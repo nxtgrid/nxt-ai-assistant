@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html>
+<head>
+<script src="./streamlit-component-lib.js"></script>
+<style>
+  body { margin: 0; padding: 0; }
+  .delete-overlay {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: none;
+    cursor: pointer;
+    background: rgba(244, 67, 54, 0.1);
+    border: 1px solid rgba(244, 67, 54, 0.3);
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 0.85em;
+    color: #c62828;
+    z-index: 10;
+  }
+  .delete-overlay:hover {
+    background: rgba(244, 67, 54, 0.3);
+  }
+  .chat-msg[data-msg-id]:hover .delete-overlay {
+    display: block;
+  }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+var lastHash = "";
+
+function onRender(event) {
+  var args = event.detail.args;
+  var html = args.html;
+  var height = args.height || 850;
+  var root = document.getElementById("root");
+
+  // Only re-render if content changed (avoid flickering)
+  var hash = String(html.length) + "_" + html.slice(0, 100);
+  if (hash !== lastHash) {
+    lastHash = hash;
+    root.innerHTML = html;
+
+    // Add delete buttons to bot messages with data-msg-id
+    var msgs = root.querySelectorAll(".chat-msg[data-msg-id]");
+    for (var i = 0; i < msgs.length; i++) {
+      (function(msg) {
+        msg.style.position = "relative";
+        var btn = document.createElement("div");
+        btn.className = "delete-overlay";
+        btn.innerHTML = "&#128465;&#65039;";
+        btn.title = "Delete this message";
+        btn.addEventListener("click", function(e) {
+          e.stopPropagation();
+          if (!confirm("Delete this bot message?")) return;
+          Streamlit.setComponentValue({
+            msg_id: msg.dataset.msgId,
+            chat_id: msg.dataset.chatId || "",
+            tg_msg_id: msg.dataset.tgMsgId ? parseInt(msg.dataset.tgMsgId) : null
+          });
+        });
+        msg.appendChild(btn);
+      })(msgs[i]);
+    }
+
+    // Auto-scroll to bottom
+    var c = root.querySelector("#msg-container");
+    if (c) {
+      c.scrollTop = c.scrollHeight;
+      setTimeout(function() { c.scrollTop = c.scrollHeight; }, 100);
+      setTimeout(function() { c.scrollTop = c.scrollHeight; }, 500);
+    }
+  }
+
+  Streamlit.setFrameHeight(height);
+}
+
+Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
+Streamlit.setComponentReady();
+Streamlit.setFrameHeight(850);
+</script>
+</body>
+</html>

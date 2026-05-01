@@ -1,0 +1,33 @@
+[theme]
+base = "light"
+primaryColor = "#293B6D"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
+font = "sans serif"
+
+[theme.sidebar]
+backgroundColor = "#1a1f2e"
+secondaryBackgroundColor = "#2d3748"
+textColor = "#ffffff"
+primaryColor = "#4da6ff"
+
+[client]
+# Disable settings menu options
+showErrorDetails = false
+toolbarMode = "minimal"
+
+[ui]
+# Keep sidebar expanded by default
+hideTopBar = false
+hideSidebarNav = false
+
+[browser]
+# Prevent showing "Made with Streamlit"
+gatherUsageStats = false
+
+[server]
+# Production settings
+headless = true
+enableCORS = false
+enableXsrfProtection = true

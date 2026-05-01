@@ -1,0 +1,95 @@
+version: '3.8'
+
+# =============================================================================
+# Anansi - Local Development Docker Compose
+# =============================================================================
+# Usage:
+#   docker-compose up              # Start all services
+#   docker-compose up -d           # Start in background
+#   docker-compose logs -f         # View logs
+#   docker-compose down            # Stop all services
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # Chat Orchestrator
+  # Main API for chat interactions
+  #
+  # Includes scheduled background tasks:
+  # - Daily metrics posting (configurable via METRICS_ENABLED, METRICS_SCHEDULE_HOUR)
+  # - Grafana panel indexing (configurable via GRAFANA_ACTIONS_ENABLED, GRAFANA_SYNC_HOUR)
+  # - Full RAG pipeline sync (GitHub, GDrive, Grafana) runs as subprocess when enabled
+  #   via APScheduler - no separate service needed
+  # ---------------------------------------------------------------------------
+  chat-orchestrator:
+    image: python:3.11-slim
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      # Override TOOLS_SERVICE_URL for internal Docker networking
+      - TOOLS_SERVICE_URL=http://tools-service:8080
+      - PYTHONPATH=/app
+    depends_on:
+      - tools-service
+    volumes:
+      # Mount entire repo for development
+      - ./chat_orchestrator:/app/chat_orchestrator
+      - ./shared:/app/shared
+      - ./rag_pipeline:/app/rag_pipeline
+    working_dir: /app/chat_orchestrator
+    command: >
+      bash -c "pip install -q -r requirements.txt &&
+               uvicorn orchestrator.api.app:app --host 0.0.0.0 --port 8000 --reload"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Tools Service
+  # REST API service for MCP server tools (formerly MCP Bridge)
+  # ---------------------------------------------------------------------------
+  tools-service:
+    image: python:3.11-slim
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      # Mount entire repo for development
+      - ./mcp_servers:/app/mcp_servers
+      - ./shared:/app/shared
+    working_dir: /app/mcp_servers
+    command: >
+      bash -c "pip install -q -r requirements.txt &&
+               uvicorn bridge:app --host 0.0.0.0 --port 8080 --reload"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8080/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # RAG Pipeline - Runs as Scheduled Subprocess in Chat Orchestrator
+  # ---------------------------------------------------------------------------
+  # NOTE: The RAG pipeline (GitHub, GDrive, Grafana indexing) runs as a
+  # scheduled subprocess within the chat-orchestrator service via APScheduler.
+  # No separate service is needed.
+  #
+  # Configuration:
+  # - Grafana indexing: Set GRAFANA_ACTIONS_ENABLED=true, GRAFANA_SYNC_HOUR=2
+  # - To run manually: docker-compose exec chat-orchestrator python rag_pipeline/ingestion/batch_ingest.py
+  #
+  # The rag_pipeline directory is already mounted in chat-orchestrator service.
+  # ---------------------------------------------------------------------------
+
+networks:
+  default:
+    name: anansi-network

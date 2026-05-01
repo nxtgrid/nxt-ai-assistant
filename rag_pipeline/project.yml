@@ -1,0 +1,23 @@
+packages:
+  - name: rag-pipeline
+    environment:
+      # GitHub credentials for code fetching
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_REPO: ${GITHUB_REPO}
+
+      # Supabase credentials for vector storage
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+
+      # OpenAI for embeddings
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+
+    functions:
+      - name: index-codebase
+        runtime: python:3.11
+        handler: ingestion/codebase_indexer.main
+        limits:
+          timeout: 300000  # 5 minutes for large repositories
+          memory: 1024
+        annotations:
+          schedule: "0 2,14 * * *"  # Run at 2 AM and 2 PM daily

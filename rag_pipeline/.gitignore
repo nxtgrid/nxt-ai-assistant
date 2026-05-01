@@ -1,0 +1,51 @@
+# Environment variables
+.env
+.env.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+temp/
+tmp/
+
+# Credentials and sensitive files
+credentials.json
+service-account.json
+service-account-key.json
+*-service-account*.json
+gcp-*.json
+*.pem
+*.key
+*.p12
+
+# AI code junk
+ingestion/aicodejunk/
+
+# Temporary downloads from Google Drive
+ingestion/temp_gdrive_downloads/

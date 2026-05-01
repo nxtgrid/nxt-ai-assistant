@@ -1,0 +1,17 @@
+# Files to exclude from DigitalOcean Functions deployment
+.git/
+.venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+tests/
+storage/
+.gitignore
+README.md
+Dockerfile
+docker-compose.yml
+deploy_digitalocean.sh
+*.md
+orchestrator/api/app.py
+orchestrator/main.py

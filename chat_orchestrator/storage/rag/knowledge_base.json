@@ -1,0 +1,14 @@
+[
+  {
+    "id": "tool-use-overview",
+    "text": "Gemini cannot call arbitrary URLs; applications must implement the tool-calling handshake and execute HTTP requests on the model's behalf."
+  },
+  {
+    "id": "parallel-calls",
+    "text": "Gemini supports parallel function calls where multiple tools are requested in a single turn."
+  },
+  {
+    "id": "dspy-benefits",
+    "text": "DSPy optimizes prompt orchestration for tool-use and RAG pipelines by learning from examples."
+  }
+]

@@ -1,0 +1,20 @@
+Anansi AI Chat Orchestrator
+Copyright 2025 Anansi Contributors
+
+This product includes software developed as part of the Anansi project
+and is licensed under the Mozilla Public License, Version 2.0.
+You may obtain a copy of the License at https://mozilla.org/MPL/2.0/
+
+-------------------------------------------------------------------------------
+
+This software uses the following open-source components:
+
+- LangGraph (MIT License) — https://github.com/langchain-ai/langgraph
+- google-generativeai (Apache 2.0) — https://github.com/google-gemini/generative-ai-python
+- FastAPI (MIT License) — https://github.com/tiangolo/fastapi
+- Pydantic (MIT License) — https://github.com/pydantic/pydantic
+- Model Context Protocol SDK (MIT License) — https://github.com/modelcontextprotocol/python-sdk
+- Streamlit (Apache 2.0) — https://github.com/streamlit/streamlit
+- asyncpg (Apache 2.0) — https://github.com/MagicStack/asyncpg
+
+See each dependency's license for full terms.

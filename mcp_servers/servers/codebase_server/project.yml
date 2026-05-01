@@ -1,0 +1,41 @@
+# DigitalOcean App Platform Configuration for Codebase Indexer
+# This configures the indexer to run as a scheduled function (twice daily)
+
+functions:
+  - name: codebase-indexer
+    github:
+      repo: your-org/your-repo
+      branch: main
+      deploy_on_push: true
+
+    # Scheduled execution: Run twice daily (8 AM and 8 PM UTC)
+    triggers:
+      - type: SCHEDULED
+        # Cron expression: "minute hour day month day-of-week"
+        # 0 8,20 * * * = At minute 0 past hour 8 and 20 (8 AM and 8 PM)
+        cron: "0 8,20 * * *"
+
+    # Environment variables
+    envs:
+      - key: GITHUB_TOKEN
+        scope: RUN_TIME
+        type: SECRET
+      - key: GITHUB_REPO
+        value: "your-org/your-repo"
+        scope: RUN_TIME
+      - key: VECTOR_DB_PATH
+        value: "/tmp/codebase_vectordb"
+        scope: RUN_TIME
+      - key: BRANCH
+        value: "main"
+        scope: RUN_TIME
+
+    # Resource configuration
+    instance_size_slug: basic-xxs  # Smallest instance for scheduled jobs
+    instance_count: 1
+
+    # Source configuration
+    source_dir: /servers/codebase_server
+
+    routes:
+      - path: /

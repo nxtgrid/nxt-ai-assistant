@@ -1,0 +1,50 @@
+# MCP Core
+mcp>=1.0.0
+
+# Database drivers
+psycopg[binary]>=3.1.0
+asyncpg>=0.29.0
+supabase>=2.29.0
+sqlalchemy>=2.0.49
+greenlet>=3.0.0
+
+# HTTP and API
+aiohttp>=3.9.0
+fastapi>=0.104.0
+uvicorn>=0.24.0
+
+# MQTT (for VRM equipment control)
+paho-mqtt>=2.0.0
+
+# Authentication and Security
+PyJWT>=2.8.0
+google-auth>=2.0,<3  # Required by shared/ for Google Docs/Drive authentication
+google-api-python-client>=2.0,<3  # Required by shared/ for Google Docs API
+google-cloud-aiplatform>=1.38,<2.0  # Vertex AI for text-embedding-005
+
+# Data processing
+pydantic>=2.4.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic-settings>=2.0.0
+loguru>=0.7.0
+rapidfuzz>=3.14.5  # Fuzzy string matching for grid names
+pdfplumber>=0.10.0  # PDF table extraction for import standards document
+
+# Scheduling
+pytz>=2024.1
+croniter>=6.2.2
+
+# Vector database (used by logs_server only; main RAG uses pgvector)
+chromadb>=1.0.0
+
+# Visualization
+vl-convert-python>=1.9.0.post1
+
+# Image processing
+Pillow>=10.0.0
+tavily-python
+
+# Geospatial (geo hazard lookups — WRI Aqueduct Floods + Copernicus DEM via COG range requests)
+rasterio>=1.3

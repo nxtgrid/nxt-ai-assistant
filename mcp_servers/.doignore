@@ -1,0 +1,22 @@
+# Files to exclude from DigitalOcean Functions deployment
+.git/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+.env.*
+tests/
+logs/
+.gitignore
+*.md
+mcp_launcher.py
+bridge.py
+diagnose_imports.py
+test_*.py
+docker-compose.yml
+Dockerfile
+deploy_digitalocean.sh
+restart_servers.sh
+*.json
+*.sh

@@ -1,0 +1,126 @@
+"""Generate QGIS project file step handler for Light Preliminary Package.
+
+Converts the distribution layout output into a .qgs + .gpkg pair with all
+reference layers present. Runs after generate_distribution_layout (and
+optionally after generate_site_layout).
+
+Phase 2: Also auto-places lightning arrestors and power jumpers per operator
+standards using network-distance algorithms on the backbone graph.
+
+The .qgs and .gpkg are uploaded to Google Drive — bytes are NOT stored in state.
+"""
+
+import asyncio
+
+from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_registry import register_step
+from shared.utils.logging import get_logger
+
+LOGGER = get_logger(__name__)
+
+
+@register_step("generate_qgis_project")
+async def generate_qgis_project(context: StepContext) -> StepResult:
+    """Generate QGIS project file from layout and optional site plan data."""
+    # Idempotency guard: QGIS project already uploaded (handles recovery re-entry)
+    if context.get_state("qgis_project_uploaded"):
+        LOGGER.info("generate_qgis_project: already done, skipping")
+        return StepResult(
+            data={"qgis_project_uploaded": True},
+            state_updates={},
+            progress_message="QGIS project already uploaded.",
+        )
+
+    # Prefer current-execution step result; fall back to persisted state for resume
+    layout_result = context.get_previous_result("generate_distribution_layout") or {}
+    if layout_result.get("skipped"):
+        layout_result = None
+    if not layout_result:
+        return StepResult(
+            data={"skipped": True, "skip_reason": "no_layout_data"},
+            progress_message="No layout data — skipping QGIS export.",
+        )
+
+    site_name = context.get_input("site_name") or context.get_state("site_name") or "Unknown"
+    number_of_phases = context.get_parameter_value("editable_number_of_phases") or "1"
+    max_drop_m = float(context.get_parameter_value("editable_max_drop_distance_m") or 40.0)
+
+    # Get boundary from layout result metadata
+    site_boundary_wgs84 = layout_result.get("site_boundary_wgs84")
+
+    await context.send_progress_to_user(f"Generating QGIS project file for {site_name}...")
+
+    from shared.layout.annotations import place_lightning_arrestors, place_power_jumpers
+    from shared.layout.qgis_export import build_qgis_project
+
+    try:
+        poles_geo = layout_result.get("poles_geo_flat", {})
+        dist_geo = layout_result.get("distribution_geo_flat", {})
+
+        # Phase 2: Auto-place lightning arrestors and power jumpers (parallel)
+        arrestors_gdf, jumpers_gdf = await asyncio.gather(
+            asyncio.to_thread(
+                place_lightning_arrestors,
+                poles_geojson=poles_geo,
+                distribution_geojson=dist_geo,
+            ),
+            asyncio.to_thread(
+                place_power_jumpers,
+                poles_geojson=poles_geo,
+                distribution_geojson=dist_geo,
+            ),
+        )
+
+        qgs_bytes, gpkg_bytes = await asyncio.to_thread(
+            build_qgis_project,
+            layout_result=layout_result,
+            site_name=site_name,
+            number_of_phases=number_of_phases,
+            max_drop_distance_m=max_drop_m,
+            site_boundary_wgs84=site_boundary_wgs84,
+            arrestors_gdf=arrestors_gdf,
+            jumpers_gdf=jumpers_gdf,
+        )
+    except Exception as exc:
+        LOGGER.exception("QGIS project generation failed: %s", exc)
+        from shared.utils.error_messages import sanitize_error_for_user
+
+        return StepResult.failure(sanitize_error_for_user(str(exc)))
+
+    # Upload both .qgs and .gpkg to Google Drive (non-fatal).
+    # Both must live in the same folder for the project to find its data.
+    from shared.utils.drive_upload import upload_step_output
+
+    site_folder_id = context.get_state("site_folder_id")
+    await asyncio.gather(
+        upload_step_output(
+            site_folder_id=site_folder_id,
+            subfolder_name="Distribution Design",
+            site_name=site_name,
+            files=[(qgs_bytes, "application/xml", "distribution_design_draft")],
+            explicit_extension="qgs",
+        ),
+        upload_step_output(
+            site_folder_id=site_folder_id,
+            subfolder_name="Distribution Design",
+            site_name=site_name,
+            files=[(gpkg_bytes, "application/geopackage+sqlite3", "distribution_network")],
+            explicit_extension="gpkg",
+        ),
+    )
+
+    arrestor_count = len(arrestors_gdf) if arrestors_gdf is not None else 0
+    jumper_count = len(jumpers_gdf) if jumpers_gdf is not None else 0
+
+    return StepResult(
+        data={
+            "qgis_project_uploaded": True,
+            "lightning_arrestor_count": arrestor_count,
+            "power_jumper_count": jumper_count,
+        },
+        state_updates={"qgis_project_uploaded": True},
+        progress_message=(
+            f"QGIS project uploaded for {site_name} "
+            f"({arrestor_count} arrestors, {jumper_count} jumpers)."
+        ),
+    )

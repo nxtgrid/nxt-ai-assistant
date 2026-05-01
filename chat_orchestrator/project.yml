@@ -1,0 +1,98 @@
+services:
+  - name: chat-orchestrator
+    dockerfile_path: chat_orchestrator/Dockerfile
+    source_dir: /
+    github:
+      repo: your-org/anansi
+      branch: main
+      deploy_on_push: true
+    envs:
+      - key: GOOGLE_API_KEY
+        scope: RUN_TIME
+        value: ${GOOGLE_API_KEY}
+      - key: TOOLS_SERVICE_URL
+        scope: RUN_TIME
+        value: ${TOOLS_SERVICE_URL}
+      - key: API_KEY
+        scope: RUN_TIME
+        value: ${API_KEY}
+      - key: SUPABASE_URL
+        scope: RUN_TIME
+        value: ${SUPABASE_URL}
+      - key: SUPABASE_KEY
+        scope: RUN_TIME
+        value: ${SUPABASE_KEY}
+      - key: AUTH_DB_DIRECT_CONNECTION
+        scope: RUN_TIME
+        value: ${AUTH_DB_DIRECT_CONNECTION}
+      - key: AUTH_DB_HOST
+        scope: RUN_TIME
+        value: ${AUTH_DB_HOST}
+      - key: AUTH_DB_PORT
+        scope: RUN_TIME
+        value: ${AUTH_DB_PORT}
+      - key: AUTH_DB_NAME
+        scope: RUN_TIME
+        value: ${AUTH_DB_NAME}
+      - key: AUTH_DB_USER
+        scope: RUN_TIME
+        value: ${AUTH_DB_USER}
+      - key: AUTH_DB_PASSWORD
+        scope: RUN_TIME
+        value: ${AUTH_DB_PASSWORD}
+      - key: AUTH_DB_SSL_MODE
+        scope: RUN_TIME
+        value: ${AUTH_DB_SSL_MODE}
+      - key: AUTH_SUPABASE_URL
+        scope: RUN_TIME
+        value: ${AUTH_SUPABASE_URL}
+      - key: AUTH_SUPABASE_ANON_KEY
+        scope: RUN_TIME
+        value: ${AUTH_SUPABASE_ANON_KEY}
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        scope: RUN_TIME
+        value: ${GOOGLE_SERVICE_ACCOUNT_JSON}
+      - key: CUSTOMER_SUPPORT_DOC_ID
+        scope: RUN_TIME
+        value: ${CUSTOMER_SUPPORT_DOC_ID}
+      - key: STAFF_SUPPORT_DOC_ID
+        scope: RUN_TIME
+        value: your-staff-support-doc-id  # pragma: allowlist secret
+      - key: DEBUG
+        scope: RUN_TIME
+        value: ${DEBUG}
+      - key: DEBUG_TELEGRAM_CHAT_ID
+        scope: RUN_TIME
+        value: ${DEBUG_TELEGRAM_CHAT_ID}
+      - key: TELEGRAM_BOT_TOKEN
+        scope: RUN_TIME
+        value: ${TELEGRAM_BOT_TOKEN}
+      - key: ESCALATION_TELEGRAM_CHAT_ID
+        scope: RUN_TIME
+        value: ${ESCALATION_TELEGRAM_CHAT_ID}
+      - key: GEMINI_MODEL
+        scope: RUN_TIME
+        value: ${GEMINI_MODEL:-gemini-flash-latest}
+      - key: GEMINI_TEMPERATURE
+        scope: RUN_TIME
+        value: "0.2"
+      - key: ALLOW_PARALLEL_CALLS
+        scope: RUN_TIME
+        value: "true"
+      - key: MAX_TOOL_ROUNDS
+        scope: RUN_TIME
+        value: "3"
+      - key: METRICS_ENABLED
+        scope: RUN_TIME
+        value: "true"
+      - key: METRICS_SCHEDULE_HOUR
+        scope: RUN_TIME
+        value: "9"
+      - key: METRICS_TIMEZONE
+        scope: RUN_TIME
+        value: "UTC"
+    http_port: 8000
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    routes:
+      - path: /

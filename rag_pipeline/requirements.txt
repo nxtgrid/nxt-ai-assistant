@@ -1,0 +1,30 @@
+# RAG Pipeline - Data Ingestion Requirements
+
+# Core dependencies
+supabase>=2.29.0
+python-dotenv>=1.0.0
+
+# Google AI Studio (for embeddings via Gemini API)
+google-genai>=1.0.0
+
+# Code ingestion
+gitpython>=3.1.47
+requests>=2.31.0
+
+# LangChain - for SemanticChunker and LLMGraphTransformer
+langchain>=1.2.0,<2.0
+langchain-core>=1.3.2,<2.0
+langchain-experimental>=0.3.0,<1.0
+langchain-google-genai>=4.0.0,<5.0
+
+# Google Drive ingestion (still needs separate auth)
+google-auth>=2.0.0
+google-api-python-client>=2.194.0
+
+# Document parsing
+PyPDF2>=3.0.0  # PDF text extraction
+python-docx>=1.2.0  # DOCX text extraction
+
+# Optional - for Telegram ingestion
+# telethon>=1.0.0  # Telegram full API (can fetch historical messages)
+# python-telegram-bot>=20.0  # Telegram Bot API (receive-only, for webhooks)

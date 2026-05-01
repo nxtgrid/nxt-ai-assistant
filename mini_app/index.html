@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Anansi Mini App</title>
+    <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests">
+    <script>
+      // Force HTTPS — Telegram Desktop may load web_app URLs over HTTP
+      if (location.protocol === "http:" && location.hostname !== "localhost") {
+        location.replace("https:" + location.href.substring(5));
+      }
+      window.__tgSdkFailed = false;
+      window.onerror = function(msg, src, line) {
+        var app = document.getElementById("app");
+        if (app) app.innerHTML = '<div class="state-screen error">' + msg + '</div>';
+      };
+    </script>
+    <script src="https://telegram.org/js/telegram-web-app.js?60"
+            onerror="window.__tgSdkFailed = true"></script>
+    <script>
+      // Call ready() as early as possible per Telegram docs — tells the
+      // client the Mini App is ready to display (removes loading placeholder).
+      if (window.Telegram && window.Telegram.WebApp) {
+        window.Telegram.WebApp.ready();
+        window.Telegram.WebApp.expand();
+      }
+    </script>
+    <style>
+      /* Base styles so loading/error states are always visible */
+      #app { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; padding: 16px; min-height: 100vh; }
+      .state-screen { display: flex; align-items: center; justify-content: center; min-height: 200px; text-align: center; padding: 24px; font-size: 16px; }
+      .state-screen.error { color: #ff3b30; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div class="state-screen" id="fallback-loading">Loading...</div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+    <script>
+      // Fallback: if module script fails to load/execute (e.g. old webview),
+      // show an error after a timeout instead of a blank screen.
+      setTimeout(function() {
+        var app = document.getElementById("app");
+        var fb = document.getElementById("fallback-loading");
+        // If fallback is still visible, the module script never ran
+        if (fb && app.contains(fb)) {
+          app.innerHTML = '<div class="state-screen error">' +
+            'Could not load app. Please update Telegram or try on mobile.</div>';
+        }
+      }, 5000);
+    </script>
+  </body>
+</html>

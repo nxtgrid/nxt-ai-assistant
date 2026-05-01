@@ -1,0 +1,352 @@
+"""MCP Payment Processor Server - Handles payment transaction status checks."""
+
+import asyncio
+import json
+import logging
+import os
+import sys
+from typing import Any, Dict, List, Optional
+
+import mcp.server.stdio
+import mcp.types as types
+from dotenv import load_dotenv
+from mcp.server import Server
+from mcp.server.models import InitializationOptions
+from mcp.types import ServerCapabilities
+
+# Load environment variables from .env file BEFORE importing shared_code
+load_dotenv()
+
+from shared_code.utils.http_client import HTTPClientMixin
+
+from shared.utils.response_formatters import compose_error_response, compose_json_response
+
+# Configure logging to stderr for Claude Desktop visibility
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)],
+)
+logger = logging.getLogger("payment-processor-server")
+
+# Startup messages to stderr
+print("🚀 Payment Processor MCP Server starting...", file=sys.stderr)
+print(f"📍 Python path: {sys.path}", file=sys.stderr)
+print(f"📂 Working directory: {os.getcwd()}", file=sys.stderr)
+
+# Initialize MCP server
+server = Server("payment-processor-server")
+
+# Payment processor API configuration
+PAYMENT_PROCESSOR_API_URL = os.getenv("PAYMENT_PROCESSOR_API_URL", "")
+PAYMENT_PROCESSOR_SECRET_KEY = os.getenv("PAYMENT_PROCESSOR_SECRET_KEY")
+
+
+class PaymentProcessorClient(HTTPClientMixin):
+    """Client for interacting with payment processor API."""
+
+    def __init__(self):
+        super().__init__()
+        self.base_url: Optional[str] = None
+        self.secret_key: Optional[str] = None
+        self._auto_configure_from_env()
+
+    def _auto_configure_from_env(self):
+        """Load credentials from environment variables."""
+        if PAYMENT_PROCESSOR_API_URL and PAYMENT_PROCESSOR_SECRET_KEY:
+            self.base_url = PAYMENT_PROCESSOR_API_URL
+            self.secret_key = PAYMENT_PROCESSOR_SECRET_KEY
+            logger.info("Payment processor client auto-configured from environment")
+        else:
+            logger.warning(
+                "Payment processor credentials not found in environment. "
+                "Set PAYMENT_PROCESSOR_API_URL and PAYMENT_PROCESSOR_SECRET_KEY."
+            )
+
+    async def _make_request(self, endpoint: str) -> Dict[str, Any]:
+        """
+        Make authenticated request to payment processor API.
+
+        Args:
+            endpoint: API endpoint path (e.g., "/transactions/123/verify")
+
+        Returns:
+            API response data
+
+        Raises:
+            Exception: If request fails or credentials missing
+        """
+        if not self.base_url or not self.secret_key:
+            raise Exception(
+                "Payment processor client not configured. "
+                "Set PAYMENT_PROCESSOR_API_URL and PAYMENT_PROCESSOR_SECRET_KEY environment variables."
+            )
+
+        url = f"{self.base_url}{endpoint}"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.secret_key}",
+        }
+
+        client = await self._get_client()
+
+        try:
+            response = await client.get(url, headers=headers)
+            response.raise_for_status()
+            return dict(await response.json())
+        except Exception as e:
+            logger.error(f"Payment processor API request failed: {e}")
+            raise
+
+    async def verify_transaction_by_id(self, transaction_id: str) -> Dict[str, Any]:
+        """
+        Verify transaction using payment processor transaction ID.
+
+        Args:
+            transaction_id: Payment processor transaction ID
+
+        Returns:
+            Transaction verification response
+        """
+        logger.info(f"Verifying transaction by ID: {transaction_id}")
+        endpoint = f"/transactions/{transaction_id}/verify"
+        return await self._make_request(endpoint)
+
+    async def verify_transaction_by_reference(self, tx_ref: str) -> Dict[str, Any]:
+        """
+        Verify transaction using merchant transaction reference.
+
+        Args:
+            tx_ref: Merchant transaction reference (e.g., from Skyfox orders.external_reference)
+
+        Returns:
+            Transaction verification response
+        """
+        logger.info(f"Verifying transaction by reference: {tx_ref}")
+        from urllib.parse import quote
+
+        endpoint = f"/transactions/verify_by_reference?tx_ref={quote(tx_ref, safe='')}"
+        return await self._make_request(endpoint)
+
+    async def close(self):
+        """Close HTTP session."""
+        await self.close_session()
+
+
+# Global client instance
+payment_processor_client = PaymentProcessorClient()
+
+
+@server.list_tools()
+async def handle_list_tools() -> List[types.Tool]:
+    """List available payment processor tools."""
+    tools = [
+        types.Tool(
+            name="check_transaction_status",
+            description=(
+                "[READ-ONLY] Check the status of a payment transaction. "
+                "Provide either transaction_id (payment processor's internal ID) or tx_ref (merchant reference). "
+                "Returns transaction status (successful/pending/failed), amount, currency, payment type, "
+                "and customer details. This tool ONLY retrieves transaction information - it CANNOT initiate payments, "
+                "refunds, or modify transactions. Useful for verifying payment completion and troubleshooting payment issues."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "transaction_id": {
+                        "type": "string",
+                        "description": (
+                            "Payment processor transaction ID - labeled 'Transaction No.' on receipts "
+                            "(e.g., '2504030201001869149859T'). "
+                            "NOT the 'Session ID' which is a different identifier."
+                        ),
+                    },
+                    "tx_ref": {
+                        "type": "string",
+                        "description": (
+                            "Merchant transaction reference exactly as provided by the customer. "
+                            "Do NOT construct or guess this value - it must come from the customer's receipt or records."
+                        ),
+                    },
+                },
+                "oneOf": [
+                    {"required": ["transaction_id"]},
+                    {"required": ["tx_ref"]},
+                ],
+            },
+            visible_to_customer=False,
+        ),
+    ]
+
+    logger.info(f"Payment processor server: {len(tools)} tools available")
+    return tools
+
+
+@server.call_tool()
+async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
+    """Handle tool calls."""
+    try:
+        if name == "check_transaction_status":
+            return await check_transaction_status(arguments)
+        else:
+            return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
+
+    except Exception as e:
+        logger.error(f"Error in tool {name}: {e}")
+        return list(compose_error_response(e))
+
+
+async def check_transaction_status(args: Dict[str, Any]) -> List[types.TextContent]:
+    """
+    Check payment transaction status.
+
+    Args:
+        args: Tool arguments containing transaction_id or tx_ref
+
+    Returns:
+        Transaction status details
+    """
+    transaction_id = args.get("transaction_id")
+    tx_ref = args.get("tx_ref")
+
+    # Validate inputs
+    if not transaction_id and not tx_ref:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: Either transaction_id or tx_ref must be provided",
+            )
+        ]
+
+    try:
+        # Choose verification method based on provided identifier
+        if transaction_id:
+            result = await payment_processor_client.verify_transaction_by_id(transaction_id)
+        else:
+            result = await payment_processor_client.verify_transaction_by_reference(tx_ref)
+
+        # Check if verification was successful
+        if result.get("status") == "error":
+            error_message = result.get("message", "Unknown error")
+            return list(
+                compose_error_response(Exception(f"Payment verification failed: {error_message}"))
+            )
+
+        # Extract transaction data
+        transaction_data = result.get("data", {})
+
+        # Format response with key transaction details
+        response_data = {
+            "verification_status": result.get("status"),
+            "message": result.get("message"),
+            "transaction": {
+                "id": transaction_data.get("id"),
+                "tx_ref": transaction_data.get("tx_ref"),
+                "flw_ref": transaction_data.get("flw_ref"),
+                "status": transaction_data.get("status"),
+                "amount": transaction_data.get("amount"),
+                "currency": transaction_data.get("currency"),
+                "charged_amount": transaction_data.get("charged_amount"),
+                "app_fee": transaction_data.get("app_fee"),
+                "merchant_fee": transaction_data.get("merchant_fee"),
+                "amount_settled": transaction_data.get("amount_settled"),
+                "payment_type": transaction_data.get("payment_type"),
+                "processor_response": transaction_data.get("processor_response"),
+                "created_at": transaction_data.get("created_at"),
+                "customer": transaction_data.get("customer", {}),
+                "card": transaction_data.get("card", {}),
+            },
+        }
+
+        logger.info(
+            f"Transaction verified - ID: {transaction_data.get('id')}, "
+            f"Status: {transaction_data.get('status')}, "
+            f"Amount: {transaction_data.get('amount')} {transaction_data.get('currency')}"
+        )
+
+        return list(compose_json_response(response_data))
+
+    except Exception as e:
+        logger.error(f"Error checking transaction status: {e}")
+        return list(
+            compose_error_response(Exception(f"Failed to check transaction status: {str(e)}"))
+        )
+
+
+@server.list_resources()
+async def handle_list_resources() -> List[types.Resource]:
+    """List available resources."""
+    return [
+        types.Resource(
+            uri="payment_processor://config",
+            name="Payment Processor Configuration",
+            description="Current payment processor server configuration",
+            mimeType="application/json",
+        ),
+        types.Resource(
+            uri="payment_processor://status",
+            name="Connection Status",
+            description="Payment processor API connection status",
+            mimeType="application/json",
+        ),
+    ]
+
+
+@server.read_resource()
+async def handle_read_resource(uri: str) -> str:
+    """Read resource content."""
+    if uri == "payment_processor://config":
+        config = {
+            "api_url": PAYMENT_PROCESSOR_API_URL,
+            "configured": bool(PAYMENT_PROCESSOR_SECRET_KEY),
+            "server_name": "payment-processor-server",
+            "server_version": "1.0.0",
+        }
+        return json.dumps(config, indent=2)
+    elif uri == "payment_processor://status":
+        status = {
+            "configured": bool(PAYMENT_PROCESSOR_API_URL and PAYMENT_PROCESSOR_SECRET_KEY),
+            "api_url": PAYMENT_PROCESSOR_API_URL,
+            "has_secret_key": bool(PAYMENT_PROCESSOR_SECRET_KEY),
+        }
+        return json.dumps(status, indent=2)
+    else:
+        raise ValueError(f"Unknown resource: {uri}")
+
+
+async def main():
+    """Main entry point."""
+    try:
+        logger.info("Starting Payment Processor MCP Server...")
+        print("✅ Payment processor server initialized successfully", file=sys.stderr)
+
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            print("🔌 Connected to stdio streams", file=sys.stderr)
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="payment-processor-server",
+                    server_version="1.0.0",
+                    capabilities=ServerCapabilities(),
+                ),
+            )
+    except Exception as e:
+        print(f"❌ Fatal error in payment processor server: {e}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
+        raise
+    finally:
+        # Clean up client
+        await payment_processor_client.close()
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("🛑 Payment processor server stopped by user", file=sys.stderr)
+    except Exception as e:
+        print(f"❌ Payment processor server crashed: {e}", file=sys.stderr)
+        sys.exit(1)

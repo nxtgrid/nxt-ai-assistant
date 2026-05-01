@@ -1,0 +1,34 @@
+services:
+  - name: "get_service_status"
+    description: "Gets the operational status of a specific MCP service."
+    url: "https://my-mcp-services.com/api/v1/getStatus"
+    method: "GET"
+    payload_mode: "query"
+    timeout_seconds: 15
+    include_raw_response: false
+    arguments_schema:
+      type: "OBJECT"
+      properties:
+        serviceName:
+          type: "STRING"
+          description: "The name of the service to check, e.g., 'auth-service' or 'database-proxy'."
+      required:
+        - "serviceName"
+  - name: "restart_service"
+    description: "Requests a rolling restart for an MCP-managed microservice."
+    url: "https://my-mcp-services.com/api/v1/restart"
+    method: "POST"
+    payload_mode: "json"
+    timeout_seconds: 30
+    include_raw_response: true
+    arguments_schema:
+      type: "OBJECT"
+      properties:
+        serviceName:
+          type: "STRING"
+          description: "Target service identifier."
+        reason:
+          type: "STRING"
+          description: "Human readable justification for the restart."
+      required:
+        - "serviceName"

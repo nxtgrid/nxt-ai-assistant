@@ -1,0 +1,38 @@
+packages:
+  - name: tools-service
+    environment:
+      # Auth Supabase (for user authentication and permissions)
+      # Uses anon key for read-only access to auth database
+      AUTH_SUPABASE_URL: ${AUTH_SUPABASE_URL}
+      AUTH_SUPABASE_ANON_KEY: ${AUTH_SUPABASE_ANON_KEY}
+
+      # Main Supabase credentials
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_KEY: ${SUPABASE_KEY}
+      SUPABASE_ACTIONS_ENABLED: ${SUPABASE_ACTIONS_ENABLED}
+
+      # TimescaleDB credentials
+      TIMESCALE_HOST: ${TIMESCALE_HOST}
+      TIMESCALE_PORT: ${TIMESCALE_PORT}
+      TIMESCALE_DATABASE: ${TIMESCALE_DATABASE}
+      TIMESCALE_USER: ${TIMESCALE_USER}
+      TIMESCALE_PASSWORD: ${TIMESCALE_PASSWORD}
+      TIMESCALE_ACTIONS_ENABLED: ${TIMESCALE_ACTIONS_ENABLED}
+
+      # JIRA credentials
+      JIRA_SERVER_URL: ${JIRA_SERVER_URL}
+      JIRA_EMAIL: ${JIRA_EMAIL}
+      JIRA_API_TOKEN: ${JIRA_API_TOKEN}
+      JIRA_ACTIONS_ENABLED: ${JIRA_ACTIONS_ENABLED}
+
+      # VRM credentials (if used)
+      VRM_API_KEY: ${VRM_API_KEY}
+      VRM_ACTIONS_ENABLED: ${VRM_ACTIONS_ENABLED}
+
+    functions:
+      - name: call
+        runtime: python:3.11
+        handler: handler.main
+        limits:
+          timeout: 60000
+          memory: 512

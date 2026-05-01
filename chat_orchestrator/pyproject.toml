@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "chat-orchestrator"
+version = "0.1.0"
+description = "Gemini tool calling orchestrator with optional RAG and DSPy integration"
+readme = "README.md"
+authors = [{ name = "Vaibhav Vaidya", email = "akshayvaidya@gmail.com" }]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.104,<0.116",
+    "uvicorn>=0.24,<0.41",
+    "aiohttp>=3.9,<4",
+    "httpx>=0.26,<0.29",
+    "pydantic>=2.5,<3",
+    "pydantic-settings>=2.0,<3",
+    "loguru>=0.7,<0.8",
+    "python-dotenv>=1,<2",
+    "PyYAML>=6,<7",
+    "supabase>=2.0,<3",
+    "asyncpg>=0.29,<1",  # Direct PostgreSQL connection
+    "psycopg[binary]>=3.1,<4.0",
+    "google-auth>=2.0,<3",  # Google Docs/Drive authentication
+    "google-api-python-client>=2.0,<3",  # Google Docs API
+    "numpy>=1.24,<3.0",  # Vector operations
+    "rapidfuzz>=3.0,<4.0",  # Fuzzy string matching for grid names
+    "prettytable>=3.0,<4",  # Metrics table formatting
+    "apscheduler>=3.10,<4",  # Scheduled metrics posting
+    "langgraph>=0.2.0,<1.0",  # LangGraph for multi-agent orchestration
+    "langgraph-checkpoint-postgres>=2.0.0,<4.0",  # PostgreSQL checkpointing for LangGraph
+    "shapely>=2.0,<3.0",  # Geometry operations for site mapping
+    "matplotlib>=3.7,<4.0",  # Plotting for site maps
+    "Pillow>=10.0,<13.0",  # Image processing for Apps Script client
+    "google-genai>=1.0,<2.0",  # Google AI Studio SDK for Gemini
+    "google-cloud-aiplatform>=1.38,<2.0",  # Vertex AI SDK for text-embedding-005
+    "beautifulsoup4>=4.12,<5.0",  # HTML parsing for table extraction
+    "pymupdf4llm>=0.2.0,<1.0",  # PDF extraction optimized for LLM (markdown output, no PyTorch)
+    # Distribution layout designer dependencies
+    "osmnx>=2.0,<3.0",  # Road network extraction from OpenStreetMap
+    "networkx>=3.0,<4.0",  # Graph algorithms (Steiner tree)
+    "geopandas>=1.0,<2.0",  # Spatial DataFrames, CRS transformations
+    "scipy>=1.10,<2.0",  # KDTree for nearest-neighbor queries
+    "pyproj>=3.5,<4.0",  # Coordinate reference system transformations
+    "contextily>=1.6,<2.0",  # Satellite basemap tiles for site maps
+    "geopy>=2.4,<3.0",   # Nominatim reverse geocoding for community names
+    "pyogrio>=0.7,<1.0", # Fast GDAL vector I/O (GeoPackage bbox filter)
+    # MCP server dependencies (consolidated from tools-service)
+    "mcp>=1.0.0",  # MCP core
+    "paho-mqtt>=2.0.0",  # VRM equipment control
+    "croniter>=2.0.0",  # Schedule server
+    "pytz>=2024.1",  # Timezone handling
+    # LLM observability (Langfuse)
+    "langfuse>=3.0,<4",
+]
+
+[tool.setuptools.packages.find]
+include = ["orchestrator*"]
+exclude = ["supabase*", "storage*", "tests*"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7,<9",
+    "pytest-asyncio>=0.23,<1.4",
+    "ruff>=0.1,<0.9"
+]
+dspy = ["dspy-ai>=2.4,<3"]
+rag = [
+    "chromadb>=1.0,<2.0",
+    "sentence-transformers>=2.2,<6"
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = [".", ".."]

@@ -1,0 +1,84 @@
+# Python project configuration
+
+[project]
+name = "anansi"
+version = "0.1.0"
+description = "Production AI chat orchestrator using Google Gemini, GraphRAG, and MCP tool integration"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MPL-2.0" }
+authors = [
+    { name = "Vaibhav Vaidya", email = "akshayvaidya@gmail.com" },
+]
+keywords = ["ai", "chatbot", "gemini", "mcp", "rag", "telegram"]
+classifiers = [
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: Mozilla Public License 2.0 (MPL 2.0)",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Repository = "https://github.com/nxtgrid/nxt-ai-assistant"
+Issues = "https://github.com/nxtgrid/nxt-ai-assistant/issues"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".git",
+    ".eggs",
+    ".mypy_cache",
+    "build",
+    "dist",
+    "anansi_deprecated",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = [
+    "E203",  # whitespace before ':' — formatter handles this
+    "E402",  # module-level import not at top — many intentional sys.path setups
+    "E501",  # line too long — formatter handles this
+]
+# Rules we explicitly enforce (previously ignored under flake8):
+#   F401 — unused imports
+#   F541 — f-string without placeholders
+#   F811 — redefinition of unused name
+#   F841 — unused variable assigned
+#   E722 — bare except (use `except Exception:` instead)
+
+[tool.ruff.lint.isort]
+known-first-party = ["orchestrator", "shared", "rag_pipeline", "mcp_servers"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401", "F811"]  # test files often have unused imports for fixtures
+"**/conftest.py" = ["F401", "F811"]
+
+[tool.ruff.format]
+# Compatible with Black defaults
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+ignore_missing_imports = true
+exclude = [
+    "^.venv/",
+    "^venv/",
+    "^anansi_deprecated/",
+]
+
+[[tool.mypy.overrides]]
+module = "requests.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"

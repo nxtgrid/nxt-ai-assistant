@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.eggs/
+*.swp
+
+# Virtual environments
+.env
+.venv
+venv/
+
+# Tooling
+.mypy_cache/
+.pytest_cache/
+coverage/
+.coverage
+
+# Logs
+logs/
+/tmp/
+
+# IDEs
+.idea/
+.vscode/
+*.iml
