@@ -1,7 +1,7 @@
 """Thread assignment service for conversation disentanglement.
 
 Assigns incoming messages to conversation threads using two-path logic:
-- Path A (deterministic): reply chains, commands, single active thread, zero threads
+- Path A (deterministic): reply chains, commands, explicit new-issue signals, single active thread, zero threads
 - Path B (LLM binary): ask Gemini Flash Lite when multiple active threads exist
 
 Fail-open: any exception returns None → downstream uses full unfiltered history.
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +32,25 @@ CONFIDENCE_THRESHOLD = 0.5
 # Default model for thread classification
 DEFAULT_CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 
+# Issue type taxonomy — used for thread classification and open-issue queries.
+ISSUE_TYPES = ("token", "hps", "meter", "transaction", "commissioning", "other")
+
+# Explicit "new issue" signals — anchored to message start, case-insensitive.
+# Matching any of these deterministically creates a new thread (Path A.2.5).
+_NEW_ISSUE_SIGNAL_RE = re.compile(
+    r"^("
+    r"new (issue|problem|topic|question|thread|case)"
+    r"|separate (issue|problem|question)"
+    r"|different (issue|problem|question)"
+    r"|unrelated (issue|problem|question|topic)"
+    r"|this is a new (issue|problem|topic)"
+    r"|i('m| am) (reporting|raising|opening|starting|logging) a (new|separate|different) (issue|problem|question)"
+    r"|i have a (new|different|separate) (issue|problem|question)"
+    r"|starting (a )?(new|fresh) (issue|problem|topic|thread)"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 @dataclass
 class ThreadAssignment:
@@ -40,6 +60,7 @@ class ThreadAssignment:
     is_new: bool = False
     method: str = "unknown"
     confidence: float = 1.0
+    issue_type: Optional[str] = None
 
 
 def _new_thread_id() -> str:
@@ -101,6 +122,49 @@ def is_thread_disentanglement_enabled() -> bool:
     return os.getenv("THREAD_DISENTANGLEMENT_ENABLED", "false").lower() == "true"
 
 
+async def classify_issue_type(user_input: str) -> str:
+    """Classify the user's first message into one of the ISSUE_TYPES buckets.
+
+    Uses Flash Lite for low-latency classification. Falls back to 'other' on any error.
+    """
+    model = os.getenv("THREAD_CLASSIFIER_MODEL", DEFAULT_CLASSIFIER_MODEL)
+    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    prompt = (
+        f"TODAY'S DATE AND TIME: {now_str}\n\n"
+        f"Classify this customer support message into exactly one category.\n\n"
+        f'Message: "{user_input[:500]}"\n\n'
+        f"Categories:\n"
+        f"- token: payment token generation, token not received, top-up failures\n"
+        f"- hps: HPS power limit, load shedding, high-power service requests\n"
+        f"- meter: meter errors, tamper alerts, meter replacement, meter hardware\n"
+        f"- transaction: payments, wallet credit, transaction history, refunds\n"
+        f"- commissioning: new connection, commissioning failures, meter activation\n"
+        f"- other: anything else\n\n"
+        f'Return JSON: {{"issue_type": "<one of the categories above>"}}'
+    )
+    try:
+        from google import genai
+
+        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        response = await client.aio.models.generate_content(
+            model=model,
+            contents=prompt,
+            config={
+                "temperature": 0.0,
+                "max_output_tokens": 32,
+                "response_mime_type": "application/json",
+            },
+        )
+        if response.text:
+            result = json.loads(response.text.strip())
+            issue_type = str(result.get("issue_type", "other"))
+            if issue_type in ISSUE_TYPES:
+                return issue_type
+    except Exception as e:
+        LOGGER.warning(f"Issue type classification failed, defaulting to 'other': {e}")
+    return "other"
+
+
 class ThreadAssignmentService:
     """Assigns messages to conversation threads."""
 
@@ -150,6 +214,16 @@ class ThreadAssignmentService:
                 thread_id=_new_thread_id(),
                 is_new=True,
                 method="command",
+            )
+
+        # Path A.2.5: Explicit "new issue" signal → always a new thread.
+        # Matched at message start so mid-sentence occurrences don't trigger.
+        if _NEW_ISSUE_SIGNAL_RE.match(user_input.strip()):
+            LOGGER.info("Explicit new-issue signal detected — creating new thread")
+            return ThreadAssignment(
+                thread_id=_new_thread_id(),
+                is_new=True,
+                method="explicit_signal",
             )
 
         # Path A.3: Active expert workflow awaiting input → workflow's thread
@@ -222,7 +296,7 @@ Return JSON: {{"thread_id": "<thread_id or NEW>", "confidence": 0.0-1.0, "reason
             from google import genai
 
             client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-            response = client.models.generate_content(
+            response = await client.aio.models.generate_content(
                 model=model,
                 contents=prompt,
                 config={
@@ -338,4 +412,6 @@ __all__ = [
     "assign_passive_thread",
     "filter_history_by_thread",
     "is_thread_disentanglement_enabled",
+    "classify_issue_type",
+    "ISSUE_TYPES",
 ]

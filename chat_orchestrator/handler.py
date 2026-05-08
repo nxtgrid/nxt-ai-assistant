@@ -2307,6 +2307,17 @@ async def _handle_escalation_close_callback(
             return {"success": True, "message": "Already claimed", "statusCode": 200}
 
         claimed = True
+
+        # Set resolved_at immediately so orphan recovery (which reactivates
+        # is_active=False rows without resolved_at) never re-opens this intentional close.
+        try:
+            _db = supabase_client._get_client()
+            _db.table("escalation_mappings").update(
+                {"resolved_at": datetime.now(timezone.utc).isoformat()}
+            ).eq("id", mapping_id).execute()
+        except Exception:
+            LOGGER.warning("Could not set resolved_at for mapping %s", mapping_id, exc_info=True)
+
         session_id = escalation.get("session_id")
         if not session_id:
             await _answer_callback_query(callback_id, "No session found", show_alert=True)

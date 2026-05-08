@@ -23,6 +23,7 @@ from mcp.types import ImageContent, ServerCapabilities, TextContent, Tool
 load_dotenv()
 
 _ORG_NAME = os.getenv("ORGANIZATION_NAME", "the operator")
+STAFF_ORG_ID: int = int(os.getenv("STAFF_ORG_ID", "2"))
 
 from shared_code.utils.logger import setup_logger
 
@@ -575,12 +576,49 @@ async def handle_call_tool(
         return list(compose_error_response(e))
 
 
+async def _check_grid_org_access(grid_name: str, organization_id: int) -> Optional[str]:
+    """Verify the grid belongs to the given org and return the canonical name, or None if denied.
+
+    Returns the matched grid name (may differ from input due to fuzzy matching), or None if the
+    grid doesn't exist within the org.
+    """
+    auth_service = get_auth_service()
+    pool = await auth_service._get_db_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT name FROM grids
+            WHERE organization_id = $1
+              AND is_hidden_from_reporting IS NOT TRUE
+              AND deleted_at IS NULL
+            ORDER BY name
+            """,
+            organization_id,
+        )
+    org_names = [row["name"] for row in rows]
+    from shared.utils.grid_matcher import find_best_grid_match
+
+    matched_name, _, _ = find_best_grid_match(grid_name, org_names)
+    return matched_name
+
+
 async def _handle_get_equipment_status(
     plat: VRMPlatform, arguments: Dict[str, Any]
 ) -> List[TextContent]:
     """Handle get_equipment_status tool call."""
     grid_name = arguments.get("grid_name")
     metrics = arguments.get("metrics", ["inverter", "battery", "grid", "pv", "alarms"])
+    organization_id = arguments.get("organization_id")
+
+    # Fail closed when org identity is unresolved (unauthenticated caller).
+    if organization_id is None:
+        return [TextContent(type="text", text=f"Grid not found: {grid_name}")]
+
+    if int(organization_id) != STAFF_ORG_ID:
+        canonical = await _check_grid_org_access(grid_name, int(organization_id))
+        if not canonical:
+            return [TextContent(type="text", text=f"Grid not found: {grid_name}")]
+        grid_name = canonical
 
     site_id, is_managed = await plat.get_site_id_for_grid(grid_name)
     if not is_managed:

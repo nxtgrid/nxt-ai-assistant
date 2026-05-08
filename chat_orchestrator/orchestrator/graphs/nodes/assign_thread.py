@@ -12,6 +12,7 @@ from typing import Any, Dict
 from orchestrator.graphs.state import ConversationState
 from orchestrator.services.thread_assignment import (
     ThreadAssignmentService,
+    classify_issue_type,
     filter_history_by_thread,
     is_thread_disentanglement_enabled,
 )
@@ -84,6 +85,35 @@ async def assign_thread(state: ConversationState) -> Dict[str, Any]:
         f"confidence={assignment.confidence:.2f}, "
         f"filtered={len(filtered)}/{len(conversation_history)} messages)"
     )
+
+    # Persist new threads to chat_threads table with issue type classification.
+    # Skip LLM classification for explicit-signal threads ("new issue" etc.) — the signal
+    # phrase itself doesn't describe the issue; the next message will be more informative.
+    if assignment.is_new:
+        try:
+            if assignment.method == "explicit_signal":
+                issue_type = "other"
+            else:
+                issue_type = await classify_issue_type(user_input)
+            LOGGER.info(f"New thread {assignment.thread_id} classified as issue_type={issue_type}")
+
+            user_context = state.get("user_context")
+            organization_id = None
+            if user_context and user_context.organization_ids:
+                organization_id = int(user_context.organization_ids[0])
+
+            from orchestrator.services.supabase_client import get_supabase_client
+
+            supabase = get_supabase_client()
+            if supabase:
+                await supabase.save_thread(
+                    thread_id=assignment.thread_id,
+                    session_id=session_id,
+                    organization_id=organization_id,
+                    issue_type=issue_type,
+                )
+        except Exception as e:
+            LOGGER.warning(f"Failed to persist new thread metadata (non-fatal): {e}")
 
     return {
         "thread_id": assignment.thread_id,

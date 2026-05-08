@@ -459,7 +459,8 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
             "1) Call meta_get_performance_report to get performance data\n"
             "2) Call meta_response_distribution_chart for response distribution chart\n"
             "3) Call meta_escalation_types_chart for escalation breakdown chart\n"
-            "4) Present summary with charts\n\n"
+            "4) Call meta_issue_type_breakdown_chart for issue type breakdown chart\n"
+            "5) Present summary with all charts\n\n"
             "DO NOT say tools are unavailable. They are in your function list. Use them."
         ),
         requires_args=False,
@@ -537,6 +538,59 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
         requires_args=True,
         args_hint="Please specify the meter number, e.g., /resend_topup_token 12345678",
         exclusive_tools=["customer_resend_meter_token"],
+        staff_only=True,
+    ),
+    "resend_clear_tamper_token": CommandDefinition(
+        command="resend_clear_tamper_token",
+        command_type="tool",
+        description="Resend the last CLEAR_TAMPER token to a meter (e.g., /resend_clear_tamper_token 12345678)",
+        linked_tool="customer_resend_clear_tamper_token",
+        prompt_template=(
+            "The user has explicitly requested to resend the last CLEAR_TAMPER token for meter '{args}'. "
+            "Call the customer_resend_clear_tamper_token tool with meter_number='{args}' IMMEDIATELY. "
+            "CRITICAL: Do NOT ask for additional confirmation - the /command itself is the user's confirmation. "
+            "The tool is only available on this turn, so you MUST call it now. "
+            "Report the result. If successful, inform the user that the customer should receive the token "
+            "via their registered channel (SMS or app) shortly."
+        ),
+        requires_args=True,
+        args_hint="Please specify the meter number, e.g., /resend_clear_tamper_token 12345678",
+        exclusive_tools=["customer_resend_clear_tamper_token"],
+        staff_only=True,
+    ),
+    "resend_power_limit_token": CommandDefinition(
+        command="resend_power_limit_token",
+        command_type="tool",
+        description="Resend the last PLS (power limit set) token to a meter (e.g., /resend_power_limit_token 12345678)",
+        linked_tool="customer_resend_power_limit_token",
+        prompt_template=(
+            "The user has explicitly requested to resend the last power limit set (PLS) token for meter '{args}'. "
+            "Call the customer_resend_power_limit_token tool with meter_number='{args}' IMMEDIATELY. "
+            "CRITICAL: Do NOT ask for additional confirmation - the /command itself is the user's confirmation. "
+            "The tool is only available on this turn, so you MUST call it now. "
+            "Report the result. If successful, inform the user that the customer should receive the token "
+            "via their registered channel (SMS or app) shortly."
+        ),
+        requires_args=True,
+        args_hint="Please specify the meter number, e.g., /resend_power_limit_token 12345678",
+        exclusive_tools=["customer_resend_power_limit_token"],
+        staff_only=True,
+    ),
+    "meter_date": CommandDefinition(
+        command="meter_date",
+        command_type="tool",
+        description="Sync a meter's date to today (Africa/Lagos time) (e.g., /meter_date 12345678)",
+        linked_tool="customer_set_meter_date",
+        prompt_template=(
+            "The user has explicitly requested to set the date on meter '{args}' to today. "
+            "Call the customer_set_meter_date tool with meter_number='{args}' IMMEDIATELY. "
+            "CRITICAL: Do NOT ask for additional confirmation - the /command itself is the user's confirmation. "
+            "The tool is only available on this turn, so you MUST call it now. "
+            "Report the result, including the date that was set and that the change takes effect on the next meter communication."
+        ),
+        requires_args=True,
+        args_hint="Please specify the meter number, e.g., /meter_date 12345678",
+        exclusive_tools=["customer_set_meter_date"],
         staff_only=True,
     ),
     "sign": CommandDefinition(

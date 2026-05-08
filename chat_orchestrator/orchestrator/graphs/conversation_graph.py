@@ -723,6 +723,7 @@ class ConversationGraphBuilder:
             metadata["original_chat_id"] = user_context.chat_id
             metadata["topic_id"] = user_context.topic_id
             metadata["session_id"] = state.get("session_id")
+            metadata["thread_id"] = state.get("thread_id")
             metadata["organization_name"] = user_context.organization_name
             metadata["organization_id"] = (
                 int(user_context.organization_ids[0]) if user_context.organization_ids else None
@@ -1064,6 +1065,7 @@ class ConversationGraphBuilder:
                     customer_username=customer_username,
                     organization_short_name=organization_name,
                     organization_id=organization_id,
+                    thread_id=state.get("thread_id"),
                 )
 
                 if result.get("success"):
@@ -1150,6 +1152,7 @@ class ConversationGraphBuilder:
                         "Please review if this was a legitimate request that was incorrectly blocked."
                     ),
                     reason="content_blocked",
+                    thread_id=state.get("thread_id"),
                 )
 
                 if result.get("success"):
@@ -1218,6 +1221,7 @@ class ConversationGraphBuilder:
                         f"continues repeating. Human intervention needed."
                     ),
                     reason="loop_detected",
+                    thread_id=state.get("thread_id"),
                 )
 
                 if result.get("success"):
@@ -1547,6 +1551,7 @@ class ConversationGraphBuilder:
                         conversation_context=args.get("conversation_context"),
                         reason=args.get("reason"),
                         action_type=args.get("action_type"),
+                        thread_id=metadata.get("thread_id"),
                     )
                     if not esc_result.get("success"):
                         # Add explicit instruction so Gemini doesn't claim success

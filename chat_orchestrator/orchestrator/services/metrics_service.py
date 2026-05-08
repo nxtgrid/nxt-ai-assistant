@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from orchestrator.services.escalation_service import EscalationService
 from orchestrator.services.supabase_client import SupabaseClient
 from shared.auth.auth_service import AuthService, get_auth_service
+from shared.utils.date_utils import parse_iso_with_timezone
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -192,17 +193,19 @@ class MetricsService:
             LOGGER.error(f"Error collecting user messages: {e}")
 
         # 2. Get escalations per user (if table exists)
+        total_close_minutes = 0.0
+        close_count = 0
         try:
-            # Get all escalations with customer_chat_id directly
+            # Fetch created_at and resolved_at to compute avg time to close
             escalations_response = (
                 client.table("escalation_mappings")
-                .select("customer_chat_id")
+                .select("customer_chat_id, created_at, resolved_at")
                 .gte("created_at", start_of_day.isoformat())
                 .lt("created_at", end_of_range.isoformat())
                 .execute()
             )
 
-            # Count escalations per user
+            # Count escalations per user and accumulate close times
             for row in escalations_response.data or []:
                 chat_id = row.get("customer_chat_id") or "unknown"
 
@@ -223,10 +226,22 @@ class MetricsService:
 
                 user_metrics[chat_id]["escalations"] += 1
 
+                # Accumulate time to close for resolved escalations
+                created_raw = row.get("created_at")
+                resolved_raw = row.get("resolved_at")
+                if created_raw and resolved_raw:
+                    try:
+                        created_dt = parse_iso_with_timezone(created_raw)
+                        resolved_dt = parse_iso_with_timezone(resolved_raw)
+                        delta_minutes = (resolved_dt - created_dt).total_seconds() / 60
+                        if delta_minutes >= 0:
+                            total_close_minutes += delta_minutes
+                            close_count += 1
+                    except (ValueError, AttributeError):
+                        LOGGER.debug(f"Skipping malformed escalation timestamp: {row!r}")
+
             escalation_count = len(escalations_response.data or [])
             LOGGER.info(f"Escalation query returned {escalation_count} records")
-            if escalation_count > 0:
-                LOGGER.info(f"Escalation data: {escalations_response.data}")
 
         except Exception as e:
             if "Could not find the table" in str(e):
@@ -604,6 +619,10 @@ class MetricsService:
             # Use looked-up name or fall back to chat_id
             user_metrics[chat_id]["user_name"] = name_map.get(chat_id, chat_id)
 
+        avg_time_to_close_minutes = (
+            round(total_close_minutes / close_count, 1) if close_count > 0 else None
+        )
+
         result = {
             "start_date": target_date,
             "end_date": end_date or target_date,
@@ -611,6 +630,7 @@ class MetricsService:
             "group_chat_ids": group_chat_ids,  # Set of chat_ids that are groups (for icon display)
             "total_input_tokens": total_input_tokens,
             "total_output_tokens": total_output_tokens,
+            "avg_time_to_close_minutes": avg_time_to_close_minutes,
         }
 
         date_range_str = (
@@ -708,6 +728,15 @@ class MetricsService:
             overall_median = statistics.median(all_response_times)
             total_line += f", ⏱️ {overall_median:.1f}s"
         lines.append(total_line)
+
+        # Add avg time to close if any escalations were resolved in this period
+        avg_close = metrics.get("avg_time_to_close_minutes")
+        if avg_close is not None:
+            if avg_close >= 60:
+                close_str = f"{avg_close / 60:.1f}h"
+            else:
+                close_str = f"{avg_close:.1f}m"
+            lines.append(f"⏳ Avg escalation close time: {close_str}")
 
         # Add token usage summary if available
         total_input_tokens = metrics.get("total_input_tokens", 0)

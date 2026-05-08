@@ -308,6 +308,10 @@ class AgentWorker:
                     expert_id, entity_type, entity_id, entity, config.wake_schedule
                 )
                 created += 1
+            elif existing_map[entity_id]["status"] == "error":
+                # Auto-recover from transient errors (e.g. Gemini timeout, network blip)
+                await self._reactivate_instance(existing_map[entity_id], entity_type, entity)
+                reactivated += 1
             elif existing_map[entity_id]["status"] == "terminated":
                 # Only re-activate if auto-terminated by reconciliation (not user-stopped)
                 error_msg = existing_map[entity_id].get("error_message") or ""

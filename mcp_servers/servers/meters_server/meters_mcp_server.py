@@ -343,7 +343,7 @@ class MetersAPIClient:
             }
             params = {
                 "meter_no": f"eq.{meter_no}",
-                "select": "id,meter_type,dcu_id,customer_id,dev_eui,gateway_id",
+                "select": "id,meter_type,dcu_id,customer_id,dev_eui,gateway_id,last_metering_hardware_install_session_id(last_meter_commissioning_id(created_at,meter_commissioning_status))",
             }
 
             async with session.get(url, headers=headers, params=params) as response:
@@ -359,6 +359,14 @@ class MetersAPIClient:
                     return {}
 
                 meter_info = result[0]
+                session_data = (
+                    meter_info.pop("last_metering_hardware_install_session_id", None) or {}
+                )
+                commissioning_data = session_data.get("last_meter_commissioning_id") or {}
+                meter_info["commissioning_date"] = commissioning_data.get("created_at")
+                meter_info["commissioning_status"] = commissioning_data.get(
+                    "meter_commissioning_status"
+                )
                 meter_id = meter_info.get("id")
                 logger.info(
                     f"Retrieved info for meter {meter_no} (accessed by {SUPABASE_USER_EMAIL}): {meter_info}"

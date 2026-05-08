@@ -15,7 +15,7 @@
           },
           "required": ["grid_name"]
         },
-        "visible_to_customer": false
+        "visible_to_customer": true
       },
       {
         "name": "get_site_info",
@@ -298,7 +298,7 @@
     "customer": [
       {
         "name": "meter_information",
-        "description": "[READ-ONLY] Get customer account details, credit balance, and recent token history for a specific meter.",
+        "description": "[READ-ONLY] Get customer account details, credit balance, and recent token history for a specific meter. Also returns commissioning_date (datetime of most recent commissioning attempt) and commissioning_status (e.g. SUCCESSFUL, FAILED, PROCESSING) when a commissioning record exists.",
         "inputSchema": {
           "type": "object",
           "properties": { "meter_number": { "type": "string" }, "organization_id": { "type": "integer" } },
@@ -415,7 +415,7 @@
       },
       {
         "name": "retry_commissioning",
-        "description": "[ACTION - STARTS METER COMMISSIONING] Retry a failed or stuck meter commissioning. Looks up the last commissioning attempt and re-triggers it via the platform. Only works if the previous attempt was not successful and no retry is already in progress. Only call when the user has explicitly requested this action.",
+        "description": "[ACTION - STARTS METER COMMISSIONING] Retry a failed or stuck meter commissioning. Looks up the last commissioning attempt and re-triggers it via the platform. Only works if the previous attempt was not successful and no retry is already in progress. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -429,7 +429,7 @@
       },
       {
         "name": "unassign_meter",
-        "description": "[ACTION - UNASSIGNS METER] Unassign a meter from its current connection. This removes the meter from the customer it is assigned to. Typically the first step in a reassignment flow — after unassigning, the meter must be manually reconnected to a new customer. Use when a meter is assigned to the wrong customer or needs to be decommissioned. Only call when the user has explicitly requested this action.",
+        "description": "[ACTION - UNASSIGNS METER] Unassign a meter from its current connection. This removes the meter from the customer it is assigned to. Typically the first step in a reassignment flow — after unassigning, the meter must be manually reconnected to a new customer. Use when a meter is assigned to the wrong customer or needs to be decommissioned. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -443,7 +443,7 @@
       },
       {
         "name": "set_meter_power_limit",
-        "description": "[ACTION - SETS HPS POWER LIMIT] Set the maximum power limit (HPS threshold) for a meter. Sends a SET_POWER_LIMIT interaction to the meter via the platform. Only the values listed in the enum are supported: 200W = standard HPS customer, 600W = high power tariff upgrade. Change takes effect on the next meter communication cycle. Only call when the user has explicitly requested this action.",
+        "description": "[ACTION - SETS HPS POWER LIMIT] Set the maximum power limit (HPS threshold) for a meter. Sends a SET_POWER_LIMIT interaction to the meter via the platform. Only the values listed in the enum are supported: 200W = standard HPS customer, 600W = high power tariff upgrade. Change takes effect on the next meter communication cycle. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -461,8 +461,50 @@
         "visible_to_customer": false
       },
       {
+        "name": "set_meter_date",
+        "description": "[ACTION - SETS METER DATE] Synchronise the date on a meter to today's date (Africa/Lagos time). Sends a SET_DATE interaction to the meter via the platform. Use when a meter is showing the wrong date, or as part of meter diagnostics/commissioning. Change takes effect on the next meter communication cycle. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "meter_number": { "type": "string", "description": "The meter number (external reference)" },
+            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
+            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+          },
+          "required": ["meter_number"]
+        },
+        "visible_to_customer": false
+      },
+      {
         "name": "resend_meter_token",
-        "description": "[ACTION - RESENDS METER TOKEN] Resend the last TOP_UP prepayment token to a meter. Looks up the most recent TOP_UP directive token and delivers it again. Only resends top-up (credit) tokens — not power limit or other control tokens. Use when a customer did not receive or lost their top-up token. Only call when the user has explicitly requested this action.",
+        "description": "[ACTION - RESENDS TOP_UP TOKEN] Resend the last TOP_UP prepayment token to a meter. Looks up the most recent TOP_UP directive token and delivers it again. Only resends top-up (credit) tokens — not power limit or other control tokens. Use when a customer did not receive or lost their top-up token. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "meter_number": { "type": "string", "description": "The meter number (external reference)" },
+            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
+            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+          },
+          "required": ["meter_number"]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "resend_clear_tamper_token",
+        "description": "[ACTION - RESENDS CLEAR_TAMPER TOKEN] Resend the last CLEAR_TAMPER token to a meter. Looks up the most recent CLEAR_TAMPER directive token and delivers it again. Use when a customer has a tamper flag that needs clearing and did not receive or lost the clear-tamper token. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "meter_number": { "type": "string", "description": "The meter number (external reference)" },
+            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
+            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+          },
+          "required": ["meter_number"]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "resend_power_limit_token",
+        "description": "[ACTION - RESENDS PLS TOKEN] Resend the last PLS (power limit set) token to a meter. Looks up the most recent PLS directive token and delivers it again. Use when a power limit change was issued but the customer did not receive or the meter did not apply the token. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -486,6 +528,41 @@
             "organization_name": { "type": "string", "description": "Organization name if visible on receipt (optional)" }
           },
           "required": ["customer_name"]
+        },
+        "visible_to_customer": true
+      },
+      {
+        "name": "lookup_transactions",
+        "description": "[READ-ONLY] List payment transactions for the current organization (or all orgs if staff). All filters are optional — omit all to see recent transactions. Supports filtering by date range, reference number, amount, and receiver name (accepts meter numbers or partial person names). Returns amount, date/time, reference number, receiver name, and order status for each match.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "date_from": { "type": "string", "description": "Start of date range in ISO format, e.g. 2026-01-01 or 2026-01-01T00:00:00 (optional, inclusive)" },
+            "date_to": { "type": "string", "description": "End of date range in ISO format, e.g. 2026-01-31 or 2026-01-31T23:59:59 (optional, inclusive)" },
+            "reference_number": { "type": "string", "description": "Partial or full transaction reference number (case-insensitive substring match)" },
+            "amount": { "type": "number", "description": "Payment amount to filter by (±5% tolerance)" },
+            "receiver_name": { "type": "string", "description": "Partial receiver name or meter number (fuzzy match — each word matched independently)" },
+            "limit": { "type": "integer", "description": "Maximum number of results to return (default 20, max 50)" },
+            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
+            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+          },
+          "required": []
+        },
+        "visible_to_customer": true
+      },
+      {
+        "name": "get_my_open_issues",
+        "description": "[READ-ONLY] List this organisation's open support escalations, optionally filtered by issue type. Returns a summary count by type plus individual issue details (summary, reason, when raised). Issue types: token, hps, meter, transaction, commissioning, other.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "issue_type": {
+              "type": "string",
+              "description": "Filter by issue type: token, hps, meter, transaction, commissioning, or other. Omit to return all open issues."
+            },
+            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+          },
+          "required": []
         },
         "visible_to_customer": true
       }

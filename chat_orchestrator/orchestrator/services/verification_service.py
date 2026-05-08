@@ -17,6 +17,7 @@ import asyncio
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -113,6 +114,11 @@ class ResponseVerificationService:
                 feedback="Verification skipped: no instructions configured",
             )
 
+        # Prepend current date to system_instruction so the verifier model (which has a
+        # training cutoff) does not incorrectly flag valid recent dates as future dates.
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        dated_instructions = f"TODAY'S DATE AND TIME: {today}\n\n{verification_instructions}"
+
         # Build verification prompt
         verification_prompt = self._build_verification_prompt(
             original_message=original_message,
@@ -124,7 +130,7 @@ class ResponseVerificationService:
         try:
             # Call Gemini with verification model
             result = await self._call_gemini(
-                system_instruction=verification_instructions,
+                system_instruction=dated_instructions,
                 user_message=verification_prompt,
             )
 
