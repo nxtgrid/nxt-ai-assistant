@@ -99,11 +99,34 @@ CREATE TABLE IF NOT EXISTS escalation_mappings (
     escalation_topic_id     integer,
     is_active               boolean DEFAULT true,
     created_at              timestamptz DEFAULT now(),
-    resolved_at             timestamptz
+    resolved_at             timestamptz,
+    question_text           text,
+    thread_id               text
 );
 
 CREATE INDEX IF NOT EXISTS escalation_mappings_session_id_idx ON escalation_mappings (session_id);
 CREATE INDEX IF NOT EXISTS escalation_mappings_customer_chat_id_idx ON escalation_mappings (customer_chat_id);
+CREATE INDEX IF NOT EXISTS escalation_mappings_thread_id_idx ON escalation_mappings (thread_id);
+
+-- ── Conversation Threads ──────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS chat_threads (
+    thread_id               text PRIMARY KEY,
+    session_id              text NOT NULL,
+    organization_id         integer,
+    issue_type              text CHECK (issue_type IN ('token', 'hps', 'meter', 'transaction', 'commissioning', 'other')),
+    status                  text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+    created_at              timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS chat_threads_session_id_idx ON chat_threads (session_id);
+CREATE INDEX IF NOT EXISTS chat_threads_organization_id_idx ON chat_threads (organization_id);
+CREATE INDEX IF NOT EXISTS chat_threads_issue_type_idx ON chat_threads (issue_type);
+
+-- FK from escalation_mappings to chat_threads (defined after both tables exist)
+ALTER TABLE escalation_mappings
+    ADD CONSTRAINT IF NOT EXISTS escalation_mappings_thread_id_fkey
+    FOREIGN KEY (thread_id) REFERENCES chat_threads(thread_id);
 
 -- ── Per-org metadata ──────────────────────────────────────────────────────────
 

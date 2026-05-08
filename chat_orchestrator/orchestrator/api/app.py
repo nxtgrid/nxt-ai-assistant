@@ -615,6 +615,27 @@ async def jira_webhook(request: Request, background_tasks: BackgroundTasks) -> J
     return JSONResponse(status_code=200, content={"ok": True})
 
 
+async def _run_telegram_workflow(body: dict, chat_id: str, topic_id: int | None) -> None:
+    """Run a Telegram webhook workflow and send an error message if it fails."""
+    try:
+        await async_main(body)
+    except Exception as e:
+        logger.error(f"Telegram workflow failed for chat {chat_id}: {e}", exc_info=True)
+        if chat_id:
+            try:
+                from shared.utils.telegram_send import send_telegram_message
+
+                bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+                await send_telegram_message(
+                    bot_token,
+                    chat_id,
+                    "Something went wrong — please try again.",
+                    topic_id=topic_id,
+                )
+            except Exception:
+                pass
+
+
 @app.post("/")
 async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
     """
@@ -663,7 +684,10 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
         # Use asyncio.create_task (not BackgroundTasks) so the workflow is a real
         # asyncio.Task that can be tracked in _active_workflow_tasks and cancelled
         # cleanly during SIGTERM-triggered graceful shutdown.
-        task = asyncio.create_task(async_main(body))
+        tg_msg = body.get("message") or body.get("edited_message") or {}
+        tg_chat_id = str(tg_msg.get("chat", {}).get("id", ""))
+        tg_topic_id = tg_msg.get("message_thread_id")
+        task = asyncio.create_task(_run_telegram_workflow(body, tg_chat_id, tg_topic_id))
         _active_workflow_tasks.add(task)
         task.add_done_callback(_active_workflow_tasks.discard)
         return JSONResponse(status_code=200, content={"success": True})

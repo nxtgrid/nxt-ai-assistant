@@ -22,7 +22,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, cast
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -148,6 +148,7 @@ class EscalationService:
         grid_name: Optional[str] = None,
         reason: Optional[str] = None,
         action_type: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Escalate a customer support question to internal support group or Jira.
@@ -205,6 +206,7 @@ class EscalationService:
             conversation_context=conversation_context,
             reason=reason,
             action_type=action_type,
+            thread_id=thread_id,
         )
 
     async def _get_or_create_escalation_topic(
@@ -259,6 +261,7 @@ class EscalationService:
         conversation_context: Optional[str] = None,
         reason: Optional[str] = None,
         action_type: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Escalate to Telegram (debug mode)."""
 
@@ -368,6 +371,8 @@ class EscalationService:
                             mapping_id=followup_mapping_id,
                             organization_id=organization_id,
                             escalation_topic_id=followup_topic_id,
+                            question_text=question_summary,
+                            thread_id=thread_id,
                         )
 
                     return {
@@ -489,6 +494,8 @@ class EscalationService:
                             mapping_id=mapping_id,
                             organization_id=organization_id,
                             escalation_topic_id=escalation_topic_id,
+                            question_text=question_summary,
+                            thread_id=thread_id,
                         )
                         LOGGER.info(
                             f"Saved escalation to database: msg_id={escalation_message_id} → "
@@ -730,6 +737,7 @@ class EscalationService:
         grid_name: Optional[str] = None,
         assignee_email: Optional[str] = None,
         organization_short_name: Optional[str] = None,
+        labels: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Create a Jira ticket.
@@ -782,6 +790,9 @@ class EscalationService:
 
             if assignee_account_id:
                 payload["fields"]["assignee"] = {"accountId": assignee_account_id}
+
+            if labels:
+                payload["fields"]["labels"] = labels
 
             # Tag the JSM Organizations field (fuzzy-match our org to Jira's org list)
             org_field_id = os.getenv("JIRA_ORGANIZATION_FIELD_ID")
@@ -933,6 +944,63 @@ class EscalationService:
 
         except Exception:
             LOGGER.warning("Error transitioning Jira %s to Done", issue_key, exc_info=True)
+
+    async def _fetch_jira_issue_fields(self, issue_key: str) -> Optional[Dict[str, Any]]:
+        """Fetch summary and status category for a Jira issue.
+
+        Returns {"summary": str, "is_done": bool} or None on error/not-found.
+        """
+        if not self._jira_base_url:
+            return None
+        url = f"{self._jira_base_url}/rest/api/3/issue/{issue_key}?fields=summary,status"
+        try:
+            session = _get_jira_session()
+            async with session.get(
+                url,
+                headers=self._jira_auth_headers(),
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    LOGGER.debug("Jira fetch %s returned HTTP %s", issue_key, resp.status)
+                    return None
+                data = await resp.json()
+            fields = data.get("fields", {})
+            status_category = fields.get("status", {}).get("statusCategory", {}).get("key", "")
+            return {
+                "summary": fields.get("summary", ""),
+                "is_done": status_category == "done",
+            }
+        except Exception:
+            LOGGER.debug("Error fetching Jira issue fields for %s", issue_key, exc_info=True)
+            return None
+
+    async def _search_jira_for_escalation(self, mapping_id: str) -> Optional[str]:
+        """Search Jira for an existing ticket filed for this escalation mapping.
+
+        Tickets are tagged with label "escalation-{mapping_id[:8]}" at creation.
+        Returns the issue key if found, None otherwise.
+        """
+        if not self._jira_base_url or not self._jira_project_key:
+            return None
+        label = f"escalation-{mapping_id[:8]}"
+        jql = f'project = "{self._jira_project_key}" AND labels = "{label}" ORDER BY created DESC'
+        url = f"{self._jira_base_url}/rest/api/3/issue/search"
+        try:
+            session = _get_jira_session()
+            async with session.get(
+                url,
+                params={"jql": jql, "fields": "summary,status", "maxResults": "1"},
+                headers=self._jira_auth_headers(),
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+            issues = data.get("issues", [])
+            return str(issues[0]["key"]) if issues else None
+        except Exception:
+            LOGGER.debug("Error searching Jira for escalation %s", mapping_id, exc_info=True)
+            return None
 
     async def notify_customer_resolved(
         self,
@@ -1508,32 +1576,52 @@ class EscalationService:
         _org_short_name: Optional[str] = _org_hashtag.lstrip("#") or None
 
         try:
-            # 1. Fetch recent chat history
-            supabase_client = self._get_supabase_client()
-            messages: List[Dict[str, Any]] = []
-            if supabase_client:
-                messages = (
-                    await supabase_client.get_messages(
-                        session_uuid=session_id, max_age_hours=72, max_messages=30
-                    )
-                    or []
-                )
+            # The stored question text is the most reliable source — it's exactly what the
+            # customer wrote when escalating, captured at creation time regardless of session age.
+            stored_question = escalation_mapping.get("question_text") or ""
 
-            # 2. Build JIRA title from first customer message
+            # 1. Fetch recent chat history
+            # escalation_mappings.session_id is the string session ID (e.g. "telegram_abc123").
+            # chat_messages stores the UUID primary key (chat_sessions.id) — look it up first.
+            supabase_client = self._get_supabase_client()
+            raw_messages: list = []
+            if supabase_client:
+                try:
+                    session_obj = await supabase_client.get_session(session_id)
+                    if session_obj and session_obj.id:
+                        raw_messages = (
+                            await supabase_client.get_messages(
+                                session_uuid=session_obj.id, max_age_hours=168, max_messages=50
+                            )
+                            or []
+                        )
+                except Exception as e:
+                    LOGGER.warning("Could not fetch messages for Jira ticket: %s", e)
+            # Normalise to plain dicts — get_messages returns ConversationMessage Pydantic
+            # objects (no .get()), so access attributes and convert.
+            messages: List[Dict[str, Any]] = [
+                m
+                if isinstance(m, dict)
+                else {"role": getattr(m, "role", ""), "content": getattr(m, "content", "") or ""}
+                for m in raw_messages
+            ]
+
+            # 2. Build JIRA title: prefer stored question, fall back to first chat message
             first_user_msg = next(
-                (
-                    m.get("content", "")
-                    for m in messages
-                    if m.get("role") == "user" and m.get("content")
-                ),
-                "Customer support escalation",
+                (m["content"] for m in messages if m.get("role") == "user" and m.get("content")),
+                "",
             )
-            summary = first_user_msg[:120].strip()
-            if len(first_user_msg) > 120:
+            best_summary = stored_question or first_user_msg or "Customer support escalation"
+            summary = best_summary[:120].strip()
+            if len(best_summary) > 120:
                 summary += "..."
 
-            # 3. Build JIRA description from chat history
-            description = _build_ticket_description(messages, escalation_mapping)
+            # 3. Build JIRA description from chat history (with Telegram link to original message)
+            escalation_msg_id = escalation_mapping.get("escalation_message_id")
+            telegram_link = _build_telegram_msg_link(self._escalation_chat_id, escalation_msg_id)
+            description = _build_ticket_description(
+                messages, escalation_mapping, stored_question, telegram_link=telegram_link
+            )
 
             # 4. Resolve grid name from customer chat/topic for the JIRA grid field
             grid_name = None
@@ -1559,12 +1647,34 @@ class EscalationService:
             except Exception as e:
                 LOGGER.debug(f"Could not resolve grid for JIRA ticket: {e}")
 
+            # Dedup guard: if a previous attempt created a Jira ticket but failed to
+            # store the key in DB, find it by label and reuse it instead of filing again.
+            existing_key = await self._search_jira_for_escalation(mapping_id)
+            if existing_key:
+                LOGGER.info(
+                    "Dedup: found existing Jira ticket %s for mapping %s — skipping creation",
+                    existing_key,
+                    mapping_id,
+                )
+                if supabase_client:
+                    try:
+                        _client = supabase_client._get_client()
+                        _client.table("escalation_mappings").update(
+                            {"jira_ticket_key": existing_key}
+                        ).eq("id", mapping_id).execute()
+                    except Exception as e:
+                        LOGGER.warning(
+                            "Dedup: failed to store recovered key %s: %s", existing_key, e
+                        )
+                return {"success": True, "jira_ticket_key": existing_key}
+
             ticket_result = await self._create_jira_ticket(
                 summary=summary,
                 description=description,
                 grid_name=grid_name,
                 assignee_email=assignee_email,
                 organization_short_name=_org_short_name,
+                labels=[f"escalation-{mapping_id[:8]}"],
             )
 
             if not ticket_result.get("success"):
@@ -1575,13 +1685,20 @@ class EscalationService:
 
             # 6+7+8. Run independent post-ticket operations concurrently.
             async def _store_jira_key():
-                # Do NOT catch exceptions here — let them propagate into gather so the
-                # caller can detect DB write failure and avoid returning success=True.
+                # Retry up to 3 times — a transient DB error here causes the sweep to
+                # reactivate and re-file a duplicate ticket on the next run.
                 if supabase_client:
-                    client = supabase_client._get_client()
-                    client.table("escalation_mappings").update({"jira_ticket_key": jira_key}).eq(
-                        "id", mapping_id
-                    ).execute()
+                    _client = supabase_client._get_client()
+                    for _attempt in range(3):
+                        try:
+                            _client.table("escalation_mappings").update(
+                                {"jira_ticket_key": jira_key}
+                            ).eq("id", mapping_id).execute()
+                            return
+                        except Exception:
+                            if _attempt == 2:
+                                raise
+                            await asyncio.sleep(0.5 * (_attempt + 1))
 
             async def _release_session():
                 # Release session back to bot only if no other blocking escalations
@@ -1785,11 +1902,97 @@ class EscalationService:
                 text="\n".join(lines),
             )
 
+        # Reconcile tracked escalations whose Jira ticket was closed outside the webhook
+        # path, then notify each customer group of their remaining open issues in one message.
+        reconciled = 0
+        notified_groups = 0
+        tracked = await supabase_client.get_active_tracked_escalations()
+        if tracked:
+            open_tracked: List[tuple] = []
+            # Fetch all Jira ticket statuses concurrently (cap at 10 parallel to avoid rate limits).
+            _sem = asyncio.Semaphore(10)
+
+            async def _fetch_with_sem(key: str):
+                async with _sem:
+                    return await self._fetch_jira_issue_fields(key)
+
+            keys_to_fetch = [esc.get("jira_ticket_key") or "" for esc in tracked]
+            field_results = await asyncio.gather(
+                *[_fetch_with_sem(k) for k in keys_to_fetch],
+                return_exceptions=True,
+            )
+
+            for esc, fields_or_exc in zip(tracked, field_results):
+                key = esc.get("jira_ticket_key") or ""
+                if not key:
+                    continue
+                fields: Optional[Dict[str, Any]] = (
+                    None
+                    if isinstance(fields_or_exc, Exception)
+                    else cast(Optional[Dict[str, Any]], fields_or_exc)
+                )
+                if fields and fields["is_done"]:
+                    # Jira webhook was missed — close the mapping silently
+                    LOGGER.info("Reconciling Jira-closed ticket %s (mapping %s)", key, esc["id"])
+                    try:
+                        client = supabase_client._get_client()
+                        client.table("escalation_mappings").update(
+                            {
+                                "is_active": False,
+                                "resolved_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                        ).eq("id", esc["id"]).eq("is_active", True).execute()
+                        reconciled += 1
+                    except Exception:
+                        LOGGER.warning("Could not reconcile mapping %s", esc["id"], exc_info=True)
+                else:
+                    open_tracked.append((esc, fields))
+
+            # Group open tracked escalations by (customer_chat_id, customer_topic_id)
+            groups: Dict[str, Dict] = {}
+            for esc, fields in open_tracked:
+                chat_id = esc.get("customer_chat_id") or ""
+                topic_id = str(esc.get("customer_topic_id") or "")
+                if not chat_id:
+                    continue
+                group_key = f"{chat_id}|{topic_id}"
+                if group_key not in groups:
+                    groups[group_key] = {"chat_id": chat_id, "topic_id": topic_id, "issues": []}
+                groups[group_key]["issues"].append(
+                    {
+                        "key": esc["jira_ticket_key"],
+                        "summary": (fields or {}).get("summary", "") if fields else "",
+                    }
+                )
+
+            for group_info in groups.values():
+                chat_id = group_info["chat_id"]
+                topic_id = group_info["topic_id"]
+                issues = group_info["issues"]
+                lines = ["📋 *Open support requests:*"]
+                for issue in issues:
+                    escaped_key = _escape_telegram_markdown(issue["key"])
+                    desc = _escape_telegram_markdown(_short_desc(issue["summary"]))
+                    lines.append(f"• *{escaped_key}* — {desc}")
+                try:
+                    await self._send_telegram_message(
+                        chat_id=chat_id,
+                        text="\n".join(lines),
+                        topic_id=int(topic_id) if topic_id else None,
+                    )
+                    notified_groups += 1
+                except Exception:
+                    LOGGER.warning(
+                        "Failed to send pending issues to chat_id=%s", chat_id, exc_info=True
+                    )
+
         summary = {
             "eligible": len(eligible),
             "filed": filed,
             "skipped": skipped,
             "failed": failed,
+            "reconciled": reconciled,
+            "notified_groups": notified_groups,
         }
         LOGGER.info("Escalation sweep complete: %s", summary)
         return summary
@@ -1860,44 +2063,58 @@ class EscalationService:
         """Background task: create Jira ticket after-hours, then edit the escalation message."""
         try:
             supabase_client = self._get_supabase_client()
-            messages: List[Dict[str, Any]] = []
+            raw_messages: list = []
             if supabase_client and customer_chat_id:
-                # Best-effort: fetch chat history via session lookup
                 try:
-                    session_row = await supabase_client.get_session_by_chat_id(customer_chat_id)
-                    if session_row:
-                        messages = (
+                    session_row = await supabase_client.get_session_by_chat_id(
+                        source="telegram",
+                        chat_id=customer_chat_id,
+                        topic_id=customer_topic_id,
+                    )
+                    if session_row and session_row.id:
+                        raw_messages = (
                             await supabase_client.get_messages(
-                                session_uuid=str(session_row.id), max_age_hours=72, max_messages=30
+                                session_uuid=session_row.id, max_age_hours=168, max_messages=50
                             )
                             or []
                         )
                 except Exception as e:
                     LOGGER.debug("Could not fetch messages for after-hours Jira: %s", e)
 
+            # Normalise ConversationMessage Pydantic objects → plain dicts
+            messages: List[Dict[str, Any]] = [
+                m
+                if isinstance(m, dict)
+                else {"role": getattr(m, "role", ""), "content": getattr(m, "content", "") or ""}
+                for m in raw_messages
+            ]
+
+            # Prefer question_summary (captured at escalation time) over chat history
             first_user_msg = next(
-                (
-                    m.get("content", "")
-                    for m in messages
-                    if m.get("role") == "user" and m.get("content")
-                ),
-                question_summary or "Customer support escalation",
+                (m["content"] for m in messages if m.get("role") == "user" and m.get("content")),
+                "",
             )
-            summary = first_user_msg[:120].strip()
-            if len(first_user_msg) > 120:
+            best_summary = question_summary or first_user_msg or "Customer support escalation"
+            summary = best_summary[:120].strip()
+            if len(best_summary) > 120:
                 summary += "..."
 
-            # Build a minimal escalation_mapping dict for _build_ticket_description
             dummy_mapping: Dict[str, Any] = {
                 "id": mapping_id,
                 "org_hashtag": f"#{organization_short_name}" if organization_short_name else None,
             }
-            description = _build_ticket_description(messages, dummy_mapping)
+            telegram_link = _build_telegram_msg_link(
+                self._escalation_chat_id, escalation_message_id
+            )
+            description = _build_ticket_description(
+                messages, dummy_mapping, question_summary, telegram_link=telegram_link
+            )
 
             ticket_result = await self._create_jira_ticket(
                 summary=summary,
                 description=description,
                 organization_short_name=organization_short_name,
+                labels=[f"escalation-{mapping_id[:8]}"],
             )
 
             if ticket_result.get("success") and ticket_result.get("key"):
@@ -2257,6 +2474,7 @@ class EscalationService:
         customer_username: Optional[str] = None,
         organization_short_name: Optional[str] = None,
         organization_id: Optional[int] = None,
+        thread_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Escalate a response that failed verification twice.
@@ -2361,6 +2579,8 @@ class EscalationService:
                             reason="verification_failed",
                             organization_id=organization_id,
                             escalation_topic_id=escalation_topic_id,
+                            question_text=original_message[:2000] if original_message else None,
+                            thread_id=thread_id,
                         )
                         LOGGER.info(
                             f"Saved verification failure escalation to database: "
@@ -2390,8 +2610,38 @@ class EscalationService:
             }
 
 
+def _short_desc(summary: str, max_words: int = 5) -> str:
+    """Truncate a Jira summary to at most max_words words for compact inline display."""
+    words = summary.split()[:max_words]
+    return " ".join(words) or "support issue"
+
+
+def _build_telegram_msg_link(
+    escalation_chat_id: Optional[str], message_id: Optional[int]
+) -> Optional[str]:
+    """Build a t.me deep-link to a specific message in the escalation support group."""
+    if not escalation_chat_id or not message_id:
+        return None
+    try:
+        chat_str = str(escalation_chat_id)
+        # t.me/c/ deep-links only work for supergroups (IDs starting with -100).
+        # Legacy group IDs and positive IDs cannot be linked via this format.
+        if not chat_str.startswith("-100"):
+            return None
+        group_id = chat_str[4:]
+        if not group_id.isdigit():
+            return None
+        return f"https://t.me/c/{group_id}/{message_id}"
+    except Exception:
+        LOGGER.warning("Failed to build Telegram message link for chat_id=%s", escalation_chat_id)
+        return None
+
+
 def _build_ticket_description(
-    messages: List[Dict[str, Any]], escalation_mapping: Dict[str, Any]
+    messages: List[Dict[str, Any]],
+    escalation_mapping: Dict[str, Any],
+    question_text: Optional[str] = None,
+    telegram_link: Optional[str] = None,
 ) -> str:
     """Build a JIRA ticket description from chat history."""
     parts: List[str] = []
@@ -2405,13 +2655,28 @@ def _build_ticket_description(
     parts.append(f"Customer: {customer}")
     if reason:
         parts.append(f"Escalation reason: {reason}")
+    if telegram_link:
+        parts.append(f"Telegram: {telegram_link}")
+
+    # Escalation question — the exact message that triggered the escalation
+    stored = question_text or escalation_mapping.get("question_text") or ""
+    if stored:
+        parts.append("")
+        parts.append("--- Escalation Message ---")
+        parts.append(stored[:1000])
+
     parts.append("")
 
     # Chat history (most recent messages, truncated)
     parts.append("--- Chat History ---")
     for msg in messages[-20:]:
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
+        # Support both plain dicts and Pydantic ConversationMessage objects
+        if isinstance(msg, dict):
+            role = msg.get("role", "unknown")
+            content = msg.get("content", "")
+        else:
+            role = getattr(msg, "role", "unknown")
+            content = getattr(msg, "content", "") or ""
         if not content:
             continue
         label = "Customer" if role == "user" else "Bot" if role == "model" else role

@@ -13,6 +13,7 @@ from loguru import logger as LOGGER
 
 from orchestrator.graphs.state import ConversationState
 from shared.auth import get_auth_service
+from shared.utils.error_messages import ErrorCategory, get_user_message
 
 
 async def safety_check(state: ConversationState) -> Dict[str, Any]:
@@ -46,10 +47,13 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
         final_response = stripped_response
         state_updates["final_response"] = final_response
 
-    # If this session already has an active escalation (from a prior turn),
-    # the bot may legitimately reference it — skip the false-positive check.
-    if state.get("is_escalated_session"):
-        LOGGER.debug("Session has active escalation from prior turn, skipping safety check")
+    # If the session has an active escalation AND this turn was already handled by
+    # auto-forwarding (escalation_forward_result is set), the bot's response is the
+    # confirmation message — skip the false-positive check.
+    # Do NOT skip when forward_result is None: that means forwarding failed and the
+    # LLM processed the turn normally, so we still need to catch fabricated claims.
+    if state.get("is_escalated_session") and state.get("escalation_forward_result"):
+        LOGGER.debug("Session has active escalation and forward succeeded, skipping safety check")
         return {**state_updates, "safety_escalation_needed": False}
 
     # Check if escalate_to_support was actually called this turn
@@ -77,29 +81,38 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
             LOGGER.debug("Escalation tool was called and succeeded, no safety check needed")
             return {**state_updates, "safety_escalation_needed": False}
 
-        # Tool was called but FAILED — if bot still claims success, correct it
+        # Tool was called but FAILED — correct response if it claims success, then
+        # fall through to trigger a backup escalation so the customer is not lost.
+        LOGGER.warning("Escalation tool was called but FAILED — triggering backup escalation")
         if _detect_escalation_claim(final_response):
-            LOGGER.warning(
-                "Escalation tool was called but FAILED, yet bot claims success. "
-                "Replacing response with failure message."
-            )
-            from shared.utils.error_messages import ErrorCategory, get_user_message
-
             final_response = get_user_message(ErrorCategory.ESCALATION, "failed")
             state_updates["final_response"] = final_response
 
-        return {**state_updates, "safety_escalation_needed": False}
+        # Fall through to the backup escalation trigger below instead of returning early.
 
-    # Check if response claims escalation without tool call
-    if not _detect_escalation_claim(final_response):
+    # Check if response claims escalation without tool call.
+    # When escalation_tool_called=True the guard below is always bypassed — backup fires
+    # unconditionally for any tool failure, regardless of the bot's response content.
+    # This is intentional: a failed tool call means the customer may not be escalated,
+    # so we attempt backup even when the bot's response does not claim escalation.
+    if not escalation_tool_called and not _detect_escalation_claim(final_response):
         LOGGER.debug("No escalation claim detected in response")
         return {**state_updates, "safety_escalation_needed": False}
 
-    # Safety check triggered!
-    LOGGER.warning(
-        "Escalation safety check triggered: Bot claimed escalation without tool call. "
-        "Triggering automatic escalation."
-    )
+    # Guard: if session_id is None the backup Telegram message has no mapping to attach to,
+    # leaving support staff with an unanswerable thread. Fail gracefully.
+    if not session_id:
+        LOGGER.warning("Safety backup escalation skipped — session_id is None")
+        state_updates["final_response"] = get_user_message(ErrorCategory.ESCALATION, "failed")
+        return {**state_updates, "safety_escalation_needed": True}
+
+    # Safety check triggered: either tool failed (fall-through above) or bot claimed
+    # escalation without calling the tool at all.
+    if not escalation_tool_called:
+        LOGGER.warning(
+            "Escalation safety check triggered: Bot claimed escalation without tool call. "
+            "Triggering automatic escalation."
+        )
 
     try:
         from orchestrator.services.escalation_service import EscalationService
@@ -111,8 +124,6 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
 
         if not safety_escalation_service.is_enabled():
             LOGGER.warning("Safety escalation skipped - escalation service not enabled")
-            from shared.utils.error_messages import ErrorCategory, get_user_message
-
             state_updates["final_response"] = get_user_message(ErrorCategory.ESCALATION, "failed")
             return {**state_updates, "safety_escalation_needed": True}
 
@@ -127,6 +138,16 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
         summary = _extract_escalation_summary(final_response)
 
         # Trigger the escalation
+        if escalation_tool_called:
+            esc_context = (
+                f"[SAFETY ESCALATION - escalate_to_support tool was called but FAILED]\n"
+                f"User message: {user_input[:500]}"
+            )
+        else:
+            esc_context = (
+                f"[SAFETY ESCALATION - Model claimed escalation without tool call]\n"
+                f"User message: {user_input[:500]}"
+            )
         safety_result = await safety_escalation_service.escalate_to_support(
             question_summary=summary,
             session_id=session_id,
@@ -140,10 +161,7 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
             customer_topic_id=user_context.topic_id if user_context else None,
             customer_username=user_context.username if user_context else None,
             customer_email=user_context.user_email if user_context else None,
-            conversation_context=(
-                f"[SAFETY ESCALATION - Model claimed escalation without tool call]\n"
-                f"User message: {user_input[:500]}"
-            ),
+            conversation_context=esc_context,
             reason="safety_escalation",
         )
 
@@ -152,15 +170,11 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
         else:
             LOGGER.error(f"Safety escalation failed: {safety_result.get('error')}")
             # Auto-escalation failed AND bot claimed success — correct the response
-            from shared.utils.error_messages import ErrorCategory, get_user_message
-
             state_updates["final_response"] = get_user_message(ErrorCategory.ESCALATION, "failed")
 
     except Exception as e:
         LOGGER.exception(f"Safety escalation error: {e}")
         # Exception during auto-escalation — correct the response
-        from shared.utils.error_messages import ErrorCategory, get_user_message
-
         state_updates["final_response"] = get_user_message(ErrorCategory.ESCALATION, "failed")
 
     return {**state_updates, "safety_escalation_needed": True}

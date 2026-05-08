@@ -938,6 +938,8 @@ class EnhancedSupabaseClient:
         mapping_id: Optional[str] = None,
         organization_id: Optional[int] = None,
         escalation_topic_id: Optional[int] = None,
+        question_text: Optional[str] = None,
+        thread_id: Optional[str] = None,
     ) -> Optional[str]:
         """
         Save escalation mapping for routing support replies back to customer.
@@ -995,6 +997,8 @@ class EnhancedSupabaseClient:
                 "is_active": True,
                 "organization_id": organization_id,
                 "escalation_topic_id": escalation_topic_id,
+                "question_text": question_text[:2000] if question_text else None,
+                "thread_id": thread_id,
             }
 
             client.table("escalation_mappings").insert(mapping_data).execute()
@@ -1345,7 +1349,7 @@ class EnhancedSupabaseClient:
                     "id, session_id, org_hashtag, customer_email, customer_username, "
                     "customer_chat_id, customer_topic_id, organization_id, "
                     "escalation_message_id, escalation_topic_id, reason, jira_ticket_key, "
-                    "created_at"
+                    "question_text, created_at"
                 )
                 .eq("is_active", True)
                 .is_("jira_ticket_key", "null")
@@ -1426,6 +1430,36 @@ class EnhancedSupabaseClient:
             LOGGER.error(f"Error fetching old unfiled escalations: {e}")
             return []
 
+    async def get_active_tracked_escalations(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return active escalations that have a Jira ticket key (tracked, pending resolution).
+
+        Used by the sweep to reconcile Jira-closed tickets and notify customers of open ones.
+        """
+        try:
+            client = self._get_client()
+            result = (
+                client.table("escalation_mappings")
+                .select(
+                    "id, session_id, customer_chat_id, customer_topic_id, "
+                    "jira_ticket_key, org_hashtag, customer_username, created_at"
+                )
+                .eq("is_active", True)
+                .filter("jira_ticket_key", "not.is", "null")
+                .order("created_at", desc=False)
+                .limit(limit)
+                .execute()
+            )
+            rows = result.data or []
+            if len(rows) == limit:
+                LOGGER.warning(
+                    "get_active_tracked_escalations hit cap of %d — some tracked escalations skipped",
+                    limit,
+                )
+            return rows
+        except Exception as e:
+            LOGGER.error(f"Error fetching active tracked escalations: {e}")
+            return []
+
     # =========================================================================
     # ORG METADATA METHODS
     # =========================================================================
@@ -1487,6 +1521,84 @@ class EnhancedSupabaseClient:
                 )
         except Exception as e:
             LOGGER.error(f"Error clearing org escalation topic for org={organization_id}: {e}")
+
+    async def save_thread(
+        self,
+        thread_id: str,
+        session_id: str,
+        organization_id: Optional[int] = None,
+        issue_type: Optional[str] = None,
+    ) -> None:
+        """Persist a new conversation thread to chat_threads."""
+        try:
+            client = self._get_client()
+            client.table("chat_threads").insert(
+                {
+                    "thread_id": thread_id,
+                    "session_id": session_id,
+                    "organization_id": organization_id,
+                    "issue_type": issue_type,
+                    "status": "open",
+                }
+            ).execute()
+        except Exception as e:
+            LOGGER.error(f"Error saving thread {thread_id}: {e}")
+
+    async def get_open_issues_for_org(
+        self,
+        organization_id: int,
+        issue_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return open escalation_mappings for an org, joined with chat_threads for issue_type.
+
+        Uses PostgREST embedding (FK relationship) to join chat_threads inline.
+        """
+        try:
+            client = self._get_client()
+            query = (
+                client.table("escalation_mappings")
+                .select(
+                    "id, question_text, reason, action_type, created_at, thread_id, "
+                    "chat_threads(issue_type)"
+                )
+                .eq("organization_id", organization_id)
+                .eq("is_active", True)
+                .order("created_at", desc=True)
+                .limit(50)
+            )
+            if issue_type:
+                # PostgREST: filter on embedded table column
+                query = query.eq("chat_threads.issue_type", issue_type)
+            response = query.execute()
+            rows = response.data or []
+
+            results = []
+            for row in rows:
+                thread_data = row.get("chat_threads") or {}
+                row_issue_type = (
+                    thread_data.get("issue_type") if isinstance(thread_data, dict) else None
+                )
+                if issue_type and row_issue_type != issue_type:
+                    # PostgREST embedded filters don't always exclude rows; guard here.
+                    continue
+                results.append(
+                    {
+                        "id": row.get("id"),
+                        "thread_id": row.get("thread_id"),
+                        "issue_type": row_issue_type or "unknown",
+                        "summary": row.get("question_text"),
+                        "reason": row.get("reason"),
+                        "action_type": row.get("action_type"),
+                        "created_at": row.get("created_at"),
+                    }
+                )
+            return results
+        except Exception as e:
+            LOGGER.warning(
+                f"Error fetching open issues for org={organization_id} "
+                f"(possible schema/FK issue — run chat_threads migration?): {e}"
+            )
+            return []
 
 
 # Backward compatibility alias

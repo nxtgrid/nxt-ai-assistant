@@ -30,6 +30,7 @@ from shared_code.utils.logger import setup_logger
 from supabase import Client, create_client
 
 from shared.charts import apply_theme
+from shared.utils.date_utils import parse_iso_with_timezone
 
 logger = setup_logger("meta-server")
 
@@ -164,14 +165,15 @@ async def _get_response_distribution(
     """
     Get distribution of bot responses vs escalations.
 
-    Counts sessions that had user message activity in the date range
-    (not just sessions created in that range), matching the chat stats
-    approach in anansi_app.
+    Counts sessions with user message activity, and separately counts sessions
+    with ANY escalation event (including agent-initiated ones that may not have
+    user messages in the window). Both sets are unioned before applying the
+    org filter and escalation-group exclusion.
 
     Returns:
         Dict with 'bot_responded' and 'escalated' counts
     """
-    # Find sessions with user messages in the date range
+    # Sessions with user messages in the period
     msg_response = (
         client.table("chat_messages")
         .select("session_id")
@@ -180,69 +182,95 @@ async def _get_response_distribution(
         .lt("created_at", end_date.isoformat())
         .execute()
     )
-
-    active_session_ids = list(
-        set(row["session_id"] for row in msg_response.data if row.get("session_id"))
+    active_session_ids: set[str] = set(
+        row["session_id"] for row in msg_response.data or [] if row.get("session_id")
     )
 
-    if not active_session_ids:
+    # Sessions with ANY escalation event — direct query, not cross-joined against
+    # active_session_ids, so agent-initiated escalations are not silently dropped.
+    esc_query = (
+        client.table("escalation_mappings")
+        .select("session_id")
+        .gte("created_at", start_date.isoformat())
+        .lt("created_at", end_date.isoformat())
+        .limit(2000)
+    )
+    if organization_id:
+        esc_query = esc_query.eq("organization_id", organization_id)
+    esc_response = esc_query.execute()
+    escalated_session_ids: set[str] = set(
+        row["session_id"] for row in esc_response.data or [] if row.get("session_id")
+    )
+
+    all_relevant_ids = active_session_ids | escalated_session_ids
+    if not all_relevant_ids:
         return {"bot_responded": 0, "escalated": 0}
 
-    # Find sessions that had ANY escalation in the date range.
-    # We use escalation_mappings instead of chat_sessions.is_escalated because
-    # is_escalated is a transient flag cleared on close — resolved escalations
-    # would incorrectly count as bot_responded.
-    escalated_session_ids: set = set()
+    # Apply org filter and exclude escalation group chats via chat_sessions lookup
     batch_size = 50
+    valid_session_ids: set[str] = set()
+    all_relevant_list = list(all_relevant_ids)
 
-    for i in range(0, len(active_session_ids), batch_size):
-        batch = active_session_ids[i : i + batch_size]
-        esc_response = (
-            client.table("escalation_mappings")
-            .select("session_id")
-            .gte("created_at", start_date.isoformat())
-            .lt("created_at", end_date.isoformat())
-            .in_("session_id", batch)
-            .execute()
-        )
-        for row in esc_response.data or []:
-            if row.get("session_id"):
-                escalated_session_ids.add(row["session_id"])
-
-    # Look up sessions to filter out escalation group chats
-    bot_responded = 0
-    escalated = 0
-
-    for i in range(0, len(active_session_ids), batch_size):
-        batch = active_session_ids[i : i + batch_size]
+    for i in range(0, len(all_relevant_list), batch_size):
+        batch = all_relevant_list[i : i + batch_size]
         query = client.table("chat_sessions").select("id, telegram_chat_id")
-
         if organization_id:
             query = query.eq("organization_id", organization_id)
-
         query = query.in_("id", batch)
         response = query.execute()
 
         for session in response.data or []:
-            # Skip escalation group sessions
             chat_id = str(session.get("telegram_chat_id", ""))
             if chat_id == str(ESCALATION_CHAT_ID):
                 continue
+            valid_session_ids.add(session.get("id"))
 
-            session_id = session.get("id")
-            if session_id in escalated_session_ids:
-                escalated += 1
-            else:
-                bot_responded += 1
+    escalated = len(escalated_session_ids & valid_session_ids)
+    bot_responded = len((active_session_ids - escalated_session_ids) & valid_session_ids)
 
     return {"bot_responded": bot_responded, "escalated": escalated}
+
+
+async def _get_issue_type_breakdown(
+    client: Client,
+    start_date: datetime,
+    end_date: datetime,
+    organization_id: Optional[int] = None,
+) -> Dict[str, int]:
+    """Get thread count breakdown by issue type from chat_threads for new threads in window."""
+    _LIMIT = 5000
+    query = (
+        client.table("chat_threads")
+        .select("issue_type")
+        .gte("created_at", start_date.isoformat())
+        .lt("created_at", end_date.isoformat())
+        .limit(_LIMIT)
+    )
+    if organization_id:
+        query = query.eq("organization_id", organization_id)
+
+    try:
+        response = query.execute()
+    except Exception:
+        logger.warning("chat_threads query failed — table may not exist yet", exc_info=True)
+        return {}
+    rows = response.data or []
+    if len(rows) == _LIMIT:
+        logger.warning(
+            "_get_issue_type_breakdown hit row cap (%d) — counts may be incomplete", _LIMIT
+        )
+    counts: Dict[str, int] = {}
+    for row in rows:
+        t = row.get("issue_type") or "other"
+        counts[t] = counts.get(t, 0) + 1
+    return counts
 
 
 async def _get_escalation_reasons(
     client: Client,
     start_date: datetime,
     end_date: datetime,
-    org_hashtag: Optional[str] = None,
+    organization_id: Optional[int] = None,
 ) -> Dict[str, int]:
     """
     Get escalation breakdown by reason.
@@ -255,10 +283,11 @@ async def _get_escalation_reasons(
         .select("reason")
         .gte("created_at", start_date.isoformat())
         .lt("created_at", end_date.isoformat())
+        .limit(2000)
     )
 
-    if org_hashtag:
-        query = query.eq("org_hashtag", org_hashtag)
+    if organization_id:
+        query = query.eq("organization_id", organization_id)
 
     response = query.execute()
 
@@ -274,7 +303,7 @@ async def _get_action_types(
     client: Client,
     start_date: datetime,
     end_date: datetime,
-    org_hashtag: Optional[str] = None,
+    organization_id: Optional[int] = None,
 ) -> Dict[str, int]:
     """
     Get action type breakdown for staff_action_required escalations.
@@ -288,10 +317,11 @@ async def _get_action_types(
         .eq("reason", "staff_action_required")
         .gte("created_at", start_date.isoformat())
         .lt("created_at", end_date.isoformat())
+        .limit(2000)
     )
 
-    if org_hashtag:
-        query = query.eq("org_hashtag", org_hashtag)
+    if organization_id:
+        query = query.eq("organization_id", organization_id)
 
     response = query.execute()
 
@@ -301,6 +331,61 @@ async def _get_action_types(
         action_types[action_type] = action_types.get(action_type, 0) + 1
 
     return action_types
+
+
+async def _get_avg_time_to_close(
+    client: Client,
+    start_date: datetime,
+    end_date: datetime,
+    organization_id: Optional[int] = None,
+) -> Optional[float]:
+    """
+    Compute average time to close escalations in minutes.
+
+    Only includes escalations that were resolved (resolved_at is not null)
+    and were created within the date range.
+
+    Returns:
+        Average minutes to close, or None if no closed escalations exist.
+    """
+    query = (
+        client.table("escalation_mappings")
+        .select("created_at, resolved_at")
+        .gte("created_at", start_date.isoformat())
+        .lt("created_at", end_date.isoformat())
+        .not_.is_("resolved_at", "null")
+        .limit(2000)
+    )
+    if organization_id:
+        query = query.eq("organization_id", organization_id)
+    try:
+        response = query.execute()
+    except Exception as e:
+        logger.error(f"Error fetching avg time to close: {e}")
+        return None
+
+    total_minutes = 0.0
+    count = 0
+    for row in response.data or []:
+        created_raw = row.get("created_at")
+        resolved_raw = row.get("resolved_at")
+        if not created_raw or not resolved_raw:
+            continue
+        try:
+            created_dt = parse_iso_with_timezone(created_raw)
+            resolved_dt = parse_iso_with_timezone(resolved_raw)
+            delta_minutes = (resolved_dt - created_dt).total_seconds() / 60
+            if delta_minutes >= 0:
+                total_minutes += delta_minutes
+                count += 1
+        except (ValueError, AttributeError):
+            logger.debug(f"Skipping malformed timestamp row: {row!r}")
+            continue
+
+    if count == 0:
+        return None
+
+    return round(total_minutes / count, 1)
 
 
 async def _get_negative_feedback_count(
@@ -371,7 +456,7 @@ async def _get_escalated_messages(
     client: Client,
     start_date: datetime,
     end_date: datetime,
-    org_hashtag: Optional[str] = None,
+    organization_id: Optional[int] = None,
     char_limit: int = 5000,
 ) -> List[Dict[str, Any]]:
     """
@@ -389,8 +474,8 @@ async def _get_escalated_messages(
         .limit(50)  # Fetch more than needed, will filter by char limit
     )
 
-    if org_hashtag:
-        query = query.eq("org_hashtag", org_hashtag)
+    if organization_id:
+        query = query.eq("organization_id", organization_id)
 
     response = query.execute()
 
@@ -591,7 +676,9 @@ async def handle_list_tools() -> List[types.Tool]:
             name="get_performance_report",
             description=(
                 "Get comprehensive bot performance report. "
-                "Returns response distribution, escalation breakdown, and feedback stats. "
+                "Returns response distribution, escalation breakdown "
+                "(including avg_time_to_close_minutes for resolved escalations, null if none), "
+                "and feedback stats. "
                 "Default: past 7 days, all organizations."
             ),
             inputSchema={
@@ -724,6 +811,29 @@ async def handle_list_tools() -> List[types.Tool]:
             },
             visible_to_customer=False,
         ),
+        types.Tool(
+            name="issue_type_breakdown_chart",
+            description=(
+                "Generate pie chart showing new conversation threads broken down by issue type "
+                "(token, hps, meter, transaction, commissioning, other). Returns PNG image."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "days": {
+                        "type": "integer",
+                        "description": "Number of days to include (default: 7)",
+                        "default": 7,
+                    },
+                    "organization": {
+                        "type": "string",
+                        "description": "Filter by organization name",
+                    },
+                },
+                "required": [],
+            },
+            visible_to_customer=False,
+        ),
     ]
 
     logger.info(f"Meta server: {len(tools)} tools available")
@@ -787,7 +897,7 @@ async def handle_call_tool(
         # Route to appropriate handler
         if name == "get_performance_report":
             return await _handle_performance_report(
-                client, start_date, end_date, organization_id, org_hashtag, days, org_name
+                client, start_date, end_date, organization_id, days, org_name
             )
 
         elif name == "response_distribution_chart":
@@ -797,21 +907,26 @@ async def handle_call_tool(
 
         elif name == "escalation_types_chart":
             return await _handle_escalation_types_chart(
-                client, start_date, end_date, org_hashtag, days, org_name
+                client, start_date, end_date, organization_id, days, org_name
             )
 
         elif name == "action_types_chart":
             return await _handle_action_types_chart(
-                client, start_date, end_date, org_hashtag, days, org_name
+                client, start_date, end_date, organization_id, days, org_name
             )
 
         elif name == "list_escalated_messages":
             return await _handle_list_escalated_messages(
-                client, start_date, end_date, org_hashtag, days, org_name
+                client, start_date, end_date, organization_id, days, org_name
             )
 
         elif name == "list_negative_feedback":
             return await _handle_list_negative_feedback(
+                client, start_date, end_date, organization_id, days, org_name
+            )
+
+        elif name == "issue_type_breakdown_chart":
+            return await _handle_issue_type_chart(
                 client, start_date, end_date, organization_id, days, org_name
             )
 
@@ -838,18 +953,21 @@ async def _handle_performance_report(
     start_date: datetime,
     end_date: datetime,
     organization_id: Optional[int],
-    org_hashtag: Optional[str],
     days: int,
     org_name: Optional[str],
 ) -> List[types.TextContent]:
     """Handle meta_get_performance_report tool."""
     # Get all metrics
     distribution = await _get_response_distribution(client, start_date, end_date, organization_id)
-    reasons = await _get_escalation_reasons(client, start_date, end_date, org_hashtag)
-    action_types = await _get_action_types(client, start_date, end_date, org_hashtag)
+    reasons = await _get_escalation_reasons(client, start_date, end_date, organization_id)
+    action_types = await _get_action_types(client, start_date, end_date, organization_id)
+    issue_type_breakdown = await _get_issue_type_breakdown(
+        client, start_date, end_date, organization_id
+    )
     negative_feedback = await _get_negative_feedback_count(
         client, start_date, end_date, organization_id
     )
+    avg_close_minutes = await _get_avg_time_to_close(client, start_date, end_date, organization_id)
 
     total_sessions = distribution["bot_responded"] + distribution["escalated"]
     escalation_rate = (
@@ -876,7 +994,9 @@ async def _handle_performance_report(
         "escalation_breakdown": {
             "by_reason": reasons,
             "by_action_type": action_types,
+            "avg_time_to_close_minutes": avg_close_minutes,
         },
+        "issue_type_breakdown": issue_type_breakdown,
     }
 
     return [
@@ -933,12 +1053,12 @@ async def _handle_escalation_types_chart(
     client: Client,
     start_date: datetime,
     end_date: datetime,
-    org_hashtag: Optional[str],
+    organization_id: Optional[int],
     days: int,
     org_name: Optional[str],
 ) -> List[types.TextContent | types.ImageContent]:
     """Handle meta_escalation_types_chart tool."""
-    reasons = await _get_escalation_reasons(client, start_date, end_date, org_hashtag)
+    reasons = await _get_escalation_reasons(client, start_date, end_date, organization_id)
 
     data = [{"category": reason, "count": count} for reason, count in reasons.items()]
 
@@ -972,12 +1092,12 @@ async def _handle_action_types_chart(
     client: Client,
     start_date: datetime,
     end_date: datetime,
-    org_hashtag: Optional[str],
+    organization_id: Optional[int],
     days: int,
     org_name: Optional[str],
 ) -> List[types.TextContent | types.ImageContent]:
     """Handle meta_action_types_chart tool."""
-    action_types = await _get_action_types(client, start_date, end_date, org_hashtag)
+    action_types = await _get_action_types(client, start_date, end_date, organization_id)
 
     data = [
         {"category": action_type, "count": count} for action_type, count in action_types.items()
@@ -1009,16 +1129,44 @@ async def _handle_action_types_chart(
     ]
 
 
+async def _handle_issue_type_chart(
+    client: Client,
+    start_date: datetime,
+    end_date: datetime,
+    organization_id: Optional[int],
+    days: int,
+    org_name: Optional[str],
+) -> List[types.TextContent | types.ImageContent]:
+    """Handle issue_type_breakdown_chart tool."""
+    breakdown = await _get_issue_type_breakdown(client, start_date, end_date, organization_id)
+
+    data = [{"category": t, "count": c} for t, c in breakdown.items()]
+    title = f"Issues by Type (Last {days} days)"
+    if org_name:
+        title += f" - {org_name}"
+
+    png_bytes = _build_pie_chart(data, title)
+    image_base64 = base64.b64encode(png_bytes).decode("utf-8")
+
+    return [
+        types.ImageContent(type="image", data=image_base64, mimeType="image/png"),
+        types.TextContent(
+            type="text",
+            text=json.dumps({"success": True, "chart_type": "issue_types", "data": data}),
+        ),
+    ]
+
+
 async def _handle_list_escalated_messages(
     client: Client,
     start_date: datetime,
     end_date: datetime,
-    org_hashtag: Optional[str],
+    organization_id: Optional[int],
     days: int,
     org_name: Optional[str],
 ) -> List[types.TextContent]:
     """Handle meta_list_escalated_messages tool."""
-    messages = await _get_escalated_messages(client, start_date, end_date, org_hashtag)
+    messages = await _get_escalated_messages(client, start_date, end_date, organization_id)
 
     return [
         types.TextContent(

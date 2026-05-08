@@ -101,7 +101,10 @@ _METER_ACTIONS_DISABLED_MSG: str = (
 _last_action_times: dict[str, datetime] = {}
 _ACTION_COOLDOWNS: dict[str, timedelta] = {
     "set_meter_power_limit": timedelta(minutes=5),
+    "set_meter_date": timedelta(minutes=5),
     "resend_meter_token": timedelta(minutes=10),
+    "resend_clear_tamper_token": timedelta(minutes=10),
+    "resend_power_limit_token": timedelta(minutes=10),
     "retry_commissioning": timedelta(minutes=15),
     "unassign_meter": timedelta(hours=1),
 }
@@ -1962,6 +1965,147 @@ class CustomerServiceClient(HTTPClientMixin):
             logger.error(f"Error in find_payment: {e}")
             return {"error": f"Failed to search for payment: {str(e)}"}
 
+    async def lookup_transactions(
+        self,
+        user_email: str = "",
+        organization_id: Optional[int] = None,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        reference_number: Optional[str] = None,
+        amount: Optional[float] = None,
+        receiver_name: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        List payment transactions filtered by optional criteria.
+
+        Scoped to the user's organization; staff (STAFF_ORG_ID) can see all orgs.
+        """
+        if organization_id is None:
+            organization_id = await self.get_user_organization(user_email)
+            if organization_id is None:
+                return {"error": "Could not determine organization for user"}
+
+        result_limit = min(int(limit) if limit else 20, 50)
+
+        try:
+            import asyncpg
+
+            conn = await asyncpg.connect(
+                host=os.getenv("AUTH_DB_HOST"),
+                port=int(os.getenv("AUTH_DB_PORT", "5432")),
+                user=os.getenv("AUTH_DB_USER"),
+                password=os.getenv("AUTH_DB_PASSWORD"),
+                database=os.getenv("AUTH_DB_NAME", "postgres"),
+                ssl="require",
+                statement_cache_size=0,
+            )
+
+            try:
+                conditions: list = []
+                params: list = []
+                param_idx = 1
+
+                # Org scoping for non-staff
+                if organization_id != STAFF_ORG_ID:
+                    conditions.append(f"rls_organization_id = ${param_idx}")
+                    params.append(organization_id)
+                    param_idx += 1
+
+                # Date range
+                if date_from and date_from.strip():
+                    try:
+                        ds = date_from.strip()
+                        if len(ds) == 10:
+                            ds = f"{ds}T00:00:00"
+                        dt = datetime.fromisoformat(ds)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=ZoneInfo(DEFAULT_TIMEZONE))
+                        conditions.append(f"created_at >= ${param_idx}")
+                        params.append(dt)
+                        param_idx += 1
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Could not parse date_from '{date_from}': {e}")
+
+                if date_to and date_to.strip():
+                    try:
+                        ds = date_to.strip()
+                        if len(ds) == 10:
+                            ds = f"{ds}T23:59:59"
+                        dt = datetime.fromisoformat(ds)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=ZoneInfo(DEFAULT_TIMEZONE))
+                        conditions.append(f"created_at <= ${param_idx}")
+                        params.append(dt)
+                        param_idx += 1
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Could not parse date_to '{date_to}': {e}")
+
+                # Reference number substring match
+                if reference_number and reference_number.strip():
+                    conditions.append(f"external_reference ILIKE ${param_idx}")
+                    params.append(f"%{reference_number.strip()}%")
+                    param_idx += 1
+
+                # Amount with ±5% tolerance
+                if amount is not None and amount > 0:
+                    tolerance = amount * 0.05
+                    conditions.append(f"amount >= ${param_idx}")
+                    params.append(amount - tolerance)
+                    param_idx += 1
+                    conditions.append(f"amount <= ${param_idx}")
+                    params.append(amount + tolerance)
+                    param_idx += 1
+
+                # Receiver name fuzzy match (each word independently)
+                if receiver_name and receiver_name.strip():
+                    for word in receiver_name.strip().split():
+                        if len(word) >= 2:
+                            conditions.append(f"meta_receiver_name ILIKE ${param_idx}")
+                            params.append(f"%{word}%")
+                            param_idx += 1
+
+                where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+                query = f"""
+                    SELECT external_reference, order_status::text,
+                           amount, created_at, meta_receiver_name
+                    FROM orders
+                    {where_clause}
+                    ORDER BY created_at DESC
+                    LIMIT {result_limit}
+                """
+
+                rows = await conn.fetch(query, *params)
+
+            finally:
+                await conn.close()
+
+            if not rows:
+                return {
+                    "transactions_found": 0,
+                    "message": "No transactions found matching the given filters.",
+                }
+
+            transactions = [
+                {
+                    "reference_number": row["external_reference"],
+                    "amount": row["amount"],
+                    "date_time": row["created_at"].isoformat() if row["created_at"] else None,
+                    "receiver_name": row["meta_receiver_name"],
+                    "status": row["order_status"],
+                }
+                for row in rows
+            ]
+
+            return {
+                "transactions_found": len(transactions),
+                "transactions": transactions,
+            }
+
+        except Exception as e:
+            logger.error(f"Error in lookup_transactions: {e}")
+            return {"error": f"Failed to look up transactions: {str(e)}"}
+
     async def _verify_payment_processor_transaction(self, tx_ref: str) -> Dict[str, Any]:
         """
         Verify transaction using payment processor transaction reference.
@@ -2135,6 +2279,25 @@ class CustomerServiceClient(HTTPClientMixin):
                         "updated_at": successful_token_row.get("updated_at"),
                     }
 
+                try:
+                    commissioning_row = await conn.fetchrow(
+                        """
+                        SELECT mc.created_at, mc.meter_commissioning_status::text AS meter_commissioning_status
+                        FROM meter_commissionings mc
+                        JOIN metering_hardware_install_sessions mhis
+                          ON mc.metering_hardware_install_session_id = mhis.id
+                        WHERE mhis.meter_id = $1
+                        ORDER BY mc.created_at DESC
+                        LIMIT 1
+                        """,
+                        meter_id,
+                    )
+                except Exception as commissioning_err:
+                    logger.warning(
+                        f"Commissioning query failed for meter {meter_number}: {commissioning_err}"
+                    )
+                    commissioning_row = None
+
             # Get enriched meter information (customer, connection, grid)
             # Note: This method still uses Supabase client - will need refactoring if it queries auth db
             enriched_meter = await self._get_meter_enriched_info(meter_id, None, organization_id)
@@ -2151,6 +2314,12 @@ class CustomerServiceClient(HTTPClientMixin):
             response = {
                 "meter_found": True,
                 "meter_number": meter_number,
+                "commissioning_date": commissioning_row["created_at"]
+                if commissioning_row
+                else None,
+                "commissioning_status": commissioning_row["meter_commissioning_status"].upper()
+                if commissioning_row and commissioning_row["meter_commissioning_status"]
+                else None,
                 "directives_count": len(directives),
                 "directives": directives,
                 "last_error_directive": last_error_directive,
@@ -2249,8 +2418,8 @@ class CustomerServiceClient(HTTPClientMixin):
             return response
 
         except Exception as e:
-            logger.error(f"Error checking commissioning status: {e}")
-            return {"error": f"Failed to check commissioning status: {str(e)}"}
+            logger.error(f"Error fetching meter information for {meter_number}: {e}")
+            return {"error": f"Failed to fetch meter information: {str(e)}"}
 
     async def list_grid_meters(
         self,
@@ -3565,6 +3734,97 @@ class CustomerServiceClient(HTTPClientMixin):
                 "error": "Something went wrong while setting the power limit. The team has been notified."
             }
 
+    async def set_meter_date(
+        self,
+        meter_number: str,
+        user_email: str,
+        organization_id: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Set the current date on a meter via Tiamat API.
+
+        Sends a SET_DATE interaction to the meter via POST /meter-interactions/create-one.
+        The date is always the current date in Africa/Lagos time (WAT, UTC+1).
+        Requires CUSTOMER_METER_ACTIONS_ENABLED=true.
+        """
+        if not CUSTOMER_METER_ACTIONS_ENABLED:
+            return {"error": _METER_ACTIONS_DISABLED_MSG}
+
+        if not meter_number or not meter_number.strip():
+            return {"error": "Meter number is required."}
+        meter_number = meter_number.strip()
+
+        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+            return {
+                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+            }
+
+        if err := self._check_rate_limit("set_meter_date", meter_number):
+            return {"error": err}
+
+        if organization_id is None:
+            organization_id = await self.get_user_organization(user_email)
+            if organization_id is None:
+                return {"error": "Could not determine organization for user"}
+
+        # Use Africa/Lagos (WAT, UTC+1) so the calendar date matches the meter's local time
+        now = datetime.now(ZoneInfo("Africa/Lagos"))
+
+        try:
+            conn, meter = await self._fetch_meter(meter_number, organization_id)
+            try:
+                if not meter:
+                    return {
+                        "meter_found": False,
+                        "message": "Meter not found for your organization",
+                        "meter_number": meter_number,
+                    }
+                meter_id = meter["id"]
+            finally:
+                await conn.close()
+
+            http_client = await self.get_session()
+            url = f"{self.tiamat_api_url}/meter-interactions/create-one"
+            headers = {"Content-Type": "application/json", "X-API-KEY": self.tiamat_api_key}
+            body = {
+                "meter_id": meter_id,
+                "meter_interaction_type": "SET_DATE",
+                "payload_data": {"year": now.year, "month": now.month, "day": now.day},
+            }
+
+            try:
+                response = await http_client.post(url, headers=headers, json=body)
+                response.raise_for_status()
+                tiamat_response = await response.json()
+                return {
+                    "success": True,
+                    "meter_number": meter_number,
+                    "date_set": now.strftime("%Y-%m-%d"),
+                    "interaction_id": tiamat_response.get("id"),
+                    "message": (
+                        f"Date set to {now.strftime('%Y-%m-%d')} on meter {meter_number}. "
+                        "The change will take effect on the next meter communication."
+                    ),
+                }
+            except Exception as e:
+                logger.error(f"Tiamat API set_meter_date request failed: {e}")
+                status = getattr(e, "status", None)
+                if status == 400:
+                    return {
+                        "error": "Invalid request to meter service. Check meter number.",
+                        "meter_number": meter_number,
+                    }
+                return {
+                    "error": "Failed to contact meter service. Please try again later.",
+                    "meter_number": meter_number,
+                }
+
+        except Exception as e:
+            logger.error(f"Error setting meter date: {e}")
+            return {
+                "error": "Something went wrong while setting the meter date. The team has been notified."
+            }
+
     async def resend_meter_token(
         self,
         meter_number: str,
@@ -3664,6 +3924,202 @@ class CustomerServiceClient(HTTPClientMixin):
 
         except Exception as e:
             logger.error(f"Error resending meter token: {e}")
+            return {
+                "error": "Something went wrong while resending the token. The team has been notified."
+            }
+
+    async def resend_clear_tamper_token(
+        self,
+        meter_number: str,
+        user_email: str,
+        organization_id: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Resend the last CLEAR_TAMPER token to a meter via Tiamat API.
+        """
+        if not CUSTOMER_METER_ACTIONS_ENABLED:
+            return {"error": _METER_ACTIONS_DISABLED_MSG}
+
+        if not meter_number or not meter_number.strip():
+            return {"error": "Meter number is required."}
+        meter_number = meter_number.strip()
+
+        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+            return {
+                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+            }
+
+        if err := self._check_rate_limit("resend_clear_tamper_token", meter_number):
+            return {"error": err}
+
+        if organization_id is None:
+            organization_id = await self.get_user_organization(user_email)
+            if organization_id is None:
+                return {"error": "Could not determine organization for user"}
+
+        try:
+            conn, meter = await self._fetch_meter(meter_number, organization_id)
+            try:
+                if not meter:
+                    return {
+                        "meter_found": False,
+                        "message": "Meter not found for your organization",
+                        "meter_number": meter_number,
+                    }
+                meter_db_id = meter["id"]
+                external_ref = meter["external_reference"]
+
+                directive = await conn.fetchrow(
+                    """
+                    SELECT token FROM directives
+                    WHERE meter_id = $1 AND directive_type = 'CLEAR_TAMPER'
+                    AND token IS NOT NULL AND token != ''
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    meter_db_id,
+                )
+            finally:
+                await conn.close()
+
+            if not directive or not directive["token"]:
+                return {
+                    "error": "No previous CLEAR_TAMPER token found for this meter.",
+                    "meter_number": meter_number,
+                }
+
+            token_code = directive["token"]
+
+            http_client = await self.get_session()
+            url = f"{self.tiamat_api_url}/meters/{external_ref}/tokens/deliver"
+            headers = {
+                "Content-Type": "application/json",
+                "X-API-KEY": self.tiamat_api_key,
+            }
+
+            try:
+                response = await http_client.post(url, headers=headers, json={"token": token_code})
+                response.raise_for_status()
+                return {
+                    "success": True,
+                    "meter_number": meter_number,
+                    "message": (
+                        f"CLEAR_TAMPER token resent successfully to meter {meter_number}. "
+                        "The customer should receive it via their registered channel shortly."
+                    ),
+                }
+            except Exception as e:
+                logger.error(f"Tiamat CLEAR_TAMPER token resend request failed: {e}")
+                status = getattr(e, "status", None)
+                if status == 400:
+                    return {
+                        "error": "Invalid request to meter service. Check the meter number.",
+                        "meter_number": meter_number,
+                    }
+                return {
+                    "error": "Failed to contact meter service. Please try again later.",
+                    "meter_number": meter_number,
+                }
+
+        except Exception as e:
+            logger.error(f"Error resending CLEAR_TAMPER token: {e}")
+            return {
+                "error": "Something went wrong while resending the token. The team has been notified."
+            }
+
+    async def resend_power_limit_token(
+        self,
+        meter_number: str,
+        user_email: str,
+        organization_id: int | None = None,
+    ) -> dict[str, Any]:
+        """
+        Resend the last PLS (power limit set) token to a meter via Tiamat API.
+        """
+        if not CUSTOMER_METER_ACTIONS_ENABLED:
+            return {"error": _METER_ACTIONS_DISABLED_MSG}
+
+        if not meter_number or not meter_number.strip():
+            return {"error": "Meter number is required."}
+        meter_number = meter_number.strip()
+
+        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+            return {
+                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+            }
+
+        if err := self._check_rate_limit("resend_power_limit_token", meter_number):
+            return {"error": err}
+
+        if organization_id is None:
+            organization_id = await self.get_user_organization(user_email)
+            if organization_id is None:
+                return {"error": "Could not determine organization for user"}
+
+        try:
+            conn, meter = await self._fetch_meter(meter_number, organization_id)
+            try:
+                if not meter:
+                    return {
+                        "meter_found": False,
+                        "message": "Meter not found for your organization",
+                        "meter_number": meter_number,
+                    }
+                meter_db_id = meter["id"]
+                external_ref = meter["external_reference"]
+
+                directive = await conn.fetchrow(
+                    """
+                    SELECT token FROM directives
+                    WHERE meter_id = $1 AND directive_type = 'PLS'
+                    AND token IS NOT NULL AND token != ''
+                    ORDER BY created_at DESC LIMIT 1
+                    """,
+                    meter_db_id,
+                )
+            finally:
+                await conn.close()
+
+            if not directive or not directive["token"]:
+                return {
+                    "error": "No previous PLS (power limit set) token found for this meter.",
+                    "meter_number": meter_number,
+                }
+
+            token_code = directive["token"]
+
+            http_client = await self.get_session()
+            url = f"{self.tiamat_api_url}/meters/{external_ref}/tokens/deliver"
+            headers = {
+                "Content-Type": "application/json",
+                "X-API-KEY": self.tiamat_api_key,
+            }
+
+            try:
+                response = await http_client.post(url, headers=headers, json={"token": token_code})
+                response.raise_for_status()
+                return {
+                    "success": True,
+                    "meter_number": meter_number,
+                    "message": (
+                        f"PLS (power limit set) token resent successfully to meter {meter_number}. "
+                        "The customer should receive it via their registered channel shortly."
+                    ),
+                }
+            except Exception as e:
+                logger.error(f"Tiamat PLS token resend request failed: {e}")
+                status = getattr(e, "status", None)
+                if status == 400:
+                    return {
+                        "error": "Invalid request to meter service. Check the meter number.",
+                        "meter_number": meter_number,
+                    }
+                return {
+                    "error": "Failed to contact meter service. Please try again later.",
+                    "meter_number": meter_number,
+                }
+
+        except Exception as e:
+            logger.error(f"Error resending PLS token: {e}")
             return {
                 "error": "Something went wrong while resending the token. The team has been notified."
             }
@@ -5258,6 +5714,71 @@ async def get_last_gtr_summary(grid_name: str) -> Dict[str, Any]:
         executor.shutdown(wait=False)
 
 
+async def get_my_open_issues(
+    organization_id: int,
+    issue_type: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return open escalations for the caller's organisation, optionally filtered by issue type."""
+    chat_db_url = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL", "")
+    chat_db_key = os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY", "")
+    if not chat_db_url or not chat_db_key:
+        return {"error": "Chat database not configured"}
+
+    try:
+        from supabase import create_client  # type: ignore[attr-defined]
+
+        client = create_client(chat_db_url, chat_db_key)
+
+        query = (
+            client.table("escalation_mappings")
+            .select(
+                "id, question_text, reason, action_type, created_at, thread_id, "
+                "chat_threads(issue_type)"
+            )
+            .eq("organization_id", organization_id)
+            .eq("is_active", True)
+            .order("created_at", desc=True)
+            .limit(50)
+        )
+        response = query.execute()
+        rows = response.data or []
+
+        results = []
+        for row in rows:
+            thread_data = row.get("chat_threads") or {}
+            row_issue_type = (
+                thread_data.get("issue_type") if isinstance(thread_data, dict) else None
+            )
+            if issue_type and row_issue_type != issue_type:
+                continue
+            results.append(
+                {
+                    "id": row.get("id"),
+                    "thread_id": row.get("thread_id"),
+                    "issue_type": row_issue_type or "unknown",
+                    "summary": row.get("question_text"),
+                    "reason": row.get("reason"),
+                    "action_type": row.get("action_type"),
+                    "created_at": row.get("created_at"),
+                }
+            )
+
+        # Summarise counts per type for the response header
+        type_counts: Dict[str, int] = {}
+        for r in results:
+            t = r["issue_type"]
+            type_counts[t] = type_counts.get(t, 0) + 1
+
+        return {
+            "total_open": len(results),
+            "by_type": type_counts,
+            "issues": results,
+        }
+    except Exception as e:
+        logger.error(f"Error fetching open issues for org={organization_id}: {e}")
+        return {"error": f"Failed to fetch open issues: {str(e)}"}
+
+
 @server.list_tools()
 async def handle_list_tools() -> List[types.Tool]:
     """List available customer-facing tools."""
@@ -5506,6 +6027,17 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
                 user_email=arguments.get("user_email", ""),
                 organization_id=arguments.get("organization_id"),
             )
+        elif name == "lookup_transactions":
+            result = await customer_client.lookup_transactions(
+                user_email=arguments.get("user_email", ""),
+                organization_id=arguments.get("organization_id"),
+                date_from=arguments.get("date_from"),
+                date_to=arguments.get("date_to"),
+                reference_number=arguments.get("reference_number"),
+                amount=arguments.get("amount"),
+                receiver_name=arguments.get("receiver_name"),
+                limit=arguments.get("limit"),
+            )
         elif name == "meter_information":
             result = await customer_client.meter_information(
                 meter_number=arguments.get("meter_number"),
@@ -5558,12 +6090,45 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
                 organization_id=organization_id,
             )
             return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+        elif name == "set_meter_date":
+            meter_number = arguments.get("meter_number", "")
+            user_email = arguments.get("user_email", "")
+            raw_org = arguments.get("organization_id")
+            organization_id = int(raw_org) if raw_org is not None else None
+            result = await customer_client.set_meter_date(
+                meter_number=meter_number,
+                user_email=user_email,
+                organization_id=organization_id,
+            )
+            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
         elif name == "resend_meter_token":
             meter_number = arguments.get("meter_number", "")
             user_email = arguments.get("user_email", "")
             raw_org = arguments.get("organization_id")
             organization_id = int(raw_org) if raw_org is not None else None
             result = await customer_client.resend_meter_token(
+                meter_number=meter_number,
+                user_email=user_email,
+                organization_id=organization_id,
+            )
+            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+        elif name == "resend_clear_tamper_token":
+            meter_number = arguments.get("meter_number", "")
+            user_email = arguments.get("user_email", "")
+            raw_org = arguments.get("organization_id")
+            organization_id = int(raw_org) if raw_org is not None else None
+            result = await customer_client.resend_clear_tamper_token(
+                meter_number=meter_number,
+                user_email=user_email,
+                organization_id=organization_id,
+            )
+            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+        elif name == "resend_power_limit_token":
+            meter_number = arguments.get("meter_number", "")
+            user_email = arguments.get("user_email", "")
+            raw_org = arguments.get("organization_id")
+            organization_id = int(raw_org) if raw_org is not None else None
+            result = await customer_client.resend_power_limit_token(
                 meter_number=meter_number,
                 user_email=user_email,
                 organization_id=organization_id,
@@ -5679,6 +6244,19 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
                 grid_name=arguments.get("grid_name", ""),
                 organization_id=int(organization_id),
                 days_back=int(arguments.get("days_back", 7)),
+            )
+        elif name == "get_my_open_issues":
+            organization_id = arguments.get("organization_id")
+            if organization_id is None:
+                return [
+                    types.TextContent(
+                        type="text",
+                        text="Error: organization_id is required (should be injected by orchestrator)",
+                    )
+                ]
+            result = await get_my_open_issues(
+                organization_id=int(organization_id),
+                issue_type=arguments.get("issue_type"),
             )
         else:
             return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
