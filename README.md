@@ -1,10 +1,60 @@
-# NXT Grid's Open Source AI Assistant for mini grids - Code name 'Anansi'
+# Anansi — Open Source AI Operations Assistant for Mini-Grids
 
-A production-ready chat orchestrator using Google's Gemini API with dynamic system instructions from Google Docs, RAG knowledge retrieval, and MCP tool integration.
+In Akan folklore, Anansi the spider tricked the sky-god into giving him every story in the world, then wove them into a single web so people could share them. This Anansi does the same thing for mini-grid operators, sans trickery — weaving the scattered threads of daily work (meters, maps, tickets, field conversations, tribal knowledge in Telegram groups) into one chat thread your team and customers can actually talk to.
 
-## Why Anansi?
+Built and run in production by [NXT Grid](https://nxtgrid.co), open-sourced for the wider energy-access community.
 
-Most AI chat frameworks require redeployment to change how the assistant behaves. Anansi's system instructions live in a Google Doc — your team edits them in a browser and the next conversation picks up the change. It also separates customer-facing and staff-facing modes from a single deployment, supports multi-step expert workflows that can pause for user input and resume later, and connects to any data source via MCP tool servers. If you're building a conversational AI product that needs to evolve quickly without engineering involvement in every instruction change, Anansi is designed for that.
+## What it does for mini-grid operators
+
+### Customer support automation for prepaid meters
+
+Customers message the bot to check balance, buy tokens, report no-power, or get a token resent. Staff use the same bot to commission new meters, unassign them, change power limits, and resolve disputes. Anansi talks to your meter backend (Tiamat by default, swappable via MCP) and applies the right approval rules depending on whether the requester is a customer or a staff member.
+
+<table>
+  <tr>
+    <td align="center"><a href="docs/illustrations/meterIssue.jpeg"><img src="docs/illustrations/meterIssue.jpeg" width="320" alt="Customer reports a meter issue"></a><br/><sub>Customer reports a meter issue</sub></td>
+    <td align="center"><a href="docs/illustrations/resolved.jpeg"><img src="docs/illustrations/resolved.jpeg" width="320" alt="Issue resolved end-to-end"></a><br/><sub>Issue resolved end-to-end</sub></td>
+  </tr>
+</table>
+
+### Geospatial design & site planning
+
+The `/lpp` expert generates a Light Preliminary Package for a candidate site. Give it a GPS point and a site name; it pulls the community boundary from the GRID3 Nigeria settlement-extents dataset, runs the layout engine to place poles and lines, renders a map, and drafts a Google Doc package. The output is structured so the design can feed directly into a downstream Bill-of-Materials tool without re-keying.
+
+<table>
+  <tr>
+    <td align="center"><a href="docs/illustrations/siteSelection.jpeg"><img src="docs/illustrations/siteSelection.jpeg" width="280" alt="Site selection with community boundary"></a><br/><sub>Site selection &amp; community boundary</sub></td>
+    <td align="center"><a href="docs/illustrations/distrib.jpeg"><img src="docs/illustrations/distrib.jpeg" width="280" alt="Distribution layout"></a><br/><sub>Generated distribution layout</sub></td>
+    <td align="center"><a href="docs/illustrations/powerHeatMap.png"><img src="docs/illustrations/powerHeatMap.png" width="280" alt="Power demand heat map"></a><br/><sub>Power demand heat map</sub></td>
+  </tr>
+</table>
+
+### Grid analytics & KPIs on demand
+
+`/analyze`, `/kpi`, and `/report` let staff ask "how did Site X perform last week?" in plain English. Anansi pulls from TimescaleDB, the Victron VRM API (solar inverter telemetry), and your operational DB, then returns charts plus a written summary. Reports can be scheduled — e.g. every Monday at 9am to a specific Telegram group.
+
+<table>
+  <tr>
+    <td align="center"><a href="docs/illustrations/grid.jpeg"><img src="docs/illustrations/grid.jpeg" width="280" alt="Single-grid status report"></a><br/><sub>Single-grid status report</sub></td>
+    <td align="center"><a href="docs/illustrations/grids.jpeg"><img src="docs/illustrations/grids.jpeg" width="280" alt="Multi-grid KPI overview"></a><br/><sub>Multi-grid KPI overview</sub></td>
+    <td align="center"><a href="docs/illustrations/gridIssue.jpeg"><img src="docs/illustrations/gridIssue.jpeg" width="280" alt="Grid issue diagnosis"></a><br/><sub>Grid issue diagnosis</sub></td>
+  </tr>
+</table>
+
+### Ticketing, escalation, and institutional memory
+
+Conversations that need a human are routed to the right internal Telegram group automatically, or opened as a JIRA issue with the full transcript attached. The same pipeline ingests your historical Telegram support chats, Google Drive docs, and GitHub repos into a GraphRAG index — so the bot answers from your actual past decisions, not generic LLM knowledge.
+
+<table>
+  <tr>
+    <td align="center"><a href="docs/illustrations/tracking.jpeg"><img src="docs/illustrations/tracking.jpeg" width="320" alt="Escalation tracking"></a><br/><sub>Escalation tracking</sub></td>
+    <td align="center"><a href="docs/illustrations/meta.jpg"><img src="docs/illustrations/meta.jpg" width="320" alt="Bot performance / meta analytics"></a><br/><sub>Bot performance &amp; escalation analytics</sub></td>
+  </tr>
+</table>
+
+## Why "general-purpose underneath" matters
+
+Anansi is a general Gemini chat orchestrator at its core — Google Docs system instructions (your ops team edits the prompt in a browser, no redeploy), MCP tools, RAG, expert workflows. The mini-grid focus comes from the *tools and embellishments* layered on top, and from the "messenger-first" assumption that field staff and customers live in chat apps, not dashboards. Telegram is the primary surface today; WhatsApp is on the roadmap but not yet supported.
 
 **Project structure:**
 - `chat_orchestrator/` - Main Gemini orchestration service with Google Docs instructions
@@ -12,15 +62,6 @@ Most AI chat frameworks require redeployment to change how the assistant behaves
 - `rag_pipeline/` - Knowledge ingestion from GitHub, Google Drive, Telegram
 - `shared/` - Common utilities (auth, database, logging, Google Docs fetching)
 - `anansi_app/` - Streamlit admin UI for chat history, broadcasts, and settings
-
-## Overview
-
-Anansi orchestrates intelligent conversations with:
-- **Google Docs System Instructions** - Dynamic, collaborative instruction management
-- **Dual Mode Support** - Customer support and internal staff modes
-- **GraphRAG Pipeline** - Knowledge ingestion from GitHub, Google Drive, Telegram
-- **MCP Tool Integration** - Access to databases, JIRA, logs, and more
-- **Proper API Usage** - Gemini `systemInstruction` field + context messages
 
 ## Quick Start
 
