@@ -352,10 +352,46 @@ class EscalationService:
                                 f"Failed to send standalone follow-up escalation: {standalone_result}"
                             )
 
+                    # If the parent escalation already has a Jira ticket, add a follow-up
+                    # comment to it (only when the Telegram send succeeded and the ticket
+                    # is still open) so the sweep does not create a duplicate ticket.
+                    existing_jira_key: Optional[str] = existing.get("jira_ticket_key")
+                    if existing_jira_key:
+                        try:
+                            ticket_fields = await self._fetch_jira_issue_fields(existing_jira_key)
+                            if ticket_fields and ticket_fields.get("is_done"):
+                                LOGGER.info(
+                                    "Parent Jira ticket %s is Done — will not pre-link follow-up "
+                                    "for session %s; sweep will create a fresh ticket",
+                                    existing_jira_key,
+                                    session_id,
+                                )
+                                existing_jira_key = None
+                        except Exception:
+                            pass  # fail-open: keep existing_jira_key if status check fails
+
                     # Create a new escalation mapping for this follow-up so closing
-                    # the original doesn't lose this request
+                    # the original doesn't lose this request. Pre-link to the existing
+                    # Jira ticket (if any) so the sweep does not create a second ticket.
                     supabase_client = self._get_supabase_client()
                     if supabase_client and followup_msg_id and customer_chat_id:
+                        if existing_jira_key:
+                            comment_body = f"Follow-up from customer:\n\n{question_summary}"
+                            commented = await self._add_jira_comment(
+                                existing_jira_key, comment_body
+                            )
+                            if commented:
+                                LOGGER.info(
+                                    "Added follow-up comment to existing Jira ticket %s for session %s",
+                                    existing_jira_key,
+                                    session_id,
+                                )
+                            else:
+                                LOGGER.warning(
+                                    "Failed to add follow-up comment to Jira ticket %s for session %s",
+                                    existing_jira_key,
+                                    session_id,
+                                )
                         await supabase_client.save_escalation_mapping(
                             escalation_message_id=followup_msg_id,
                             customer_chat_id=customer_chat_id,
@@ -373,6 +409,7 @@ class EscalationService:
                             escalation_topic_id=followup_topic_id,
                             question_text=question_summary,
                             thread_id=thread_id,
+                            jira_ticket_key=existing_jira_key,
                         )
 
                     return {
@@ -872,6 +909,34 @@ class EscalationService:
                 "success": False,
                 "error": str(e),
             }
+
+    async def _add_jira_comment(self, issue_key: str, body: str) -> bool:
+        """Post a plain-text comment to an existing Jira issue. Returns True on success."""
+        if not self._jira_base_url:
+            return False
+        try:
+            headers = self._jira_auth_headers()
+            url = f"{self._jira_base_url}/rest/api/3/issue/{issue_key}/comment"
+            payload = {
+                "body": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [{"type": "paragraph", "content": [{"type": "text", "text": body}]}],
+                }
+            }
+            jira_sess = _get_jira_session()
+            async with jira_sess.post(
+                url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
+                if resp.status in (200, 201):
+                    return True
+                LOGGER.warning(
+                    "Failed to add Jira comment to %s: status=%s", issue_key, resp.status
+                )
+                return False
+        except Exception as e:
+            LOGGER.warning("Error adding Jira comment to %s: %s", issue_key, e)
+            return False
 
     async def _transition_jira_to_done(self, issue_key: str) -> None:
         """Transition a Jira issue to Done from whatever status it currently has.
@@ -1948,7 +2013,9 @@ class EscalationService:
                 else:
                     open_tracked.append((esc, fields))
 
-            # Group open tracked escalations by (customer_chat_id, customer_topic_id)
+            # Group open tracked escalations by (customer_chat_id, customer_topic_id),
+            # deduplicating by Jira ticket key so follow-up mappings pre-linked to the
+            # same ticket don't trigger duplicate sweep notifications.
             groups: Dict[str, Dict] = {}
             for esc, fields in open_tracked:
                 chat_id = esc.get("customer_chat_id") or ""
@@ -1957,34 +2024,46 @@ class EscalationService:
                     continue
                 group_key = f"{chat_id}|{topic_id}"
                 if group_key not in groups:
-                    groups[group_key] = {"chat_id": chat_id, "topic_id": topic_id, "issues": []}
-                groups[group_key]["issues"].append(
-                    {
-                        "key": esc["jira_ticket_key"],
+                    groups[group_key] = {
+                        "chat_id": chat_id,
+                        "topic_id": topic_id,
+                        "issues": {},  # keyed by jira_ticket_key for dedup
+                    }
+                ticket_key = esc["jira_ticket_key"]
+                if ticket_key not in groups[group_key]["issues"]:
+                    groups[group_key]["issues"][ticket_key] = {
+                        "key": ticket_key,
                         "summary": (fields or {}).get("summary", "") if fields else "",
                     }
-                )
 
             for group_info in groups.values():
                 chat_id = group_info["chat_id"]
                 topic_id = group_info["topic_id"]
                 issues = group_info["issues"]
-                lines = ["📋 *Open support requests:*"]
-                for issue in issues:
+                sent_any = False
+                for issue in issues.values():
                     escaped_key = _escape_telegram_markdown(issue["key"])
-                    desc = _escape_telegram_markdown(_short_desc(issue["summary"]))
-                    lines.append(f"• *{escaped_key}* — {desc}")
-                try:
-                    await self._send_telegram_message(
-                        chat_id=chat_id,
-                        text="\n".join(lines),
-                        topic_id=int(topic_id) if topic_id else None,
+                    desc = _escape_telegram_markdown(_customer_facing_desc(issue["summary"]))
+                    text = (
+                        f"Your issue *{escaped_key}* about {desc} is in progress "
+                        f"and will be attended to in working hours by our team."
                     )
+                    try:
+                        await self._send_telegram_message(
+                            chat_id=chat_id,
+                            text=text,
+                            topic_id=int(topic_id) if topic_id else None,
+                        )
+                        sent_any = True
+                    except Exception:
+                        LOGGER.warning(
+                            "Failed to send pending issue %s to chat_id=%s",
+                            issue["key"],
+                            chat_id,
+                            exc_info=True,
+                        )
+                if sent_any:
                     notified_groups += 1
-                except Exception:
-                    LOGGER.warning(
-                        "Failed to send pending issues to chat_id=%s", chat_id, exc_info=True
-                    )
 
         summary = {
             "eligible": len(eligible),
@@ -2610,10 +2689,13 @@ class EscalationService:
             }
 
 
-def _short_desc(summary: str, max_words: int = 5) -> str:
-    """Truncate a Jira summary to at most max_words words for compact inline display."""
-    words = summary.split()[:max_words]
-    return " ".join(words) or "support issue"
+def _customer_facing_desc(summary: str, max_words: int = 7) -> str:
+    """Return a customer-facing short description, stripping AI 'User ...' phrasing."""
+    # Handles both "User requested ..." and "User is following up on ..."
+    text = re.sub(r"(?i)^user(?:\s+is\s+following\s+up\s+on)?\s+", "", summary).strip()
+    words = text.split()[:max_words]
+    # Fall back to truncating the original summary if stripping left nothing
+    return " ".join(words) or " ".join(summary.split()[:max_words]) or "support issue"
 
 
 def _build_telegram_msg_link(

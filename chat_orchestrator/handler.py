@@ -4153,6 +4153,87 @@ async def _process_and_respond_async(
                 LOGGER.exception(f"Failed to send error message: {send_error}")
 
 
+def _is_system_error_response(response_text: str) -> bool:
+    """Return True if response_text is a SYSTEM-category error message from error_messages.py."""
+    from shared.utils.error_messages import ERROR_MESSAGES, ErrorCategory
+
+    system_errors = set(ERROR_MESSAGES.get(ErrorCategory.SYSTEM, {}).values())
+    return bool(response_text) and response_text.strip() in system_errors
+
+
+async def _auto_escalate_on_error_response(
+    session_id: str,
+    user_context,
+    webhook_req,
+) -> bool:
+    """Escalate to support when the bot is about to send a system error to a customer.
+
+    Returns True if an escalation task was fired, False otherwise (already escalated,
+    rate-limited, service disabled, or exception).
+    """
+    try:
+        from orchestrator.services.escalation_service import EscalationService
+
+        escalation_service = EscalationService()
+        if not escalation_service.is_enabled():
+            return False
+
+        already_escalated = await escalation_service.is_session_escalated(session_id)
+        if already_escalated:
+            return False
+
+        # Rate limit: one auto-escalation per session per 10 minutes
+        existing = await escalation_service.get_escalation_info(session_id)
+        if existing:
+            created_at_str = existing.get("created_at", "")
+            if created_at_str:
+                try:
+                    created_at = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                    age_seconds = (datetime.now(timezone.utc) - created_at).total_seconds()
+                    if age_seconds < 600:
+                        LOGGER.info(
+                            f"Rate-limiting error-response auto-escalation for session={session_id} "
+                            f"({age_seconds:.0f}s since last escalation)"
+                        )
+                        return False
+                except (ValueError, AttributeError):
+                    pass
+
+        organization_id = None
+        if user_context.organization_ids:
+            try:
+                organization_id = int(user_context.organization_ids[0])
+            except (ValueError, TypeError):
+                pass
+
+        user_msg = (webhook_req.message or "")[:500]
+        asyncio.create_task(
+            escalation_service.escalate_to_support(
+                question_summary=f"[BOT ERROR] {user_msg[:200] or 'Bot returned system error'}",
+                session_id=session_id,
+                organization_id=organization_id,
+                organization_short_name=user_context.organization_name,
+                customer_chat_id=user_context.chat_id,
+                customer_topic_id=webhook_req.topic_id,
+                customer_username=user_context.username,
+                customer_email=user_context.user_email,
+                conversation_context=(
+                    "[AUTO-ESCALATION: Bot returned system error to customer]\n\n"
+                    f"Customer message: {user_msg or 'N/A'}\n\n"
+                    "The bot was unable to process the customer's request."
+                ),
+                reason="system_error",
+            ),
+            name=f"auto-escalate-error-{session_id}",
+        )
+        LOGGER.info(f"Auto-escalated system error response for session={session_id}")
+        return True
+
+    except Exception as esc_error:
+        LOGGER.exception(f"Failed to auto-escalate system error response: {esc_error}")
+        return False
+
+
 async def _process_telegram_async(
     webhook_req: WebhookRequest,
     user_context: UserContext,
@@ -4258,6 +4339,19 @@ async def _process_telegram_async(
                     except Exception:
                         pass
                     break
+
+        # Auto-escalate before sending a system error to a non-staff customer
+        if response_text and not user_context.is_staff and _is_system_error_response(response_text):
+            escalated = await _auto_escalate_on_error_response(
+                session_id=session_id,
+                user_context=user_context,
+                webhook_req=webhook_req,
+            )
+            if escalated:
+                response_text = (
+                    "Something went wrong on our end. "
+                    "Our support team has been notified and will follow up with you shortly."
+                )
 
         # Send text response via Telegram Bot API (with inline buttons if present)
         webhook_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"

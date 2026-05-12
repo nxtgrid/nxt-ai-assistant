@@ -940,6 +940,7 @@ class EnhancedSupabaseClient:
         escalation_topic_id: Optional[int] = None,
         question_text: Optional[str] = None,
         thread_id: Optional[str] = None,
+        jira_ticket_key: Optional[str] = None,
     ) -> Optional[str]:
         """
         Save escalation mapping for routing support replies back to customer.
@@ -999,6 +1000,7 @@ class EnhancedSupabaseClient:
                 "escalation_topic_id": escalation_topic_id,
                 "question_text": question_text[:2000] if question_text else None,
                 "thread_id": thread_id,
+                "jira_ticket_key": jira_ticket_key,
             }
 
             client.table("escalation_mappings").insert(mapping_data).execute()

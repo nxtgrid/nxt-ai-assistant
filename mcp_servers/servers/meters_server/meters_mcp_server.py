@@ -56,8 +56,12 @@ from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from shared_code.config.action_flags import ActionFlags
 
+from shared.auth import get_auth_service
+
 # Load environment variables from .env file
 load_dotenv()
+
+STAFF_ORG_ID: int = int(os.getenv("STAFF_ORG_ID", "2"))
 
 # Get Calin V1 credentials from environment
 CALIN_V1_BASE_URL = os.getenv("CALIN_V1_BASE_URL", "")
@@ -2108,6 +2112,46 @@ async def handle_list_tools() -> List[types.Tool]:
     return tools
 
 
+async def _verify_meter_org_access(meter_no: str, user_email: str) -> Optional[str]:
+    """Return an error string if meter_no is not owned by user_email's org, else None.
+
+    Staff (STAFF_ORG_ID) bypass the check. Uses AUTH_DB meters table with
+    rls_organization_id for the same org-scoping that customer_server applies.
+    """
+    import asyncpg as _asyncpg
+
+    auth_service = get_auth_service()
+    permissions = await auth_service.get_user_permissions(email=user_email)
+    if not permissions or not permissions.organization_ids:
+        return "User not found or has no organization"
+
+    org_id = int(permissions.organization_ids[0])
+    if org_id == STAFF_ORG_ID:
+        return None
+
+    conn = await _asyncpg.connect(
+        host=os.getenv("AUTH_DB_HOST"),
+        port=int(os.getenv("AUTH_DB_PORT", "6543")),
+        user=os.getenv("AUTH_DB_USER"),
+        password=os.getenv("AUTH_DB_PASSWORD"),
+        database=os.getenv("AUTH_DB_NAME", "postgres"),
+        ssl="require",
+        statement_cache_size=0,
+    )
+    try:
+        row = await conn.fetchrow(
+            "SELECT id FROM meters WHERE external_reference = $1 AND rls_organization_id = $2 LIMIT 1",
+            meter_no,
+            org_id,
+        )
+    finally:
+        await conn.close()
+
+    if not row:
+        return f"Meter {meter_no} is not accessible for your organization"
+    return None
+
+
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
     """Handle tool calls"""
@@ -2119,24 +2163,32 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
             if not user_email:
                 result = {"error": "Authentication required: user_email missing from request"}
             else:
-                result = await client.unified_get_dcu_status(
-                    meter_no=arguments["meter_no"],
-                    user_email=user_email,
-                    dcu_id=arguments.get("dcu_id"),
-                    gateway_id=arguments.get("gateway_id"),
-                )
+                org_error = await _verify_meter_org_access(arguments["meter_no"], user_email)
+                if org_error:
+                    result = {"error": org_error}
+                else:
+                    result = await client.unified_get_dcu_status(
+                        meter_no=arguments["meter_no"],
+                        user_email=user_email,
+                        dcu_id=arguments.get("dcu_id"),
+                        gateway_id=arguments.get("gateway_id"),
+                    )
         elif name == "create_meter_reading_task":
             user_email = arguments.get("user_email")
             if not user_email:
                 result = {"error": "Authentication required: user_email missing from request"}
             else:
-                result = await client.unified_create_reading_task(
-                    meter_no=arguments["meter_no"],
-                    reading_type=arguments["reading_type"],
-                    user_email=user_email,
-                    customer_id=arguments.get("customer_id"),
-                    dev_eui=arguments.get("dev_eui"),
-                )
+                org_error = await _verify_meter_org_access(arguments["meter_no"], user_email)
+                if org_error:
+                    result = {"error": org_error}
+                else:
+                    result = await client.unified_create_reading_task(
+                        meter_no=arguments["meter_no"],
+                        reading_type=arguments["reading_type"],
+                        user_email=user_email,
+                        customer_id=arguments.get("customer_id"),
+                        dev_eui=arguments.get("dev_eui"),
+                    )
         elif name == "get_meter_reading_task_status":
             user_email = arguments.get("user_email")
             if not user_email:

@@ -10,10 +10,27 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_name": { "type": "string", "description": "Name of the grid site" },
-            "metrics": { "type": "array", "items": { "type": "string" }, "default": ["inverter", "battery", "grid", "pv", "alarms"] }
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid site"
+            },
+            "metrics": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "inverter",
+                "battery",
+                "grid",
+                "pv",
+                "alarms"
+              ]
+            }
           },
-          "required": ["grid_name"]
+          "required": [
+            "grid_name"
+          ]
         },
         "visible_to_customer": true
       },
@@ -22,8 +39,14 @@
         "description": "Retrieve high-level site metadata: online/offline status, phase configuration, and location.",
         "inputSchema": {
           "type": "object",
-          "properties": { "grid_name": { "type": "string" } },
-          "required": ["grid_name"]
+          "properties": {
+            "grid_name": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "grid_name"
+          ]
         },
         "visible_to_customer": false
       },
@@ -33,12 +56,49 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_name": { "type": "string" },
-            "time_range": { "type": "string", "enum": ["last_hour", "last_6h", "last_24h", "last_7d", "last_30d", "last_90d", "custom"], "default": "last_24h" },
-            "metrics": { "type": "array", "items": { "type": "string" }, "default": ["grid_power", "grid_consumption", "battery_soc"] },
-            "analysis": { "type": "array", "items": { "type": "string", "enum": ["outages", "peak_load", "summary_stats"] }, "default": [] }
+            "grid_name": {
+              "type": "string"
+            },
+            "time_range": {
+              "type": "string",
+              "enum": [
+                "last_hour",
+                "last_6h",
+                "last_24h",
+                "last_7d",
+                "last_30d",
+                "last_90d",
+                "custom"
+              ],
+              "default": "last_24h"
+            },
+            "metrics": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": [
+                "grid_power",
+                "grid_consumption",
+                "battery_soc"
+              ]
+            },
+            "analysis": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "outages",
+                  "peak_load",
+                  "summary_stats"
+                ]
+              },
+              "default": []
+            }
           },
-          "required": ["grid_name"]
+          "required": [
+            "grid_name"
+          ]
         },
         "visible_to_customer": false
       },
@@ -48,10 +108,20 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_names": { "type": "array", "items": { "type": "string" } },
-            "hours": { "type": "integer", "default": 24 }
+            "grid_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "hours": {
+              "type": "integer",
+              "default": 24
+            }
           },
-          "required": ["grid_names"]
+          "required": [
+            "grid_names"
+          ]
         },
         "visible_to_customer": false
       },
@@ -61,11 +131,23 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_name": { "type": "string", "description": "Name of the grid site" },
-            "outage_time": { "type": "string", "description": "Approximate time of outage (ISO datetime). If not provided, finds the most recent outage." },
-            "search_window_minutes": { "type": "integer", "description": "Minutes around outage_time to search", "default": 60 }
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid site"
+            },
+            "outage_time": {
+              "type": "string",
+              "description": "Approximate time of outage (ISO datetime). If not provided, finds the most recent outage."
+            },
+            "search_window_minutes": {
+              "type": "integer",
+              "description": "Minutes around outage_time to search",
+              "default": 60
+            }
           },
-          "required": ["grid_name"]
+          "required": [
+            "grid_name"
+          ]
         },
         "visible_to_customer": false
       }
@@ -77,12 +159,30 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "text_search": { "type": "string" },
-            "grid": { "type": "string" },
-            "organization": { "type": "string" },
-            "statuses": { "type": "array", "items": { "type": "string" }, "description": "Filter by Jira statuses. Valid values: 'To Do', 'In Progress', 'Done'. Note: there is no 'Open' status — omit statuses to get all non-done tickets." },
-            "assignee": { "type": "string", "description": "Assignee name, email, 'me', or 'unassigned'. Omit for any assignee." },
-            "exclude_done": { "type": "boolean", "description": "Exclude Done tickets. Defaults to true when no statuses provided, false when statuses are explicitly set." }
+            "text_search": {
+              "type": "string"
+            },
+            "grid": {
+              "type": "string"
+            },
+            "organization": {
+              "type": "string"
+            },
+            "statuses": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Filter by Jira statuses. Valid values: 'To Do', 'In Progress', 'Done'. Note: there is no 'Open' status \u2014 omit statuses to get all non-done tickets."
+            },
+            "assignee": {
+              "type": "string",
+              "description": "Assignee name, email, 'me', or 'unassigned'. Omit for any assignee."
+            },
+            "exclude_done": {
+              "type": "boolean",
+              "description": "Exclude Done tickets. Defaults to true when no statuses provided, false when statuses are explicitly set."
+            }
           }
         },
         "visible_to_customer": false
@@ -92,8 +192,15 @@
         "description": "Retrieve the full details, history, and comments of one specific Jira issue i.e. ticket. Use ONLY when a Ticket Key (e.g., OPS-123) is known.",
         "inputSchema": {
           "type": "object",
-          "properties": { "issue_key": { "type": "string", "description": "Jira issue key" } },
-          "required": ["issue_key"]
+          "properties": {
+            "issue_key": {
+              "type": "string",
+              "description": "Jira issue key"
+            }
+          },
+          "required": [
+            "issue_key"
+          ]
         },
         "visible_to_customer": false
       },
@@ -103,21 +210,32 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "days": { "type": "integer", "description": "Number of days to look back. Default: 30" }
+            "days": {
+              "type": "integer",
+              "description": "Number of days to look back. Default: 30"
+            }
           }
         },
         "visible_to_customer": false
       },
       {
         "name": "jira_get_on_call",
-        "description": "Get the JSM on-call schedule for a date range — use for any question about who was, is, or will be on call. Works for past dates (e.g. 'last weekend'), present, and future. Pass start_date as YYYY-MM-DD or ISO 8601.",
+        "description": "Get the JSM on-call schedule for a date range \u2014 use for any question about who was, is, or will be on call. Works for past dates (e.g. 'last weekend'), present, and future. Pass start_date as YYYY-MM-DD or ISO 8601.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "start_date": { "type": "string", "description": "Start date in YYYY-MM-DD or ISO 8601 format (e.g. '2026-04-18')" },
-            "end_date": { "type": "string", "description": "End date (inclusive). Defaults to start_date if omitted." }
+            "start_date": {
+              "type": "string",
+              "description": "Start date in YYYY-MM-DD or ISO 8601 format (e.g. '2026-04-18')"
+            },
+            "end_date": {
+              "type": "string",
+              "description": "End date (inclusive). Defaults to start_date if omitted."
+            }
           },
-          "required": ["start_date"]
+          "required": [
+            "start_date"
+          ]
         },
         "visible_to_customer": false
       },
@@ -126,8 +244,18 @@
         "description": "[ACTION] Add a new comment to a specific Jira ticket.",
         "inputSchema": {
           "type": "object",
-          "properties": { "issue_key": { "type": "string" }, "comment_text": { "type": "string" } },
-          "required": ["issue_key", "comment_text"]
+          "properties": {
+            "issue_key": {
+              "type": "string"
+            },
+            "comment_text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "issue_key",
+            "comment_text"
+          ]
         },
         "visible_to_customer": false
       },
@@ -137,10 +265,19 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "issue_key": { "type": "string", "description": "Jira issue key (e.g., OPS-2148)" },
-            "transition": { "type": "string", "description": "Target status name (e.g., 'Done', 'In Progress', 'To Do')" }
+            "issue_key": {
+              "type": "string",
+              "description": "Jira issue key (e.g., OPS-2148)"
+            },
+            "transition": {
+              "type": "string",
+              "description": "Target status name (e.g., 'Done', 'In Progress', 'To Do')"
+            }
           },
-          "required": ["issue_key", "transition"]
+          "required": [
+            "issue_key",
+            "transition"
+          ]
         },
         "visible_to_customer": false
       },
@@ -150,10 +287,19 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "issue_key": { "type": "string", "description": "Jira issue key (e.g., OPS-2148)" },
-            "assignee": { "type": "string", "description": "Name, email, 'me' (self-assign), or 'unassigned' (remove assignee)" }
+            "issue_key": {
+              "type": "string",
+              "description": "Jira issue key (e.g., OPS-2148)"
+            },
+            "assignee": {
+              "type": "string",
+              "description": "Name, email, 'me' (self-assign), or 'unassigned' (remove assignee)"
+            }
           },
-          "required": ["issue_key", "assignee"]
+          "required": [
+            "issue_key",
+            "assignee"
+          ]
         },
         "visible_to_customer": false
       }
@@ -164,8 +310,17 @@
         "description": "Find specific code patterns or regex matches across the repository.",
         "inputSchema": {
           "type": "object",
-          "properties": { "query": { "type": "string" }, "file_pattern": { "type": "string" } },
-          "required": ["query"]
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "file_pattern": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ]
         },
         "visible_to_customer": false
       },
@@ -174,8 +329,14 @@
         "description": "Natural language search for concepts like 'how does auth work' using vector embeddings.",
         "inputSchema": {
           "type": "object",
-          "properties": { "query": { "type": "string" } },
-          "required": ["query"]
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ]
         },
         "visible_to_customer": false
       },
@@ -185,8 +346,14 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "days": { "type": "integer", "default": 14 },
-            "max_prs": { "type": "integer", "default": 20 }
+            "days": {
+              "type": "integer",
+              "default": 14
+            },
+            "max_prs": {
+              "type": "integer",
+              "default": 20
+            }
           }
         },
         "visible_to_customer": false
@@ -196,8 +363,14 @@
         "description": "Get detailed file changes for a specific PR number. Shows exactly what code was modified.",
         "inputSchema": {
           "type": "object",
-          "properties": { "pr_number": { "type": "integer" } },
-          "required": ["pr_number"]
+          "properties": {
+            "pr_number": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "pr_number"
+          ]
         },
         "visible_to_customer": false
       },
@@ -207,10 +380,17 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "file_path": { "type": "string" },
-            "max_commits": { "type": "integer", "default": 10 }
+            "file_path": {
+              "type": "string"
+            },
+            "max_commits": {
+              "type": "integer",
+              "default": 10
+            }
           },
-          "required": ["file_path"]
+          "required": [
+            "file_path"
+          ]
         },
         "visible_to_customer": false
       },
@@ -220,9 +400,14 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "sql_query": { "type": "string", "description": "SELECT query to execute against the Auth database" }
+            "sql_query": {
+              "type": "string",
+              "description": "SELECT query to execute against the Auth database"
+            }
           },
-          "required": ["sql_query"]
+          "required": [
+            "sql_query"
+          ]
         },
         "visible_to_customer": false
       }
@@ -233,7 +418,15 @@
         "description": "Retrieve raw software/application logs from Grafana Loki using LogQL queries.",
         "inputSchema": {
           "type": "object",
-          "properties": { "query": { "type": "string" }, "hours": { "type": "integer", "default": 12 } }
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "hours": {
+              "type": "integer",
+              "default": 12
+            }
+          }
         },
         "visible_to_customer": false
       },
@@ -242,8 +435,14 @@
         "description": "Semantic/concept search for logs. Use to find issues by description like 'database timeout' or 'payment error'.",
         "inputSchema": {
           "type": "object",
-          "properties": { "query": { "type": "string" } },
-          "required": ["query"]
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ]
         },
         "visible_to_customer": false
       }
@@ -254,10 +453,16 @@
         "description": "[READ-ONLY] Check if a meter's gateway or DCU is currently online. Does not ping the meter hardware.",
         "inputSchema": {
           "type": "object",
-          "properties": { "meter_no": { "type": "string" } },
-          "required": ["meter_no"]
+          "properties": {
+            "meter_no": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "meter_no"
+          ]
         },
-        "visible_to_customer": false
+        "visible_to_customer": true
       },
       {
         "name": "create_meter_reading_task",
@@ -265,12 +470,27 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "meter_no": { "type": "string" },
-            "reading_type": { "type": "string", "enum": ["voltage", "current", "power", "energy", "current_credit", "relay_status"] }
+            "meter_no": {
+              "type": "string"
+            },
+            "reading_type": {
+              "type": "string",
+              "enum": [
+                "voltage",
+                "current",
+                "power",
+                "energy",
+                "current_credit",
+                "relay_status"
+              ]
+            }
           },
-          "required": ["meter_no", "reading_type"]
+          "required": [
+            "meter_no",
+            "reading_type"
+          ]
         },
-        "visible_to_customer": false
+        "visible_to_customer": true
       }
     ],
     "equipment_control": [
@@ -279,8 +499,18 @@
         "description": "[CRITICAL ACTION] Physically reboot inverter hardware. Use only after confirming no recurring electrical shorts.",
         "inputSchema": {
           "type": "object",
-          "properties": { "grid": { "type": "string" }, "user_email": { "type": "string" } },
-          "required": ["grid", "user_email"]
+          "properties": {
+            "grid": {
+              "type": "string"
+            },
+            "user_email": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "grid",
+            "user_email"
+          ]
         },
         "visible_to_customer": false
       },
@@ -289,8 +519,18 @@
         "description": "[ACTION] Reboot communication hardware (Cerbo, DCU, Router). Site will be offline for ~10 minutes.",
         "inputSchema": {
           "type": "object",
-          "properties": { "grid": { "type": "string" }, "user_email": { "type": "string" } },
-          "required": ["grid", "user_email"]
+          "properties": {
+            "grid": {
+              "type": "string"
+            },
+            "user_email": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "grid",
+            "user_email"
+          ]
         },
         "visible_to_customer": false
       }
@@ -301,8 +541,17 @@
         "description": "[READ-ONLY] Get customer account details, credit balance, and recent token history for a specific meter. Also returns commissioning_date (datetime of most recent commissioning attempt) and commissioning_status (e.g. SUCCESSFUL, FAILED, PROCESSING) when a commissioning record exists.",
         "inputSchema": {
           "type": "object",
-          "properties": { "meter_number": { "type": "string" }, "organization_id": { "type": "integer" } },
-          "required": ["meter_number"]
+          "properties": {
+            "meter_number": {
+              "type": "string"
+            },
+            "organization_id": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "meter_number"
+          ]
         },
         "visible_to_customer": true
       },
@@ -312,37 +561,60 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "meter_number": { "type": "string", "description": "Meter number (external reference)" },
-            "days_back": { "type": "integer", "description": "Number of days to look back (default 30, max 365)", "default": 30 }
+            "meter_number": {
+              "type": "string",
+              "description": "Meter number (external reference)"
+            },
+            "days_back": {
+              "type": "integer",
+              "description": "Number of days to look back (default 30, max 365)",
+              "default": 30
+            }
           },
-          "required": ["meter_number"]
+          "required": [
+            "meter_number"
+          ]
         },
-        "visible_to_customer": false
+        "visible_to_customer": true
       },
       {
         "name": "customer_get_grid_chat_chronology",
-        "description": "[READ-ONLY] Get a chronological timeline of all chat messages related to a specific grid — from its O&M group topic, individual org users, and developer groups. Use when asked about communication history, customer complaints, or recent discussions about a grid. Accepts grid name OR organization name (e.g., 'AcmeCorp' resolves to its grid 'ExampleGrid'). Returns annotated messages with source context.",
+        "description": "[READ-ONLY] Get a chronological timeline of all chat messages related to a specific grid \u2014 from its O&M group topic, individual org users, and developer groups. Use when asked about communication history, customer complaints, or recent discussions about a grid. Accepts grid name OR organization name (e.g., 'AcmeCorp' resolves to its grid 'ExampleGrid'). Returns annotated messages with source context.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_name": { "type": "string", "description": "Grid name or organization name (supports fuzzy matching)" },
-            "days_back": { "type": "integer", "description": "Number of days to look back (default 7, max 90)", "default": 7 }
+            "grid_name": {
+              "type": "string",
+              "description": "Grid name or organization name (supports fuzzy matching)"
+            },
+            "days_back": {
+              "type": "integer",
+              "description": "Number of days to look back (default 7, max 90)",
+              "default": 7
+            }
           },
-          "required": ["grid_name"]
+          "required": [
+            "grid_name"
+          ]
         },
         "visible_to_customer": false
       },
       {
         "name": "customer_list_grid_meters",
-        "description": "[READ-ONLY] List all meters for a grid with their power limits, HPS mode presets, status, credit balance, and phase count. Excludes cabin/AC meters. Use this when the user asks about meters across a grid — e.g., which meters have a specific power limit, how many meters are on/off, or bulk meter status. Supports fuzzy grid name matching.",
+        "description": "[READ-ONLY] List all meters for a grid with their power limits, HPS mode presets, status, credit balance, and phase count. Excludes cabin/AC meters. Use this when the user asks about meters across a grid \u2014 e.g., which meters have a specific power limit, how many meters are on/off, or bulk meter status. Supports fuzzy grid name matching.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_name": { "type": "string", "description": "Name of the grid (required)" }
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid (required)"
+            }
           },
-          "required": ["grid_name"]
+          "required": [
+            "grid_name"
+          ]
         },
-        "visible_to_customer": false
+        "visible_to_customer": true
       },
       {
         "name": "customer_get_meters_on_pole",
@@ -350,12 +622,20 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "pole_reference": { "type": "string", "description": "Pole reference number (e.g., '701741', 'CVP006')" },
-            "grid_name": { "type": "string", "description": "Grid name to narrow search (optional, helps if pole reference is ambiguous)" }
+            "pole_reference": {
+              "type": "string",
+              "description": "Pole reference number (e.g., '701741', 'CVP006')"
+            },
+            "grid_name": {
+              "type": "string",
+              "description": "Grid name to narrow search (optional, helps if pole reference is ambiguous)"
+            }
           },
-          "required": ["pole_reference"]
+          "required": [
+            "pole_reference"
+          ]
         },
-        "visible_to_customer": false
+        "visible_to_customer": true
       },
       {
         "name": "customer_get_grid_status",
@@ -363,16 +643,24 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_name": { "type": "string", "description": "Name of the grid (required)" }
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid (required)"
+            }
           },
-          "required": ["grid_name"]
+          "required": [
+            "grid_name"
+          ]
         },
         "visible_to_customer": true
       },
       {
         "name": "customer_get_all_grids_status",
         "description": "[READ-ONLY] Status dashboard for all accessible grids, including service status icons and weather.",
-        "inputSchema": { "type": "object", "properties": {} },
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        },
         "visible_to_customer": true
       },
       {
@@ -381,9 +669,14 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_name": { "type": "string", "description": "Grid name to look up GTR for" }
+            "grid_name": {
+              "type": "string",
+              "description": "Grid name to look up GTR for"
+            }
           },
-          "required": ["grid_name"]
+          "required": [
+            "grid_name"
+          ]
         },
         "visible_to_customer": false
       },
@@ -393,23 +686,39 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_name": { "type": "string", "description": "Name of the grid (required)" },
-            "start_date": { "type": "string", "description": "Start date YYYY-MM-DD (inclusive, defaults to yesterday)" },
-            "end_date": { "type": "string", "description": "End date YYYY-MM-DD (inclusive, defaults to today)" }
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid (required)"
+            },
+            "start_date": {
+              "type": "string",
+              "description": "Start date YYYY-MM-DD (inclusive, defaults to yesterday)"
+            },
+            "end_date": {
+              "type": "string",
+              "description": "End date YYYY-MM-DD (inclusive, defaults to today)"
+            }
           },
-          "required": ["grid_name"]
+          "required": [
+            "grid_name"
+          ]
         },
         "visible_to_customer": false
       },
       {
         "name": "check_payment_completion",
-        "description": "[READ-ONLY] Check the completion status of a payment transaction. Provide the transaction reference exactly as given by the customer from their receipt or records to see if the payment was successful on the payment processor, whether the order is marked as completed, and the status of any associated directive (meter token). Do NOT construct or guess transaction references — they must come from the customer.",
+        "description": "[READ-ONLY] Check the completion status of a payment transaction. Provide the transaction reference exactly as given by the customer from their receipt or records to see if the payment was successful on the payment processor, whether the order is marked as completed, and the status of any associated directive (meter token). Do NOT construct or guess transaction references \u2014 they must come from the customer.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "transaction_reference": { "type": "string", "description": "Transaction reference exactly as provided by the customer from their receipt or records. Do NOT construct or guess this value." }
+            "transaction_reference": {
+              "type": "string",
+              "description": "Transaction reference exactly as provided by the customer from their receipt or records. Do NOT construct or guess this value."
+            }
           },
-          "required": ["transaction_reference"]
+          "required": [
+            "transaction_reference"
+          ]
         },
         "visible_to_customer": true
       },
@@ -419,25 +728,47 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "meter_number": { "type": "string", "description": "The meter number (external reference) to retry commissioning for" },
-            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
-            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+            "meter_number": {
+              "type": "string",
+              "description": "The meter number (external reference) to retry commissioning for"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "Email of the requesting user (injected by orchestrator)"
+            },
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
           },
-          "required": ["meter_number"]
+          "required": [
+            "meter_number"
+          ]
         },
         "visible_to_customer": false
       },
       {
         "name": "unassign_meter",
-        "description": "[ACTION - UNASSIGNS METER] Unassign a meter from its current connection. This removes the meter from the customer it is assigned to. Typically the first step in a reassignment flow — after unassigning, the meter must be manually reconnected to a new customer. Use when a meter is assigned to the wrong customer or needs to be decommissioned. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
+        "description": "[ACTION - UNASSIGNS METER] Unassign a meter from its current connection. This removes the meter from the customer it is assigned to. Typically the first step in a reassignment flow \u2014 after unassigning, the meter must be manually reconnected to a new customer. Use when a meter is assigned to the wrong customer or needs to be decommissioned. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "meter_number": { "type": "string", "description": "The meter number (external reference) to unassign" },
-            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
-            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+            "meter_number": {
+              "type": "string",
+              "description": "The meter number (external reference) to unassign"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "Email of the requesting user (injected by orchestrator)"
+            },
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
           },
-          "required": ["meter_number"]
+          "required": [
+            "meter_number"
+          ]
         },
         "visible_to_customer": false
       },
@@ -447,16 +778,31 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "meter_number": { "type": "string", "description": "The meter number (external reference)" },
+            "meter_number": {
+              "type": "string",
+              "description": "The meter number (external reference)"
+            },
             "power_limit_watts": {
               "type": "string",
-              "enum": ["200", "600"],
+              "enum": [
+                "200",
+                "600"
+              ],
               "description": "Power limit in watts. 200 = standard HPS, 600 = high power. NOTE: if CUSTOMER_METER_POWER_LIMIT_OPTIONS env var is changed, update this enum to match."
             },
-            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
-            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+            "user_email": {
+              "type": "string",
+              "description": "Email of the requesting user (injected by orchestrator)"
+            },
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
           },
-          "required": ["meter_number", "power_limit_watts"]
+          "required": [
+            "meter_number",
+            "power_limit_watts"
+          ]
         },
         "visible_to_customer": false
       },
@@ -466,25 +812,47 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "meter_number": { "type": "string", "description": "The meter number (external reference)" },
-            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
-            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+            "meter_number": {
+              "type": "string",
+              "description": "The meter number (external reference)"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "Email of the requesting user (injected by orchestrator)"
+            },
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
           },
-          "required": ["meter_number"]
+          "required": [
+            "meter_number"
+          ]
         },
         "visible_to_customer": false
       },
       {
         "name": "resend_meter_token",
-        "description": "[ACTION - RESENDS TOP_UP TOKEN] Resend the last TOP_UP prepayment token to a meter. Looks up the most recent TOP_UP directive token and delivers it again. Only resends top-up (credit) tokens — not power limit or other control tokens. Use when a customer did not receive or lost their top-up token. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
+        "description": "[ACTION - RESENDS TOP_UP TOKEN] Resend the last TOP_UP prepayment token to a meter. Looks up the most recent TOP_UP directive token and delivers it again. Only resends top-up (credit) tokens \u2014 not power limit or other control tokens. Use when a customer did not receive or lost their top-up token. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "meter_number": { "type": "string", "description": "The meter number (external reference)" },
-            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
-            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+            "meter_number": {
+              "type": "string",
+              "description": "The meter number (external reference)"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "Email of the requesting user (injected by orchestrator)"
+            },
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
           },
-          "required": ["meter_number"]
+          "required": [
+            "meter_number"
+          ]
         },
         "visible_to_customer": false
       },
@@ -494,11 +862,22 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "meter_number": { "type": "string", "description": "The meter number (external reference)" },
-            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
-            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+            "meter_number": {
+              "type": "string",
+              "description": "The meter number (external reference)"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "Email of the requesting user (injected by orchestrator)"
+            },
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
           },
-          "required": ["meter_number"]
+          "required": [
+            "meter_number"
+          ]
         },
         "visible_to_customer": false
       },
@@ -508,43 +887,92 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "meter_number": { "type": "string", "description": "The meter number (external reference)" },
-            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
-            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+            "meter_number": {
+              "type": "string",
+              "description": "The meter number (external reference)"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "Email of the requesting user (injected by orchestrator)"
+            },
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
           },
-          "required": ["meter_number"]
+          "required": [
+            "meter_number"
+          ]
         },
         "visible_to_customer": false
       },
       {
         "name": "find_payment",
-        "description": "[READ-ONLY] Search for a payment order by customer name and approximate details (amount, date, organization). Use when the exact transaction reference is not available — e.g., working from a payment app screenshot. Returns matching orders; if exactly one match is found, automatically verifies it with the payment processor.",
+        "description": "[READ-ONLY] Search for a payment order by customer name and approximate details (amount, date, organization). Use when the exact transaction reference is not available \u2014 e.g., working from a payment app screenshot. Returns matching orders; if exactly one match is found, automatically verifies it with the payment processor.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "customer_name": { "type": "string", "description": "Customer name from receipt or screenshot" },
-            "amount": { "type": "number", "description": "Payment amount (optional, helps narrow results)" },
-            "date": { "type": "string", "description": "Date or datetime from receipt in ISO format, e.g. 2026-01-30 (optional)" },
-            "organization_name": { "type": "string", "description": "Organization name if visible on receipt (optional)" }
+            "customer_name": {
+              "type": "string",
+              "description": "Customer name from receipt or screenshot"
+            },
+            "amount": {
+              "type": "number",
+              "description": "Payment amount (optional, helps narrow results)"
+            },
+            "date": {
+              "type": "string",
+              "description": "Date or datetime from receipt in ISO format, e.g. 2026-01-30 (optional)"
+            },
+            "organization_name": {
+              "type": "string",
+              "description": "Organization name if visible on receipt (optional)"
+            }
           },
-          "required": ["customer_name"]
+          "required": [
+            "customer_name"
+          ]
         },
         "visible_to_customer": true
       },
       {
         "name": "lookup_transactions",
-        "description": "[READ-ONLY] List payment transactions for the current organization (or all orgs if staff). All filters are optional — omit all to see recent transactions. Supports filtering by date range, reference number, amount, and receiver name (accepts meter numbers or partial person names). Returns amount, date/time, reference number, receiver name, and order status for each match.",
+        "description": "[READ-ONLY] List payment transactions for the current organization (or all orgs if staff). All filters are optional \u2014 omit all to see recent transactions. Supports filtering by date range, reference number, amount, and receiver name (accepts meter numbers or partial person names). Returns amount, date/time, reference number, receiver name, and order status for each match.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "date_from": { "type": "string", "description": "Start of date range in ISO format, e.g. 2026-01-01 or 2026-01-01T00:00:00 (optional, inclusive)" },
-            "date_to": { "type": "string", "description": "End of date range in ISO format, e.g. 2026-01-31 or 2026-01-31T23:59:59 (optional, inclusive)" },
-            "reference_number": { "type": "string", "description": "Partial or full transaction reference number (case-insensitive substring match)" },
-            "amount": { "type": "number", "description": "Payment amount to filter by (±5% tolerance)" },
-            "receiver_name": { "type": "string", "description": "Partial receiver name or meter number (fuzzy match — each word matched independently)" },
-            "limit": { "type": "integer", "description": "Maximum number of results to return (default 20, max 50)" },
-            "user_email": { "type": "string", "description": "Email of the requesting user (injected by orchestrator)" },
-            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+            "date_from": {
+              "type": "string",
+              "description": "Start of date range in ISO format, e.g. 2026-01-01 or 2026-01-01T00:00:00 (optional, inclusive)"
+            },
+            "date_to": {
+              "type": "string",
+              "description": "End of date range in ISO format, e.g. 2026-01-31 or 2026-01-31T23:59:59 (optional, inclusive)"
+            },
+            "reference_number": {
+              "type": "string",
+              "description": "Partial or full transaction reference number (case-insensitive substring match)"
+            },
+            "amount": {
+              "type": "number",
+              "description": "Payment amount to filter by (\u00b15% tolerance)"
+            },
+            "receiver_name": {
+              "type": "string",
+              "description": "Partial receiver name or meter number (fuzzy match \u2014 each word matched independently)"
+            },
+            "limit": {
+              "type": "integer",
+              "description": "Maximum number of results to return (default 20, max 50)"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "Email of the requesting user (injected by orchestrator)"
+            },
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
           },
           "required": []
         },
@@ -560,7 +988,10 @@
               "type": "string",
               "description": "Filter by issue type: token, hps, meter, transaction, commissioning, or other. Omit to return all open issues."
             },
-            "organization_id": { "type": "integer", "description": "Organization ID (injected by orchestrator)" }
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
           },
           "required": []
         },
@@ -573,8 +1004,19 @@
         "description": "Schedule a message (slash command or plain text) to run later or on a recurring basis (e.g., 'daily at 9am', 'every other monday at 9am', 'monthly on the 1st at 9am').",
         "inputSchema": {
           "type": "object",
-          "properties": { "message": { "type": "string", "description": "The message to schedule. Can be a slash command like '/tickets' or any regular text like 'show me the tickets assigned to anyone'" }, "time_expression": { "type": "string" } },
-          "required": ["message", "time_expression"]
+          "properties": {
+            "message": {
+              "type": "string",
+              "description": "The message to schedule. Can be a slash command like '/tickets' or any regular text like 'show me the tickets assigned to anyone'"
+            },
+            "time_expression": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message",
+            "time_expression"
+          ]
         },
         "visible_to_customer": true
       },
@@ -583,7 +1025,13 @@
         "description": "List all active scheduled commands for the current chat. Shows schedule ID, command, timing, and next run time.",
         "inputSchema": {
           "type": "object",
-          "properties": { "include_inactive": { "type": "boolean", "description": "Include paused and completed schedules", "default": false } },
+          "properties": {
+            "include_inactive": {
+              "type": "boolean",
+              "description": "Include paused and completed schedules",
+              "default": false
+            }
+          },
           "required": []
         },
         "visible_to_customer": true
@@ -593,8 +1041,15 @@
         "description": "Cancel a scheduled command by its ID. The ID can be found using list_user_schedules.",
         "inputSchema": {
           "type": "object",
-          "properties": { "schedule_id": { "type": "string", "description": "The schedule ID to cancel (UUID format or first 8 characters)" } },
-          "required": ["schedule_id"]
+          "properties": {
+            "schedule_id": {
+              "type": "string",
+              "description": "The schedule ID to cancel (UUID format or first 8 characters)"
+            }
+          },
+          "required": [
+            "schedule_id"
+          ]
         },
         "visible_to_customer": true
       },
@@ -603,8 +1058,15 @@
         "description": "Pause a recurring schedule. Can be resumed later.",
         "inputSchema": {
           "type": "object",
-          "properties": { "schedule_id": { "type": "string", "description": "The schedule ID to pause" } },
-          "required": ["schedule_id"]
+          "properties": {
+            "schedule_id": {
+              "type": "string",
+              "description": "The schedule ID to pause"
+            }
+          },
+          "required": [
+            "schedule_id"
+          ]
         },
         "visible_to_customer": true
       },
@@ -613,27 +1075,66 @@
         "description": "Resume a paused schedule.",
         "inputSchema": {
           "type": "object",
-          "properties": { "schedule_id": { "type": "string", "description": "The schedule ID to resume" } },
-          "required": ["schedule_id"]
+          "properties": {
+            "schedule_id": {
+              "type": "string",
+              "description": "The schedule ID to resume"
+            }
+          },
+          "required": [
+            "schedule_id"
+          ]
         },
         "visible_to_customer": true
       },
       {
         "name": "create_user_agent",
-        "description": "[ACTION] Create a persistent monitoring agent that checks a condition on a schedule and notifies the user when it's met. Use when the user says things like 'alert me when X', 'let me know if Y', 'watch Z for me', 'track when X happens'. Do NOT use for simple recurring commands (use schedule_schedule_user_command instead). BEFORE calling this tool, verify FEASIBILITY: (1) Can the check_prompt be answered using the tools currently available to you? If not, tell the user what's missing instead of creating an agent. (2) Does the entity exist? (e.g., if they mention a grid name, verify it's a real grid). (3) Is the data source accessible? (e.g., battery SOC requires VRM tools). If any check fails, explain why the agent can't be created and suggest alternatives. You MUST provide TWO prompts: (1) check_prompt — a yes/no gate question (e.g., 'Have any customers in ExampleGrid crossed 200W?'), and (2) response_prompt — the full detail query to run ONLY when the check triggers (e.g., 'List all customers in ExampleGrid above 200W with their meter ID and current power.'). Strip 'alert me', 'let me know', 'watch for' etc. from BOTH prompts. NEVER include 'create', 'agent', 'monitor' in either prompt.",
+        "description": "[ACTION] Create a persistent monitoring agent that checks a condition on a schedule and notifies the user when it's met. Use when the user says things like 'alert me when X', 'let me know if Y', 'watch Z for me', 'track when X happens'. Do NOT use for simple recurring commands (use schedule_schedule_user_command instead). BEFORE calling this tool, verify FEASIBILITY: (1) Can the check_prompt be answered using the tools currently available to you? If not, tell the user what's missing instead of creating an agent. (2) Does the entity exist? (e.g., if they mention a grid name, verify it's a real grid). (3) Is the data source accessible? (e.g., battery SOC requires VRM tools). If any check fails, explain why the agent can't be created and suggest alternatives. You MUST provide TWO prompts: (1) check_prompt \u2014 a yes/no gate question (e.g., 'Have any customers in ExampleGrid crossed 200W?'), and (2) response_prompt \u2014 the full detail query to run ONLY when the check triggers (e.g., 'List all customers in ExampleGrid above 200W with their meter ID and current power.'). Strip 'alert me', 'let me know', 'watch for' etc. from BOTH prompts. NEVER include 'create', 'agent', 'monitor' in either prompt.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "agent_type": { "type": "string", "description": "Agent type. Use 'condition_monitor' (default) for threshold alerts and watch-for-X requests. For other agent types defined in the expert instructions (e.g., site_visit_tracker, project_manager), use the expert_id from the doc. If unsure, use 'condition_monitor'.", "default": "condition_monitor" },
-            "instance_name": { "type": "string", "description": "Short friendly name (e.g., 'ExampleGrid 200W threshold monitor')" },
-            "check_prompt": { "type": "string", "description": "For condition_monitor agents: YES/NO gate question evaluated every wake. Must end in '?'. For other agent types: the main task description or goal." },
-            "response_prompt": { "type": "string", "description": "For condition_monitor: full detail query when check triggers. For other agent types: additional context or desired output format. Can be empty for expert-defined agents." },
-            "anchor_entity": { "type": "string", "description": "Optional: name of the grid, organization, or other entity this agent is about. Used to enrich agent context with relevant chat history, status data, etc. Examples: 'ExampleGrid' (grid), 'ExampleOrg' (org). Supports fuzzy matching. Omit if the agent is not entity-specific." },
-            "wake_schedule": { "type": "string", "description": "Cron expression for check frequency. Default: '0 8-18 * * 1-5' (hourly during work hours). Use '*/30 8-18 * * 1-5' for every 30 min, '0 9,13,17 * * 1-5' for 3x daily.", "default": "0 8-18 * * 1-5" },
-            "auto_complete": { "type": "boolean", "description": "If true, agent auto-terminates after condition is met once. Default true for one-time alerts, false for ongoing tracking.", "default": true },
-            "model_tier": { "type": "string", "description": "Model tier: 'standard' for simple threshold checks, status monitoring, or factual lookups (e.g., 'alert me when SOC drops below 60%'). 'pro' for complex analysis, multi-step reasoning, regulatory interpretation, trend analysis, or tasks requiring deep domain understanding (e.g., 'track project development and coordinate site visits'). Default: 'standard'.", "default": "standard" }
+            "agent_type": {
+              "type": "string",
+              "description": "Agent type. Use 'condition_monitor' (default) for threshold alerts and watch-for-X requests. For other agent types defined in the expert instructions (e.g., site_visit_tracker, project_manager), use the expert_id from the doc. If unsure, use 'condition_monitor'.",
+              "default": "condition_monitor"
+            },
+            "instance_name": {
+              "type": "string",
+              "description": "Short friendly name (e.g., 'ExampleGrid 200W threshold monitor')"
+            },
+            "check_prompt": {
+              "type": "string",
+              "description": "For condition_monitor agents: YES/NO gate question evaluated every wake. Must end in '?'. For other agent types: the main task description or goal."
+            },
+            "response_prompt": {
+              "type": "string",
+              "description": "For condition_monitor: full detail query when check triggers. For other agent types: additional context or desired output format. Can be empty for expert-defined agents."
+            },
+            "anchor_entity": {
+              "type": "string",
+              "description": "Optional: name of the grid, organization, or other entity this agent is about. Used to enrich agent context with relevant chat history, status data, etc. Examples: 'ExampleGrid' (grid), 'ExampleOrg' (org). Supports fuzzy matching. Omit if the agent is not entity-specific."
+            },
+            "wake_schedule": {
+              "type": "string",
+              "description": "Cron expression for check frequency. Default: '0 8-18 * * 1-5' (hourly during work hours). Use '*/30 8-18 * * 1-5' for every 30 min, '0 9,13,17 * * 1-5' for 3x daily.",
+              "default": "0 8-18 * * 1-5"
+            },
+            "auto_complete": {
+              "type": "boolean",
+              "description": "If true, agent auto-terminates after condition is met once. Default true for one-time alerts, false for ongoing tracking.",
+              "default": true
+            },
+            "model_tier": {
+              "type": "string",
+              "description": "Model tier: 'standard' for simple threshold checks, status monitoring, or factual lookups (e.g., 'alert me when SOC drops below 60%'). 'pro' for complex analysis, multi-step reasoning, regulatory interpretation, trend analysis, or tasks requiring deep domain understanding (e.g., 'track project development and coordinate site visits'). Default: 'standard'.",
+              "default": "standard"
+            }
           },
-          "required": ["instance_name", "check_prompt", "response_prompt"]
+          "required": [
+            "instance_name",
+            "check_prompt",
+            "response_prompt"
+          ]
         },
         "visible_to_customer": false
       },
@@ -643,7 +1144,11 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "include_terminated": { "type": "boolean", "description": "Include cancelled agents in the list", "default": false }
+            "include_terminated": {
+              "type": "boolean",
+              "description": "Include cancelled agents in the list",
+              "default": false
+            }
           }
         },
         "visible_to_customer": false
@@ -654,24 +1159,45 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "instance_id": { "type": "string", "description": "UUID of the agent instance to cancel (from list_user_agents)" }
+            "instance_id": {
+              "type": "string",
+              "description": "UUID of the agent instance to cancel (from list_user_agents)"
+            }
           },
-          "required": ["instance_id"]
+          "required": [
+            "instance_id"
+          ]
         },
         "visible_to_customer": false
       },
       {
         "name": "start_expert_workflow",
-        "description": "[ACTION] Start an expert workflow in the background. Returns immediately with a packet_id. The agent will be woken when the workflow completes. Use check_workflow_result to read outputs. Available experts: lpp_expert (layout generation), gtr_expert (grid technical review). IMPORTANT: Provide ALL required inputs upfront — the workflow runs without user interaction.",
+        "description": "[ACTION] Start an expert workflow in the background. Returns immediately with a packet_id. The agent will be woken when the workflow completes. Use check_workflow_result to read outputs. Available experts: lpp_expert (layout generation), gtr_expert (grid technical review). IMPORTANT: Provide ALL required inputs upfront \u2014 the workflow runs without user interaction.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "expert_id": { "type": "string", "description": "Expert to invoke: 'lpp_expert' or 'gtr_expert'" },
-            "packet_type": { "type": "string", "description": "Packet type matching expert definition (e.g., 'lpp_generation', 'grids_technical_review')" },
-            "inputs": { "type": "string", "description": "JSON object with all required inputs for the workflow (e.g., '{\"site_name\": \"ExampleGrid\", \"editable_total_buildings\": 150}')" },
-            "prefilled_inputs": { "type": "string", "description": "Optional: JSON object with pre-filled responses for interactive steps. Format: '{\"step_name\": \"response\"}'" }
+            "expert_id": {
+              "type": "string",
+              "description": "Expert to invoke: 'lpp_expert' or 'gtr_expert'"
+            },
+            "packet_type": {
+              "type": "string",
+              "description": "Packet type matching expert definition (e.g., 'lpp_generation', 'grids_technical_review')"
+            },
+            "inputs": {
+              "type": "string",
+              "description": "JSON object with all required inputs for the workflow (e.g., '{\"site_name\": \"ExampleGrid\", \"editable_total_buildings\": 150}')"
+            },
+            "prefilled_inputs": {
+              "type": "string",
+              "description": "Optional: JSON object with pre-filled responses for interactive steps. Format: '{\"step_name\": \"response\"}'"
+            }
           },
-          "required": ["expert_id", "packet_type", "inputs"]
+          "required": [
+            "expert_id",
+            "packet_type",
+            "inputs"
+          ]
         },
         "visible_to_customer": false
       },
@@ -681,9 +1207,14 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "packet_id": { "type": "string", "description": "Packet ID returned by start_expert_workflow" }
+            "packet_id": {
+              "type": "string",
+              "description": "Packet ID returned by start_expert_workflow"
+            }
           },
-          "required": ["packet_id"]
+          "required": [
+            "packet_id"
+          ]
         },
         "visible_to_customer": false
       }
@@ -694,21 +1225,36 @@
         "description": "Search the internal knowledge base for structured documentation on technical procedures.",
         "inputSchema": {
           "type": "object",
-          "properties": { "topic": { "type": "string" } },
-          "required": ["topic"]
+          "properties": {
+            "topic": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "topic"
+          ]
         },
         "visible_to_customer": false
       },
       {
         "name": "get_grid_review_history",
-        "description": "[READ-ONLY] Get monthly Grid Technical Review (GTR) history for a grid. Returns distilled monthly reviews with KPIs (CUF, losses, revenue collection, connections), commentary, actions taken, and pending issues. This is the monthly technical review summary — NOT live data. For live KPIs use Grafana tools, for recent O&M chat history use customer_get_grid_chat_chronology. Supports fuzzy grid name matching.",
+        "description": "[READ-ONLY] Get monthly Grid Technical Review (GTR) history for a grid. Returns distilled monthly reviews with KPIs (CUF, losses, revenue collection, connections), commentary, actions taken, and pending issues. This is the monthly technical review summary \u2014 NOT live data. For live KPIs use Grafana tools, for recent O&M chat history use customer_get_grid_chat_chronology. Supports fuzzy grid name matching.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_name": { "type": "string", "description": "Grid name (supports fuzzy matching)" },
-            "months_back": { "type": "integer", "description": "Number of months to look back (default 6, max 24)", "default": 6 }
+            "grid_name": {
+              "type": "string",
+              "description": "Grid name (supports fuzzy matching)"
+            },
+            "months_back": {
+              "type": "integer",
+              "description": "Number of months to look back (default 6, max 24)",
+              "default": 6
+            }
           },
-          "required": ["grid_name"]
+          "required": [
+            "grid_name"
+          ]
         },
         "visible_to_customer": false
       },
@@ -718,14 +1264,36 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "query": { "type": "string", "description": "Search query. Be specific — include country, year, and topic for best results." },
-            "country": { "type": "string", "description": "Two-letter country code to bias results (e.g., 'ng' for Nigeria, 'cd' for DRC). Optional." },
-            "topic": { "type": "string", "description": "'general' (default) or 'news' for recent news articles", "default": "general" },
-            "num_results": { "type": "integer", "description": "Number of results (1-10, default 5)", "default": 5 },
-            "days_back": { "type": "integer", "description": "Limit results to the last N days (e.g., 7 for last week, 30 for last month). Optional." },
-            "include_domains": { "type": "string", "description": "Domain filter preset: 'african_energy' (Nigerian/DRC news + regulatory), 'mini_grid' (mini-grid sector sources — AMDA, ESMAP, REA, IRENA, etc.), 'all' (both combined). Omit for general web." }
+            "query": {
+              "type": "string",
+              "description": "Search query. Be specific \u2014 include country, year, and topic for best results."
+            },
+            "country": {
+              "type": "string",
+              "description": "Two-letter country code to bias results (e.g., 'ng' for Nigeria, 'cd' for DRC). Optional."
+            },
+            "topic": {
+              "type": "string",
+              "description": "'general' (default) or 'news' for recent news articles",
+              "default": "general"
+            },
+            "num_results": {
+              "type": "integer",
+              "description": "Number of results (1-10, default 5)",
+              "default": 5
+            },
+            "days_back": {
+              "type": "integer",
+              "description": "Limit results to the last N days (e.g., 7 for last week, 30 for last month). Optional."
+            },
+            "include_domains": {
+              "type": "string",
+              "description": "Domain filter preset: 'african_energy' (Nigerian/DRC news + regulatory), 'mini_grid' (mini-grid sector sources \u2014 AMDA, ESMAP, REA, IRENA, etc.), 'all' (both combined). Omit for general web."
+            }
           },
-          "required": ["query"]
+          "required": [
+            "query"
+          ]
         },
         "visible_to_customer": true
       },
@@ -735,9 +1303,14 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "url": { "type": "string", "description": "Full URL to extract content from" }
+            "url": {
+              "type": "string",
+              "description": "Full URL to extract content from"
+            }
           },
-          "required": ["url"]
+          "required": [
+            "url"
+          ]
         },
         "visible_to_customer": false
       },
@@ -747,21 +1320,31 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "query": { "type": "string", "description": "Document name fragment or code to search for (e.g., 'DOC-1234', 'ExampleSite Grids Technical Review')" }
+            "query": {
+              "type": "string",
+              "description": "Document name fragment or code to search for (e.g., 'DOC-1234', 'ExampleSite Grids Technical Review')"
+            }
           },
-          "required": ["query"]
+          "required": [
+            "query"
+          ]
         },
         "visible_to_customer": false
       },
       {
         "name": "read_document",
-        "description": "Read the full content of a Google Doc as markdown. Use this to understand the document's structure, style, and existing content before editing. Requires a document ID — use find_document first if you only have a name.",
+        "description": "Read the full content of a Google Doc as markdown. Use this to understand the document's structure, style, and existing content before editing. Requires a document ID \u2014 use find_document first if you only have a name.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "document_id": { "type": "string", "description": "Google Doc file ID (from find_document or a Google Docs URL)" }
+            "document_id": {
+              "type": "string",
+              "description": "Google Doc file ID (from find_document or a Google Docs URL)"
+            }
           },
-          "required": ["document_id"]
+          "required": [
+            "document_id"
+          ]
         },
         "visible_to_customer": false
       },
@@ -771,25 +1354,47 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "document_id": { "type": "string", "description": "Google Doc file ID (required — not a document name). If the user gives a name, use find_document first to resolve the ID." }
+            "document_id": {
+              "type": "string",
+              "description": "Google Doc file ID (required \u2014 not a document name). If the user gives a name, use find_document first to resolve the ID."
+            }
           },
-          "required": ["document_id"]
+          "required": [
+            "document_id"
+          ]
         },
         "visible_to_customer": false
       },
       {
         "name": "edit_doc_section",
-        "description": "Edit a section of a Google Doc with formatted markdown. SAFETY: This is a destructive write operation. Before calling: (1) confirm with the user which document and section will be edited, (2) never assume a document ID from context — require an explicit file ID. If the user provides a name, use find_document first. If find_document returns 2+ results, ask the user which one. Supports: **bold**, *italic*, ## headings, - bullets, 1. numbered lists, | tables |, [links](url).",
+        "description": "Edit a section of a Google Doc with formatted markdown. SAFETY: This is a destructive write operation. Before calling: (1) confirm with the user which document and section will be edited, (2) never assume a document ID from context \u2014 require an explicit file ID. If the user provides a name, use find_document first. If find_document returns 2+ results, ask the user which one. Supports: **bold**, *italic*, ## headings, - bullets, 1. numbered lists, | tables |, [links](url).",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "document_id": { "type": "string", "description": "Google Doc file ID (required — not a document name)" },
-            "comment_id": { "type": "string", "description": "Comment ID from scan_doc_comments (for comment-driven editing)" },
-            "instruction": { "type": "string", "description": "Edit instruction (for instruction-driven editing, or to override the comment text)" },
-            "section_text": { "type": "string", "description": "Exact text of the section to edit (for instruction-driven mode without comment_id)" },
-            "replacement_markdown": { "type": "string", "description": "Markdown-formatted replacement content. If not provided, the bot will generate it from the instruction." }
+            "document_id": {
+              "type": "string",
+              "description": "Google Doc file ID (required \u2014 not a document name)"
+            },
+            "comment_id": {
+              "type": "string",
+              "description": "Comment ID from scan_doc_comments (for comment-driven editing)"
+            },
+            "instruction": {
+              "type": "string",
+              "description": "Edit instruction (for instruction-driven editing, or to override the comment text)"
+            },
+            "section_text": {
+              "type": "string",
+              "description": "Exact text of the section to edit (for instruction-driven mode without comment_id)"
+            },
+            "replacement_markdown": {
+              "type": "string",
+              "description": "Markdown-formatted replacement content. If not provided, the bot will generate it from the instruction."
+            }
           },
-          "required": ["document_id"]
+          "required": [
+            "document_id"
+          ]
         },
         "visible_to_customer": false
       }
@@ -801,11 +1406,23 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "chat_id": { "type": "string", "description": "Telegram chat ID of the target group (must be a registered staff group)" },
-            "text": { "type": "string", "description": "Message text to send" },
-            "topic_id": { "type": "string", "description": "Optional topic/thread ID for forum groups" }
+            "chat_id": {
+              "type": "string",
+              "description": "Telegram chat ID of the target group (must be a registered staff group)"
+            },
+            "text": {
+              "type": "string",
+              "description": "Message text to send"
+            },
+            "topic_id": {
+              "type": "string",
+              "description": "Optional topic/thread ID for forum groups"
+            }
           },
-          "required": ["chat_id", "text"]
+          "required": [
+            "chat_id",
+            "text"
+          ]
         },
         "visible_to_customer": false,
         "persistent_only": true
@@ -818,9 +1435,14 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "query": { "type": "string", "description": "Item description or CET code (dots optional)" }
+            "query": {
+              "type": "string",
+              "description": "Item description or CET code (dots optional)"
+            }
           },
-          "required": ["query"]
+          "required": [
+            "query"
+          ]
         },
         "visible_to_customer": false
       },
@@ -839,9 +1461,14 @@
         "inputSchema": {
           "type": "object",
           "properties": {
-            "query": { "type": "string", "description": "Item name to search for" }
+            "query": {
+              "type": "string",
+              "description": "Item name to search for"
+            }
           },
-          "required": ["query"]
+          "required": [
+            "query"
+          ]
         },
         "visible_to_customer": false
       }
