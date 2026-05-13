@@ -29,6 +29,16 @@ The `/lpp` expert generates a Light Preliminary Package for a candidate site. Gi
   </tr>
 </table>
 
+#### Power plant site layout
+
+For the generation side, Anansi renders the power-plant footprint itself: PV array blocks with plinths, earth pits, lightning-arrester coverage circles, DC and AC cable runs with lengths, the Victron cabin, feeder pillar, VSAT, and the fenced site boundary with a gate. Module count, achieved vs target kWp, and cable lengths (including contingency) are summarised in the title block, so the same image doubles as a quick BoM sanity-check.
+
+<table>
+  <tr>
+    <td align="center"><a href="docs/illustrations/powerPlantLayout.png"><img src="docs/illustrations/powerPlantLayout.png" width="560" alt="Power plant site layout"></a><br/><sub>PV arrays, earth pits, lightning coverage, cable trenches &amp; cabin</sub></td>
+  </tr>
+</table>
+
 ### Grid analytics & KPIs on demand
 
 `/analyze`, `/kpi`, and `/report` let staff ask "how did Site X perform last week?" in plain English. Anansi pulls from TimescaleDB, the Victron VRM API (solar inverter telemetry), and your operational DB, then returns charts plus a written summary. Reports can be scheduled — e.g. every Monday at 9am to a specific Telegram group.
