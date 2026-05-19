@@ -730,6 +730,11 @@ async def think_and_act(state: PersistentAgentState) -> Dict[str, Any]:
         )
     all_tools = await permissions_service.get_available_tools(agent_context) or []
 
+    # Persistent agents must never call relay/destructive tools that require an explicit
+    # human slash command to unlock — strip them here since conversation_graph's
+    # exclusive-tools unlock flow is not part of the persistent agent execution path.
+    all_tools = [t for t in all_tools if not t.get("command_gated", False)]
+
     if available_tools:
         # Expert config has a ## Tools include list — filter to those
         tool_names_set = set(available_tools)
