@@ -832,6 +832,58 @@
         "visible_to_customer": false
       },
       {
+        "name": "turn_meter_on",
+        "command_gated": true,
+        "description": "[ACTION - TURNS METER ON] Turn on the relay for a meter, restoring power to the customer. Sends a TURN_ON interaction to the meter via the platform. Change takes effect on the next meter communication cycle. IMPORTANT: Use this tool only if explicitly requested by a user via the /meter_on command.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "meter_number": {
+              "type": "string",
+              "description": "The meter number (external reference)"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "Email of the requesting user (injected by orchestrator)"
+            },
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
+          },
+          "required": [
+            "meter_number"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "turn_meter_off",
+        "command_gated": true,
+        "description": "[ACTION - TURNS METER OFF] Turn off the relay for a meter, cutting power to the customer. Sends a TURN_OFF interaction to the meter via the platform. Change takes effect on the next meter communication cycle. IMPORTANT: Use this tool only if explicitly requested by a user via the /meter_off command.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "meter_number": {
+              "type": "string",
+              "description": "The meter number (external reference)"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "Email of the requesting user (injected by orchestrator)"
+            },
+            "organization_id": {
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
+            }
+          },
+          "required": [
+            "meter_number"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
         "name": "resend_meter_token",
         "description": "[ACTION - RESENDS TOP_UP TOKEN] Resend the last TOP_UP prepayment token to a meter. Looks up the most recent TOP_UP directive token and delivers it again. Only resends top-up (credit) tokens \u2014 not power limit or other control tokens. Use when a customer did not receive or lost their top-up token. IMPORTANT: Use this tool only if explicitly requested by a user or if its use is directly a step in a predefined procedure in your instructions.",
         "inputSchema": {

@@ -1721,6 +1721,8 @@ class ConversationGraphBuilder:
             "customer_unassign_meter",
             "customer_set_meter_power_limit",
             "customer_resend_meter_token",
+            "customer_turn_meter_on",
+            "customer_turn_meter_off",
         }
 
         # Separate exact names from prefix patterns (e.g., "prefix:grafana_")

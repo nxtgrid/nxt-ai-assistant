@@ -6,7 +6,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from zoneinfo import ZoneInfo
 
 import mcp.server.stdio
@@ -102,6 +102,8 @@ _last_action_times: dict[str, datetime] = {}
 _ACTION_COOLDOWNS: dict[str, timedelta] = {
     "set_meter_power_limit": timedelta(minutes=5),
     "set_meter_date": timedelta(minutes=5),
+    "turn_meter_on": timedelta(minutes=5),
+    "turn_meter_off": timedelta(minutes=5),
     "resend_meter_token": timedelta(minutes=10),
     "resend_clear_tamper_token": timedelta(minutes=10),
     "resend_power_limit_token": timedelta(minutes=10),
@@ -3825,6 +3827,88 @@ class CustomerServiceClient(HTTPClientMixin):
                 "error": "Something went wrong while setting the meter date. The team has been notified."
             }
 
+    async def send_relay_state(
+        self,
+        meter_number: str,
+        user_email: str,
+        interaction_type: Literal["TURN_ON", "TURN_OFF"],
+        organization_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Send a TURN_ON or TURN_OFF interaction to a meter via Tiamat."""
+        if interaction_type not in ("TURN_ON", "TURN_OFF"):
+            return {"error": f"Invalid interaction_type: {interaction_type}"}
+
+        if not CUSTOMER_METER_ACTIONS_ENABLED:
+            return {"error": _METER_ACTIONS_DISABLED_MSG}
+
+        if not meter_number or not meter_number.strip():
+            return {"error": "Meter number is required."}
+        meter_number = meter_number.strip()
+
+        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+            return {
+                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+            }
+
+        rate_key = "turn_meter_on" if interaction_type == "TURN_ON" else "turn_meter_off"
+        if err := self._check_rate_limit(rate_key, meter_number):
+            return {"error": err}
+
+        if organization_id is None:
+            organization_id = await self.get_user_organization(user_email)
+            if organization_id is None:
+                return {"error": "Could not determine organization for user"}
+
+        try:
+            conn, meter = await self._fetch_meter(meter_number, organization_id)
+            try:
+                if not meter:
+                    return {
+                        "meter_found": False,
+                        "message": "Meter not found for your organization",
+                        "meter_number": meter_number,
+                    }
+                meter_id = meter["id"]
+            finally:
+                await conn.close()
+
+            http_client = await self.get_session()
+            url = f"{self.tiamat_api_url}/meter-interactions/create-one"
+            headers = {"Content-Type": "application/json", "X-API-KEY": self.tiamat_api_key}
+            body = {"meter_id": meter_id, "meter_interaction_type": interaction_type}
+
+            try:
+                response = await http_client.post(url, headers=headers, json=body)
+                response.raise_for_status()
+                tiamat_response = await response.json()
+                state = "ON" if interaction_type == "TURN_ON" else "OFF"
+                return {
+                    "success": True,
+                    "meter_number": meter_number,
+                    "state": state,
+                    "interaction_id": tiamat_response.get("id"),
+                    "message": (
+                        f"Meter {meter_number} relay turned {state}. "
+                        "The change will take effect on the next meter communication."
+                    ),
+                }
+            except Exception as e:
+                logger.error(f"Tiamat API {interaction_type} request failed: {e}")
+                status = getattr(e, "status", None)
+                if status == 400:
+                    return {
+                        "error": "Invalid request to meter service. Check meter number.",
+                        "meter_number": meter_number,
+                    }
+                return {
+                    "error": "Failed to contact meter service. Please try again later.",
+                    "meter_number": meter_number,
+                }
+
+        except Exception as e:
+            logger.error(f"Error sending {interaction_type} for meter {meter_number}: {e}")
+            return {"error": "Something went wrong. The team has been notified."}
+
     async def resend_meter_token(
         self,
         meter_number: str,
@@ -6098,6 +6182,18 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
             result = await customer_client.set_meter_date(
                 meter_number=meter_number,
                 user_email=user_email,
+                organization_id=organization_id,
+            )
+            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+        elif name in ("turn_meter_on", "turn_meter_off"):
+            meter_number = arguments.get("meter_number", "")
+            user_email = arguments.get("user_email", "")
+            raw_org = arguments.get("organization_id")
+            organization_id = int(raw_org) if raw_org is not None else None
+            result = await customer_client.send_relay_state(
+                meter_number=meter_number,
+                user_email=user_email,
+                interaction_type="TURN_ON" if name == "turn_meter_on" else "TURN_OFF",
                 organization_id=organization_id,
             )
             return [types.TextContent(type="text", text=json.dumps(result, default=str))]

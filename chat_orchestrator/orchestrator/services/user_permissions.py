@@ -301,6 +301,12 @@ class UserPermissionsService:
                 tool for tool in server_tools if not tool.get("persistent_only", False)
             ]
 
+            # Filter out command-gated tools (only unlocked via slash commands in
+            # conversation_graph; never available to persistent agents or the generic flow)
+            filtered_tools = [
+                tool for tool in filtered_tools if not tool.get("command_gated", False)
+            ]
+
             # Filter tools based on customer visibility if user is not staff
             if not user_context.is_staff:
                 filtered_tools = [

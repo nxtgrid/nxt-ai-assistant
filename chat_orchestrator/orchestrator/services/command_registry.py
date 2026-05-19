@@ -593,6 +593,40 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
         exclusive_tools=["customer_set_meter_date"],
         staff_only=True,
     ),
+    "meter_on": CommandDefinition(
+        command="meter_on",
+        command_type="tool",
+        description="Turn on the relay for a meter, restoring power to the customer (e.g., /meter_on 12345678)",
+        linked_tool="customer_turn_meter_on",
+        prompt_template=(
+            "The user has explicitly requested to turn ON meter '{args}'. "
+            "Call the customer_turn_meter_on tool with meter_number='{args}' IMMEDIATELY. "
+            "CRITICAL: Do NOT ask for additional confirmation - the /command itself is the user's confirmation. "
+            "The tool is only available on this turn, so you MUST call it now. "
+            "Report the result and that the change takes effect on the next meter communication."
+        ),
+        requires_args=True,
+        args_hint="Please specify the meter number, e.g., /meter_on 12345678",
+        exclusive_tools=["customer_turn_meter_on"],
+        staff_only=True,
+    ),
+    "meter_off": CommandDefinition(
+        command="meter_off",
+        command_type="tool",
+        description="Turn off the relay for a meter, cutting power to the customer (e.g., /meter_off 12345678)",
+        linked_tool="customer_turn_meter_off",
+        prompt_template=(
+            "The user has explicitly requested to turn OFF meter '{args}'. "
+            "Call the customer_turn_meter_off tool with meter_number='{args}' IMMEDIATELY. "
+            "CRITICAL: Do NOT ask for additional confirmation - the /command itself is the user's confirmation. "
+            "The tool is only available on this turn, so you MUST call it now. "
+            "Report the result and that the change takes effect on the next meter communication."
+        ),
+        requires_args=True,
+        args_hint="Please specify the meter number, e.g., /meter_off 12345678",
+        exclusive_tools=["customer_turn_meter_off"],
+        staff_only=True,
+    ),
     "sign": CommandDefinition(
         command="sign",
         description="Request a signature on a Drive PDF from a named person",
