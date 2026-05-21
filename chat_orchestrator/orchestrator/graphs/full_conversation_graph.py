@@ -671,7 +671,7 @@ async def invoke_full_graph(
         ),
     }
 
-    result: Dict[str, Any] = await graph.ainvoke(initial_state)
+    result: Dict[str, Any] = await graph.ainvoke(initial_state, config={"recursion_limit": 50})
     return result
 
 
