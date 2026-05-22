@@ -1588,6 +1588,10 @@ class GrafanaDataClient:
                         series_config["drawStyle"] = prop_value
                     elif prop_id == "custom.lineInterpolation":
                         series_config["lineInterpolation"] = prop_value
+                    elif prop_id == "custom.lineStyle":
+                        # Grafana lineStyle: {"fill": "solid"|"dash"|"dot", "dash": [n, n]}
+                        if isinstance(prop_value, dict):
+                            series_config["lineStyle"] = prop_value
                     elif prop_id == "unit":
                         series_config["unit"] = prop_value
                     elif prop_id == "custom.hideFrom":
@@ -1828,6 +1832,35 @@ class GrafanaDataClient:
 
         return result
 
+    def _resolve_stroke_dash(
+        self,
+        line_style: Optional[Dict[str, Any]],
+        line_width: float,
+    ) -> Optional[List[float]]:
+        """
+        Translate a Grafana lineStyle into a Vega-Lite strokeDash array.
+
+        Grafana lineStyle: {"fill": "solid"|"dash"|"dot", "dash": [dash, gap]}.
+        Returns None for solid lines (Vega-Lite default). For dot/dash without an
+        explicit dash array, scales the pattern by line width so it stays visible.
+        """
+        if not isinstance(line_style, dict):
+            return None
+
+        fill = line_style.get("fill", "solid")
+        if fill == "solid":
+            return None
+
+        explicit = line_style.get("dash")
+        if isinstance(explicit, list) and explicit:
+            return [float(x) for x in explicit]
+
+        width = line_width or 1
+        if fill == "dot":
+            return [width, 2 * width]
+        # dash
+        return [4 * width, 2 * width]
+
     def _get_effective_mark_config(
         self,
         series_name: str,
@@ -1851,12 +1884,18 @@ class GrafanaDataClient:
         )
         vl_interpolation = INTERPOLATION_MAP.get(interpolation, "linear")
         line_width = override.get("lineWidth", styling.get("line_width", 3))
+        line_style = override.get("lineStyle", styling.get("line_style"))
 
         # Line with fillOpacity > 0 → area mark (Grafana renders these as shaded regions)
         if draw_style == "line" and fill_opacity and fill_opacity > 0:
+            stroke_dash = self._resolve_stroke_dash(line_style, line_width)
+            # Vega-Lite area: a "line" object styles the border (dash carries onto it).
+            area_line: Any = (
+                {"strokeDash": stroke_dash, "strokeWidth": line_width} if stroke_dash else True
+            )
             return {
                 "type": "area",
-                "line": True,
+                "line": area_line,
                 "opacity": fill_opacity / 100,
                 "interpolate": vl_interpolation,
                 "tooltip": True,
@@ -1865,13 +1904,17 @@ class GrafanaDataClient:
         mark_type = DRAW_STYLE_MAP.get(draw_style, "line")
 
         if mark_type == "line":
-            return {
+            line_mark = {
                 "type": "line",
                 "interpolate": vl_interpolation,
                 "strokeWidth": line_width,
                 "point": False,
                 "tooltip": True,
             }
+            stroke_dash = self._resolve_stroke_dash(line_style, line_width)
+            if stroke_dash:
+                line_mark["strokeDash"] = stroke_dash
+            return line_mark
 
         # bars, points, etc.
         return {
