@@ -427,6 +427,13 @@ def _execute_user_command(
         response.raise_for_status()
         result = response.json()
 
+    # Orchestrator returns success=False with HTTP 200 for transient errors (e.g. rate limits).
+    # Raise so the scheduler marks this execution as failed rather than delivering the error
+    # message as if it were a normal scheduled response.
+    if not result.get("success", True):
+        error_msg = result.get("error") or result.get("message") or "Orchestrator returned failure"
+        raise RuntimeError(f"Orchestrator error: {error_msg}")
+
     # API returns "message" field, but fallback to "final_text" for backward compatibility
     return str(result.get("message") or result.get("final_text") or "No response generated")
 
