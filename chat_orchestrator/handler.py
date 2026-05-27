@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import os
 import uuid as uuid_mod
 from datetime import datetime, timezone
@@ -4161,10 +4162,54 @@ def _is_system_error_response(response_text: str) -> bool:
     return bool(response_text) and response_text.strip() in system_errors
 
 
+def _format_tool_results_for_escalation(
+    tool_results: Optional[List["ToolCallResult"]],
+    max_items: int = 20,
+    output_chars_per_item: int = 400,
+) -> str:
+    """Render accumulated tool results as a compact summary for staff escalation context.
+
+    Includes each tool's name, success flag, and a truncated peek at its output so staff
+    can see what the bot already investigated before giving up.
+    """
+    if not tool_results:
+        return ""
+
+    lines: List[str] = []
+    for tr in tool_results[:max_items]:
+        status = "ok" if getattr(tr, "success", True) else "FAIL"
+        name = getattr(tr, "name", "<unknown>")
+        peek_source = (
+            getattr(tr, "error", None) if status == "FAIL" else getattr(tr, "output", None)
+        )
+        peek = ""
+        if peek_source is not None:
+            try:
+                peek_str = (
+                    peek_source
+                    if isinstance(peek_source, str)
+                    else json.dumps(peek_source, default=str)
+                )
+            except Exception:
+                peek_str = str(peek_source)
+            peek_str = " ".join(peek_str.split())  # collapse whitespace
+            if len(peek_str) > output_chars_per_item:
+                peek_str = peek_str[:output_chars_per_item] + "…"
+            peek = f" — {peek_str}"
+        lines.append(f"• {name} [{status}]{peek}")
+
+    remainder = len(tool_results) - max_items
+    if remainder > 0:
+        lines.append(f"• … and {remainder} more tool call(s)")
+
+    return "\n\nInvestigation steps the bot completed before failing:\n" + "\n".join(lines)
+
+
 async def _auto_escalate_on_error_response(
     session_id: str,
     user_context,
     webhook_req,
+    tool_results: Optional[List["ToolCallResult"]] = None,
 ) -> bool:
     """Escalate to support when the bot is about to send a system error to a customer.
 
@@ -4207,6 +4252,7 @@ async def _auto_escalate_on_error_response(
                 pass
 
         user_msg = (webhook_req.message or "")[:500]
+        tool_summary = _format_tool_results_for_escalation(tool_results)
         asyncio.create_task(
             escalation_service.escalate_to_support(
                 question_summary=f"[BOT ERROR] {user_msg[:200] or 'Bot returned system error'}",
@@ -4220,7 +4266,7 @@ async def _auto_escalate_on_error_response(
                 conversation_context=(
                     "[AUTO-ESCALATION: Bot returned system error to customer]\n\n"
                     f"Customer message: {user_msg or 'N/A'}\n\n"
-                    "The bot was unable to process the customer's request."
+                    "The bot was unable to process the customer's request." + tool_summary
                 ),
                 reason="system_error",
             ),
@@ -4346,6 +4392,7 @@ async def _process_telegram_async(
                 session_id=session_id,
                 user_context=user_context,
                 webhook_req=webhook_req,
+                tool_results=tool_results,
             )
             if escalated:
                 response_text = (

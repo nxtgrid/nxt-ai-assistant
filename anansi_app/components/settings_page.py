@@ -117,7 +117,7 @@ def render_settings_page():
         st.session_state.pending_settings["MAX_TOOL_ROUNDS"] = st.slider(
             "Max Tool Execution Rounds",
             min_value=1,
-            max_value=10,
+            max_value=50,
             value=st.session_state.pending_settings["MAX_TOOL_ROUNDS"],
             help="Maximum number of tool execution cycles per conversation",
         )

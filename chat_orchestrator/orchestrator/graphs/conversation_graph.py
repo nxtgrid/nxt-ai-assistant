@@ -373,6 +373,30 @@ class ConversationGraphBuilder:
 
         # Check if we've exceeded max rounds
         if current_round >= max_rounds:
+            # Staff: synthesize a partial answer from accumulated tool results instead of
+            # returning a generic system error, so the investigation isn't wasted.
+            user_ctx = state.get("user_context")
+            is_staff = bool(getattr(user_ctx, "is_staff", False))
+            if is_staff and state.get("accumulated_tool_results"):
+                try:
+                    synthesized = await self._synthesize_partial_answer(state)
+                    if synthesized:
+                        LOGGER.info(
+                            "Max rounds exceeded for staff session — returning synthesized "
+                            f"partial answer ({len(synthesized)} chars, "
+                            f"{len(state['accumulated_tool_results'])} tool results)"
+                        )
+                        return {
+                            "final_response": synthesized,
+                            "should_continue": False,
+                            "error_category": ErrorCategory.SYSTEM.value,
+                            "error": "Max tool rounds exceeded — returned partial synthesis",
+                        }
+                except Exception as synth_err:
+                    LOGGER.exception(
+                        f"Partial-answer synthesis failed, falling back to canned error: {synth_err}"
+                    )
+
             return {
                 "error": "Max tool rounds exceeded without final response from Gemini",
                 "error_category": ErrorCategory.SYSTEM.value,
@@ -1375,6 +1399,38 @@ class ConversationGraphBuilder:
                 LOGGER.warning(f"Media URL not yet supported, skipping: {media.url}")
                 return None
         return None
+
+    async def _synthesize_partial_answer(self, state: ConversationState) -> Optional[str]:
+        """Ask Gemini to summarize what was gathered when the tool budget is exhausted.
+
+        Used for staff sessions when MAX_TOOL_ROUNDS is hit, so the investigation context
+        already in gemini_history isn't discarded. Called WITHOUT tools so Gemini is forced
+        to produce final text instead of requesting more calls.
+        """
+        history = list(state.get("gemini_history") or [])
+        if not history:
+            return None
+
+        synthesis_prompt = (
+            "You've used your full tool-call budget without producing a final answer. "
+            "Do NOT request any more tools — based ONLY on the tool results above, write a "
+            "concise answer to the user's original question. Explicitly call out:\n"
+            "• What you were able to confirm\n"
+            "• What you couldn't complete (and why)\n"
+            "• Any tickets, grids, meters, or items that still need follow-up\n\n"
+            "Format for Telegram: short, scannable, use bullet points."
+        )
+        history.append({"role": "user", "parts": [{"text": synthesis_prompt}]})
+
+        payload = self._build_payload(
+            history=history,
+            tools_payload=None,
+            system_instructions=state.get("system_instructions"),
+        )
+
+        response = await self._gemini.generate_content(payload)
+        text = self._extract_text(response)
+        return text or None
 
     def _build_payload(
         self,

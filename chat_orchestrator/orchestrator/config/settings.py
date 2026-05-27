@@ -241,7 +241,7 @@ class AppSettings(BaseSettings):
     gemini: GeminiModelConfig = Field(default_factory=GeminiModelConfig)
     known_services: List[ToolServiceConfig] = Field(default_factory=list)
     allow_parallel_calls: bool = True
-    max_tool_rounds: int = Field(default=3, ge=1, le=8)
+    max_tool_rounds: int = Field(default=3, ge=1, le=50)
     rag: RagConfig = Field(default_factory=RagConfig)
     dspy: DspyConfig = Field(default_factory=DspyConfig)
     bridge_url: Optional[str] = Field(
