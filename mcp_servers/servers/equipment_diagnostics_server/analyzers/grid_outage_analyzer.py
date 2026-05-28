@@ -48,6 +48,10 @@ class GridOutageEvent:
     recovery_time_seconds: Optional[int] = None  # Time for power to stabilize
     is_ongoing: bool = False  # True if outage is still in progress at time of analysis
     phase_details: List[PhaseOutage] = field(default_factory=list)
+    # Phase(s) that tripped first and opened the outage (the fault trigger).
+    # In mini-grid topology where phases track together, an L2 overload trips L2 first
+    # and the others cascade — triggering_phases captures the root-cause phase(s).
+    triggering_phases: List[str] = field(default_factory=list)
     # Cause classification (populated by classify_outage_cause)
     cause_category: Optional[str] = (
         None  # "battery_depletion", "grid_fault", "vebus_error", "unknown"
@@ -71,6 +75,17 @@ class GridOutageEvent:
             "recovery_time_seconds": self.recovery_time_seconds,
             "is_ongoing": self.is_ongoing,
         }
+        if self.triggering_phases:
+            result["triggering_phases"] = self.triggering_phases
+        if self.phase_details:
+            result["phase_details"] = [
+                {
+                    "phase": pd.phase,
+                    "power_before_w": pd.power_before_w,
+                    "power_after_w": pd.power_after_w,
+                }
+                for pd in self.phase_details
+            ]
         # Add cause classification if available
         if self.cause_category:
             result["cause"] = {
@@ -364,14 +379,18 @@ class GridOutageAnalyzer:
     ) -> List[GridOutageEvent]:
         """Merge per-phase outages into grid outage events.
 
-        For Victron inverters, all phases follow each other up/down together.
-        A grid outage only occurs when ALL phases are down. If ANY phase is
-        operational (above threshold), the inverters are running.
+        In mini-grid topology, all three phases track together: a fault on any
+        one phase (e.g. L2 overload) trips the whole inverter cluster. So the
+        grid outage opens the moment the FIRST phase drops and closes when ALL
+        phases have recovered. This keeps the outage start anchored to the
+        triggering fault, so alarm-to-outage matching can find the root cause.
 
         Logic:
         - Track which phases are currently down
-        - Start outage when ALL phases are down
-        - End outage when ANY phase recovers
+        - Start outage when ANY phase goes down (record it as the trigger)
+        - End outage when ALL phases have recovered
+        - Record max concurrent down phases → is_full_outage
+        - Record every phase that went down during the outage → affected_phases
         """
         # Collect all outage start/end times
         all_events: List[Tuple[datetime, str, str, float]] = []  # (time, phase, type, power)
@@ -402,10 +421,14 @@ class GridOutageAnalyzer:
         all_events.sort(key=lambda e: (e[0], 0 if e[2] == "end" else 1))
 
         # Process events to build grid outages
-        # Key insight: outage only when ALL phases are down
+        # Phases track in mini-grid topology: any phase going down opens the outage
         grid_outages: List[GridOutageEvent] = []
         down_phases: Dict[str, float] = {}  # phase -> power_before when it went down
         outage_start: Optional[datetime] = None
+        triggering_phases: List[str] = []  # phase(s) that opened the current outage
+        outage_affected: set = set()  # all phases that went down during the current outage
+        outage_phase_powers: Dict[str, float] = {}  # power-before snapshot per phase
+        max_concurrent_down = 0  # peak number of phases simultaneously down
         total_phases = len(phases_with_data) if phases_with_data else 3
 
         for timestamp, phase, event_type, power in all_events:
@@ -413,19 +436,30 @@ class GridOutageAnalyzer:
                 # Phase is going down
                 down_phases[phase] = power
 
-                # Check if ALL phases are now down → outage starts
-                if len(down_phases) >= total_phases and outage_start is None:
+                if outage_start is None:
+                    # First phase to trip — open the outage and record the trigger
                     outage_start = timestamp
+                    triggering_phases = [phase]
+                    outage_affected = {phase}
+                    outage_phase_powers = {phase: power}
+                    max_concurrent_down = 1
+                else:
+                    # Additional phase tripping during an in-progress outage
+                    outage_affected.add(phase)
+                    outage_phase_powers.setdefault(phase, power)
+                    # Phases that drop in the same sample as the trigger are co-triggers
+                    if timestamp == outage_start and phase not in triggering_phases:
+                        triggering_phases.append(phase)
+                    if len(down_phases) > max_concurrent_down:
+                        max_concurrent_down = len(down_phases)
 
             elif event_type == "end":
                 # Phase is recovering
-                was_full_outage = len(down_phases) >= total_phases
-
                 if phase in down_phases:
                     del down_phases[phase]
 
-                # If we were in a full outage and ANY phase just recovered → outage ends
-                if was_full_outage and outage_start is not None:
+                # Outage closes only when ALL phases have recovered
+                if not down_phases and outage_start is not None:
                     duration = int((timestamp - outage_start).total_seconds())
 
                     # Calculate MAX load in 30 minutes before outage (per phase)
@@ -444,23 +478,40 @@ class GridOutageAnalyzer:
 
                     total_pre = sum(pre_load.values())
 
+                    affected_sorted = sorted(outage_affected)
+                    phase_details_list = [
+                        PhaseOutage(
+                            phase=p,
+                            power_before_w=outage_phase_powers.get(p, 0.0),
+                            power_after_w=0.0,
+                        )
+                        for p in affected_sorted
+                    ]
+
                     grid_outages.append(
                         GridOutageEvent(
                             start_time=outage_start,
                             end_time=timestamp,
                             duration_seconds=duration,
-                            affected_phases=list(phases_with_data),
-                            is_full_outage=True,
+                            affected_phases=affected_sorted,
+                            is_full_outage=max_concurrent_down >= total_phases,
                             pre_outage_load=pre_load,
                             peak_load_before_w=total_pre,
+                            phase_details=phase_details_list,
+                            triggering_phases=list(triggering_phases),
                         )
                     )
 
+                    # Reset per-outage tracking
                     outage_start = None
+                    triggering_phases = []
+                    outage_affected = set()
+                    outage_phase_powers = {}
+                    max_concurrent_down = 0
 
         # Handle ongoing outage at end of data
-        if len(down_phases) >= total_phases and outage_start is not None:
-            # All phases are still down — outage is ongoing
+        if down_phases and outage_start is not None:
+            # At least one phase is still down — outage is ongoing
             # Use latest event timestamp as provisional end_time
             last_event_time = all_events[-1][0] if all_events else outage_start
             duration = int((last_event_time - outage_start).total_seconds())
@@ -480,16 +531,28 @@ class GridOutageAnalyzer:
 
             total_pre = sum(ongoing_pre_load.values())
 
+            affected_sorted = sorted(outage_affected)
+            phase_details_list = [
+                PhaseOutage(
+                    phase=p,
+                    power_before_w=outage_phase_powers.get(p, 0.0),
+                    power_after_w=0.0,
+                )
+                for p in affected_sorted
+            ]
+
             grid_outages.append(
                 GridOutageEvent(
                     start_time=outage_start,
                     end_time=last_event_time,
                     duration_seconds=duration,
-                    affected_phases=list(phases_with_data),
-                    is_full_outage=True,
+                    affected_phases=affected_sorted,
+                    is_full_outage=max_concurrent_down >= total_phases,
                     pre_outage_load=ongoing_pre_load,
                     peak_load_before_w=total_pre,
                     is_ongoing=True,
+                    phase_details=phase_details_list,
+                    triggering_phases=list(triggering_phases),
                 )
             )
 
