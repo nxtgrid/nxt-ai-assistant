@@ -367,7 +367,40 @@ def parse_time_expression(
 
         return None, utc_time, "once"
 
-    # Relative time patterns (one-time)
+    # Relative time patterns (one-time) — minutes, hours, days, months
+    # "in 3 months and 19 days at 10am" or "in 2 hours" etc.
+    relative_months_match = re.match(
+        r"in\s+(\d+)\s+months?(?:\s+(?:and\s+)?(\d+)\s+days?)?\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+        expr_lower,
+        re.IGNORECASE,
+    )
+    if relative_months_match:
+        months = int(relative_months_match.group(1))
+        extra_days = int(relative_months_match.group(2) or 0)
+        hour = int(relative_months_match.group(3))
+        minute = int(relative_months_match.group(4) or 0)
+        ampm = relative_months_match.group(5)
+        hour, minute = parse_time_to_24h(hour, minute, ampm)
+
+        target_month = now_local.month + months
+        target_year = now_local.year + (target_month - 1) // 12
+        target_month = ((target_month - 1) % 12) + 1
+        import calendar as cal_mod
+
+        max_day = cal_mod.monthrange(target_year, target_month)[1]
+        target_day = min(now_local.day, max_day)
+        local_time = now_local.replace(
+            year=target_year,
+            month=target_month,
+            day=target_day,
+            hour=hour,
+            minute=minute,
+            second=0,
+            microsecond=0,
+        ) + timedelta(days=extra_days)
+        utc_time = local_time.astimezone(pytz.UTC)
+        return None, utc_time, "once"
+
     relative_match = re.match(r"in\s+(\d+)\s+(minutes?|hours?|days?)", expr_lower, re.IGNORECASE)
     if relative_match:
         amount = int(relative_match.group(1))
@@ -382,6 +415,96 @@ def parse_time_expression(
         else:
             raise ValueError(f"Unknown time unit: {unit}")
 
+        return None, utc_time, "once"
+
+    # ISO date pattern: "2026-09-16 at 10:00" or "on 2026-09-16 at 10am"
+    iso_date_match = re.match(
+        r"(?:on\s+)?(\d{4})-(\d{2})-(\d{2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+        expr_lower,
+        re.IGNORECASE,
+    )
+    if iso_date_match:
+        year = int(iso_date_match.group(1))
+        month = int(iso_date_match.group(2))
+        day = int(iso_date_match.group(3))
+        hour = int(iso_date_match.group(4))
+        minute = int(iso_date_match.group(5) or 0)
+        ampm = iso_date_match.group(6)
+        hour, minute = parse_time_to_24h(hour, minute, ampm)
+
+        local_time = tz.localize(datetime(year, month, day, hour, minute, 0))
+        utc_time = local_time.astimezone(pytz.UTC)
+        return None, utc_time, "once"
+
+    # Named month patterns (one-time): "September 16th at 10am" or "16th September at 10am"
+    month_names = (
+        "january|february|march|april|may|june|july|august|september|october|november|december"
+        "|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
+    )
+    month_map = {
+        "january": 1,
+        "jan": 1,
+        "february": 2,
+        "feb": 2,
+        "march": 3,
+        "mar": 3,
+        "april": 4,
+        "apr": 4,
+        "may": 5,
+        "june": 6,
+        "jun": 6,
+        "july": 7,
+        "jul": 7,
+        "august": 8,
+        "aug": 8,
+        "september": 9,
+        "sep": 9,
+        "sept": 9,
+        "october": 10,
+        "oct": 10,
+        "november": 11,
+        "nov": 11,
+        "december": 12,
+        "dec": 12,
+    }
+
+    # "September 16th at 10am" / "on September 16 at 10am"
+    month_day_match = re.match(
+        rf"(?:on\s+)?({month_names})\s+(\d{{1,2}})(?:st|nd|rd|th)?\s+at\s+(\d{{1,2}})(?::(\d{{2}}))?\s*(am|pm)?",
+        expr_lower,
+        re.IGNORECASE,
+    )
+    # "16th September at 10am" / "on 16 September at 10am"
+    day_month_match = re.match(
+        rf"(?:on\s+)?(\d{{1,2}})(?:st|nd|rd|th)?\s+({month_names})\s+at\s+(\d{{1,2}})(?::(\d{{2}}))?\s*(am|pm)?",
+        expr_lower,
+        re.IGNORECASE,
+    )
+
+    named_date_match = month_day_match or day_month_match
+    if named_date_match:
+        if month_day_match:
+            month_str = named_date_match.group(1).lower()
+            day = int(named_date_match.group(2))
+            hour = int(named_date_match.group(3))
+            minute = int(named_date_match.group(4) or 0)
+            ampm = named_date_match.group(5)
+        else:
+            day = int(named_date_match.group(1))
+            month_str = named_date_match.group(2).lower()
+            hour = int(named_date_match.group(3))
+            minute = int(named_date_match.group(4) or 0)
+            ampm = named_date_match.group(5)
+
+        hour, minute = parse_time_to_24h(hour, minute, ampm)
+        month_num = month_map[month_str]
+
+        # Use current year; if date already passed, use next year
+        year = now_local.year
+        local_time = tz.localize(datetime(year, month_num, day, hour, minute, 0))
+        if local_time.astimezone(pytz.UTC) <= now_utc:
+            local_time = tz.localize(datetime(year + 1, month_num, day, hour, minute, 0))
+        utc_time = local_time.astimezone(pytz.UTC)
         return None, utc_time, "once"
 
     # Time only pattern (one-time, today or tomorrow)
@@ -404,7 +527,8 @@ def parse_time_expression(
         f"Could not parse time expression: '{expr}'. "
         "Try formats like: 'daily at 9am', 'every monday at 10am', "
         "'every other monday at 9am', 'monthly on the 1st at 9am', "
-        "'tomorrow at 3pm', 'in 2 hours'"
+        "'September 16th at 10am', 'on 2026-09-16 at 10:00', "
+        "'tomorrow at 3pm', 'in 2 hours', 'in 3 months at 10am'"
     )
 
 
