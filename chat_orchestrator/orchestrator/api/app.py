@@ -636,6 +636,77 @@ async def _run_telegram_workflow(body: dict, chat_id: str, topic_id: int | None)
                 pass
 
 
+async def _is_staff_for_disabled_check(body: dict, auth_method: str) -> bool:
+    """Determine if a request originates from a staff context.
+
+    Used by the BOT_ENABLED=false branch to decide whether to surface a
+    visible "disabled" notice (staff) or stay silent (customers).
+    """
+    metadata = body.get("metadata") or {}
+    if metadata.get("staff_group_auth"):
+        return True
+    if metadata.get("scheduled_is_staff"):
+        return True
+    if metadata.get("is_staff"):
+        return True
+
+    if auth_method == "telegram":
+        tg_msg = body.get("message") or body.get("edited_message") or {}
+        tg_chat = tg_msg.get("chat") or {}
+        chat_id = str(tg_chat.get("id") or "").strip()
+        topic_id = tg_msg.get("message_thread_id")
+        tg_user_id = str((tg_msg.get("from") or {}).get("id") or "").strip()
+    else:
+        chat_id = str(body.get("chat_id") or "").strip()
+        topic_id = body.get("topic_id")
+        tg_user_id = str(body.get("user_id") or "").strip()
+
+    if not chat_id:
+        return False
+
+    try:
+        from shared.auth import get_auth_service
+
+        perms = await get_auth_service().resolve_permissions_from_chat(
+            chat_id=chat_id,
+            topic_id=topic_id,
+            user_id=tg_user_id or "disabled-check",
+            telegram_id=tg_user_id or None,
+        )
+        return bool(perms and perms.is_staff)
+    except Exception as e:
+        logger.warning(f"is_staff lookup failed during BOT_ENABLED check: {e}")
+        return False
+
+
+async def _send_telegram_disabled_notice(chat_id: str, topic_id, reply_to_message_id=None) -> None:
+    """Send a 'Bot is currently disabled' notice via Telegram Bot API."""
+    import httpx
+
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if not bot_token or not chat_id:
+        return
+    payload: dict = {"chat_id": chat_id, "text": "Bot is currently disabled."}
+    if topic_id is not None:
+        try:
+            payload["message_thread_id"] = int(topic_id)
+        except (TypeError, ValueError):
+            pass
+    if reply_to_message_id is not None:
+        try:
+            payload["reply_to_message_id"] = int(reply_to_message_id)
+        except (TypeError, ValueError):
+            pass
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json=payload,
+            )
+    except Exception as e:
+        logger.warning(f"Failed to send BOT_ENABLED=false notice to Telegram: {e}")
+
+
 @app.post("/")
 async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
     """
@@ -647,21 +718,6 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
         - X-Api-Key: Returns response in HTTP body
         - X-Telegram-Bot-Api-Secret-Token: Sends response via Telegram Bot API
     """
-    # Check if bot is enabled
-    bot_enabled = os.getenv("BOT_ENABLED", "true").lower() in ("true", "1", "yes")
-    if not bot_enabled:
-        logger.info("Bot is disabled via BOT_ENABLED flag - returning 200 without action")
-        # success=False so the scheduler's safety filter treats this as a failure
-        # and does not deliver "Bot is currently disabled" wrapped as a scheduled response.
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": False,
-                "error": "Bot is currently disabled",
-                "message": "Bot is currently disabled",
-            },
-        )
-
     # Verify authentication and get method
     auth_method = get_auth_method(request)
 
@@ -677,6 +733,42 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
             pass
         return JSONResponse(
             status_code=400, content={"success": False, "error": f"Invalid JSON body: {str(e)}"}
+        )
+
+    # When BOT_ENABLED=false, staff get a visible "disabled" notice;
+    # customers and unknown audiences get silence (no delivery, no Telegram message).
+    bot_enabled = os.getenv("BOT_ENABLED", "true").lower() in ("true", "1", "yes")
+    if not bot_enabled:
+        is_staff = await _is_staff_for_disabled_check(body, auth_method)
+        logger.info(
+            f"Bot is disabled via BOT_ENABLED flag - is_staff={is_staff}, auth={auth_method}"
+        )
+
+        if auth_method == "telegram":
+            if is_staff:
+                tg_msg = body.get("message") or body.get("edited_message") or {}
+                tg_chat_id = str((tg_msg.get("chat") or {}).get("id") or "")
+                tg_topic_id = tg_msg.get("message_thread_id")
+                tg_msg_id = tg_msg.get("message_id")
+                await _send_telegram_disabled_notice(tg_chat_id, tg_topic_id, tg_msg_id)
+            return JSONResponse(status_code=200, content={"success": True})
+
+        # API key path (direct callers / scheduler)
+        if is_staff:
+            # success=True so the scheduler delivers the notice to staff
+            return JSONResponse(
+                status_code=200,
+                content={"success": True, "message": "Bot is currently disabled."},
+            )
+        # Customer / unknown: success=False so the scheduler's safety filter
+        # treats this as a failed run and delivers nothing.
+        return JSONResponse(
+            status_code=200,
+            content={
+                "success": False,
+                "error": "Bot is currently disabled",
+                "message": "Bot is currently disabled",
+            },
         )
 
     # Add auth method to body so handler knows how to respond
@@ -716,19 +808,8 @@ async def handle_chat(request: Request, background_tasks: BackgroundTasks):
         - X-Api-Key: Returns response in HTTP body
         - X-Telegram-Bot-Api-Secret-Token: Sends response via Telegram Bot API
     """
-    # Check if bot is enabled
-    bot_enabled = os.getenv("BOT_ENABLED", "true").lower() in ("true", "1", "yes")
-    if not bot_enabled:
-        logger.info("Bot is disabled via BOT_ENABLED flag - returning 200 without action")
-        return JSONResponse(
-            status_code=200,
-            content={
-                "success": False,
-                "error": "Bot is currently disabled",
-                "message": "Bot is currently disabled",
-            },
-        )
-
+    # Delegate to handle_webhook — including BOT_ENABLED handling, which is
+    # staff-aware (visible notice for staff, silent for customers).
     return await handle_webhook(request, background_tasks)
 
 

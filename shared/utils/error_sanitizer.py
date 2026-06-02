@@ -328,18 +328,12 @@ def categorize_and_sanitize_error(
     if re.search(r"(invalid|malformed|incorrect.*format)", error_lower):
         return (ErrorCategory.REPHRASE, get_user_message(ErrorCategory.REPHRASE, "parse_error"))
 
-    # PERMISSION errors - user needs to contact support
-    if re.search(r"(403|Forbidden|permission denied|access denied)", error, re.IGNORECASE):
-        return (
-            ErrorCategory.PERMISSION,
-            get_user_message(ErrorCategory.PERMISSION, "access_denied"),
-        )
-
-    if re.search(r"(401|Unauthorized|invalid.*token)", error, re.IGNORECASE):
-        return (
-            ErrorCategory.PERMISSION,
-            get_user_message(ErrorCategory.PERMISSION, "access_denied"),
-        )
+    # NOTE: Upstream 401/403 substrings (Gemini billing/dunning, Jira API, etc.)
+    # are deliberately NOT mapped to ErrorCategory.PERMISSION. They have nothing
+    # to do with the end user's permissions and showing "contact support for
+    # access" misleads users when the real issue is on our side. Genuine user-
+    # level denials should raise PermissionError and be handled upstream of
+    # this function; everything else falls through to SYSTEM below.
 
     # SYSTEM errors - internal issues
     if re.search(r"(asyncpg|psycopg|postgres|database)", error_lower):

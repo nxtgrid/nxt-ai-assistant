@@ -130,12 +130,13 @@ def categorize_error(error: Exception) -> Tuple[ErrorCategory, str]:
     if "parse" in error_str or "format" in error_str or "invalid" in error_str:
         return (ErrorCategory.REPHRASE, get_user_message(ErrorCategory.REPHRASE, "parse_error"))
 
-    # Authentication/authorization - permission issue
-    if "401" in error_str or "403" in error_str or "unauthorized" in error_str:
-        return (
-            ErrorCategory.PERMISSION,
-            get_user_message(ErrorCategory.PERMISSION, "access_denied"),
-        )
+    # NOTE: We intentionally do NOT map raw "401"/"403"/"unauthorized" substrings
+    # to ErrorCategory.PERMISSION. Those strings frequently come from upstream
+    # services (Gemini billing/dunning, Jira API, etc.) and have nothing to do
+    # with the end user's permissions. Genuine user-level denials raise
+    # PermissionError and are caught by the isinstance check above; everything
+    # else falls through to SYSTEM, which gives an honest "something went wrong
+    # on our end" message instead of a misleading "contact support for access".
 
     # Database errors - system issue
     if "database" in error_str or "db " in error_str or "sql" in error_str:
