@@ -651,8 +651,15 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
     bot_enabled = os.getenv("BOT_ENABLED", "true").lower() in ("true", "1", "yes")
     if not bot_enabled:
         logger.info("Bot is disabled via BOT_ENABLED flag - returning 200 without action")
+        # success=False so the scheduler's safety filter treats this as a failure
+        # and does not deliver "Bot is currently disabled" wrapped as a scheduled response.
         return JSONResponse(
-            status_code=200, content={"success": True, "message": "Bot is currently disabled"}
+            status_code=200,
+            content={
+                "success": False,
+                "error": "Bot is currently disabled",
+                "message": "Bot is currently disabled",
+            },
         )
 
     # Verify authentication and get method
@@ -714,7 +721,12 @@ async def handle_chat(request: Request, background_tasks: BackgroundTasks):
     if not bot_enabled:
         logger.info("Bot is disabled via BOT_ENABLED flag - returning 200 without action")
         return JSONResponse(
-            status_code=200, content={"success": True, "message": "Bot is currently disabled"}
+            status_code=200,
+            content={
+                "success": False,
+                "error": "Bot is currently disabled",
+                "message": "Bot is currently disabled",
+            },
         )
 
     return await handle_webhook(request, background_tasks)
