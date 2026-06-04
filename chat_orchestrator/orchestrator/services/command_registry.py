@@ -215,6 +215,11 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
         exclusive_tools=[
             "jira_jira_search_issues_with_comments",
             "jira_jira_get_ticket_statistics",
+            "jira_jira_get_issue",
+            "jira_jira_add_comment",
+            "jira_jira_change_status",
+            "customer_customer_get_grid_status",
+            "customer_customer_get_all_grids_status",
         ],
     ),
     "ticket": CommandDefinition(
