@@ -47,7 +47,7 @@ print(f"📂 Working directory: {os.getcwd()}", file=sys.stderr)
 server = Server("equipment-control-server")
 
 # VRM MQTT Configuration (direct MQTT connection to Victron)
-# Auth uses account credentials: username=VRM_MQTT_USER (email), password=VRM_MQTT_PASSWORD
+# Auth: username=VRM_MQTT_USER (email), password=VRM_MQTT_PASSWORD ("Token <personal-access-token>")
 # Broker is per-installation: sum(ord(c) for c in portal_id) % 128 → mqtt{n}.victronenergy.com
 VRM_MQTT_PORT = 8883
 
@@ -57,7 +57,9 @@ def _get_vrm_broker(portal_id: str) -> str:
 
 
 VRM_MQTT_USER = os.getenv("VRM_MQTT_USER")  # VRM account email address
-VRM_MQTT_PASSWORD = os.getenv("VRM_MQTT_PASSWORD")  # VRM account password for MQTT auth
+VRM_MQTT_PASSWORD = os.getenv(
+    "VRM_MQTT_PASSWORD"
+)  # VRM personal access token, formatted as "Token <token>"
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
 # VRM REST API Configuration (for checking site online status)
