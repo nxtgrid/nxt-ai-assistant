@@ -154,7 +154,7 @@
     ],
     "jira": [
       {
-        "name": "jira_search_issues_with_comments",
+        "name": "search_issues_with_comments",
         "description": "List and filter multiple Jira issues i.e. tickets. Use for 'my tickets', 'open tickets', or searching by grid/org. Does NOT provide details for a single ticket. By default excludes Done tickets unless statuses are explicitly provided or exclude_done is set to false. When presenting results, always include the created date in short format (e.g. '15 Mar') alongside each ticket.",
         "inputSchema": {
           "type": "object",
@@ -188,7 +188,7 @@
         "visible_to_customer": false
       },
       {
-        "name": "jira_get_issue",
+        "name": "get_issue",
         "description": "Retrieve the full details, history, and comments of one specific Jira issue i.e. ticket. Use ONLY when a Ticket Key (e.g., OPS-123) is known.",
         "inputSchema": {
           "type": "object",
@@ -205,7 +205,7 @@
         "visible_to_customer": false
       },
       {
-        "name": "jira_get_ticket_statistics",
+        "name": "get_ticket_statistics",
         "description": "Get aggregated ticket statistics for the last N days (open + closed). Returns tickets per grid, top ticket types, and grids with above-average ticket counts. Use for executive summaries.",
         "inputSchema": {
           "type": "object",
@@ -219,7 +219,7 @@
         "visible_to_customer": false
       },
       {
-        "name": "jira_get_on_call",
+        "name": "get_on_call",
         "description": "Get the JSM on-call schedule for a date range \u2014 use for any question about who was, is, or will be on call. Works for past dates (e.g. 'last weekend'), present, and future. Pass start_date as YYYY-MM-DD or ISO 8601.",
         "inputSchema": {
           "type": "object",
@@ -240,7 +240,7 @@
         "visible_to_customer": false
       },
       {
-        "name": "jira_add_comment",
+        "name": "add_comment",
         "description": "[ACTION] Add a new comment to a specific Jira ticket.",
         "inputSchema": {
           "type": "object",
@@ -260,7 +260,7 @@
         "visible_to_customer": false
       },
       {
-        "name": "jira_change_status",
+        "name": "change_status",
         "description": "[ACTION] Change the status of a Jira ticket (e.g., close, start progress, reopen). Use transition names like 'Done', 'In Progress', 'To Do'. If the ticket is unassigned, it will be auto-assigned to the requesting user.",
         "inputSchema": {
           "type": "object",
@@ -282,7 +282,7 @@
         "visible_to_customer": false
       },
       {
-        "name": "jira_assign_issue",
+        "name": "assign_issue",
         "description": "[ACTION] Assign or reassign a Jira ticket to a user. Use 'me' to self-assign, 'unassigned' to remove assignee, or a person's name/email for fuzzy matching. Returns an error if the user is not found in Jira.",
         "inputSchema": {
           "type": "object",

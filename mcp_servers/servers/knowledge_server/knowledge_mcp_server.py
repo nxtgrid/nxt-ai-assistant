@@ -48,7 +48,7 @@ TOOL_TOPIC_MAP = {
         "equipment_diagnostics_get_current_status",
     ],
     "meter": ["meters_lookup_meter", "meters_meter_status", "meters_list_meters"],
-    "ticket": ["jira_jira_search_issues_with_comments", "jira_jira_get_issue_details"],
+    "ticket": ["jira_search_issues_with_comments", "jira_get_issue"],
     "payment": ["customer_check_payment_status", "payment_processor_check_transaction"],
     "equipment": [
         "equipment_diagnostics_get_current_status",

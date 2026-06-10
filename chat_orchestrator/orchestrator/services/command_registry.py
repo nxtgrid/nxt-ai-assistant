@@ -125,7 +125,7 @@ TICKETS_WITH_ARGS_TEMPLATE = (
     "- Otherwise (org names, keywords) → use the 'text_search' parameter\n\n"
     "IMPORTANT: By default, show only OPEN tickets (statuses: To Do, In Progress). "
     "Only show all statuses if the argument explicitly mentions 'all', 'done', or 'won't do'. "
-    "Use the jira_jira_search_issues_with_comments tool."
+    "Use the jira_search_issues_with_comments tool."
 )
 
 
@@ -198,13 +198,13 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
         command="tickets",
         command_type="tool",
         description="List my open JIRA tickets",
-        linked_tool="jira_jira_search_issues_with_comments",
+        linked_tool="jira_search_issues_with_comments",
         prompt_template=(
-            "FIRST call jira_jira_get_ticket_statistics to get 30-day ticket trends. "
+            "FIRST call jira_get_ticket_statistics to get 30-day ticket trends. "
             "Render a **Ticket Summary** at the top: total tickets in 30 days, "
             "grids with most tickets (highlight any from grids_above_average), "
             "and top 3 ticket types. Keep it concise (3-5 lines).\n\n"
-            "THEN call jira_jira_search_issues_with_comments with assignee='me' and statuses=['To Do', 'In Progress'] "
+            "THEN call jira_search_issues_with_comments with assignee='me' and statuses=['To Do', 'In Progress'] "
             "to list the current user's open tickets. "
             "Show key, summary, status, and assignee. "
             "Limit to 10 unless specified otherwise. "
@@ -213,11 +213,11 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
         ),
         requires_args=False,
         exclusive_tools=[
-            "jira_jira_search_issues_with_comments",
-            "jira_jira_get_ticket_statistics",
-            "jira_jira_get_issue",
-            "jira_jira_add_comment",
-            "jira_jira_change_status",
+            "jira_search_issues_with_comments",
+            "jira_get_ticket_statistics",
+            "jira_get_issue",
+            "jira_add_comment",
+            "jira_change_status",
             "customer_customer_get_grid_status",
             "customer_customer_get_all_grids_status",
         ],
@@ -226,15 +226,15 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
         command="ticket",
         command_type="tool",
         description="Get JIRA ticket details (e.g., /ticket OPS-123)",
-        linked_tool="jira_jira_get_issue",
+        linked_tool="jira_get_issue",
         prompt_template=(
             "Get the full details for JIRA ticket {args}. "
-            "Call the jira_jira_get_issue tool with issue_key='{args}'. "
+            "Call the jira_get_issue tool with issue_key='{args}'. "
             "Show description, status, priority, assignee, and recent comments."
         ),
         requires_args=True,
         args_hint="Please provide a ticket key, e.g., /ticket OPS-123",
-        exclusive_tools=["jira_jira_get_issue"],
+        exclusive_tools=["jira_get_issue"],
     ),
     "inverters_restart": CommandDefinition(
         command="inverters_restart",

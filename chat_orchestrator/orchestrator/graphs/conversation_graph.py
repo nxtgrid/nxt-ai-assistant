@@ -641,7 +641,7 @@ class ConversationGraphBuilder:
                             result_data = last_result.output
 
                         # Special handling for jira_get_issue - format ticket details
-                        if last_call.name == "jira_jira_get_issue" and result_data:
+                        if last_call.name == "jira_get_issue" and result_data:
                             final_text = self._format_jira_ticket_details(result_data)
                             LOGGER.info("Added fallback ticket details for jira_get_issue")
                         else:

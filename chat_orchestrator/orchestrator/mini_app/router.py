@@ -958,11 +958,11 @@ def _humanize_tool_name(tool_name: str) -> str:
     """Convert tool names to human-readable labels.
 
     'customer_customer_get_grid_status' → 'Get Grid Status'
-    'jira_jira_search_issues_with_comments' → 'Search Issues With Comments'
+    'jira_search_issues_with_comments' → 'Search Issues With Comments'
     """
-    # Strip common server prefixes (customer_customer_, jira_jira_, vrm_, etc.)
+    # Strip common server prefixes (customer_customer_, jira_, vrm_, etc.)
     name = tool_name
-    for prefix in ("customer_customer_", "jira_jira_", "equipment_diagnostics_"):
+    for prefix in ("customer_customer_", "jira_", "equipment_diagnostics_"):
         if name.startswith(prefix):
             name = name[len(prefix) :]
             break
