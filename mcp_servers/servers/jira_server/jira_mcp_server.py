@@ -2050,13 +2050,13 @@ async def handle_list_tools() -> List[types.Tool]:
     tools = [
         types.Tool(
             name="jira_search_issues_with_comments",
-            description="Search Jira issues in the OPS project. Returns: key, summary, status, assignee, reporter, priority, issue_type, grid, organization, created, updated, comments. Filter by grid, organization, status, assignee (accepts person's name like 'Chovwe' or email), date range, labels, or text search. To find someone's tickets, use the assignee parameter with their name. Defaults to last 90 days if no dates specified. When presenting results, always include the created date in short format (e.g. '15 Mar') alongside each ticket.",
+            description="Search Jira issues in the OPS project. Returns: key, summary, status, assignee, reporter, priority, issue_type, grid, organization, created, updated, comments. Filter by grid, organization, status, assignee (accepts person's name like 'Chovwe' or email), date range, labels, or text search. To find someone's tickets, use the assignee parameter with their name. Defaults to last 90 days if no dates specified. When presenting results, always include the created date in short format (e.g. '15 Mar') alongside each ticket. IMPORTANT: for topic or category questions (e.g. 'tickets about DCUs being offline', 'grid downtime tickets'), do NOT rely on text_search — tickets rarely use the same words as the question. Instead fetch the open tickets without text_search (the list is small) and judge from the summaries yourself which ones match the topic.",
             inputSchema={
                 "type": "object",
                 "properties": {
                     "text_search": {
                         "type": "string",
-                        "description": "Text to search in summary, description, and title fields (optional)",
+                        "description": "Literal keyword match against summary/description — only finds tickets that contain these exact words. Monitoring alert tickets use templated phrasing that often differs from how a user describes the issue (e.g. a DCU outage ticket reads 'DCU 230401080 in Okpokunou could have a problem, causing Meter Issues', not 'DCU offline'). Use only for distinctive literal strings like a meter number, device ID, or grid name; otherwise omit and filter the results yourself.",
                     },
                     "grid": {"type": "string", "description": "Grid name to filter by"},
                     "organization": {

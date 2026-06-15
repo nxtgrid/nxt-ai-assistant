@@ -82,9 +82,11 @@ CHIRPSTACK_TENANT_ID = os.getenv("CHIRPSTACK_TENANT_ID", "")
 
 # Get Supabase credentials from environment (chat database with legacy fallback)
 SUPABASE_URL = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL", "")
-SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")  # Public anon key (respects RLS)
-SUPABASE_SERVICE_ROLE_KEY = os.getenv(
-    "SUPABASE_SERVICE_ROLE_KEY", ""
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv(
+    "SUPABASE_KEY", ""
+)  # Public anon key (respects RLS)
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv(
+    "CHAT_DB_SERVICE_KEY", ""
 )  # Service role key (only for JWT generation)
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET", "")  # JWT secret for signing tokens
 SUPABASE_DEFAULT_USER_EMAIL = os.getenv(
@@ -530,10 +532,10 @@ class MetersAPIClient:
         async with session.post(url, json=data) as response:
             result = await response.json()
 
-        token = result.get("result", {}).get("token")
+        token = ((result or {}).get("result") or {}).get("token")
         if not token:
             raise Exception(
-                f"Calin V1 did not return token for meter {meter_number}: {result.get('reason')}"
+                f"Calin V1 did not return token for meter {meter_number}: {(result or {}).get('reason')}"
             )
 
         return {"token": token}
@@ -880,9 +882,9 @@ class MetersAPIClient:
         ) as response:
             result = await response.json()
 
-        token = result.get("result", {}).get("token")
+        token = ((result or {}).get("result") or {}).get("token")
         if not token:
-            raise Exception(f"Calin V2 login failed: {result.get('reason')}")
+            raise Exception(f"Calin V2 login failed: {(result or {}).get('reason')}")
 
         # Decode token to get expiry time
         decoded = jwt.decode(token, options={"verify_signature": False})
@@ -1042,7 +1044,7 @@ class MetersAPIClient:
         async with session.post(url, json=data, headers=headers) as response:
             result = await response.json()
 
-        credit_token = result.get("result", {}).get("token")
+        credit_token = ((result or {}).get("result") or {}).get("token")
         if not credit_token:
             raise Exception(f"Calin V2 did not return token for meter {meter_id}")
 
@@ -1069,7 +1071,7 @@ class MetersAPIClient:
         async with session.post(url, json=data, headers=headers) as response:
             result = await response.json()
 
-        power_token = result.get("result", {}).get("token")
+        power_token = ((result or {}).get("result") or {}).get("token")
         if not power_token:
             raise Exception(f"Calin V2 did not return power limit token for meter {meter_id}")
 
@@ -1091,7 +1093,7 @@ class MetersAPIClient:
         async with session.post(url, json=data, headers=headers) as response:
             result = await response.json()
 
-        tamper_token = result.get("result", {}).get("token")
+        tamper_token = ((result or {}).get("result") or {}).get("token")
         if not tamper_token:
             raise Exception(f"Calin V2 did not return tamper token for meter {meter_id}")
 
@@ -1113,7 +1115,7 @@ class MetersAPIClient:
         async with session.post(url, json=data, headers=headers) as response:
             result = await response.json()
 
-        credit_token = result.get("result", {}).get("token")
+        credit_token = ((result or {}).get("result") or {}).get("token")
         if not credit_token:
             raise Exception(f"Calin V2 did not return clear credit token for meter {meter_id}")
 
@@ -1735,6 +1737,97 @@ class MetersAPIClient:
         else:
             raise Exception(f"Unknown meter type for meter {meter_no}")
 
+    async def find_meters_by_device_id(self, device_id: str) -> List[Dict[str, Any]]:
+        """
+        Find meters served by a DCU/concentrator or LoRaWAN gateway (base station).
+
+        Queries the Supabase 'meters' table by dcu_id or gateway_id. Used to resolve
+        a device ID (as referenced in alert tickets) to a device type and the meters
+        it serves, without requiring a meter number up front.
+        """
+        try:
+            access_token = await self.supabase_ensure_token()
+            session = await self.get_session()
+
+            url = f"{SUPABASE_URL}/rest/v1/meters"
+            headers = {
+                "apikey": SUPABASE_ANON_KEY,
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            }
+            params = {
+                "or": f"(dcu_id.eq.{device_id},gateway_id.eq.{device_id})",
+                "select": "meter_no,meter_type,dcu_id,gateway_id",
+                "limit": "10",
+            }
+
+            async with session.get(url, headers=headers, params=params) as response:
+                if response.status != 200:
+                    logger.warning(
+                        f"Supabase device lookup failed for {device_id}: {response.status}"
+                    )
+                    return []
+                return list(await response.json() or [])
+        except Exception as e:
+            logger.warning(f"Supabase device lookup failed for {device_id}: {e}")
+            return []
+
+    async def unified_get_device_status_by_id(
+        self,
+        device_id: str,
+        user_email: str,
+        device_type: Optional[str] = None,
+        matched_meters: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Get online status for a DCU/concentrator or LoRaWAN base station by its
+        device ID, without requiring a meter number (alert tickets reference the
+        device ID directly, e.g. 'DCU 230401080' or 'Base Station a84041ffff29d4da').
+
+        Device type is resolved from the Supabase 'meters' table when not provided,
+        falling back to the ID format (gateway EUIs are 16-char hex, DCU IDs numeric).
+
+        Args:
+            device_id: DCU/concentrator ID or LoRaWAN gateway/base station ID
+            user_email: User email for RLS authentication (required)
+            device_type: Optional 'dcu' or 'base_station' to skip auto-detection
+            matched_meters: Pre-fetched result of find_meters_by_device_id (optional)
+        """
+        self.current_user_email = user_email
+
+        if matched_meters is None:
+            matched_meters = await self.find_meters_by_device_id(device_id)
+        matched_types = {(m.get("meter_type") or "").lower() for m in matched_meters}
+
+        resolved_type = (device_type or "").lower().replace(" ", "_") or None
+        if resolved_type == "gateway":
+            resolved_type = "base_station"
+        if not resolved_type:
+            if any(m.get("gateway_id") == device_id for m in matched_meters):
+                resolved_type = "base_station"
+            elif any(m.get("dcu_id") == device_id for m in matched_meters):
+                resolved_type = "dcu"
+            else:
+                # No meter record found - infer from ID format
+                is_hex_eui = len(device_id) >= 16 and not device_id.isdigit()
+                resolved_type = "base_station" if is_hex_eui else "dcu"
+
+        if resolved_type == "base_station":
+            status = await self.lorawan_get_gateway_status(device_id)
+        elif matched_types == {"calin_v1"}:
+            # V1 has no DCU-level status endpoint; use a served meter's online
+            # status as proxy (same behavior as unified_get_dcu_status for V1)
+            status = await self.v1_get_online_status(matched_meters[0]["meter_no"])
+        else:
+            status = await self.v2_get_concentrator_online_status(device_id)
+
+        return {
+            "device_id": device_id,
+            "device_type": resolved_type,
+            "meters_on_device": [m.get("meter_no") for m in matched_meters],
+            "status": status,
+        }
+
     async def unified_create_reading_task(
         self,
         meter_no: str,
@@ -2025,6 +2118,30 @@ async def handle_list_tools() -> List[types.Tool]:
             visible_to_customer=False,
         ),
         types.Tool(
+            name="get_dcu_status_by_id",
+            description="[READ-ONLY] Check whether a DCU/concentrator or LoRaWAN base station is currently online, using the device ID itself - no meter number needed. Use this when a ticket or alert references the device directly (e.g. 'DCU 230401080' or 'Base Station a84041ffff29d4da'). Device type is auto-detected from the meters table or the ID format (base station/gateway IDs are 16-char hex, DCU IDs are numeric). Returns online/offline status plus the meter numbers served by the device. This tool ONLY retrieves status information - it does NOT communicate with meters or take any actions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "device_id": {
+                        "type": "string",
+                        "description": "DCU/concentrator ID (e.g. '230401080') or LoRaWAN base station/gateway ID (e.g. 'a84041ffff29d4da'), as referenced in the ticket or alert",
+                    },
+                    "device_type": {
+                        "type": "string",
+                        "description": "Optional: 'dcu' or 'base_station' to skip auto-detection",
+                        "enum": ["dcu", "base_station"],
+                    },
+                    "user_email": {
+                        "type": "string",
+                        "description": "(Injected by orchestrator) User email for RLS authentication",
+                    },
+                },
+                "required": ["device_id"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
             name="create_meter_reading_task",
             description="[ACTION - SENDS COMMAND TO METER] Create remote reading task for any meter type. This tool ACTIVELY COMMUNICATES with the physical meter by sending a command. Automatically routes to the correct API based on meter type from Supabase: (1) Calin V1 meters - uses PLC-based remote reading via V1 API, (2) Calin V2 meters - uses RF-based remote reading via V2 API with protocol IDs, (3) LoRaWAN meters - sends Chirpstack downlink with Calin protocol encoding. This is a TWO-STEP operation: (1) sends downlink command to meter, (2) waits 15 seconds, (3) checks uplink response from meter. Total time: approximately 15-20 seconds. IMPORTANT: Only call this tool ONCE per conversation response - do NOT batch multiple meter readings in a single response. Supports reading types: 'voltage' (line voltage), 'current' (current draw), 'power' (active power), 'energy' (accumulated energy), 'current_credit' (remaining prepaid credit), 'power_limit' (maximum power threshold setting), 'relay_status' (meter relay on/off state), 'power_down_count' (number of power outages), 'special_status' (meter error/tamper flags), 'meter_version' (firmware version). For Calin V2, you can also use numeric protocol IDs (e.g., 5 for voltage, 39 for current credit). Returns complete reading result with meter data.",
             inputSchema={
@@ -2173,6 +2290,40 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
                         dcu_id=arguments.get("dcu_id"),
                         gateway_id=arguments.get("gateway_id"),
                     )
+        elif name == "get_dcu_status_by_id":
+            user_email = arguments.get("user_email")
+            if not user_email:
+                result = {"error": "Authentication required: user_email missing from request"}
+            else:
+                device_id = arguments["device_id"]
+                matched_meters = await client.find_meters_by_device_id(device_id)
+
+                # Org scoping: staff can query any device; customers only devices
+                # that serve at least one meter belonging to their organization
+                auth_service = get_auth_service()
+                permissions = await auth_service.get_user_permissions(email=user_email)
+                if not permissions or not permissions.organization_ids:
+                    result = {"error": "User not found or has no organization"}
+                else:
+                    org_error = None
+                    if int(permissions.organization_ids[0]) != STAFF_ORG_ID:
+                        if not matched_meters:
+                            org_error = (
+                                f"Device {device_id} is not accessible for your organization"
+                            )
+                        else:
+                            org_error = await _verify_meter_org_access(
+                                matched_meters[0]["meter_no"], user_email
+                            )
+                    if org_error:
+                        result = {"error": org_error}
+                    else:
+                        result = await client.unified_get_device_status_by_id(
+                            device_id=device_id,
+                            user_email=user_email,
+                            device_type=arguments.get("device_type"),
+                            matched_meters=matched_meters,
+                        )
         elif name == "create_meter_reading_task":
             user_email = arguments.get("user_email")
             if not user_email:

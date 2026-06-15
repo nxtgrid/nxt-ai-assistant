@@ -1781,35 +1781,50 @@ class CustomerServiceClient(HTTPClientMixin):
 
     async def find_payment(
         self,
-        customer_name: str,
+        customer_name: str = "",
         amount: Optional[float] = None,
         date: Optional[str] = None,
         organization_name: Optional[str] = None,
         user_email: str = "",
         organization_id: Optional[int] = None,
+        time_window_hours: float = 2.0,
     ) -> Dict[str, Any]:
         """
-        Search for payment orders by customer name and approximate details.
+        Search for payment orders by any combination of: customer/sender name, amount, date.
 
-        Uses ILIKE on external_reference (format: OrgName+CustomerRef__ISO_timestamp)
-        to find orders when the exact tx_ref is not available.
+        Searches both external_reference (EOS format: OrgName+CustomerRef__timestamp)
+        and meta_receiver_name (registered NXT Grid customer name) so it works for
+        EOS screenshots, bank receipts (FirstBank, OPay, etc.), and other evidence.
+
+        At least one of customer_name, amount, or date must be provided.
+
+        Date handling:
+        - Datetime strings (e.g. "2026-05-29T16:42:43"): ±time_window_hours window
+        - Date-only strings (e.g. "2026-05-29"): full 24-hour day search
 
         Uses asyncpg with AUTH_DB credentials (AUTH_DB_USER).
 
         Args:
-            customer_name: Customer name from receipt/screenshot
-            amount: Payment amount (optional filter)
-            date: Date/datetime string (optional, used for ±2h time window)
-            organization_name: Organization name if visible (optional prefix filter)
+            customer_name: Customer or sender name from receipt (optional)
+            amount: Payment amount (optional, ±5% tolerance)
+            date: Date or datetime from receipt (optional)
+            organization_name: Organization name prefix in external_reference (optional)
             user_email: User email for organization lookup
             organization_id: Optional organization ID (injected by orchestrator)
+            time_window_hours: Hours before/after datetime for time window (default 2.0)
 
         Returns:
             Dict with search results: 0 matches (not found), 1 match (auto-verified),
             or 2-5 matches (list for user selection)
         """
-        if not customer_name or not customer_name.strip():
-            return {"error": "customer_name is required"}
+        name_clean = (customer_name or "").strip()
+
+        if not name_clean and amount is None and not (date and date.strip()):
+            return {
+                "error": (
+                    "At least one search criterion is required: customer_name, amount, or date"
+                )
+            }
 
         # Resolve organization
         if organization_id is None:
@@ -1831,39 +1846,63 @@ class CustomerServiceClient(HTTPClientMixin):
             )
 
             try:
-                # Build dynamic query with ILIKE conditions
                 conditions = []
                 params: list = []
                 param_idx = 1
 
-                # Required: each name word as a separate ILIKE condition
-                name_parts = [p for p in customer_name.strip().split() if len(p) >= 2]
-                if not name_parts:
-                    return {"error": "Customer name too short to search"}
+                # Name: each word must appear in EITHER external_reference OR meta_receiver_name
+                if name_clean:
+                    name_parts = [p for p in name_clean.split() if len(p) >= 2]
+                    if not name_parts:
+                        return {
+                            "error": "Customer name too short to search (minimum 2 characters per word)"
+                        }
+                    for part in name_parts:
+                        conditions.append(
+                            f"(external_reference ILIKE ${param_idx} OR meta_receiver_name ILIKE ${param_idx})"
+                        )
+                        params.append(f"%{part}%")
+                        param_idx += 1
 
-                for part in name_parts:
-                    conditions.append(f"external_reference ILIKE ${param_idx}")
-                    params.append(f"%{part}%")
-                    param_idx += 1
-
-                # Optional: organization name prefix
+                # Optional: organization name prefix in external_reference
                 if organization_name and organization_name.strip():
                     conditions.append(f"external_reference ILIKE ${param_idx}")
                     params.append(f"{organization_name.strip()}+%")
                     param_idx += 1
 
-                # Optional: time window (±2h around provided date)
+                # Optional: time window around provided date
                 if date and date.strip():
                     try:
                         date_str = date.strip()
-                        # Handle date-only strings (e.g. "2026-01-30")
-                        if len(date_str) == 10 and date_str[4] == "-":
-                            date_str = f"{date_str}T00:00:00"
-                        parsed_dt = datetime.fromisoformat(date_str)
-                        if parsed_dt.tzinfo is None:
-                            parsed_dt = parsed_dt.replace(tzinfo=ZoneInfo(DEFAULT_TIMEZONE))
-                        window_start = parsed_dt - timedelta(hours=2)
-                        window_end = parsed_dt + timedelta(hours=2)
+                        date_only = len(date_str) == 10 and date_str[4] == "-"
+                        if date_only:
+                            # Search entire calendar day in the configured timezone
+                            parsed_date = datetime.fromisoformat(date_str).date()
+                            tz = ZoneInfo(DEFAULT_TIMEZONE)
+                            window_start = datetime(
+                                parsed_date.year,
+                                parsed_date.month,
+                                parsed_date.day,
+                                0,
+                                0,
+                                0,
+                                tzinfo=tz,
+                            )
+                            window_end = datetime(
+                                parsed_date.year,
+                                parsed_date.month,
+                                parsed_date.day,
+                                23,
+                                59,
+                                59,
+                                tzinfo=tz,
+                            )
+                        else:
+                            parsed_dt = datetime.fromisoformat(date_str)
+                            if parsed_dt.tzinfo is None:
+                                parsed_dt = parsed_dt.replace(tzinfo=ZoneInfo(DEFAULT_TIMEZONE))
+                            window_start = parsed_dt - timedelta(hours=time_window_hours)
+                            window_end = parsed_dt + timedelta(hours=time_window_hours)
                         conditions.append(f"created_at >= ${param_idx}")
                         params.append(window_start)
                         param_idx += 1
@@ -1909,20 +1948,33 @@ class CustomerServiceClient(HTTPClientMixin):
             finally:
                 await conn.close()
 
+            search_criteria = {
+                k: v
+                for k, v in {
+                    "customer_name": name_clean or None,
+                    "amount": amount,
+                    "date": date,
+                    "organization_name": organization_name,
+                    "time_window_hours": time_window_hours
+                    if (date and not (len((date or "").strip()) == 10))
+                    else None,
+                }.items()
+                if v is not None
+            }
+
             if not rows:
                 return {
                     "matches_found": 0,
-                    "message": "No matching payment orders found",
-                    "search_criteria": {
-                        "customer_name": customer_name,
-                        "amount": amount,
-                        "date": date,
-                        "organization_name": organization_name,
-                    },
+                    "message": (
+                        "No payment orders found matching the provided details. "
+                        "The payment may not have been recorded yet, or the details "
+                        "on the receipt may differ from what is stored in the system."
+                    ),
+                    "search_criteria": search_criteria,
                     "suggestion": (
-                        "Try with fewer details or check the spelling. "
-                        "If you have the exact transaction reference, "
-                        "use check_payment_completion instead."
+                        "Ask the customer for: (1) the exact transaction reference from "
+                        "the receipt, or (2) the meter number to look up the account directly. "
+                        "Alternatively, try with just the amount and date if a name search returned nothing."
                     ),
                 }
 
@@ -1938,7 +1990,7 @@ class CustomerServiceClient(HTTPClientMixin):
                 verification["matched_via"] = "find_payment (single match, auto-verified)"
                 return verification
 
-            # Multiple matches — return list for selection
+            # Multiple matches — return list so LLM can ask for clarification
             matches = []
             for row in rows:
                 matches.append(
@@ -1956,11 +2008,14 @@ class CustomerServiceClient(HTTPClientMixin):
             return {
                 "matches_found": len(matches),
                 "message": (
-                    f"Found {len(matches)} matching orders. "
-                    "Use check_payment_completion with the correct "
-                    "external_reference to verify."
+                    f"Found {len(matches)} payment orders matching the provided details — "
+                    "cannot uniquely identify the payment. Ask the customer for additional "
+                    "details (e.g. meter number, or the exact transaction/session ID from their receipt) "
+                    "to identify the correct one, or call check_payment_completion with the "
+                    "correct external_reference from the list below."
                 ),
                 "matches": matches,
+                "search_criteria": search_criteria,
             }
 
         except Exception as e:
@@ -5903,29 +5958,53 @@ async def handle_list_tools() -> List[types.Tool]:
         types.Tool(
             name="find_payment",
             description=(
-                "[READ-ONLY] Search for a payment order by customer name and approximate details "
-                "(amount, date, organization). Use when the exact transaction reference is not available — "
-                "e.g., working from a payment app screenshot. Returns matching orders; if exactly one "
-                "match is found, automatically verifies it with the payment processor."
+                "[READ-ONLY] Search for a payment order from any receipt type "
+                "(EOS/NXT Pay screenshot, FirstBank receipt, OPay receipt, etc.). "
+                "Use when the exact transaction reference is not available. "
+                "Provide any combination of: customer/sender name, amount, date — "
+                "at least one is required. "
+                "Searches both the transaction reference and the registered customer name, "
+                "so it works even when the bank sender name differs from the EOS customer name. "
+                "Date-only inputs (e.g. 2026-05-29) search the full day; "
+                "datetime inputs use a ±2h window by default. "
+                "Amount tolerance is ±5%. "
+                "If exactly one match is found, automatically verifies it with the payment processor. "
+                "If zero or multiple matches are found, returns an LLM-readable explanation "
+                "with suggestions for next steps."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "customer_name": {
                         "type": "string",
-                        "description": "Customer name from receipt or screenshot",
+                        "description": (
+                            "Customer or sender name from the receipt. Works for EOS customer names, "
+                            "bank sender names (e.g. 'ADAMU SULEIMAN' from FirstBank), "
+                            "or OPay sender names. Each word is matched independently."
+                        ),
                     },
                     "amount": {
                         "type": "number",
-                        "description": "Payment amount (optional, helps narrow results)",
+                        "description": "Payment amount from the receipt (±5% tolerance applied)",
                     },
                     "date": {
                         "type": "string",
-                        "description": "Date or datetime from receipt in ISO format, e.g. 2026-01-30 (optional)",
+                        "description": (
+                            "Date or datetime from receipt in ISO format. "
+                            "Date-only (e.g. 2026-05-29) searches the full calendar day. "
+                            "Datetime (e.g. 2026-05-29T16:42:43) uses a ±2h window by default."
+                        ),
                     },
                     "organization_name": {
                         "type": "string",
-                        "description": "Organization name if visible on receipt (optional)",
+                        "description": "Organization name prefix if visible on receipt (optional)",
+                    },
+                    "time_window_hours": {
+                        "type": "number",
+                        "description": (
+                            "Hours before/after the provided datetime to search (default 2.0). "
+                            "Only applies to datetime inputs, not date-only inputs."
+                        ),
                     },
                     "user_email": {
                         "type": "string",
@@ -5936,7 +6015,7 @@ async def handle_list_tools() -> List[types.Tool]:
                         "description": "(Injected by orchestrator) User's organization ID",
                     },
                 },
-                "required": ["customer_name"],
+                "required": [],
             },
             visible_to_customer=True,
         ),
@@ -6110,6 +6189,7 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
                 organization_name=arguments.get("organization_name"),
                 user_email=arguments.get("user_email", ""),
                 organization_id=arguments.get("organization_id"),
+                time_window_hours=float(arguments.get("time_window_hours", 2.0)),
             )
         elif name == "lookup_transactions":
             result = await customer_client.lookup_transactions(
