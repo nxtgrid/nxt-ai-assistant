@@ -954,14 +954,26 @@ class ConversationGraphBuilder:
                     )
                 )
 
-            # Include tool calls made this turn so the verifier knows what actions were taken
+            # Include tool calls and their results so the verifier knows what actions were taken
+            # and whether they succeeded — without this, the verifier can't confirm claims like
+            # "the date was updated" and flags them as potential inaccuracies.
             accumulated_calls = state.get("accumulated_tool_calls") or []
+            accumulated_results = state.get("accumulated_tool_results") or []
             if accumulated_calls:
-                call_names = [
-                    getattr(tc, "name", tc.get("name") if isinstance(tc, dict) else "?")
-                    for tc in accumulated_calls
-                ]
-                context_parts.append(f"TOOLS CALLED THIS TURN: {', '.join(call_names)}")
+                tool_summaries = []
+                for i, tc in enumerate(accumulated_calls):
+                    name = getattr(tc, "name", tc.get("name") if isinstance(tc, dict) else "?")
+                    result = accumulated_results[i] if i < len(accumulated_results) else None
+                    if result is not None:
+                        success = getattr(result, "success", None)
+                        error = getattr(result, "error", None)
+                        if success:
+                            tool_summaries.append(f"- {name}: succeeded")
+                        else:
+                            tool_summaries.append(f"- {name}: failed ({error or 'unknown error'})")
+                    else:
+                        tool_summaries.append(f"- {name}: called")
+                context_parts.append("TOOLS CALLED THIS TURN:\n" + "\n".join(tool_summaries))
 
             # Flag if session has an active escalation from a prior turn
             if state.get("is_escalated_session"):
