@@ -283,6 +283,39 @@ class EnhancedSupabaseClient:
 
         return None
 
+    async def get_recent_session_for_chat(
+        self,
+        telegram_chat_id: str,
+        exclude_session_uuid: Optional[UUID] = None,
+    ) -> Optional["ChatSessionModel"]:
+        """Get the most recently updated session for a Telegram chat.
+
+        Used for cross-session context jump when a user replies to a bot
+        message from a different topic/thread in the same group.
+
+        Args:
+            telegram_chat_id: Telegram chat ID to search
+            exclude_session_uuid: Session UUID to exclude (current session)
+
+        Returns:
+            Most recently updated ChatSessionModel, or None
+        """
+        try:
+            client = self._get_client()
+            query = (
+                client.table("chat_sessions")
+                .select("*")
+                .eq("telegram_chat_id", telegram_chat_id)
+            )
+            if exclude_session_uuid:
+                query = query.neq("id", str(exclude_session_uuid))
+            response = query.order("updated_at", desc=True).limit(1).execute()
+            if response.data:
+                return ChatSessionModel(**response.data[0])
+        except Exception as e:
+            LOGGER.error(f"Error looking up recent session for chat {telegram_chat_id}: {e}")
+        return None
+
     # Message Management
     async def save_messages(
         self,

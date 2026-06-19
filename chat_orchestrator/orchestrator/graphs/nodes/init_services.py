@@ -136,6 +136,51 @@ async def init_services(state: ConversationState) -> Dict[str, Any]:
         except Exception as e:
             LOGGER.warning(f"Reply-to context jump failed (continuing without): {e}")
 
+    # Cross-session context jump: if this is a brand-new session (no history)
+    # and the user is replying to a bot message from a different topic/thread,
+    # pull context from the most recent prior session for this chat so the LLM
+    # doesn't receive the user's closing message completely out of context.
+    # (Example: customer replies "Payment received. Thanks" to a support-team
+    # response that was sent to a different thread — without this, the LLM has
+    # no context and may echo the user's phrase back.)
+    if (
+        not conversation_history
+        and not is_scheduled_execution
+        and isinstance(reply_to, dict)
+        and reply_to.get("is_bot")
+        and reply_to.get("date")
+        and user_context
+        and user_context.chat_id
+    ):
+        try:
+            prior_session = await supabase_client.get_recent_session_for_chat(
+                telegram_chat_id=user_context.chat_id,
+                exclude_session_uuid=session.id if session else None,
+            )
+            if prior_session:
+                cross_msgs = await supabase_client.get_messages_around_timestamp(
+                    session_uuid=prior_session.id,
+                    target_timestamp=reply_to["date"],
+                    window_before=5,
+                    window_after=3,
+                    exclude_types=["scheduled", "scheduled_user"],
+                )
+                if cross_msgs:
+                    from orchestrator.models.schemas import ConversationMessage
+
+                    separator = ConversationMessage(
+                        role="user",
+                        content="[Previous conversation context from an earlier thread:]",
+                    )
+                    conversation_history = [separator] + cross_msgs
+                    LOGGER.info(
+                        f"Cross-session context jump: loaded {len(cross_msgs)} messages "
+                        f"from prior session {prior_session.id} "
+                        f"(topic {prior_session.telegram_topic_id})"
+                    )
+        except Exception as e:
+            LOGGER.warning(f"Cross-session context jump failed (continuing without): {e}")
+
     # NOTE: We intentionally do NOT return service objects here.
     # They are accessed via singletons to avoid checkpointer serialization errors.
     result = {
