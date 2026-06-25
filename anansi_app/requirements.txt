@@ -12,3 +12,8 @@ croniter>=2.0.0  # recurring broadcasts need '#' (nth weekday) and 'L' cron synt
 loguru>=0.7.3
 google-api-python-client>=2.0,<3
 google-auth>=2.49.2,<3
+
+# Required by shared.config.settings (pydantic BaseSettings), pulled in via
+# settings_service.py -> shared.config. Mirrors mcp_servers/requirements.txt.
+pydantic>=2.4.0
+pydantic-settings>=2.0.0
