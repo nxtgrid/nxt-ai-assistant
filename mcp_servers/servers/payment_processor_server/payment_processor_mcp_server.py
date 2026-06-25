@@ -117,7 +117,7 @@ class PaymentProcessorClient(HTTPClientMixin):
         Verify transaction using merchant transaction reference.
 
         Args:
-            tx_ref: Merchant transaction reference (e.g., from Skyfox orders.external_reference)
+            tx_ref: Merchant transaction reference (e.g., from Platform orders.external_reference)
 
         Returns:
             Transaction verification response

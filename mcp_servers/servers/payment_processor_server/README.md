@@ -82,13 +82,13 @@ Check the status of a Payment processor transaction.
 - `pending` - Payment is still being processed
 - `failed` - Payment failed
 
-## Integration with Skyfox
+## Integration with Platform
 
-This server is designed to work seamlessly with the Skyfox order system:
+This server is designed to work seamlessly with the Platform order system:
 
 ### Transaction Reference Format
 
-Skyfox stores transaction references in the format:
+Platform stores transaction references in the format:
 ```
 [DEV__]{organization_name}+{meter_external_reference}__{ISO_timestamp}
 ```
@@ -97,10 +97,10 @@ Example: `DEV__YourOrg+MTR123__2024-11-19T10:30:00.000Z`
 
 ### Database Schema
 
-The reference is stored in Skyfox's `orders.external_reference` field and can be used to query transaction status:
+The reference is stored in Platform's `orders.external_reference` field and can be used to query transaction status:
 
 ```typescript
-// Query Skyfox orders table
+// Query Platform orders table
 const order = await db.orders.findOne({ external_reference: tx_ref });
 
 // Check Payment processor status via MCP

@@ -8,7 +8,7 @@ Built and run in production by [NXT Grid](https://nxtgrid.co), open-sourced for 
 
 ### Customer support automation for prepaid meters
 
-Customers message the bot to check balance, buy tokens, report no-power, or get a token resent. Staff use the same bot to commission new meters, unassign them, change power limits, and resolve disputes. Anansi talks to your meter backend (Tiamat by default, swappable via MCP) and applies the right approval rules depending on whether the requester is a customer or a staff member.
+Customers message the bot to check balance, buy tokens, report no-power, or get a token resent. Staff use the same bot to commission new meters, unassign them, change power limits, and resolve disputes. Anansi talks to your meter backend (Metering Platform by default, swappable via MCP) and applies the right approval rules depending on whether the requester is a customer or a staff member.
 
 <table>
   <tr>
@@ -756,15 +756,15 @@ SETTLEMENT_DATA_DIR=/path/to/settlement-data   # holds the .gpkg files + manifes
 
 **Legacy mode:** if `SETTLEMENT_DATA_DIR` is unset but `GRID3_GPKG_PATH` points at a single Nigeria GeoPackage, that still works (Nigeria-only). If neither is configured, community detection steps fail with a clear, human-readable error and the rest of the system is unaffected. Anchors in a country with no dataset get a message naming the country and listing supported ones.
 
-### Tiamat API (Meter Management)
+### Metering Platform API (Meter Management)
 
-The customer server includes tools for meter commissioning, unassignment, power limit control, and token resend. These call the Tiamat API — an external meter management backend (see `TIAMAT_*` env vars).
+The customer server includes tools for meter commissioning, unassignment, power limit control, and token resend. These call the Metering Platform API — an external meter management backend (see `METERING_*` env vars).
 
 Without these env vars, meter write tools return a "not configured" error and all read-only tools continue to work normally:
 ```bash
-TIAMAT_API_URL=https://your-tiamat-instance
-TIAMAT_BEARER_TOKEN=your-bearer-token
-TIAMAT_API_KEY=your-api-key
+METERING_API_URL=https://your-metering-instance
+METERING_BEARER_TOKEN=your-bearer-token
+METERING_API_KEY=your-api-key
 ```
 
 ### VRM Platform (Solar Inverter Monitoring)

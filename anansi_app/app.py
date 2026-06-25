@@ -150,7 +150,7 @@ st.markdown(
         margin-bottom: 0 !important;
     }
 
-    /* === FULL-WIDTH DARK TOP BAR (background strip like Ayrton) ===
+    /* === FULL-WIDTH DARK TOP BAR (background strip like Platform) ===
        A fixed pseudo-element behind sidebar + content, so the dark band
        spans edge-to-edge across the viewport top. */
     .stApp::before {
@@ -305,7 +305,7 @@ st.markdown(
         min-height: 40px;
     }
 
-    /* Selected nav button — blue accent like Ayrton */
+    /* Selected nav button — blue accent like Platform */
     section[data-testid="stSidebar"] .stButton > button[kind="primary"] {
         background-color: rgba(77, 166, 255, 0.15) !important;
         color: #ffffff !important;

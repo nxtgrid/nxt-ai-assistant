@@ -222,7 +222,7 @@ NL_EXPERT_TOOL_DEF = {
         "- Analyze a grid's performance or issues in depth\n"
         "- Generate a KPI or performance report\n"
         "- Ingest or learn a document into the knowledge base\n"
-        "- Investigate code issues in Skyfox or Anansi codebase\n\n"
+        "- Investigate code issues in Platform or Anansi codebase\n\n"
         "Do NOT use this for:\n"
         "- Simple questions about grid status, battery, power, or weather\n"
         "- Ticket lookups or JIRA searches\n"

@@ -20,7 +20,7 @@ LOGGER = get_logger(__name__)
 
 # Per-repo configuration for language-aware searching
 REPO_CONFIG: dict[str, dict[str, str]] = {
-    "skyfox": {
+    "platform": {
         "file_pattern": "*.ts,*.tsx,*.js,*.jsx",
         "language": "typescript",
     },
@@ -83,24 +83,24 @@ def _parse_plan_from_llm(context: StepContext) -> dict | None:
 def _determine_repo(context: StepContext) -> str:
     """Determine target repo from the command that triggered this workflow.
 
-    /ayrton -> skyfox, /anansi -> anansi
+    /codebase -> platform, /anansi -> anansi
 
-    The expert_handler stores the original command (e.g. "/ayrton") in
+    The expert_handler stores the original command (e.g. "/codebase") in
     packet_inputs["parsed_command"].
     """
     parsed_command = context.get_input("parsed_command", "")
-    # parsed_command is like "/ayrton why is meter ..." — extract the command name
+    # parsed_command is like "/codebase why is meter ..." — extract the command name
     if parsed_command:
         command_name = parsed_command.strip().lstrip("/").split(None, 1)[0].lower()
-        if command_name == "ayrton":
-            return "skyfox"
+        if command_name == "codebase":
+            return "platform"
         elif command_name == "anansi":
             return "anansi"
 
     # Fallback: check packet goal or state
     goal = context.packet_goal.lower() if context.packet_goal else ""
-    if "skyfox" in goal or "ayrton" in goal:
-        return "skyfox"
+    if "platform" in goal or "codebase" in goal:
+        return "platform"
 
     return "anansi"
 

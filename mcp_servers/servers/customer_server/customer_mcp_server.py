@@ -53,10 +53,10 @@ AUTH_SUPABASE_ANON_KEY = os.getenv("AUTH_SUPABASE_ANON_KEY", "")
 PAYMENT_PROCESSOR_API_URL = os.getenv("PAYMENT_PROCESSOR_API_URL", "")
 PAYMENT_PROCESSOR_SECRET_KEY = os.getenv("PAYMENT_PROCESSOR_SECRET_KEY")
 
-# Tiamat API configuration (meter commissioning service)
-TIAMAT_API_URL = os.getenv("TIAMAT_API_URL", "")
-TIAMAT_BEARER_TOKEN = os.getenv("TIAMAT_BEARER_TOKEN", "")
-TIAMAT_API_KEY = os.getenv("TIAMAT_API_KEY", "")
+# Metering Platform API configuration (meter commissioning service)
+METERING_API_URL = os.getenv("METERING_API_URL", "")
+METERING_BEARER_TOKEN = os.getenv("METERING_BEARER_TOKEN", "")
+METERING_API_KEY = os.getenv("METERING_API_KEY", "")
 
 # TimescaleDB configuration (grid energy snapshots)
 TIMESCALE_HOST = os.getenv("TIMESCALE_HOST", "")
@@ -369,9 +369,9 @@ class CustomerServiceClient(HTTPClientMixin):
         self.auth_supabase_anon_key = AUTH_SUPABASE_ANON_KEY
         self.payment_processor_url = PAYMENT_PROCESSOR_API_URL
         self.payment_processor_key = PAYMENT_PROCESSOR_SECRET_KEY
-        self.tiamat_api_url = TIAMAT_API_URL.rstrip("/") if TIAMAT_API_URL else TIAMAT_API_URL
-        self.tiamat_bearer_token = TIAMAT_BEARER_TOKEN
-        self.tiamat_api_key = TIAMAT_API_KEY
+        self.metering_api_url = METERING_API_URL.rstrip("/") if METERING_API_URL else METERING_API_URL
+        self.metering_bearer_token = METERING_BEARER_TOKEN
+        self.metering_api_key = METERING_API_KEY
 
     def _check_rate_limit(self, action: str, meter_number: str) -> str | None:
         """Return an error string if the action is within its cooldown window, else None."""
@@ -3461,7 +3461,7 @@ class CustomerServiceClient(HTTPClientMixin):
         organization_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Retry commissioning for a meter by calling Tiamat API.
+        Retry commissioning for a meter by calling Metering Platform API.
 
         Args:
             meter_number: Meter number to retry commissioning for
@@ -3474,10 +3474,10 @@ class CustomerServiceClient(HTTPClientMixin):
         if not CUSTOMER_METER_ACTIONS_ENABLED:
             return {"error": _METER_ACTIONS_DISABLED_MSG}
 
-        # Check if Tiamat is configured
-        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+        # Check if Metering Platform is configured
+        if not self.metering_api_url or not self.metering_bearer_token:
             return {
-                "error": "Tiamat API not configured. Please contact support to enable meter commissioning actions."
+                "error": "Metering Platform API not configured. Please contact support to enable meter commissioning actions."
             }
 
         if err := self._check_rate_limit("retry_commissioning", meter_number.strip()):
@@ -3547,25 +3547,25 @@ class CustomerServiceClient(HTTPClientMixin):
             finally:
                 await conn.close()
 
-            # Call Tiamat API to retry commissioning
+            # Call Metering Platform API to retry commissioning
             http_client = await self.get_session()
-            url = f"{self.tiamat_api_url}/meter-installs/retry-commissioning"
+            url = f"{self.metering_api_url}/meter-installs/retry-commissioning"
             headers = {
                 "Content-Type": "application/json",
-                "X-API-KEY": self.tiamat_api_key,
+                "X-API-KEY": self.metering_api_key,
             }
             body = {"id": last_commissioning_id}
 
             try:
                 response = await http_client.post(url, headers=headers, json=body)
                 response.raise_for_status()
-                tiamat_response = await response.json()
+                metering_response = await response.json()
 
                 return {
                     "success": True,
                     "meter_number": meter_number,
                     "commissioning_id": last_commissioning_id,
-                    "new_commissioning_id": tiamat_response.get("id"),
+                    "new_commissioning_id": metering_response.get("id"),
                     "message": (
                         "Commissioning retry has been initiated successfully. "
                         "This process typically takes 2-5 minutes to complete. "
@@ -3574,7 +3574,7 @@ class CustomerServiceClient(HTTPClientMixin):
                 }
 
             except Exception as e:
-                logger.error(f"Tiamat API request failed: {e}")
+                logger.error(f"Metering Platform API request failed: {e}")
                 error_msg = str(e)
 
                 if "400" in error_msg or "BadRequest" in error_msg:
@@ -3602,7 +3602,7 @@ class CustomerServiceClient(HTTPClientMixin):
         organization_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Unassign a meter from its current connection by calling Tiamat API.
+        Unassign a meter from its current connection by calling Metering Platform API.
 
         Args:
             meter_number: Meter number (external reference) to unassign
@@ -3619,9 +3619,9 @@ class CustomerServiceClient(HTTPClientMixin):
             return {"error": "Meter number is required."}
         meter_number = meter_number.strip()
 
-        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+        if not self.metering_api_url or not self.metering_bearer_token:
             return {
-                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+                "error": "Metering Platform API not configured. Please contact support to enable meter actions."
             }
 
         if err := self._check_rate_limit("unassign_meter", meter_number):
@@ -3657,12 +3657,12 @@ class CustomerServiceClient(HTTPClientMixin):
             finally:
                 await conn.close()
 
-            # Call Tiamat API to unassign meter
+            # Call Metering Platform API to unassign meter
             http_client = await self.get_session()
-            url = f"{self.tiamat_api_url}/meters/{meter_id}/unassign"
+            url = f"{self.metering_api_url}/meters/{meter_id}/unassign"
             headers = {
                 "Content-Type": "application/json",
-                "X-API-KEY": self.tiamat_api_key,
+                "X-API-KEY": self.metering_api_key,
             }
 
             try:
@@ -3679,7 +3679,7 @@ class CustomerServiceClient(HTTPClientMixin):
                 }
 
             except Exception as e:
-                logger.error(f"Tiamat API unassign request failed: {e}")
+                logger.error(f"Metering Platform API unassign request failed: {e}")
                 error_msg = str(e)
 
                 if "400" in error_msg or "BadRequest" in error_msg:
@@ -3707,7 +3707,7 @@ class CustomerServiceClient(HTTPClientMixin):
         organization_id: int | None = None,
     ) -> dict[str, Any]:
         """
-        Set the HPS power limit for a meter via Tiamat API.
+        Set the HPS power limit for a meter via Metering Platform API.
 
         Sends a SET_POWER_LIMIT interaction to the meter via POST /meter-interactions/create-one.
         Requires CUSTOMER_METER_ACTIONS_ENABLED=true.
@@ -3725,9 +3725,9 @@ class CustomerServiceClient(HTTPClientMixin):
                 "error": (f"Invalid power limit: {power_limit_watts}W. Allowed values: {allowed}W.")
             }
 
-        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+        if not self.metering_api_url or not self.metering_bearer_token:
             return {
-                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+                "error": "Metering Platform API not configured. Please contact support to enable meter actions."
             }
 
         if err := self._check_rate_limit("set_meter_power_limit", meter_number):
@@ -3752,8 +3752,8 @@ class CustomerServiceClient(HTTPClientMixin):
                 await conn.close()
 
             http_client = await self.get_session()
-            url = f"{self.tiamat_api_url}/meter-interactions/create-one"
-            headers = {"Content-Type": "application/json", "X-API-KEY": self.tiamat_api_key}
+            url = f"{self.metering_api_url}/meter-interactions/create-one"
+            headers = {"Content-Type": "application/json", "X-API-KEY": self.metering_api_key}
             body = {
                 "meter_id": meter_id,
                 "meter_interaction_type": "SET_POWER_LIMIT",
@@ -3763,19 +3763,19 @@ class CustomerServiceClient(HTTPClientMixin):
             try:
                 response = await http_client.post(url, headers=headers, json=body)
                 response.raise_for_status()
-                tiamat_response = await response.json()
+                metering_response = await response.json()
                 return {
                     "success": True,
                     "meter_number": meter_number,
                     "power_limit_watts": power_limit_watts,
-                    "interaction_id": tiamat_response.get("id"),
+                    "interaction_id": metering_response.get("id"),
                     "message": (
                         f"Power limit set to {power_limit_watts}W for meter {meter_number}. "
                         "The change will take effect on the next meter communication."
                     ),
                 }
             except Exception as e:
-                logger.error(f"Tiamat API set_power_limit request failed: {e}")
+                logger.error(f"Metering Platform API set_power_limit request failed: {e}")
                 status = getattr(e, "status", None)
                 if status == 400:
                     return {
@@ -3800,7 +3800,7 @@ class CustomerServiceClient(HTTPClientMixin):
         organization_id: int | None = None,
     ) -> dict[str, Any]:
         """
-        Set the current date on a meter via Tiamat API.
+        Set the current date on a meter via Metering Platform API.
 
         Sends a SET_DATE interaction to the meter via POST /meter-interactions/create-one.
         The date is the current date in the deployment's local timezone (DEFAULT_TIMEZONE).
@@ -3813,9 +3813,9 @@ class CustomerServiceClient(HTTPClientMixin):
             return {"error": "Meter number is required."}
         meter_number = meter_number.strip()
 
-        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+        if not self.metering_api_url or not self.metering_bearer_token:
             return {
-                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+                "error": "Metering Platform API not configured. Please contact support to enable meter actions."
             }
 
         if err := self._check_rate_limit("set_meter_date", meter_number):
@@ -3843,8 +3843,8 @@ class CustomerServiceClient(HTTPClientMixin):
                 await conn.close()
 
             http_client = await self.get_session()
-            url = f"{self.tiamat_api_url}/meter-interactions/create-one"
-            headers = {"Content-Type": "application/json", "X-API-KEY": self.tiamat_api_key}
+            url = f"{self.metering_api_url}/meter-interactions/create-one"
+            headers = {"Content-Type": "application/json", "X-API-KEY": self.metering_api_key}
             body = {
                 "meter_id": meter_id,
                 "meter_interaction_type": "SET_DATE",
@@ -3854,19 +3854,19 @@ class CustomerServiceClient(HTTPClientMixin):
             try:
                 response = await http_client.post(url, headers=headers, json=body)
                 response.raise_for_status()
-                tiamat_response = await response.json()
+                metering_response = await response.json()
                 return {
                     "success": True,
                     "meter_number": meter_number,
                     "date_set": now.strftime("%Y-%m-%d"),
-                    "interaction_id": tiamat_response.get("id"),
+                    "interaction_id": metering_response.get("id"),
                     "message": (
                         f"Date set to {now.strftime('%Y-%m-%d')} on meter {meter_number}. "
                         "The change will take effect on the next meter communication."
                     ),
                 }
             except Exception as e:
-                logger.error(f"Tiamat API set_meter_date request failed: {e}")
+                logger.error(f"Metering Platform API set_meter_date request failed: {e}")
                 status = getattr(e, "status", None)
                 if status == 400:
                     return {
@@ -3891,7 +3891,7 @@ class CustomerServiceClient(HTTPClientMixin):
         interaction_type: Literal["TURN_ON", "TURN_OFF"],
         organization_id: int | None = None,
     ) -> dict[str, Any]:
-        """Send a TURN_ON or TURN_OFF interaction to a meter via Tiamat."""
+        """Send a TURN_ON or TURN_OFF interaction to a meter via Metering Platform."""
         if interaction_type not in ("TURN_ON", "TURN_OFF"):
             return {"error": f"Invalid interaction_type: {interaction_type}"}
 
@@ -3902,9 +3902,9 @@ class CustomerServiceClient(HTTPClientMixin):
             return {"error": "Meter number is required."}
         meter_number = meter_number.strip()
 
-        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+        if not self.metering_api_url or not self.metering_bearer_token:
             return {
-                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+                "error": "Metering Platform API not configured. Please contact support to enable meter actions."
             }
 
         rate_key = "turn_meter_on" if interaction_type == "TURN_ON" else "turn_meter_off"
@@ -3930,27 +3930,27 @@ class CustomerServiceClient(HTTPClientMixin):
                 await conn.close()
 
             http_client = await self.get_session()
-            url = f"{self.tiamat_api_url}/meter-interactions/create-one"
-            headers = {"Content-Type": "application/json", "X-API-KEY": self.tiamat_api_key}
+            url = f"{self.metering_api_url}/meter-interactions/create-one"
+            headers = {"Content-Type": "application/json", "X-API-KEY": self.metering_api_key}
             body = {"meter_id": meter_id, "meter_interaction_type": interaction_type}
 
             try:
                 response = await http_client.post(url, headers=headers, json=body)
                 response.raise_for_status()
-                tiamat_response = await response.json()
+                metering_response = await response.json()
                 state = "ON" if interaction_type == "TURN_ON" else "OFF"
                 return {
                     "success": True,
                     "meter_number": meter_number,
                     "state": state,
-                    "interaction_id": tiamat_response.get("id"),
+                    "interaction_id": metering_response.get("id"),
                     "message": (
                         f"Meter {meter_number} relay turned {state}. "
                         "The change will take effect on the next meter communication."
                     ),
                 }
             except Exception as e:
-                logger.error(f"Tiamat API {interaction_type} request failed: {e}")
+                logger.error(f"Metering Platform API {interaction_type} request failed: {e}")
                 status = getattr(e, "status", None)
                 if status == 400:
                     return {
@@ -3973,7 +3973,7 @@ class CustomerServiceClient(HTTPClientMixin):
         organization_id: int | None = None,
     ) -> dict[str, Any]:
         """
-        Resend the last prepayment token to a meter via Tiamat API.
+        Resend the last prepayment token to a meter via Metering Platform API.
 
         Looks up the most recent token from the directives table and delivers it
         via POST /meters/:external_reference/tokens/deliver.
@@ -3986,9 +3986,9 @@ class CustomerServiceClient(HTTPClientMixin):
             return {"error": "Meter number is required."}
         meter_number = meter_number.strip()
 
-        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+        if not self.metering_api_url or not self.metering_bearer_token:
             return {
-                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+                "error": "Metering Platform API not configured. Please contact support to enable meter actions."
             }
 
         if err := self._check_rate_limit("resend_meter_token", meter_number):
@@ -4033,10 +4033,10 @@ class CustomerServiceClient(HTTPClientMixin):
             token_code = directive["token"]
 
             http_client = await self.get_session()
-            url = f"{self.tiamat_api_url}/meters/{external_ref}/tokens/deliver"
+            url = f"{self.metering_api_url}/meters/{external_ref}/tokens/deliver"
             headers = {
                 "Content-Type": "application/json",
-                "X-API-KEY": self.tiamat_api_key,
+                "X-API-KEY": self.metering_api_key,
             }
 
             try:
@@ -4051,7 +4051,7 @@ class CustomerServiceClient(HTTPClientMixin):
                     ),
                 }
             except Exception as e:
-                logger.error(f"Tiamat token resend request failed: {e}")
+                logger.error(f"Metering Platform token resend request failed: {e}")
                 status = getattr(e, "status", None)
                 if status == 400:
                     return {
@@ -4076,7 +4076,7 @@ class CustomerServiceClient(HTTPClientMixin):
         organization_id: int | None = None,
     ) -> dict[str, Any]:
         """
-        Resend the last CLEAR_TAMPER token to a meter via Tiamat API.
+        Resend the last CLEAR_TAMPER token to a meter via Metering Platform API.
         """
         if not CUSTOMER_METER_ACTIONS_ENABLED:
             return {"error": _METER_ACTIONS_DISABLED_MSG}
@@ -4085,9 +4085,9 @@ class CustomerServiceClient(HTTPClientMixin):
             return {"error": "Meter number is required."}
         meter_number = meter_number.strip()
 
-        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+        if not self.metering_api_url or not self.metering_bearer_token:
             return {
-                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+                "error": "Metering Platform API not configured. Please contact support to enable meter actions."
             }
 
         if err := self._check_rate_limit("resend_clear_tamper_token", meter_number):
@@ -4131,10 +4131,10 @@ class CustomerServiceClient(HTTPClientMixin):
             token_code = directive["token"]
 
             http_client = await self.get_session()
-            url = f"{self.tiamat_api_url}/meters/{external_ref}/tokens/deliver"
+            url = f"{self.metering_api_url}/meters/{external_ref}/tokens/deliver"
             headers = {
                 "Content-Type": "application/json",
-                "X-API-KEY": self.tiamat_api_key,
+                "X-API-KEY": self.metering_api_key,
             }
 
             try:
@@ -4149,7 +4149,7 @@ class CustomerServiceClient(HTTPClientMixin):
                     ),
                 }
             except Exception as e:
-                logger.error(f"Tiamat CLEAR_TAMPER token resend request failed: {e}")
+                logger.error(f"Metering Platform CLEAR_TAMPER token resend request failed: {e}")
                 status = getattr(e, "status", None)
                 if status == 400:
                     return {
@@ -4174,7 +4174,7 @@ class CustomerServiceClient(HTTPClientMixin):
         organization_id: int | None = None,
     ) -> dict[str, Any]:
         """
-        Resend the last PLS (power limit set) token to a meter via Tiamat API.
+        Resend the last PLS (power limit set) token to a meter via Metering Platform API.
         """
         if not CUSTOMER_METER_ACTIONS_ENABLED:
             return {"error": _METER_ACTIONS_DISABLED_MSG}
@@ -4183,9 +4183,9 @@ class CustomerServiceClient(HTTPClientMixin):
             return {"error": "Meter number is required."}
         meter_number = meter_number.strip()
 
-        if not self.tiamat_api_url or not self.tiamat_bearer_token:
+        if not self.metering_api_url or not self.metering_bearer_token:
             return {
-                "error": "Tiamat API not configured. Please contact support to enable meter actions."
+                "error": "Metering Platform API not configured. Please contact support to enable meter actions."
             }
 
         if err := self._check_rate_limit("resend_power_limit_token", meter_number):
@@ -4229,10 +4229,10 @@ class CustomerServiceClient(HTTPClientMixin):
             token_code = directive["token"]
 
             http_client = await self.get_session()
-            url = f"{self.tiamat_api_url}/meters/{external_ref}/tokens/deliver"
+            url = f"{self.metering_api_url}/meters/{external_ref}/tokens/deliver"
             headers = {
                 "Content-Type": "application/json",
-                "X-API-KEY": self.tiamat_api_key,
+                "X-API-KEY": self.metering_api_key,
             }
 
             try:
@@ -4247,7 +4247,7 @@ class CustomerServiceClient(HTTPClientMixin):
                     ),
                 }
             except Exception as e:
-                logger.error(f"Tiamat PLS token resend request failed: {e}")
+                logger.error(f"Metering Platform PLS token resend request failed: {e}")
                 status = getattr(e, "status", None)
                 if status == 400:
                     return {
@@ -6474,8 +6474,8 @@ async def handle_read_resource(uri: str) -> str:
             "auth_supabase_configured": bool(AUTH_SUPABASE_KEY or AUTH_SUPABASE_ANON_KEY),
             "payment_processor_url": PAYMENT_PROCESSOR_API_URL,
             "payment_processor_configured": bool(PAYMENT_PROCESSOR_SECRET_KEY),
-            "tiamat_api_url": TIAMAT_API_URL,
-            "tiamat_configured": bool(TIAMAT_API_URL and TIAMAT_BEARER_TOKEN),
+            "metering_api_url": METERING_API_URL,
+            "metering_configured": bool(METERING_API_URL and METERING_BEARER_TOKEN),
             "server_name": "customer-server",
             "server_version": "1.0.0",
         }
@@ -6488,7 +6488,7 @@ async def handle_read_resource(uri: str) -> str:
             "payment_processor_configured": bool(
                 PAYMENT_PROCESSOR_API_URL and PAYMENT_PROCESSOR_SECRET_KEY
             ),
-            "tiamat_configured": bool(TIAMAT_API_URL and TIAMAT_BEARER_TOKEN),
+            "metering_configured": bool(METERING_API_URL and METERING_BEARER_TOKEN),
         }
         return json.dumps(status, indent=2)
     else:

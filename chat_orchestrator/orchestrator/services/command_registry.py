@@ -837,13 +837,13 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
         args_hint="Optionally specify grid name(s), e.g., /gtr ExampleGrid",
         staff_only=True,
     ),
-    "ayrton": CommandDefinition(
-        command="ayrton",
-        description="Investigate Skyfox codebase for an issue",
+    "codebase": CommandDefinition(
+        command="codebase",
+        description="Investigate Platform codebase for an issue",
         command_type="expert",
         packet_type="code_investigation",
         requires_args=True,
-        args_hint="Describe the issue, e.g., /ayrton why is meter 12345 not accepting tokens",
+        args_hint="Describe the issue, e.g., /codebase why is meter 12345 not accepting tokens",
         staff_only=True,
     ),
     "anansi": CommandDefinition(

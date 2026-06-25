@@ -328,15 +328,15 @@ envs:
   - key: CHIRPSTACK_BASE_URL
     value: "https://lorawan.example.com"
     scope: RUN_TIME
-  - key: TIAMAT_API_URL
-    value: "https://your-tiamat-api.example.com/"
+  - key: METERING_API_URL
+    value: "https://your-metering-api.example.com/"
     scope: RUN_TIME
-  - key: TIAMAT_BEARER_TOKEN
-    value: "${TIAMAT_BEARER_TOKEN}"
+  - key: METERING_BEARER_TOKEN
+    value: "${METERING_BEARER_TOKEN}"
     scope: RUN_TIME
     type: SECRET
-  - key: TIAMAT_API_KEY
-    value: "${TIAMAT_API_KEY}"
+  - key: METERING_API_KEY
+    value: "${METERING_API_KEY}"
     scope: RUN_TIME
     type: SECRET
   - key: CUSTOMER_METER_ACTIONS_ENABLED
@@ -428,7 +428,7 @@ envs:
     value: "${GITHUB_TOKEN}"
     scope: RUN_TIME
     type: SECRET
-  - key: SKYFOX_GITHUB_REPO
+  - key: PLATFORM_GITHUB_REPO
     value: "your-org/your-platform-repo"
     scope: RUN_TIME
   - key: ANANSI_GITHUB_REPO
