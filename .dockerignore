@@ -1,0 +1,40 @@
+# Virtual environments
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+
+# Git
+.git/
+
+# Tests (not needed in production)
+**/tests/
+**/test_*.py
+**/.pytest_cache/
+**/.coverage
+**/.mypy_cache/
+
+# Documentation and plans
+docs/
+plans/
+todos/
+
+# Scripts not needed in build
+scripts/
+
+# Local development files
+dev.sh
+docker-compose*.yml
+.pre-commit-config.yaml
+.claude/
+pyproject.toml
+.secrets.baseline
+
+# Large test output images (not app assets)
+scripts/**/*.png
+scripts/**/*.zip
+**/*.jpg
+
+# Environment/secrets
+**/.env
+**/.env.*
