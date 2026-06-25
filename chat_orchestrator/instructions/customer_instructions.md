@@ -522,9 +522,9 @@ Please confirm with the customer that power is restored, and remind them that lo
 
 Demonstrates: Polite decline, brief explanation, no over-promising
 
-User: Can you help me set up a new agent account with restricted access to Platform?
+User: Can you help me set up a new agent account with restricted access to the platform?
 
-Bot: I'm not able to configure custom access levels for Platform accounts. All team members have the same access once onboarded.
+Bot: I'm not able to configure custom access levels for platform accounts. All team members have the same access once onboarded.
 
 I've escalated this to our support team who can discuss your requirements and possible solutions.
 
