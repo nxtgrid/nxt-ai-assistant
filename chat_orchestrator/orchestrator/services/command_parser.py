@@ -9,6 +9,7 @@ Transforms /commands based on the unified command registry.
 from __future__ import annotations
 
 import os
+import re as _re
 from typing import TYPE_CHECKING, List, Tuple
 
 from orchestrator.services.command_registry import (
@@ -235,6 +236,47 @@ class CommandParser:
             List of all CommandDefinitions
         """
         return list(self._registry.values())
+
+
+# --- /lpp GPS-anchor route (Route B) ---
+
+_BARE_LATLON_RE = _re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$")
+
+
+def _valid_latlon(lat_s: str, lon_s: str) -> bool:
+    try:
+        lat, lon = float(lat_s), float(lon_s)
+    except ValueError:
+        return False
+    return -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0
+
+
+def parse_lpp_anchor_args(args: str) -> dict | None:
+    """Parse /lpp args for a GPS-anchor (Route B) invocation.
+
+    Recognizes either form:
+      - anchor:<lat>,<lon> [name:"Community Name"]   (explicit, supports a name)
+      - bare coordinates:  <lat>,<lon>  or  <lat>, <lon>   (whole string, no name)
+
+    Returns {latitude, longitude, community_name?} or None when the args are not
+    a GPS anchor (site name or multi-site list fall through to the submission route).
+    """
+    if not args:
+        return None
+
+    m = _re.search(r"anchor:\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)", args, _re.IGNORECASE)
+    if m and _valid_latlon(m.group(1), m.group(2)):
+        result: dict = {"latitude": m.group(1), "longitude": m.group(2)}
+        name_m = _re.search(r'name:\s*"([^"]+)"|name:\s*(\S+)', args, _re.IGNORECASE)
+        if name_m:
+            result["community_name"] = name_m.group(1) or name_m.group(2)
+        return result
+
+    bare = _BARE_LATLON_RE.match(args)
+    if bare and _valid_latlon(bare.group(1), bare.group(2)):
+        return {"latitude": bare.group(1), "longitude": bare.group(2)}
+
+    return None
 
 
 __all__ = ["CommandParser", "UNRECOGNIZED_COMMAND_TEMPLATE"]

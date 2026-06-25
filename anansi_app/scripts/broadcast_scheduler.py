@@ -24,11 +24,19 @@ from typing import Any, Dict, Optional
 
 import httpx
 
-# Add parent directory to path for imports
+# Add parent directory (anansi_app) to path for service imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Add repo root to path so `shared` is importable (matches production PYTHONPATH=/app)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from services.broadcast_service import BroadcastService
 from services.scheduling_service import SchedulingService
+
+# Shared recurrence logic — single source of truth shared with the chat /schedule path
+try:
+    from shared.scheduling.recurrence import advance as advance_recurrence
+except ImportError:
+    advance_recurrence = None  # type: ignore[assignment]
 
 # Chat orchestrator URL for executing commands
 CHAT_ORCHESTRATOR_URL = os.getenv(
@@ -137,8 +145,18 @@ def process_pending_broadcasts(processor_id: str, verbose: bool = True) -> int:
                 )
                 continue
 
-            # Execute the existing scheduled broadcast (updates original record)
+            # Execute the existing scheduled broadcast. For one-shot broadcasts this
+            # updates the original record; for a recurring template it spawns and
+            # sends a child occurrence, leaving the template active.
             result = broadcast_service.execute_scheduled_broadcast(broadcast_id)
+
+            # For recurring templates, compute the next run and re-queue it.
+            # (No-op for one-shot broadcasts.)
+            try:
+                broadcast_service.advance_recurring_broadcast(broadcast_id)
+            except Exception as e:
+                if verbose:
+                    print(f"    WARNING: Failed to advance recurring broadcast: {e}")
 
             # Mark as completed with result
             scheduling_service.mark_completed(
@@ -581,7 +599,8 @@ def _update_recurring_schedule(supabase, schedule_id: str, verbose: bool = True)
 
         schedule_data = schedule.data
 
-        if schedule_data.get("schedule_type") != "recurring":
+        schedule_type = schedule_data.get("schedule_type", "recurring")
+        if schedule_type not in ("recurring", "biweekly"):
             # Mark one-time schedule as completed
             supabase.table("user_schedules").update(
                 {
@@ -599,18 +618,11 @@ def _update_recurring_schedule(supabase, schedule_id: str, verbose: bool = True)
         if not cron_expr:
             return
 
-        # Calculate next run
-        try:
-            import pytz  # type: ignore[import-untyped]
-            from croniter import croniter  # type: ignore[import-untyped]
-
-            now = datetime.now(pytz.UTC)
-            cron = croniter(cron_expr, now)
-            next_run = cron.get_next(datetime)
-            if next_run.tzinfo is None:
-                next_run = next_run.replace(tzinfo=pytz.UTC)
-        except ImportError:
-            # Fallback: schedule 24 hours later
+        # Calculate next run via the shared advance() helper (handles biweekly skip)
+        if advance_recurrence is not None:
+            next_run = advance_recurrence(schedule_type, cron_expr)
+        else:
+            # Fallback: schedule 24 hours later if shared module unavailable
             import pytz  # type: ignore[import-untyped]
 
             next_run = datetime.now(pytz.UTC) + timedelta(hours=24)

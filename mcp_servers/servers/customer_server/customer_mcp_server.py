@@ -134,7 +134,9 @@ def _format_time_12h(hour: int, minute: int) -> str:
         return f"{hour - 12}:{minute:02d} PM"
 
 
-def _to_local_time(utc_dt: Optional[datetime], tz_name: str = "Africa/Lagos") -> Optional[datetime]:
+def _to_local_time(
+    utc_dt: Optional[datetime], tz_name: str = DEFAULT_TIMEZONE
+) -> Optional[datetime]:
     """
     Convert a UTC datetime to local time in the specified timezone.
 
@@ -163,7 +165,7 @@ def _to_local_time(utc_dt: Optional[datetime], tz_name: str = "Africa/Lagos") ->
 
 
 def _format_local_timestamp(
-    utc_dt: Optional[datetime], tz_name: str = "Africa/Lagos", include_tz: bool = True
+    utc_dt: Optional[datetime], tz_name: str = DEFAULT_TIMEZONE, include_tz: bool = True
 ) -> Optional[str]:
     """
     Format a UTC datetime as an ISO string in local time.
@@ -185,7 +187,7 @@ def _format_local_timestamp(
 
 
 def _format_downtime_summary_text(
-    downtime_dict: Dict[str, Any], tz_name: str = "Africa/Lagos"
+    downtime_dict: Dict[str, Any], tz_name: str = DEFAULT_TIMEZONE
 ) -> str:
     """Format a pre-built summary sentence from downtime data for LLM verbatim use.
 
@@ -798,7 +800,7 @@ class CustomerServiceClient(HTTPClientMixin):
         grid_id: int,
         start_date: datetime,
         end_date: datetime,
-        grid_tz: str = "Africa/Lagos",
+        grid_tz: str = DEFAULT_TIMEZONE,
     ) -> Dict[str, Any]:
         """
         Query TimescaleDB for FS state transitions over a date range.
@@ -902,7 +904,7 @@ class CustomerServiceClient(HTTPClientMixin):
         grid_id: int,
         start_date: datetime,
         end_date: datetime,
-        grid_tz: str = "Africa/Lagos",
+        grid_tz: str = DEFAULT_TIMEZONE,
     ) -> Dict[str, Any]:
         """
         Query Auth DB for FS command executions in a date range.
@@ -983,7 +985,7 @@ class CustomerServiceClient(HTTPClientMixin):
         self,
         transitions_data: Dict[str, Any],
         commands_data: Dict[str, Any],
-        grid_tz: str = "Africa/Lagos",
+        grid_tz: str = DEFAULT_TIMEZONE,
     ) -> List[Dict[str, Any]]:
         """
         Merge command executions and state transitions into a per-day correlated view.
@@ -3801,7 +3803,7 @@ class CustomerServiceClient(HTTPClientMixin):
         Set the current date on a meter via Tiamat API.
 
         Sends a SET_DATE interaction to the meter via POST /meter-interactions/create-one.
-        The date is always the current date in Africa/Lagos time (WAT, UTC+1).
+        The date is the current date in the deployment's local timezone (DEFAULT_TIMEZONE).
         Requires CUSTOMER_METER_ACTIONS_ENABLED=true.
         """
         if not CUSTOMER_METER_ACTIONS_ENABLED:
@@ -3824,8 +3826,8 @@ class CustomerServiceClient(HTTPClientMixin):
             if organization_id is None:
                 return {"error": "Could not determine organization for user"}
 
-        # Use Africa/Lagos (WAT, UTC+1) so the calendar date matches the meter's local time
-        now = datetime.now(ZoneInfo("Africa/Lagos"))
+        # Use the deployment's local timezone so the calendar date matches the meter's local time
+        now = datetime.now(ZoneInfo(DEFAULT_TIMEZONE))
 
         try:
             conn, meter = await self._fetch_meter(meter_number, organization_id)

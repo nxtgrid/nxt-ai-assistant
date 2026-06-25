@@ -29,6 +29,7 @@ import aiohttp
 
 from shared.utils.logging import get_logger
 from shared.utils.telegram_buttons import build_escalation_track_keyboard
+from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
 from shared.utils.telegram_markdown import escape_markdown as _escape_telegram_markdown
 
 LOGGER = get_logger(__name__)
@@ -67,6 +68,21 @@ def _is_after_hours() -> bool:
     now = datetime.now(tz)
     start_hour = int(os.getenv("AFTER_HOURS_START_HOUR", "19"))
     return now.weekday() >= 5 or now.hour >= start_hour
+
+
+def _is_markdown_parse_error(result: Dict[str, Any]) -> bool:
+    """True if a Telegram sendMessage response failed because of malformed Markdown.
+
+    Telegram returns HTTP 400 with a "can't parse entities" description when the
+    message text contains a character it reads as an unterminated Markdown entity
+    — e.g. the lone underscore in "CLEAR_TAMPER" opens an italic entity that never
+    closes. Callers retry such sends as plain text so the message still gets
+    delivered (see CLAUDE.md "Telegram Message Formatting").
+    """
+    if not result or result.get("ok"):
+        return False
+    description = str(result.get("description", "")).lower()
+    return result.get("error_code") == 400 and "can't parse entities" in description
 
 
 def _adf_to_text(adf: Any, _depth: int = 0, _max_depth: int = 50) -> str:
@@ -1128,7 +1144,24 @@ class EscalationService:
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as response:
                 result: Dict[str, Any] = await response.json()
-                return result
+
+            # Retry as plain text if the message was rejected for malformed Markdown
+            # (e.g. a lone underscore in a support reply like "CLEAR_TAMPER"). Without
+            # this, the reply is silently dropped instead of reaching the customer.
+            if _is_markdown_parse_error(result) and "parse_mode" in payload:
+                LOGGER.warning(
+                    "Telegram rejected message as malformed Markdown (%s); retrying as plain text",
+                    result.get("description"),
+                )
+                retry_payload = {k: v for k, v in payload.items() if k != "parse_mode"}
+                async with session.post(
+                    url,
+                    json=retry_payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as retry_response:
+                    result = await retry_response.json()
+
+            return result
 
         except Exception as e:
             LOGGER.exception(f"Error sending Telegram message: {e}")
@@ -1194,8 +1227,14 @@ class EscalationService:
         customer_email = mapping.get("customer_email")
 
         try:
-            # Format support response for customer (no staff name - keep anonymous)
-            response_text = f"💬 **Response from Support Team**\n\n{reply_text}"
+            # Format support response for customer (no staff name - keep anonymous).
+            # Run the staff-typed reply through the Telegram-markdown converter so
+            # **bold** becomes *bold* and mid-word underscores (e.g. "CLEAR_TAMPER")
+            # are escaped — otherwise Telegram rejects the send as malformed Markdown.
+            # The plain-text fallback in _send_telegram_message covers anything missed.
+            response_text = convert_github_to_telegram_markdown(
+                f"💬 **Response from Support Team**\n\n{reply_text}"
+            )
 
             # Send to customer's chat
             result = await self._send_telegram_message(
@@ -1606,7 +1645,24 @@ class EscalationService:
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as response:
                 result: Dict[str, Any] = await response.json()
-                return result
+
+            # Retry as plain text if rejected for malformed Markdown (see
+            # _send_telegram_message for the rationale). reply_markup and
+            # message_thread_id are preserved — only parse_mode is dropped.
+            if _is_markdown_parse_error(result) and "parse_mode" in payload:
+                LOGGER.warning(
+                    "Telegram rejected reply as malformed Markdown (%s); retrying as plain text",
+                    result.get("description"),
+                )
+                retry_payload = {k: v for k, v in payload.items() if k != "parse_mode"}
+                async with tg_session.post(
+                    url,
+                    json=retry_payload,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as retry_response:
+                    result = await retry_response.json()
+
+            return result
 
         except Exception as e:
             LOGGER.exception(f"Error sending Telegram reply: {e}")

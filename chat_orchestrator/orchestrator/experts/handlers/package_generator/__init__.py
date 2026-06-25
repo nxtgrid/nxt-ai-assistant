@@ -40,6 +40,9 @@ from orchestrator.experts.handlers.package_generator.generate_site_layout import
 )
 from orchestrator.experts.handlers.package_generator.populate_bom_tab import populate_bom_tab
 from orchestrator.experts.handlers.package_generator.populate_cells import populate_lpp_cells
+from orchestrator.experts.handlers.package_generator.resolve_community_site import (
+    resolve_community_site,
+)
 from orchestrator.experts.handlers.package_generator.resolve_sites import resolve_sites
 from orchestrator.experts.handlers.package_generator.send_map_to_telegram import (
     send_lpp_map_to_telegram,
@@ -49,6 +52,7 @@ from orchestrator.experts.handlers.package_generator.update_design_distances imp
 )
 
 __all__ = [
+    "resolve_community_site",
     "resolve_sites",
     "create_site_folder",
     "generate_distribution_layout",

@@ -206,7 +206,7 @@ class TestGenerateDistributionLayoutStep:
 
         with patch.dict("os.environ", {"AUTH_DB_HOST": "localhost"}, clear=False):
             with patch(
-                "orchestrator.experts.handlers.package_generator.generate_distribution_layout.fetch_site_pipeline_row",
+                "orchestrator.experts.handlers.package_generator.generate_distribution_layout.load_site_row_data",
                 new_callable=AsyncMock,
                 return_value=fake_row,
             ):
@@ -261,7 +261,7 @@ class TestGenerateDistributionLayoutStep:
         with patch.dict("os.environ", {"AUTH_DB_HOST": "localhost"}, clear=False):
             with (
                 patch(
-                    "orchestrator.experts.handlers.package_generator.generate_distribution_layout.fetch_site_pipeline_row",
+                    "orchestrator.experts.handlers.package_generator.generate_distribution_layout.load_site_row_data",
                     new_callable=AsyncMock,
                     return_value=fake_row,
                 ),
@@ -279,3 +279,55 @@ class TestGenerateDistributionLayoutStep:
         assert result.data == fake_layout
         assert result.state_updates["layout_generated"] is True
         assert result.state_updates["layout_coverage_pct"] == 92.0
+
+    @pytest.mark.asyncio
+    async def test_layout_community_route_does_not_require_site_id(self, monkeypatch):
+        monkeypatch.setenv("AUTH_DB_HOST", "h")
+
+        from orchestrator.experts.handlers.package_generator.generate_distribution_layout import (
+            generate_distribution_layout,
+        )
+
+        community_row = {
+            "id": None,
+            "site_name": "Commville",
+            "outline_geom": b"x",
+            "buildings_geo_flat": {"features": [{"a": 1}, {"a": 2}]},
+            "poles_geo_flat": {"features": []},
+        }
+
+        async def fake_load(ctx, db_config):
+            return dict(community_row)
+
+        class _Boundary:
+            polygon = None
+
+        ctx = MagicMock()
+        ctx.get_input = MagicMock(return_value=None)
+        ctx.get_state = MagicMock(
+            side_effect=lambda k, *a: "community" if k == "geo_source" else None
+        )
+        ctx.get_parameter_value = MagicMock(return_value=None)
+        ctx.send_progress_to_user = AsyncMock()
+
+        with (
+            patch(
+                "orchestrator.experts.handlers.package_generator.generate_distribution_layout.load_site_row_data",
+                side_effect=fake_load,
+            ),
+            patch(
+                "shared.mapping.data_reader.extract_site_boundary",
+                return_value=_Boundary(),
+            ),
+            patch(
+                "shared.layout.generate_layout",
+                return_value={
+                    "poles_geo_flat": {"features": [1]},
+                    "meta_geo_flat": {"coverage_percentage": 95, "pole_count": 3},
+                },
+            ),
+        ):
+            result = await generate_distribution_layout(ctx)
+
+        # Did not bail with skip_reason="no_site_id"
+        assert result.data.get("skip_reason") != "no_site_id"

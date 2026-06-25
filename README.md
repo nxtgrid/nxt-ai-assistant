@@ -719,22 +719,42 @@ docker run -p 8000:8000 --env-file .env anansi-orchestrator
 
 Some features require external data files or third-party services. All are optional — the core chat orchestrator works without them.
 
-### GRID3 GeoPackage (Community Boundary Detection)
+### GRID3 GeoPackages (Community Boundary Detection)
 
-The layout engine and community detection expert use the GRID3 Nigeria settlement extents dataset to detect community boundaries around GPS points.
+The layout engine and community detection expert use GRID3 settlement-extents datasets to detect community boundaries around GPS points. GRID3 publishes these per-country for all of sub-Saharan Africa, so coverage is driven by a **manifest** rather than a single hardcoded file: an anchor's country is reverse-geocoded and matched against the datasets you have on hand.
 
-**Download:**
-1. Go to [https://grid3.org/resources/datasets](https://grid3.org/resources/datasets)
-2. Search for **"NGA — Settlement Extents"** and download the GeoPackage (`.gpkg`) file.
-3. The expected filename is `GRID3_NGA_settlement_extents_v04_3.gpkg` (≈3.4 GB).
+**Set up the data location:**
+1. Go to [https://grid3.org/resources/datasets](https://grid3.org/resources/datasets) and download the **"Settlement Extents"** GeoPackage (`.gpkg`) for each country you operate in (e.g. `NGA`, ≈3.4 GB).
+2. Put them in one directory (local path or `s3://` prefix) and point `SETTLEMENT_DATA_DIR` at it.
+3. Add a `manifest.json` in that directory describing each dataset:
 
-```bash
-# After download, note the full path to the .gpkg file and set:
-GRID3_GPKG_PATH=/path/to/GRID3_NGA_settlement_extents_v04_3.gpkg
+```json
+{
+  "datasets": [
+    {
+      "iso2": "NG",
+      "iso3": "NGA",
+      "country_name": "Nigeria",
+      "file": "GRID3_NGA_settlement_extents_v04_3.gpkg",
+      "layer": "main_GRID3_NGA_settlement_extents_v4_0",
+      "building_count_col": "building_count"
+    }
+  ]
+}
 ```
 
+```bash
+SETTLEMENT_DATA_DIR=/path/to/settlement-data   # holds the .gpkg files + manifest.json
+```
 
-If `GRID3_GPKG_PATH` is not set, community detection expert steps will fail with a clear error but the rest of the system is unaffected.
+- `iso2` is the ISO 3166-1 alpha-2 code returned by reverse-geocoding (this is the match key).
+- `file` may be a bare filename (resolved against `SETTLEMENT_DATA_DIR`), an absolute path, or an `s3://` URI — so a small local manifest can point at large remote GeoPackages.
+- `layer` / `building_count_col` vary by country/version; copy them from each GeoPackage.
+- For container/S3 deploys you can instead set `SETTLEMENT_MANIFEST_JSON` to the inline manifest JSON.
+
+**Adding a country:** drop its `.gpkg` in the location and add a manifest entry — no code change.
+
+**Legacy mode:** if `SETTLEMENT_DATA_DIR` is unset but `GRID3_GPKG_PATH` points at a single Nigeria GeoPackage, that still works (Nigeria-only). If neither is configured, community detection steps fail with a clear, human-readable error and the rest of the system is unaffected. Anchors in a country with no dataset get a message naming the country and listing supported ones.
 
 ### Tiamat API (Meter Management)
 

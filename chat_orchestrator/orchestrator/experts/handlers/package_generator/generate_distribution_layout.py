@@ -11,9 +11,10 @@ import asyncio
 import os
 
 from orchestrator.experts.handlers.package_generator.generate_map import _get_db_config
+from orchestrator.experts.handlers.package_generator.site_geo_source import load_site_row_data
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
-from shared.mapping.data_reader import _ensure_dict, fetch_site_pipeline_row
+from shared.mapping.data_reader import _ensure_dict
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
 
@@ -86,10 +87,11 @@ async def generate_distribution_layout(context: StepContext) -> StepResult:
             progress_message="Distribution layout already generated.",
         )
 
+    is_community = context.get_state("geo_source") == "community"
     site_id = context.get_input("site_id") or context.get_state("site_id")
     site_name = context.get_input("site_name") or context.get_state("site_name")
 
-    if not site_id:
+    if not is_community and not site_id:
         LOGGER.info("No site_id available yet — skipping distribution layout")
         return StepResult(
             data={"skipped": True, "skip_reason": "no_site_id"},
@@ -98,24 +100,24 @@ async def generate_distribution_layout(context: StepContext) -> StepResult:
         )
 
     db_config = _get_db_config()
-    if not db_config.get("host"):
+    if not is_community and not db_config.get("host"):
         LOGGER.warning("AUTH_DB_HOST not set — skipping distribution layout")
         return StepResult(
             data={"skipped": True, "skip_reason": "no_db_config"},
             state_updates={"site_candidates": []},
         )
 
-    # Fetch site data
+    # Fetch geo data via the route-agnostic resolver (DB row OR community boundary+footprints)
     try:
-        row_data = await fetch_site_pipeline_row(site_id=int(site_id), db_config=db_config)
+        row_data = await load_site_row_data(context, db_config)
     except ValueError:
-        LOGGER.warning(f"Site {site_id} not found in pd_site_submissions")
+        LOGGER.warning(f"Site geo not found (site_id={site_id}, community={is_community})")
         return StepResult(
             data={"skipped": True, "skip_reason": "site_not_found"},
             state_updates={"site_candidates": []},
         )
     except Exception as e:
-        LOGGER.exception(f"Database error fetching site {site_id}: {e}")
+        LOGGER.exception(f"Error resolving site geo: {e}")
         return StepResult(
             data={"skipped": True, "skip_reason": "db_error"},
             state_updates={"site_candidates": []},

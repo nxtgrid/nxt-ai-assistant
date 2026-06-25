@@ -537,8 +537,22 @@ CREATE TABLE IF NOT EXISTS broadcasts (
     failed_sends            integer DEFAULT 0,
     verification_passed     boolean,
     verification_feedback   text,
-    metadata                jsonb DEFAULT '{}'
+    metadata                jsonb DEFAULT '{}',
+    -- Recurrence (optional). When schedule_type IS NULL/'once' the broadcast is a
+    -- one-shot (legacy behaviour). A recurring "template" row carries the cron;
+    -- each fire spawns a child "occurrence" row (recurrence_parent_id set) which
+    -- holds no image blobs of its own and reads images from its parent template.
+    schedule_type           text,         -- NULL/'once' | 'recurring' | 'biweekly'
+    cron_expression         text,         -- UTC cron for the recurring template
+    timezone                text,         -- timezone the schedule was authored in
+    next_run_at             timestamptz,  -- next fire for an active recurring template
+    recurrence_parent_id    uuid REFERENCES broadcasts (id) ON DELETE SET NULL
 );
+
+-- Look up occurrences by their parent template
+CREATE INDEX IF NOT EXISTS idx_broadcasts_recurrence_parent
+    ON broadcasts (recurrence_parent_id)
+    WHERE recurrence_parent_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS broadcast_logs (
     id                      uuid PRIMARY KEY DEFAULT gen_random_uuid(),

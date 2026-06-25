@@ -53,6 +53,7 @@ dependencies = [
     "pytz>=2024.1",  # Timezone handling
     # LLM observability (Langfuse)
     "langfuse>=3.0,<4",
+    "s2sphere>=0.2.5",
 ]
 
 [tool.setuptools.packages.find]

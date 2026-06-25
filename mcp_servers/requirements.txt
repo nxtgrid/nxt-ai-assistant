@@ -48,3 +48,4 @@ tavily-python
 
 # Geospatial (geo hazard lookups — WRI Aqueduct Floods + Copernicus DEM via COG range requests)
 rasterio>=1.3
+s2sphere>=0.2.5

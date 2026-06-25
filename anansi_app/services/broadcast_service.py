@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import ssl
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,6 +21,18 @@ import httpx
 from supabase import Client, create_client
 
 from services.scheduling_service import SchedulingService
+
+# Ensure the repo root is importable so `shared` resolves locally too
+# (production sets PYTHONPATH=/app where shared lives at /app/shared).
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+# Shared recurrence logic — single source of truth shared with the chat /schedule path
+try:
+    from shared.scheduling.recurrence import advance as advance_recurrence
+except ImportError:
+    advance_recurrence = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -499,6 +512,7 @@ class BroadcastService:
         verification_passed: Optional[bool] = None,
         verification_feedback: Optional[str] = None,
         images: Optional[List["ImageData"]] = None,
+        recurrence: Optional[Dict[str, Any]] = None,
     ) -> BroadcastResult:
         """
         Send broadcast to multiple groups.
@@ -507,10 +521,16 @@ class BroadcastService:
             message: Message template (with placeholders)
             group_ids: List of target Telegram chat IDs
             created_by: Admin email
-            scheduled_for: Optional scheduled time (UTC)
+            scheduled_for: Optional scheduled time (UTC). For recurring broadcasts
+                this is the first occurrence.
             verification_passed: Whether LLM verification passed
             verification_feedback: Feedback from LLM verification
             images: Optional list of ImageData attachments (sent before text)
+            recurrence: Optional dict {"schedule_type", "cron_expression", "timezone"}.
+                When provided (alongside scheduled_for), the inserted broadcast becomes
+                a recurring *template* that is never sent directly; each fire spawns a
+                child occurrence (see execute_scheduled_broadcast). The template holds
+                the editable images; occurrences read images from it at send time.
 
         Returns:
             BroadcastResult with delivery status
@@ -545,6 +565,13 @@ class BroadcastService:
                 }
             if scheduled_for:
                 broadcast_data["scheduled_for"] = scheduled_for.isoformat()
+            # Recurring template: store the recurrence config. The template is never
+            # sent directly; the scheduler spawns occurrences from it.
+            if recurrence and scheduled_for:
+                broadcast_data["schedule_type"] = recurrence.get("schedule_type")
+                broadcast_data["cron_expression"] = recurrence.get("cron_expression")
+                broadcast_data["timezone"] = recurrence.get("timezone")
+                broadcast_data["next_run_at"] = scheduled_for.isoformat()
 
             broadcast = self._supabase.table("broadcasts").insert(broadcast_data).execute()
             broadcast_id = broadcast.data[0]["id"]
@@ -567,7 +594,10 @@ class BroadcastService:
                 "group_ids": group_ids,
                 "created_by": created_by,
             }
-            if images:
+            # For recurring templates, keep image blobs out of the queue payload —
+            # occurrences read images live from the template record at send time.
+            # (Avoids duplicating large base64 blobs into scheduled_messages JSONB.)
+            if images and not recurrence:
                 payload["images"] = [img.to_dict() for img in images]
             success, msg, schedule_id = scheduling_service.schedule_message(
                 message_type="broadcast",
@@ -1023,8 +1053,12 @@ class BroadcastService:
         """
         Cancel a scheduled broadcast.
 
+        For a recurring template this cancels the whole series: the template is
+        marked cancelled and any pending occurrence in scheduled_messages is removed
+        so no further sends fire.
+
         Args:
-            broadcast_id: Broadcast UUID
+            broadcast_id: Broadcast UUID (one-shot broadcast or recurring template)
 
         Returns:
             Tuple of (success, message)
@@ -1036,10 +1070,113 @@ class BroadcastService:
             self._supabase.table("broadcasts").update({"status": "cancelled"}).eq(
                 "id", broadcast_id
             ).eq("status", "scheduled").execute()  # Fixed: was "pending", should be "scheduled"
+
+            # Remove any pending queue entry pointing at this broadcast so a recurring
+            # series stops immediately (no-op for one-shot broadcasts).
+            try:
+                self._supabase.table("scheduled_messages").delete().eq("status", "pending").eq(
+                    "payload->>broadcast_id", broadcast_id
+                ).execute()
+            except Exception as e:
+                logger.warning(
+                    "Could not clear pending queue for broadcast %s: %s", broadcast_id, e
+                )
+
             return True, "Broadcast cancelled"
         except Exception as e:
             logger.error("Error cancelling broadcast: %s", e)
             return False, f"Error: {str(e)}"
+
+    def advance_recurring_broadcast(self, template_id: str) -> Optional[datetime]:
+        """
+        After a recurring template fires, compute its next run and re-queue it.
+
+        Mirrors the chat `/schedule` re-queue pattern (broadcast_scheduler's
+        _update_recurring_schedule). No-op for one-shot broadcasts or occurrences.
+
+        Args:
+            template_id: The recurring template broadcast UUID that was just executed.
+
+        Returns:
+            The next run datetime (UTC), or None if not a recurring template.
+        """
+        if not self._supabase:
+            return None
+
+        try:
+            response = (
+                self._supabase.table("broadcasts")
+                .select("*")
+                .eq("id", template_id)
+                .single()
+                .execute()
+            )
+            template = response.data
+        except Exception as e:
+            logger.error("Error fetching template %s for advance: %s", template_id, e)
+            return None
+
+        if not template:
+            return None
+
+        schedule_type = template.get("schedule_type")
+        cron_expression = template.get("cron_expression")
+        # Only advance active recurring templates (not occurrences, not one-shots)
+        if (
+            schedule_type not in ("recurring", "biweekly")
+            or template.get("recurrence_parent_id") is not None
+            or not cron_expression
+        ):
+            return None
+
+        # A cancelled/paused template must not be re-queued
+        if template.get("status") not in ("scheduled", "sending"):
+            return None
+
+        if advance_recurrence is None:
+            logger.error(
+                "shared.scheduling.recurrence unavailable; cannot advance broadcast %s",
+                template_id,
+            )
+            return None
+
+        try:
+            next_run = advance_recurrence(schedule_type, cron_expression)
+        except Exception as e:
+            logger.error("Error computing next run for template %s: %s", template_id, e)
+            return None
+
+        # Keep the template active and pointed at its next occurrence
+        try:
+            self._supabase.table("broadcasts").update(
+                {
+                    "status": "scheduled",
+                    "scheduled_for": next_run.isoformat(),
+                    "next_run_at": next_run.isoformat(),
+                    "successful_sends": 0,
+                    "failed_sends": 0,
+                }
+            ).eq("id", template_id).execute()
+        except Exception as e:
+            logger.error("Error updating template %s next run: %s", template_id, e)
+            return None
+
+        # Queue the next occurrence in scheduled_messages
+        scheduling_service = SchedulingService()
+        success, msg, _ = scheduling_service.schedule_message(
+            message_type="broadcast",
+            payload={
+                "broadcast_id": template_id,
+                "created_by": template.get("created_by", "scheduler"),
+            },
+            scheduled_for=next_run,
+            created_by=template.get("created_by", "scheduler"),
+        )
+        if not success:
+            logger.warning("Failed to queue next occurrence for template %s: %s", template_id, msg)
+
+        logger.info("Recurring broadcast %s: next run at %s", template_id, next_run.isoformat())
+        return next_run
 
     def execute_scheduled_broadcast(self, broadcast_id: str) -> BroadcastResult:
         """
@@ -1102,10 +1239,51 @@ class BroadcastService:
                 errors=["Missing message or group_ids"],
             )
 
-        # Update status to sending
+        # Determine which record holds this send's status/logs. For a recurring
+        # template, spawn a fresh child "occurrence" so the template stays active
+        # and each fire appears separately in history. Images are read from the
+        # template above; the occurrence stores no blobs (only the image count).
+        record_id = broadcast_id
+        schedule_type = broadcast.get("schedule_type")
+        is_recurring_template = (
+            schedule_type in ("recurring", "biweekly")
+            and broadcast.get("recurrence_parent_id") is None
+        )
+        if is_recurring_template:
+            occurrence_metadata: Dict[str, Any] = {}
+            image_count = metadata.get("image_count") or (len(images) if images else 0)
+            if image_count:
+                occurrence_metadata["image_count"] = image_count
+            try:
+                occurrence = (
+                    self._supabase.table("broadcasts")
+                    .insert(
+                        {
+                            "message": message,
+                            "created_by": created_by,
+                            "target_group_ids": group_ids,
+                            "total_recipients": len(group_ids),
+                            "status": "sending",
+                            "verification_passed": broadcast.get("verification_passed"),
+                            "verification_feedback": broadcast.get("verification_feedback"),
+                            "recurrence_parent_id": broadcast_id,
+                            "metadata": occurrence_metadata,
+                        }
+                    )
+                    .execute()
+                )
+                record_id = occurrence.data[0]["id"]
+            except Exception as e:
+                logger.error(
+                    "Error creating occurrence for template %s, sending against template: %s",
+                    broadcast_id,
+                    e,
+                )
+
+        # Update status to sending (occurrence is already 'sending'; harmless re-set)
         try:
             self._supabase.table("broadcasts").update({"status": "sending"}).eq(
-                "id", broadcast_id
+                "id", record_id
             ).execute()
         except Exception as e:
             logger.error("Error updating broadcast status to sending: %s", e)
@@ -1147,7 +1325,7 @@ class BroadcastService:
 
             # Log delivery result
             log_entry = {
-                "broadcast_id": broadcast_id,
+                "broadcast_id": record_id,
                 "chat_id": chat_id,
                 "chat_name": chat_name,
                 "enriched_message": enriched_message,
@@ -1173,7 +1351,9 @@ class BroadcastService:
 
             time.sleep(self.RATE_LIMIT_DELAY)
 
-        # Update broadcast status to completed
+        # Update broadcast status to completed (occurrence or one-shot record).
+        # The recurring template itself is left active; advance_recurring_broadcast
+        # moves it to its next run.
         try:
             self._supabase.table("broadcasts").update(
                 {
@@ -1181,12 +1361,12 @@ class BroadcastService:
                     "successful_sends": successful,
                     "failed_sends": len(group_ids) - successful,
                 }
-            ).eq("id", broadcast_id).execute()
+            ).eq("id", record_id).execute()
         except Exception as e:
             logger.error("Error updating broadcast status: %s", e)
 
         return BroadcastResult(
-            broadcast_id=broadcast_id,
+            broadcast_id=record_id,
             total=len(group_ids),
             successful=successful,
             failed=len(group_ids) - successful,

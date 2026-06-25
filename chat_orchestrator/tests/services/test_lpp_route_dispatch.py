@@ -1,0 +1,44 @@
+from orchestrator.services.command_parser import parse_lpp_anchor_args
+
+
+def test_parse_anchor_full():
+    parsed = parse_lpp_anchor_args('anchor:6.8244,4.5909 name:"Test Community"')
+    assert parsed == {
+        "latitude": "6.8244",
+        "longitude": "4.5909",
+        "community_name": "Test Community",
+    }
+
+
+def test_parse_anchor_no_name():
+    parsed = parse_lpp_anchor_args("anchor:6.8244,4.5909")
+    assert parsed["latitude"] == "6.8244"
+    assert parsed["longitude"] == "4.5909"
+    assert parsed.get("community_name") in (None, "")
+
+
+def test_parse_bare_coords_no_space():
+    parsed = parse_lpp_anchor_args("6.8244,4.5909")
+    assert parsed == {"latitude": "6.8244", "longitude": "4.5909"}
+
+
+def test_parse_bare_coords_with_space():
+    parsed = parse_lpp_anchor_args("6.8244, 4.5909")
+    assert parsed == {"latitude": "6.8244", "longitude": "4.5909"}
+
+
+def test_parse_negative_bare_coords():
+    parsed = parse_lpp_anchor_args("-1.5, 36.8")
+    assert parsed == {"latitude": "-1.5", "longitude": "36.8"}
+
+
+def test_parse_anchor_absent_returns_none():
+    assert parse_lpp_anchor_args("ExampleSite") is None
+
+
+def test_parse_site_names_not_treated_as_coords():
+    assert parse_lpp_anchor_args("Site1, Site2") is None
+
+
+def test_parse_out_of_range_falls_through_to_submission():
+    assert parse_lpp_anchor_args("12, 5000") is None

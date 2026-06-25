@@ -142,6 +142,14 @@ async def resolve_sites(context: StepContext) -> StepResult:
 
     Fails fast if ANY name is unresolvable.
     """
+    # Community (Route B) resolves its own geo via resolve_community_site; nothing to do here.
+    if context.get_state("geo_source") == "community":
+        return StepResult(
+            data={"sites_to_process": []},
+            state_updates={},
+            progress_message="Community route — site resolution handled upstream.",
+        )
+
     args = context.get_input("args") or context.get_input("site_name") or ""
     if not args:
         return StepResult.failure(

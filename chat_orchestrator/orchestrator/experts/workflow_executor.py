@@ -426,28 +426,15 @@ class WorkflowExecutor:
             LOGGER.warning(f"No workflow defined for {packet_type}")
             steps = [ParsedStep(0, "llm", "execute", "Execute the task based on user request")]
 
-        # Inject resolve_sites as first function step for LPP if not already present
         if packet_type == "light_preliminary_package":
-            has_resolve = any(s.name == "resolve_sites" for s in steps)
-            if not has_resolve:
-                # Insert after the first LLM step (parse_request) but before function steps
-                insert_idx = 0
-                for i, s in enumerate(steps):
-                    if s.step_type == "function":
-                        insert_idx = i
-                        break
-                else:
-                    insert_idx = len(steps)
-                resolve_step = ParsedStep(
-                    insert_idx,
-                    "function",
-                    "resolve_sites",
-                    "Validate and resolve site names",
-                )
-                steps.insert(insert_idx, resolve_step)
-                # Re-index all steps
-                for i, s in enumerate(steps):
-                    s.index = i
+            geo_source = (
+                "community"
+                if (context.get_state("geo_source") == "community" or context.get_input("latitude"))
+                else None
+            )
+            if geo_source == "community" and context.get_state("geo_source") != "community":
+                context.packet_state["geo_source"] = "community"
+            steps = self._inject_lpp_entry_steps(steps, geo_source)
 
         # Initialize execution summary for tracking
         execution_summary = ExecutionSummary(
@@ -1000,6 +987,45 @@ class WorkflowExecutor:
             "execution_summary": execution_summary.to_dict(),
         }
 
+    def _inject_lpp_entry_steps(
+        self, steps: List["ParsedStep"], geo_source: Optional[str]
+    ) -> List["ParsedStep"]:
+        """Inject the route-specific entry step for the LPP workflow.
+
+        Community route -> resolve_community_site (first function step), no resolve_sites.
+        Submission route -> resolve_sites (existing behavior).
+        """
+        first_fn_idx = next(
+            (i for i, s in enumerate(steps) if s.step_type == "function"), len(steps)
+        )
+
+        if geo_source == "community":
+            if not any(s.name == "resolve_community_site" for s in steps):
+                steps.insert(
+                    first_fn_idx,
+                    ParsedStep(
+                        first_fn_idx,
+                        "function",
+                        "resolve_community_site",
+                        "Detect community boundary and footprints from GPS anchor",
+                    ),
+                )
+        else:
+            if not any(s.name == "resolve_sites" for s in steps):
+                steps.insert(
+                    first_fn_idx,
+                    ParsedStep(
+                        first_fn_idx,
+                        "function",
+                        "resolve_sites",
+                        "Validate and resolve site names",
+                    ),
+                )
+
+        for i, s in enumerate(steps):
+            s.index = i
+        return steps
+
     def _summarize_result(self, data: Dict[str, Any]) -> str:
         """Create a brief summary of step result data."""
         if not data:
@@ -1545,6 +1571,17 @@ class WorkflowExecutor:
         site_name = context.get_state("site_name") or context.get_state("grid_name")
         if site_name:
             lines.append(f"**Site:** {site_name}")
+
+        # Footprint provenance (community route) — harmonization visibility
+        if context.get_state("geo_source") == "community":
+            fp_count = context.get_state("footprint_count")
+            fp_source = context.get_state("footprint_source") or "unknown"
+            grid3 = context.get_state("grid3_building_count")
+            if fp_count is not None:
+                line = f"**Footprints:** {fp_count} ({fp_source})"
+                if grid3:
+                    line += f" — GRID3 estimate {grid3}"
+                lines.append(line)
 
         # Document URL from copy_lpp_template
         template_result = results.get("copy_lpp_template", {})

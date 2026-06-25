@@ -1,0 +1,13 @@
+{
+  "_comment": "Copy to {SETTLEMENT_DATA_DIR}/manifest.json (or set SETTLEMENT_MANIFEST_JSON). One entry per country GeoPackage. 'iso2' is the reverse-geocode match key; 'file' may be a bare filename (resolved against SETTLEMENT_DATA_DIR), an absolute path, or an s3:// URI. GRID3 layer names are version-specific per country - copy the exact layer name and building-count column from each GeoPackage.",
+  "datasets": [
+    {
+      "iso2": "NG",
+      "iso3": "NGA",
+      "country_name": "Nigeria",
+      "file": "GRID3_NGA_settlement_extents_v04_3.gpkg",
+      "layer": "main_GRID3_NGA_settlement_extents_v4_0",
+      "building_count_col": "building_count"
+    }
+  ]
+}

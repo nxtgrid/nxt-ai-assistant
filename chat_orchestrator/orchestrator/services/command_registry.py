@@ -584,7 +584,7 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
     "meter_date": CommandDefinition(
         command="meter_date",
         command_type="tool",
-        description="Sync a meter's date to today (Africa/Lagos time) (e.g., /meter_date 12345678)",
+        description="Sync a meter's date to today (deployment-local time) (e.g., /meter_date 12345678)",
         linked_tool="customer_set_meter_date",
         prompt_template=(
             "The user has explicitly requested to set the date on meter '{args}' to today. "

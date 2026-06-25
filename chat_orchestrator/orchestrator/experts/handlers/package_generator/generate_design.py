@@ -58,10 +58,11 @@ async def generate_powerplant_design(context: StepContext) -> StepResult:
         )
 
     # Use get_parameter_value() to respect user overrides from confirmation flow
-    site_id = context.get_parameter_value("site_id") or context.get_state("site_id")
     site_name = context.get_parameter_value("site_name") or context.get_state("site_name")
 
-    if not site_id or not site_name:
+    # site_name is the AppSheet grid_name — the only identifier this step sends.
+    # The community route has no DB site_id, so require site_name only.
+    if not site_name:
         return StepResult.failure("No site data in state - run generate_distribution_map first")
 
     if not context.mcp_executor:

@@ -80,6 +80,9 @@ def detect_communities(
     skip_map: bool = False,
     max_blocks_in_bbox: int | None = None,
     max_buildings_in_bbox: int | None = None,
+    layer: str | None = None,
+    building_count_col: str | None = None,
+    source_label: str | None = None,
 ) -> list[CommunityResult]:
     """Detect community boundaries for one or more GPS anchor points.
 
@@ -105,6 +108,12 @@ def detect_communities(
                   proxy than block count (measures actual settlement density).
                   Suggested value: 5000 (slightly more conservative than 300
                   blocks; no site with >300 blocks has <5000 buildings).
+        layer: GeoPackage layer holding settlement blocks. Defaults to the
+                  Nigeria GRID3 layer when None (single-country / batch callers).
+        building_count_col: Column with per-block building counts. Defaults to
+                  the GRID3 "building_count" column when None.
+        source_label: Provenance string written into each boundary feature's
+                  properties (e.g. "GRID3_NGA_v4"). Defaults to the layer name.
 
     Returns:
         List of CommunityResult, one per anchor (including failed anchors with
@@ -114,6 +123,10 @@ def detect_communities(
     Raises:
         FileNotFoundError: If gpkg_path does not exist.
     """
+    layer = layer or _GPKG_LAYER
+    count_col = building_count_col or _BUILDING_COUNT_COL
+    source = source_label or layer
+
     gdal_path = _to_gdal_path(gpkg_path)
     if gdal_path == gpkg_path and not os.path.exists(gpkg_path):
         raise FileNotFoundError(f"GeoPackage not found: {gpkg_path}")
@@ -135,7 +148,7 @@ def detect_communities(
         try:
             # 1. Bbox-filtered GeoPackage read — GDAL R-tree does the spatial filter
             #    Use bbox_radius_m (default 3km) to load enough blocks for the whole community.
-            gdf = _load_blocks(gdal_path, lat, lon, bbox_radius_m)
+            gdf = _load_blocks(gdal_path, lat, lon, bbox_radius_m, layer, count_col)
             if gdf.empty:
                 raise ValueError(
                     f"No settlement blocks found within {bbox_radius_m}m of {name} ({lat}, {lon})"
@@ -160,9 +173,7 @@ def detect_communities(
                     )
                 )
                 continue
-            bbox_building_count = (
-                int(gdf[_BUILDING_COUNT_COL].sum()) if _BUILDING_COUNT_COL in gdf.columns else 0
-            )
+            bbox_building_count = int(gdf[count_col].sum()) if count_col in gdf.columns else 0
             if max_buildings_in_bbox is not None and bbox_building_count > max_buildings_in_bbox:
                 logger.info(
                     f"[{name}] Urban skip — {bbox_building_count:,} buildings in bbox > threshold {max_buildings_in_bbox}"
@@ -213,7 +224,7 @@ def detect_communities(
             )
 
             # 6. Building count from cluster
-            building_count = int(cluster_gdf_utm[_BUILDING_COUNT_COL].sum())
+            building_count = int(cluster_gdf_utm[count_col].sum())
             block_count = len(cluster_gdf_utm)
             logger.info(f"[{name}] {building_count} buildings across {block_count} blocks")
 
@@ -239,6 +250,7 @@ def detect_communities(
                     "boundary_wgs84": boundary_wgs84,
                     "lat": lat,
                     "lon": lon,
+                    "source_label": source,
                 }
             )
 
@@ -330,7 +342,14 @@ def _to_gdal_path(gpkg_path: str) -> str:
     return "/vsis3/" + gpkg_path[5:]
 
 
-def _load_blocks(gpkg_path: str, lat: float, lon: float, radius_m: float) -> gpd.GeoDataFrame:
+def _load_blocks(
+    gpkg_path: str,
+    lat: float,
+    lon: float,
+    radius_m: float,
+    layer: str = _GPKG_LAYER,
+    building_count_col: str = _BUILDING_COUNT_COL,
+) -> gpd.GeoDataFrame:
     """Load settlement blocks within a bounding box around (lat, lon).
 
     Uses pyogrio engine (default in geopandas 1.x) which delegates spatial
@@ -347,19 +366,19 @@ def _load_blocks(gpkg_path: str, lat: float, lon: float, radius_m: float) -> gpd
 
     gdf = gpd.read_file(
         gpkg_path,
-        layer=_GPKG_LAYER,
+        layer=layer,
         bbox=bbox,
         engine="pyogrio",
-        columns=[_BUILDING_COUNT_COL],  # geometry always included; skip ~26 unused columns
+        columns=[building_count_col],  # geometry always included; skip ~26 unused columns
     )
     gdf = gdf.reset_index(drop=True)
 
-    if _BUILDING_COUNT_COL not in gdf.columns:
+    if building_count_col not in gdf.columns:
         logger.warning(
-            f"Column {_BUILDING_COUNT_COL!r} not found in GeoPackage. "
+            f"Column {building_count_col!r} not found in GeoPackage. "
             f"Available: {list(gdf.columns)}. Building count will be 0."
         )
-        gdf[_BUILDING_COUNT_COL] = 0
+        gdf[building_count_col] = 0
 
     return gdf
 
@@ -490,7 +509,7 @@ def _make_boundary_feature(r: dict) -> dict:
             "community_name": r["community_name"],
             "building_count": r["building_count"],
             "block_count": r["block_count"],
-            "source": "GRID3_NGA_v4",
+            "source": r.get("source_label") or "GRID3_NGA_v4",
         },
     }
 

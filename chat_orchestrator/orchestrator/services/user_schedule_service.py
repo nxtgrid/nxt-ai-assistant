@@ -15,7 +15,7 @@ from uuid import uuid4
 from orchestrator.models.schemas import UserContext
 from orchestrator.utils.cron_parser import (
     DEFAULT_TIMEZONE,
-    calculate_next_run,
+    advance,
     format_schedule_display,
     generate_friendly_name,
     parse_time_expression,
@@ -369,11 +369,7 @@ class UserScheduleService:
             cron_expr = existing.data.get("cron_expression")
             schedule_type = existing.data.get("schedule_type", "recurring")
             if cron_expr:
-                if schedule_type == "biweekly":
-                    next_weekly = calculate_next_run(cron_expr)
-                    next_run_at = calculate_next_run(cron_expr, after=next_weekly)
-                else:
-                    next_run_at = calculate_next_run(cron_expr)
+                next_run_at = advance(schedule_type, cron_expr)
             else:
                 # One-time schedule - use original time if in future, else error
                 original = existing.data.get("next_run_at")
@@ -535,12 +531,8 @@ class UserScheduleService:
             if not cron_expr:
                 return None
 
-            # Biweekly: skip one cron occurrence so next run is 2 weeks out
-            if schedule.get("schedule_type") == "biweekly":
-                next_weekly = calculate_next_run(cron_expr)
-                next_run: datetime = calculate_next_run(cron_expr, after=next_weekly)
-            else:
-                next_run = calculate_next_run(cron_expr)
+            # Biweekly skip logic lives in the shared advance() helper
+            next_run: datetime = advance(schedule.get("schedule_type", "recurring"), cron_expr)
 
             self._supabase.table("user_schedules").update(
                 {

@@ -1181,7 +1181,7 @@ class AuthService:
             grid_name: Name of the grid (case-insensitive, fuzzy matched)
 
         Returns:
-            IANA timezone string (e.g., 'Africa/Lagos'). Defaults to 'Africa/Lagos' if not found.
+            IANA timezone string (e.g., 'Africa/Lagos'). Defaults to DEFAULT_TIMEZONE if not found.
         """
         default_tz = os.getenv("DEFAULT_TIMEZONE", "UTC")
         try:

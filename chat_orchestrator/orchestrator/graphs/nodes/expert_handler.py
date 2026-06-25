@@ -769,6 +769,35 @@ async def expert_handler(state: ConversationState) -> Dict[str, Any]:
     return result_state
 
 
+def _build_lpp_packet_inputs(
+    packet_type: str,
+    effective_request: str,
+    expert_command: str | None,
+    key_entity: str | None,
+    args: str,
+) -> dict:
+    """Build packet inputs, detecting the LPP GPS-anchor (Route B) route from args."""
+    inputs: dict = {
+        "raw_request": effective_request,
+        "parsed_command": expert_command,
+        "key_entity": key_entity,
+        "args": args,
+    }
+
+    if packet_type == "light_preliminary_package":
+        from orchestrator.services.command_parser import parse_lpp_anchor_args
+
+        anchor = parse_lpp_anchor_args(args)
+        if anchor:
+            inputs.update(anchor)  # latitude, longitude, community_name
+            return inputs  # anchor route: do NOT set site_name from args
+
+    if key_entity:
+        inputs["site_name"] = key_entity
+        inputs["grid_name"] = key_entity
+    return inputs
+
+
 async def _create_new_packet(
     state: ConversationState,
     packet_service: WorkPacketService,
@@ -833,16 +862,13 @@ async def _create_new_packet(
             if len(parts) > 1:
                 args = parts[1]  # Everything after "/command"
 
-        packet_inputs_data = {
-            "raw_request": effective_request,
-            "parsed_command": expert_command,
-            "key_entity": key_entity,  # Generic name for resume matching
-            "args": args,  # Arguments after the command (e.g., URL for /ingest)
-        }
-        # Also store as site_name for workflows that expect it (LPP, grid analysis, etc.)
-        if key_entity:
-            packet_inputs_data["site_name"] = key_entity
-            packet_inputs_data["grid_name"] = key_entity  # Some workflows use grid_name
+        packet_inputs_data = _build_lpp_packet_inputs(
+            packet_type=packet_type,
+            effective_request=effective_request,
+            expert_command=expert_command,
+            key_entity=key_entity,
+            args=args,
+        )
 
         # Auto-cancel any existing active packets of the same type for this session
         # This prevents stuck workflows and user confusion

@@ -11,11 +11,13 @@ from typing import Any, Dict, Optional
 
 import psycopg
 
+from orchestrator.experts.handlers.package_generator.site_geo_source import load_site_row_data
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
 from shared.layout import generate_layout
 from shared.mapping import generate_site_map
 from shared.mapping.data_reader import extract_site_boundary
+from shared.utils.drive_upload import upload_step_output
 from shared.utils.grid_matcher import find_best_grid_match
 from shared.utils.logging import get_logger
 from shared.utils.option_parsing import normalize_numeric_input
@@ -460,6 +462,20 @@ async def generate_distribution_map(context: StepContext) -> StepResult:
             progress_message="Distribution map already generated.",
         )
 
+    # --- Community (Route B): boundary + footprints already resolved upstream ---
+    if context.get_state("geo_source") == "community":
+        site_name = context.get_state("site_name") or "Community"
+        db_config = _get_db_config()
+        await context.send_progress_to_user(
+            f"Generating site map for {site_name}...\nThis may take a moment."
+        )
+        try:
+            row_data = await load_site_row_data(context, db_config)
+        except Exception as e:
+            LOGGER.exception(f"Error resolving community geo: {e}")
+            return StepResult.failure("Could not assemble community site data.")
+        return await _render_map_from_row_data(context, row_data, site_id=None, site_name=site_name)
+
     site_id = context.get_input("site_id")
     site_name = context.get_input("site_name")
     selected_site_id = context.get_state("selected_site_id")
@@ -716,6 +732,18 @@ async def generate_distribution_map(context: StepContext) -> StepResult:
         LOGGER.exception(f"Error fetching site data: {e}")
         return StepResult.failure(f"Database error: {str(e)}")
 
+    return await _render_map_from_row_data(context, row_data, site_id=site_id, site_name=site_name)
+
+
+async def _render_map_from_row_data(
+    context: StepContext, row_data: Dict[str, Any], site_id: Any, site_name: Optional[str]
+) -> StepResult:
+    """Shared render path for both submission and community routes.
+
+    Takes an already-resolved row_data (pd_site_submissions-shaped), runs the
+    layout engine (or reuses an upstream result), renders the map, uploads to Drive,
+    and returns a StepResult with all the usual outputs.
+    """
     # --- Distribution layout: generate or use existing ---
     layout_meta = None
     use_existing = context.get_state("use_site_submission_layout") or False
@@ -821,8 +849,6 @@ async def generate_distribution_map(context: StepContext) -> StepResult:
     # Store Drive file IDs in state instead of base64 blobs to keep packet_state small.
     # Consumers use get_previous_result() for base64 in normal flow;
     # Drive IDs are the fallback for workflow resume after failure.
-    from shared.utils.drive_upload import upload_step_output
-
     drive_ids = await upload_step_output(
         site_folder_id=context.get_state("site_folder_id"),
         subfolder_name="Distribution Design",

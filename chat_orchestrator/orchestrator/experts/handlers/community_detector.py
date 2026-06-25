@@ -18,7 +18,9 @@ State written:
     community_boundary_drive_id (str): Drive file ID for the boundary GeoJSON
 
 Env vars required:
-    GRID3_GPKG_PATH: Local filesystem path to the GRID3 GeoPackage
+    SETTLEMENT_DATA_DIR: Location holding country GeoPackages + manifest.json
+        (legacy GRID3_GPKG_PATH single-file mode still supported). The anchor's
+        country is reverse-geocoded and matched against the manifest.
 """
 
 from __future__ import annotations
@@ -27,7 +29,6 @@ import asyncio
 import base64
 import json
 import math
-import os
 import re
 
 from orchestrator.experts.step_context import StepContext, StepResult
@@ -61,20 +62,39 @@ async def detect_community_boundary(context: StepContext) -> StepResult:
             "Coordinates out of range: latitude -90 to 90, longitude -180 to 180."
         )
 
-    gpkg_path = os.environ.get("GRID3_GPKG_PATH")
-    if not gpkg_path:
-        return StepResult.failure("GRID3_GPKG_PATH environment variable not set.")
-
-    await context.send_progress_to_user(f"Detecting community boundary for {anchor_name}...")
-
     # ALL blocking work (geopandas, Nominatim HTTP, matplotlib) runs in thread
     from shared.layout.community_detector import detect_communities
+    from shared.layout.settlement_datasets import (
+        SettlementDataNotConfigured,
+        SettlementDataUnavailable,
+        resolve_dataset_for_anchor,
+    )
+
+    # Resolve which country dataset covers this anchor (reverse-geocode + manifest).
+    try:
+        dataset = await asyncio.to_thread(resolve_dataset_for_anchor, lat, lon)
+    except SettlementDataNotConfigured:
+        return StepResult.failure(
+            "Community detection data is not available. Please contact support."
+        )
+    except SettlementDataUnavailable as e:
+        return StepResult.failure(e.user_message())
+    except Exception as e:
+        LOGGER.exception(f"Dataset resolution failed for {anchor_name}: {e}")
+        return StepResult.failure(sanitize_error_for_user(str(e)))
+
+    await context.send_progress_to_user(
+        f"Detecting community boundary for {anchor_name} in {dataset.country_name}..."
+    )
 
     try:
         results = await asyncio.to_thread(
             detect_communities,
             [{"lat": lat, "lon": lon, "name": anchor_name}],
-            gpkg_path,
+            dataset.path,
+            layer=dataset.layer,
+            building_count_col=dataset.building_count_col,
+            source_label=f"GRID3_{dataset.iso3}" if dataset.iso3 else None,
         )
     except FileNotFoundError:
         LOGGER.exception(f"GeoPackage not found for {anchor_name}")

@@ -26,6 +26,71 @@ TIMEZONE_OPTIONS = {
     "PST (UTC-8)": -8,
 }
 
+# Recurrence options for scheduled broadcasts. "Does not repeat" preserves the
+# original one-shot behaviour; the others derive a cron pattern from the chosen
+# first-send date/time. Mirrors the chat /schedule recurrence set.
+REPEAT_OPTIONS = [
+    "Does not repeat",
+    "Weekly",
+    "Every other week",
+    "Monthly (same date)",
+    "Monthly (same weekday)",
+]
+
+
+def _build_recurrence(dt_utc, frequency: str) -> Optional[dict]:
+    """
+    Build a recurrence config {schedule_type, cron_expression, timezone} from the
+    chosen first-send time (UTC) and a REPEAT_OPTIONS frequency.
+
+    The cron is expressed in UTC (matching the chat /schedule convention). The
+    recurrence pattern is derived from the first-send date so the first occurrence
+    always lands exactly on the user's chosen date/time.
+    """
+    if frequency == "Does not repeat":
+        return None
+
+    minute = dt_utc.minute
+    hour = dt_utc.hour
+    cron_dow = (dt_utc.weekday() + 1) % 7  # Python Mon=0..Sun=6 -> cron Sun=0..Sat=6
+
+    if frequency == "Weekly":
+        cron, schedule_type = f"{minute} {hour} * * {cron_dow}", "recurring"
+    elif frequency == "Every other week":
+        cron, schedule_type = f"{minute} {hour} * * {cron_dow}", "biweekly"
+    elif frequency == "Monthly (same date)":
+        cron, schedule_type = f"{minute} {hour} {dt_utc.day} * *", "recurring"
+    elif frequency == "Monthly (same weekday)":
+        nth = ((dt_utc.day - 1) // 7) + 1
+        cron, schedule_type = f"{minute} {hour} * * {cron_dow}#{nth}", "recurring"
+    else:
+        return None
+
+    # Validate the generated cron before persisting it
+    try:
+        from croniter import croniter  # type: ignore[import-untyped]
+
+        if not croniter.is_valid(cron):
+            return None
+    except ImportError:
+        pass
+
+    return {"schedule_type": schedule_type, "cron_expression": cron, "timezone": "UTC"}
+
+
+def _describe_recurrence(schedule_type: Optional[str], cron_expression: Optional[str]) -> str:
+    """Human-readable label for a recurrence, reusing the shared formatter if available."""
+    if not schedule_type or not cron_expression:
+        return "—"
+    try:
+        from shared.scheduling.recurrence import format_schedule_display
+
+        return format_schedule_display(
+            schedule_type, cron_expression, datetime.now(timezone.utc), "UTC"
+        )
+    except Exception:
+        return "Every other week" if schedule_type == "biweekly" else "Recurring"
+
 
 def _clear_broadcast_state():
     """Clear all broadcast-related session state."""
@@ -269,6 +334,7 @@ Placeholders are replaced with actual values for each recipient.
     )
 
     scheduled_time: Optional[datetime] = None
+    recurrence: Optional[dict] = None
     if send_option == "Schedule for later":
         col_date, col_time, col_tz = st.columns([2, 2, 2])
         with col_date:
@@ -300,6 +366,27 @@ Placeholders are replaced with actual values for each recipient.
         scheduled_time = scheduled_time.replace(tzinfo=timezone.utc)
         st.caption(f"Will be sent at {scheduled_time.strftime('%Y-%m-%d %H:%M')} UTC")
 
+        # Recurrence (optional) — pattern is derived from the first-send date above
+        repeat = st.selectbox(
+            "Repeat",
+            REPEAT_OPTIONS,
+            key="schedule_repeat",
+            help=(
+                "Recurring broadcasts re-send automatically. The message and images "
+                "are read live from this broadcast at each send, so editing it later "
+                "changes future sends. The pattern is based on the date/time above."
+            ),
+        )
+        if repeat != "Does not repeat":
+            recurrence = _build_recurrence(scheduled_time, repeat)
+            if recurrence:
+                st.caption(
+                    f"🔁 Repeats {repeat.lower()} — first send "
+                    f"{scheduled_time.strftime('%Y-%m-%d %H:%M')} UTC"
+                )
+            else:
+                st.error("Could not build a valid repeat schedule from that date/time.")
+
     st.divider()
 
     # Show previous verification failure if any (user needs to edit and retry)
@@ -317,7 +404,7 @@ Placeholders are replaced with actual values for each recipient.
 
     send_label = "Sending..." if st.session_state.get("broadcast_sending") else "Send"
     if scheduled_time:
-        send_label = "Schedule"
+        send_label = "Schedule recurring" if recurrence else "Schedule"
 
     # Show verification status
     verification_configured = verification_service.is_enabled()
@@ -340,6 +427,7 @@ Placeholders are replaced with actual values for each recipient.
             group_options,
             scheduled_time,
             uploaded_images=uploaded_images if uploaded_images else None,
+            recurrence=recurrence,
         )
 
 
@@ -351,6 +439,7 @@ def _handle_send_with_verification(
     group_options: Dict[str, str],
     scheduled_time: Optional[datetime],
     uploaded_images=None,
+    recurrence: Optional[dict] = None,
 ):
     """
     Handle the send/schedule action with MANDATORY verification first.
@@ -412,6 +501,7 @@ def _handle_send_with_verification(
             verification_passed=verification_result.passed if verification_result else None,
             verification_feedback=verification_result.feedback if verification_result else None,
             images=image_data_list,
+            recurrence=recurrence,
         )
 
     st.session_state.broadcast_sending = False
@@ -631,6 +721,9 @@ def _render_scheduled_tab(broadcast_service: BroadcastService):
         scheduled_for_raw = broadcast.get("scheduled_for", "Unknown")
         message_preview = broadcast.get("message", "")[:100]
         recipient_count = broadcast.get("total_recipients", 0)
+        schedule_type = broadcast.get("schedule_type")
+        is_recurring = schedule_type in ("recurring", "biweekly")
+        recurrence_label = _describe_recurrence(schedule_type, broadcast.get("cron_expression"))
 
         # Format scheduled time nicely (show both UTC and CET)
         try:
@@ -642,17 +735,26 @@ def _render_scheduled_tab(broadcast_service: BroadcastService):
         except (ValueError, AttributeError):
             scheduled_display = scheduled_for_raw
 
-        with st.expander(f"Scheduled for {scheduled_display}"):
+        title_prefix = "🔁 Recurring" if is_recurring else "Scheduled"
+        with st.expander(f"{title_prefix} — next {scheduled_display}"):
+            if is_recurring:
+                st.markdown(f"**Repeats:** {recurrence_label}")
+                st.caption("Editing this broadcast's message or images changes all future sends.")
             st.markdown(f"**Recipients:** {recipient_count} groups")
             st.markdown("**Message:**")
             st.text(message_preview + ("..." if len(broadcast.get("message", "")) > 100 else ""))
 
             col1, col2 = st.columns([1, 3])
             with col1:
-                if st.button("Cancel", key=f"cancel_{broadcast['id']}", type="secondary"):
+                cancel_label = "Cancel series" if is_recurring else "Cancel"
+                if st.button(cancel_label, key=f"cancel_{broadcast['id']}", type="secondary"):
                     success, msg = broadcast_service.cancel_scheduled_broadcast(broadcast["id"])
                     if success:
-                        st.success("Broadcast cancelled")
+                        st.success(
+                            "Recurring broadcast cancelled"
+                            if is_recurring
+                            else "Broadcast cancelled"
+                        )
                         st.session_state.scheduled_refresh = True
                     else:
                         st.error(msg)

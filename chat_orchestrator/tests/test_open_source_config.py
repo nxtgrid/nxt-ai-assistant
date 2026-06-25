@@ -57,8 +57,9 @@ class TestCustomerMeterActionsEnabled:
 
     def test_defaults_to_false(self):
         """Default is false — write actions require explicit operator opt-in."""
-        with patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("CUSTOMER_METER_ACTIONS_ENABLED", None)
+        # Set explicitly to "false" rather than popping: load_dotenv(override=False) won't
+        # overwrite a key that's already present, so the reload sees "false" regardless of .env.
+        with patch.dict(os.environ, {"CUSTOMER_METER_ACTIONS_ENABLED": "false"}):
             # Ensure mcp_servers/ is on the path (repo root is already added via pyproject.toml pythonpath)
             mcp_servers_path = str(
                 __import__("pathlib").Path(__file__).resolve().parents[2] / "mcp_servers"

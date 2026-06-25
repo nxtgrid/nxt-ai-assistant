@@ -803,3 +803,48 @@ class TestParallelMultiSiteExecution:
         step2_sites = [site for site, step in call_log if step == "step2"]
         assert "FailSite" not in step2_sites
         assert "GoodSite" in step2_sites
+
+
+def test_lpp_injects_community_step_when_anchor_present():
+    ex = WorkflowExecutor(None, None, None)
+    base = [
+        ParsedStep(0, "llm", "parse_request", "x"),
+        ParsedStep(1, "function", "create_site_folder", "x"),
+    ]
+    steps = ex._inject_lpp_entry_steps(base, geo_source="community")
+    names = [s.name for s in steps]
+    assert "resolve_community_site" in names
+    assert names.index("resolve_community_site") < names.index("create_site_folder")
+    assert "resolve_sites" not in names
+
+
+def test_lpp_injects_resolve_sites_for_submission_route():
+    ex = WorkflowExecutor(None, None, None)
+    base = [
+        ParsedStep(0, "llm", "parse_request", "x"),
+        ParsedStep(1, "function", "create_site_folder", "x"),
+    ]
+    steps = ex._inject_lpp_entry_steps(base, geo_source=None)
+    names = [s.name for s in steps]
+    assert "resolve_sites" in names
+    assert "resolve_community_site" not in names
+
+
+def test_lpp_summary_shows_footprint_source_and_delta():
+    ex = WorkflowExecutor(None, None, None)
+
+    class _Ctx:
+        def get_state(self, k, d=None):
+            return {
+                "site_name": "Commville",
+                "geo_source": "community",
+                "footprint_count": 87,
+                "grid3_building_count": 100,
+                "footprint_source": "microsoft",
+            }.get(k, d)
+
+    lines = ex._format_lpp_summary({}, _Ctx())
+    text = "\n".join(lines)
+    assert "Footprints" in text and "87" in text
+    assert "microsoft" in text.lower()
+    assert "100" in text

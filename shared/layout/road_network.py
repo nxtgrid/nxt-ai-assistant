@@ -30,6 +30,9 @@ from shapely.geometry import LineString, Point, Polygon, box, shape
 from shapely.strtree import STRtree
 
 from shared.layout.building_alignment import detect_aligned_roads
+from shared.layout.quadkeys import (
+    bbox_to_quadkeys as _bbox_to_quadkeys,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -525,43 +528,6 @@ _CHM_ZOOM = 9  # Dataset uses zoom-9 QuadKeys
 # ---------------------------------------------------------------------------
 # Canopy Height Model (CHM) — tree exclusion zone
 # ---------------------------------------------------------------------------
-
-
-def _latlon_to_tile(lat: float, lon: float, zoom: int) -> tuple[int, int]:
-    """Convert lat/lon to tile XY at the given zoom level (Bing Maps tile system)."""
-    sin_lat = math.sin(lat * math.pi / 180.0)
-    sin_lat = max(-0.9999, min(0.9999, sin_lat))
-    n = 1 << zoom
-    tile_x = int((lon + 180.0) / 360.0 * n)
-    tile_y = int((0.5 - math.log((1 + sin_lat) / (1 - sin_lat)) / (4 * math.pi)) * n)
-    tile_x = max(0, min(n - 1, tile_x))
-    tile_y = max(0, min(n - 1, tile_y))
-    return tile_x, tile_y
-
-
-def _tile_to_quadkey(tile_x: int, tile_y: int, zoom: int) -> str:
-    """Convert tile XY to a Bing QuadKey string."""
-    quadkey = []
-    for i in range(zoom, 0, -1):
-        digit = 0
-        mask = 1 << (i - 1)
-        if tile_x & mask:
-            digit += 1
-        if tile_y & mask:
-            digit += 2
-        quadkey.append(str(digit))
-    return "".join(quadkey)
-
-
-def _bbox_to_quadkeys(minx: float, miny: float, maxx: float, maxy: float, zoom: int) -> list[str]:
-    """Return unique QuadKeys covering a WGS84 bounding box at the given zoom."""
-    tx_min, ty_min = _latlon_to_tile(maxy, minx, zoom)  # NW corner
-    tx_max, ty_max = _latlon_to_tile(miny, maxx, zoom)  # SE corner
-    keys = set()
-    for tx in range(tx_min, tx_max + 1):
-        for ty in range(ty_min, ty_max + 1):
-            keys.add(_tile_to_quadkey(tx, ty, zoom))
-    return sorted(keys)
 
 
 def _fetch_chm_exclusion_zone(
