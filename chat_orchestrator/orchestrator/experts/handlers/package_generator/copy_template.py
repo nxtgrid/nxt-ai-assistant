@@ -113,9 +113,16 @@ async def copy_lpp_template(context: StepContext) -> StepResult:
     if not site_name:
         return StepResult.failure("No site name provided for LPP template")
 
-    # Validate site exists in site_submissions BEFORE creating document
+    # Validate site exists in site_submissions BEFORE creating document.
+    # Community route (Route B) derives its site from a GPS anchor + GRID3
+    # boundary, so it has no site_submissions row. Skip the lookup there — it
+    # would otherwise fail every community run with a misleading "site wasn't
+    # found in your submissions" message. resolve_sites.py guards the same way.
+    is_community = context.get_state("geo_source") == "community"
     db_config = _get_db_config()
-    if db_config.get("host"):
+    if is_community:
+        LOGGER.info(f"Community route — skipping site_submissions validation for '{site_name}'")
+    elif db_config.get("host"):
         try:
             lookup = _lookup_site_by_name(site_name, db_config)
             if not lookup["found"]:
