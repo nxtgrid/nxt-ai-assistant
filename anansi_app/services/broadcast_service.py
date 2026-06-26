@@ -322,9 +322,11 @@ class BroadcastService:
         org_data = self._get_org_data_for_chat(chat_id)
 
         # Define placeholder handlers (modular for future expansion)
+        grids = org_data.get("grids") or []
         placeholders = {
             "<org_name>": org_data.get("name") or "Organization",
             "<org_hashtag>": f"#{(org_data.get('name') or 'customer').lower().replace(' ', '')}",
+            "<org_grids>": ", ".join(grids) if grids else "N/A",
         }
 
         # Replace all placeholders
@@ -402,7 +404,20 @@ class BroadcastService:
                         logger.debug(
                             "No org found for chat_id=%s (type=%s)", chat_id, type(chat_id)
                         )
-                    return dict(row) if row else None
+                    if not row:
+                        return None
+                    org = dict(row)
+                    grid_rows = await conn.fetch(
+                        """
+                        SELECT name FROM grids
+                        WHERE organization_id = $1
+                        AND deleted_at IS NULL
+                        ORDER BY name
+                        """,
+                        org["id"],
+                    )
+                    org["grids"] = [r["name"] for r in grid_rows]
+                    return org
                 finally:
                     await conn.close()
 
@@ -456,7 +471,24 @@ class BroadcastService:
                         """,
                         uncached,
                     )
-                    return [dict(row) for row in rows]
+                    orgs = [dict(row) for row in rows]
+                    if orgs:
+                        org_ids = [o["id"] for o in orgs]
+                        grid_rows = await conn.fetch(
+                            """
+                            SELECT organization_id, name FROM grids
+                            WHERE organization_id = ANY($1::int[])
+                            AND deleted_at IS NULL
+                            ORDER BY name
+                            """,
+                            org_ids,
+                        )
+                        grids_by_org: Dict[int, List[str]] = {}
+                        for gr in grid_rows:
+                            grids_by_org.setdefault(gr["organization_id"], []).append(gr["name"])
+                        for o in orgs:
+                            o["grids"] = grids_by_org.get(o["id"], [])
+                    return orgs
                 finally:
                     await conn.close()
 

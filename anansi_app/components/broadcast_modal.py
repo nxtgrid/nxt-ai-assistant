@@ -240,7 +240,7 @@ def _render_compose_tab(
         value=default_message,
         height=200,
         max_chars=4096,
-        help="Use placeholders: <org_name>, <org_hashtag>. Supports Telegram Markdown.",
+        help="Use placeholders: <org_name>, <org_hashtag>, <org_grids>. Supports Telegram Markdown.",
     )
 
     # Update session state
@@ -259,6 +259,7 @@ def _render_compose_tab(
             """
 - `<org_name>` - Organization's name (e.g., "Acme")
 - `<org_hashtag>` - Hashtag version (e.g., "#acme")
+- `<org_grids>` - Comma-separated list of grids (e.g., "GridA, GridB, GridC")
 
 Placeholders are replaced with actual values for each recipient.
 """
@@ -559,7 +560,7 @@ def _render_templates_tab(broadcast_service: BroadcastService):
             "Template Content",
             key="new_template_content",
             height=150,
-            help="You can use placeholders like <org_name>, <org_hashtag>",
+            help="You can use placeholders like <org_name>, <org_hashtag>, <org_grids>",
         )
 
         new_template_images = st.file_uploader(
