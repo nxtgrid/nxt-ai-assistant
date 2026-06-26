@@ -67,6 +67,33 @@ def test_fetch_ms_clips_to_boundary():
     assert len(fc["features"]) == 1  # only the inside building survives the clip
 
 
+import io as _io  # noqa: E402
+
+
+class _FakeRaw(_io.BytesIO):
+    """BytesIO subclass so requests' `.raw.decode_content = False` can be set.
+
+    The plain BytesIO C type rejects arbitrary attributes; subclassing gives it
+    a __dict__. TextIOWrapper reads from it like a real streamed response body.
+    """
+
+
+class _FakeStreamResponse:
+    """Minimal stand-in for `requests.get(url, stream=True)` (a context manager)."""
+
+    def __init__(self, body: bytes):
+        self.raw = _FakeRaw(body)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+    def raise_for_status(self):
+        pass
+
+
 def test_fetch_google_filters_confidence_and_clips():
     from shared.layout import building_footprints as bf
 
@@ -77,13 +104,49 @@ def test_fetch_google_filters_confidence_and_clips():
     csv_text = (
         '6.82,4.59,40,0.92,"%s",abc\n' % poly_in + '6.821,4.591,40,0.30,"%s",def\n' % poly_low_conf
     )
+    # Non-.gz URL → _stream_google_features reads resp.raw directly (no gzip layer).
     with (
-        patch.object(bf, "_google_tile_urls_for_boundary", return_value=["http://x/tile.csv.gz"]),
-        patch.object(bf, "_http_get_text", return_value=csv_text),
+        patch.object(bf, "_google_tile_urls_for_boundary", return_value=["http://x/tile.csv"]),
+        patch.object(bf.requests, "get", return_value=_FakeStreamResponse(csv_text.encode())),
     ):
         fc = bf.fetch_google_open_buildings(boundary, min_confidence=0.70)
 
     assert len(fc["features"]) == 1  # low-confidence dropped, in-boundary kept
+
+
+def test_fetch_google_skips_wkt_parse_for_rows_outside_bbox():
+    """Rows whose centroid is outside the boundary bbox must be rejected BEFORE
+    the WKT parse — this cheap pre-filter is what keeps the huge S2 tiles from
+    OOM-ing the instance (a single tile is 100MB+ and spans a far larger area
+    than the community). Regression for the silent OOM restart on /lpp."""
+    from shared.layout import building_footprints as bf
+
+    boundary = _Polygon([(4.58, 6.81), (4.60, 6.81), (4.60, 6.83), (4.58, 6.83)])
+    poly_in = "POLYGON((4.59 6.82, 4.5901 6.82, 4.5901 6.8201, 4.59 6.82))"
+    # Centroid (lat=9.99, lon=9.99) is far outside the bbox; its geometry must
+    # never reach wkt.loads. Use junk WKT so a parse attempt would surface.
+    csv_text = (
+        '6.82,4.59,40,0.95,"%s",in\n' % poly_in
+        + '9.99,9.99,40,0.95,"NOT-WKT-SHOULD-NOT-PARSE",out\n'
+    )
+    import shapely.wkt
+
+    parsed: list[str] = []
+    real_loads = shapely.wkt.loads
+
+    def tracking_loads(wkt_str):
+        parsed.append(wkt_str)
+        return real_loads(wkt_str)
+
+    with (
+        patch.object(bf, "_google_tile_urls_for_boundary", return_value=["http://x/tile.csv"]),
+        patch.object(bf.requests, "get", return_value=_FakeStreamResponse(csv_text.encode())),
+        patch.object(shapely.wkt, "loads", side_effect=tracking_loads),
+    ):
+        fc = bf.fetch_google_open_buildings(boundary, min_confidence=0.70)
+
+    assert len(fc["features"]) == 1
+    assert parsed == [poly_in]  # only the in-bbox row was ever WKT-parsed
 
 
 def test_reconcile_keeps_ms_when_coverage_sufficient():
