@@ -30,26 +30,34 @@ class TestStaffOrgId:
 class TestDefaultTimezone:
     """DEFAULT_TIMEZONE env var controls system-wide timezone default."""
 
+    # DEFAULT_TIMEZONE is computed via os.getenv() at import time in
+    # shared.scheduling.recurrence; cron_parser only re-exports the name. The
+    # env override therefore only takes effect when the *source* module is
+    # reloaded — reloading cron_parser just re-binds the already-computed value.
     def test_default_timezone_is_utc_when_unset(self):
         """Default is UTC when env var not set — safe for any deployment."""
         import importlib
 
+        import shared.scheduling.recurrence as rc
+
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("DEFAULT_TIMEZONE", None)
-            import chat_orchestrator.orchestrator.utils.cron_parser as cp
-
-            importlib.reload(cp)
-            assert cp.DEFAULT_TIMEZONE == "UTC"
+            importlib.reload(rc)
+            assert rc.DEFAULT_TIMEZONE == "UTC"
+        importlib.reload(rc)  # restore to ambient-env value for later tests
 
     def test_default_timezone_reads_from_env(self):
         """DEFAULT_TIMEZONE env var overrides the default."""
         import importlib
 
-        with patch.dict(os.environ, {"DEFAULT_TIMEZONE": "Africa/Lagos"}):
-            import chat_orchestrator.orchestrator.utils.cron_parser as cp
+        import shared.scheduling.recurrence as rc
 
-            importlib.reload(cp)
-            assert cp.DEFAULT_TIMEZONE == "Africa/Lagos"
+        try:
+            with patch.dict(os.environ, {"DEFAULT_TIMEZONE": "Africa/Lagos"}):
+                importlib.reload(rc)
+                assert rc.DEFAULT_TIMEZONE == "Africa/Lagos"
+        finally:
+            importlib.reload(rc)  # restore module-level default once env is unpatched
 
 
 class TestCustomerMeterActionsEnabled:
