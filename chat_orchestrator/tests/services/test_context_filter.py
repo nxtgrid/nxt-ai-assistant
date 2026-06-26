@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -148,9 +149,16 @@ class TestEnforceToolPairs:
 class TestFilterHistory:
     @pytest.mark.asyncio
     async def test_no_api_key_fail_open(self):
-        service = ContextFilterService(api_key="")
-        messages = [_msg(), _msg(role="model", content="reply")]
-        result = await service.filter_history("new message", messages)
+        # ContextFilterService backfills an empty api_key from GOOGLE_API_KEY
+        # (context_filter.py: `api_key or os.getenv("GOOGLE_API_KEY", "")`).
+        # CI sets GOOGLE_API_KEY=test-key and a real key may be present locally,
+        # so clear it here to deterministically exercise the no-key fail-open
+        # path instead of attempting a live call (env-/order-dependent otherwise).
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GOOGLE_API_KEY", None)
+            service = ContextFilterService(api_key="")
+            messages = [_msg(), _msg(role="model", content="reply")]
+            result = await service.filter_history("new message", messages)
         assert result.relevant_indices == [0, 1]
         assert result.confidence == 0.0
 
