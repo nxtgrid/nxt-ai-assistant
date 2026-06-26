@@ -451,17 +451,23 @@ def _find_contiguous_blocks(gdf_utm: gpd.GeoDataFrame, seed_pos: int) -> gpd.Geo
 def _get_osm_name(geolocator: Nominatim, lat: float, lon: float) -> str:
     """Reverse-geocode a settlement name from Nominatim OSM data.
 
-    Uses zoom=14 (settlement-level resolution) and returns only town/village
-    equivalent names. Explicitly excludes LGA/county-level names (which are
-    too coarse) and sub-settlement names like ward/community designations
-    (which are too granular and often administrative artefacts in Nigeria).
+    Uses zoom=14 (settlement-level resolution) and prefers town/village
+    equivalent names. Settlement-level names win; sub-settlement names are
+    used only when no settlement exists. Ward/community-style administrative
+    designations (too granular, often artefacts in Nigeria) are filtered out.
 
-    Hierarchy tried (settlement-level first):
-        hamlet → village → town → city
-    Sub-settlement fallback (if no settlement found):
-        suburb → neighbourhood → quarter → city_district
+    Hierarchy tried (finest first):
+        hamlet → village → town → city                  (settlement)
+        suburb → neighbourhood → quarter → city_district (sub-settlement)
+        municipality → county → state_district → state  (admin fallback)
 
-    Returns "Unknown" on any failure or if no suitable name is found.
+    The admin fallback exists because many rural anchors have no OSM
+    settlement node — only an LGA/county name (e.g. "Pankshin"). Returning
+    that is far more useful than the literal "Unknown", which then propagates
+    as the site name downstream. Admin-level names are NOT subjected to the
+    ward/community filter (they are legitimate place names, not "Ward 3").
+
+    Returns "Unknown" only when Nominatim yields nothing usable at all.
     """
     import re
 
@@ -469,6 +475,9 @@ def _get_osm_name(geolocator: Nominatim, lat: float, lon: float) -> str:
     _SETTLEMENT_KEYS = ("hamlet", "village", "town", "city")
     # Sub-settlement fallback — only used when no settlement-level name exists
     _SUB_KEYS = ("suburb", "neighbourhood", "quarter", "city_district")
+    # Admin-level fallback (coarsening) — used only when nothing finer exists.
+    # county == the LGA in Nigeria; state is the last resort before "Unknown".
+    _ADMIN_KEYS = ("municipality", "county", "state_district", "state")
     # Patterns that indicate administrative divisions rather than place names
     _ADMIN_PATTERN = re.compile(
         r"^(ward|community|district|zone|quarter)\s+\w",
@@ -492,6 +501,15 @@ def _get_osm_name(geolocator: Nominatim, lat: float, lon: float) -> str:
             val = addr.get(key)
             if val and not _ADMIN_PATTERN.match(val):
                 return val
+
+        # Last resort: an LGA/county or state name beats "Unknown" for labelling.
+        for key in _ADMIN_KEYS:
+            val = addr.get(key)
+            if val:
+                logger.info(
+                    f"No settlement node at ({lat}, {lon}); using admin name {val!r} from {key!r}"
+                )
+                return str(val)
 
         return "Unknown"
     except Exception as exc:

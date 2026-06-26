@@ -180,37 +180,77 @@ def _google_tile_urls_for_boundary(boundary: Polygon) -> list[str]:
     return [f"{base}/{token}_buildings.csv.gz" for token in sorted(tokens)]
 
 
-def fetch_google_open_buildings(boundary: Polygon, min_confidence: float = 0.70) -> dict[str, Any]:
-    """Google Open Buildings clipped to boundary, filtered by confidence."""
+def _stream_google_features(
+    url: str, boundary: Polygon, min_confidence: float
+) -> list[dict[str, Any]]:
+    """Stream a Google Open Buildings S2 tile (CSV.gz) line-by-line.
+
+    A single S2 level-6 tile can be 100MB+ compressed and decompress to ~1GB —
+    loading it whole (requests.get().text + pd.read_csv) OOM-kills the 1GB
+    instance. We stream it instead and reject rows cheaply:
+
+      columns (no header): latitude, longitude, area_in_meters, confidence,
+                           geometry (WKT), full_plus_code
+
+    The tile spans a far larger area than the community boundary, so a bbox
+    test on the per-building centroid (lat/lon columns) discards the vast
+    majority of rows before the expensive WKT parse. Only survivors are
+    parsed and intersection-tested.
+    """
+    import csv
+
     from shapely import wkt
 
-    features: list[dict[str, Any]] = []
-    cols = ["latitude", "longitude", "area_in_meters", "confidence", "geometry", "full_plus_code"]
-    for url in _google_tile_urls_for_boundary(boundary):
-        try:
-            text = _http_get_text(url)
-        except requests.RequestException as e:
-            logger.warning(f"Google OB: tile download failed: {e}")
-            continue
-        try:
-            df = pd.read_csv(io.StringIO(text), header=None, names=cols)
-        except (pd.errors.ParserError, ValueError) as e:
-            logger.warning(f"Google OB: tile parse failed: {e}")
-            continue
-        df = df[df["confidence"].astype(float) >= min_confidence]
-        for _, r in df.iterrows():
+    minx, miny, maxx, maxy = boundary.bounds
+    kept: list[dict[str, Any]] = []
+    with requests.get(url, timeout=_HTTP_TIMEOUT_S, stream=True) as resp:
+        resp.raise_for_status()
+        resp.raw.decode_content = False  # we manage decompression manually
+        binary_stream: Any = gzip.GzipFile(fileobj=resp.raw) if url.endswith(".gz") else resp.raw
+        reader = csv.reader(io.TextIOWrapper(binary_stream, encoding="utf-8"))
+        for row in reader:
+            if len(row) < 5:
+                continue
             try:
-                geom = wkt.loads(str(r["geometry"]))
+                lat_c = float(row[0])
+                lon_c = float(row[1])
+                conf = float(row[3])
+            except ValueError:
+                continue
+            if conf < min_confidence:
+                continue
+            # Cheap centroid bbox reject before the costly WKT parse.
+            if not (minx <= lon_c <= maxx and miny <= lat_c <= maxy):
+                continue
+            try:
+                geom = wkt.loads(row[4])
             except Exception:
                 continue
             if geom.intersects(boundary):
-                features.append(
+                kept.append(
                     {
                         "type": "Feature",
                         "geometry": geom.__geo_interface__,
-                        "properties": {"confidence": float(r["confidence"]), "source": "google"},
+                        "properties": {"confidence": conf, "source": "google"},
                     }
                 )
+    return kept
+
+
+def fetch_google_open_buildings(boundary: Polygon, min_confidence: float = 0.70) -> dict[str, Any]:
+    """Google Open Buildings clipped to boundary, filtered by confidence.
+
+    Streams each S2 tile to keep memory bounded (see _stream_google_features).
+    """
+    features: list[dict[str, Any]] = []
+    for url in _google_tile_urls_for_boundary(boundary):
+        try:
+            tile_features = _stream_google_features(url, boundary, min_confidence)
+        except requests.RequestException as e:
+            logger.warning(f"Google OB: tile download failed: {e}")
+            continue
+        logger.info(f"Google OB: tile → {len(tile_features)} buildings within boundary")
+        features.extend(tile_features)
     logger.info(f"Google OB: {len(features)} buildings within boundary")
     return {"type": "FeatureCollection", "features": features}
 

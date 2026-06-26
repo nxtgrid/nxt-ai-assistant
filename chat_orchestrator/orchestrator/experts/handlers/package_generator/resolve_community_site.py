@@ -103,7 +103,10 @@ async def resolve_community_site(context: StepContext) -> StepResult:
             f"Could not detect a usable community boundary at ({lat_str}, {lon_str})."
         )
 
-    site_name = requested_name or community.community_name or anchor_name
+    # community.community_name is "Unknown" only when OSM yields nothing usable;
+    # don't let that literal become the site label — fall back to the anchor id.
+    detected_name = community.community_name if community.community_name != "Unknown" else ""
+    site_name = requested_name or detected_name or anchor_name
     grid3_estimate = int(community.building_count or 0)
 
     await context.send_progress_to_user(
