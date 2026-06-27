@@ -47,6 +47,56 @@ class TestGenerateSiteLayoutStep:
         assert "site ID" in result.error
 
     @pytest.mark.asyncio
+    async def test_community_route_proceeds_without_site_id(self):
+        """Route B (GPS-anchored) has no DB site_id. The layout must still
+        generate from site_name + map center + synthetic polygon rather than
+        failing on the site_id guard (regression for /lpp community route)."""
+        ctx = MagicMock()
+        ctx.get_input = MagicMock(side_effect=lambda k: {"site_name": "Pankshin"}.get(k))
+        state = {"geo_source": "community", "site_name": "Pankshin", "site_folder_id": "f1"}
+        ctx.get_state = MagicMock(side_effect=lambda k, d=None: state.get(k, d))
+        ctx.get_parameter_value = MagicMock(
+            side_effect=lambda k: {
+                "editable_total_kwp": "45.5",
+                "editable_site_type": "victron",
+                "editable_panel_config": "5S2P",
+            }.get(k)
+        )
+        ctx.get_previous_result = MagicMock(return_value={"center": {"lat": 9.39, "lon": 9.31}})
+        ctx.send_progress_to_user = AsyncMock()
+
+        mock_boundary = Polygon([(0, 0), (46, 0), (46, 43), (0, 43)])
+        fake_layout = MagicMock()
+        fake_layout.total_modules = 18
+        fake_layout.achieved_kwp = 43.0
+        fake_layout.target_kwp = 45.5
+        fake_layout.arrays = [MagicMock()] * 2
+        fake_layout.lightning_positions = [(10, 10)]
+        fake_layout.earth_pit_positions = [(5, 5)]
+        fake_layout.cable_routes = [
+            _make_fake_cable_route("dc", 12.0),
+            _make_fake_cable_route("ac", 7.0),
+        ]
+        with (
+            patch(
+                "orchestrator.experts.handlers.package_generator.generate_site_layout._make_synthetic_plant_polygon",
+                return_value=(mock_boundary, "EPSG:32632"),
+            ),
+            patch(
+                "orchestrator.experts.handlers.package_generator.generate_site_layout._project_boundary_to_utm",
+                return_value=mock_boundary,
+            ),
+            patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread,
+            patch("shared.utils.drive_upload.upload_step_output", new_callable=AsyncMock),
+        ):
+            mock_thread.return_value = (fake_layout, "<xml/>", "cG5nX2RhdGE=")
+            result = await generate_site_layout(ctx)
+
+        assert result.error is None  # did NOT fail on the missing site_id guard
+        assert result.data["module_count"] == 18
+        assert result.data["achieved_kwp"] == 43.0
+
+    @pytest.mark.asyncio
     async def test_fails_when_no_kwp(self, mock_context):
         mock_context.get_parameter_value = MagicMock(
             side_effect=lambda k: {

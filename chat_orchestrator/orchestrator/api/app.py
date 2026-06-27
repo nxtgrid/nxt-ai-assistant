@@ -223,10 +223,15 @@ async def warmup_services():
 
         provider = ArtifactsProvider()
 
+        # NOTE: EXPERT_INSTRUCTIONS_DOC_ID is intentionally NOT warmed here. The
+        # artifacts provider parses a flat "system instructions" section, but the
+        # expert doc uses per-expert "# Expert:" headers, so this parser always
+        # returns 0 sections — logging a misleading "failed after 3 attempts"
+        # error and wasting ~6s every startup. The expert doc is loaded and
+        # cached correctly by expert_instructions_provider instead.
         docs_to_cache = [
             ("STAFF_SUPPORT_DOC_ID", "staff instructions"),
             ("CUSTOMER_SUPPORT_DOC_ID", "customer instructions"),
-            ("EXPERT_INSTRUCTIONS_DOC_ID", "expert definitions"),
             ("VERIFICATION_DOC_ID", "verification criteria"),
         ]
 
