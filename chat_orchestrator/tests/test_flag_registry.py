@@ -114,11 +114,23 @@ class TestSettingsServiceConsistency:
 
     def test_settings_defaults_excludes_routing_only_flags(self):
         defaults = fr.settings_defaults(env={})
-        for hidden in ("LPP_TEMPLATE_ID", "DEFAULT_TIMEZONE", "STAFF_ORG_ID", "SETTINGS_BACKEND"):
+        for hidden in ("DEFAULT_TIMEZONE", "STAFF_ORG_ID", "SETTINGS_BACKEND"):
             assert hidden not in defaults
         # but real UI flags are present and typed
         assert defaults["JIRA_ENABLED"] is True
         assert defaults["MAX_TOOL_ROUNDS"] == 5
+
+    def test_lpp_template_flags_are_settings_visible(self):
+        # Regression: the settings page renders these as editable text inputs
+        # (Templates section). They MUST be show_in_settings=True so the page
+        # loads their real DO values; with show_in_settings=False the overlay
+        # dropped them, the inputs rendered blank, and the next Save wiped the
+        # Drive IDs from the live spec — silently breaking the LPP workflow.
+        defaults = fr.settings_defaults(env={})
+        for k in ("LPP_TEMPLATE_ID", "LPP_OUTPUT_FOLDER_ID", "QGIS_TEMPLATE_FILE_ID"):
+            assert k in defaults, f"{k} must be settings-visible"
+            assert fr.FLAGS[k].show_in_settings is True
+            assert fr.FLAGS[k].editable is True
 
 
 # --------------------------------------------------------------------------- #

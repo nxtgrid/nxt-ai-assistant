@@ -466,27 +466,29 @@ _FLAGS: List[Flag] = [
         scope=SERVICE_BOT,
     ),
     _f("LAYOUT_LIGHTNING_RADIUS_M", 13.5, "Lightning-protection radius (m).", scope=SERVICE_BOT),
-    # --- Drive templates (routing only; not shown in settings UI) ---------
+    # --- Drive templates (editable in the settings UI Templates section) ---
+    # These MUST stay show_in_settings=True (the default). The settings page
+    # renders them as editable text inputs; when show_in_settings is False the
+    # overlay in get_current_settings drops their real DO values, the inputs
+    # render blank, and the next "Save changes" writes the blanks back to the
+    # live spec — silently wiping the IDs and breaking the whole LPP workflow.
     _s(
         "LPP_TEMPLATE_ID",
         "",
         "Google Slides template id for LPP output.",
         scope=SERVICE_BOT,
-        show_in_settings=False,
     ),
     _s(
         "QGIS_TEMPLATE_FILE_ID",
         "",
         "QGIS template file id for site layouts.",
         scope=SERVICE_BOT,
-        show_in_settings=False,
     ),
     _s(
         "LPP_OUTPUT_FOLDER_ID",
         "",
         "Drive folder id for LPP output.",
         scope=SERVICE_BOT,
-        show_in_settings=False,
     ),
     # --- Reference server (regulatory data; staff only) -------------------
     _s(
