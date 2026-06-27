@@ -41,7 +41,12 @@ async def generate_site_layout(context: StepContext) -> StepResult:
         site_name = re.sub(r"<[^>]+>", "", site_name)[:100]
     site_id = context.get_input("site_id") or context.get_state("site_id")
 
-    if not site_id:
+    # Community route (Route B) is GPS-anchored and has no DB site_id — it works
+    # from site_name + the map center + plant-site candidates. site_id is only
+    # ever a display fallback for a missing site_name below, so don't block the
+    # community route on it (mirrors the guard in generate_distribution_layout).
+    is_community = context.get_state("geo_source") == "community"
+    if not site_id and not is_community:
         return StepResult.failure("No site ID available — run generate_distribution_map first")
 
     # Target kWp
