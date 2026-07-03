@@ -1,0 +1,22 @@
+# Claude / editor local state
+.claude/launch.json
+.claude/worktrees/
+*-recent.json
+.excalidraw-recent.json
+
+# OS junk
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local env / secrets (never commit)
+.env
+*.env.local
+
+# Stray patch files (sync artifacts)
+*.patch

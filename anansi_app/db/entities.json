@@ -1,0 +1,1504 @@
+{
+  "tables": [
+    {
+      "bare": "organizations",
+      "label": "Organizations",
+      "icon": "\ud83c\udfe2",
+      "group": "Admin",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "users",
+      "label": "Users",
+      "icon": "\ud83d\udc64",
+      "group": "Admin",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "organization",
+          "type": "text",
+          "ref": "organizations"
+        },
+        {
+          "name": "email",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "can",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "grids",
+      "label": "Grids",
+      "icon": "\ud83c\udfd8\ufe0f",
+      "group": "Sites",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "community",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "stage",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "grid_coords",
+      "label": "Grid Coordinates",
+      "icon": "\ud83d\udccd",
+      "group": "Sites",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "grid",
+          "type": "text",
+          "ref": "grids"
+        },
+        {
+          "name": "coordinate",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "components",
+      "label": "Components",
+      "icon": "\ud83d\udd29",
+      "group": "Catalogue",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "name_in_french",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "counting_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "component_type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "source",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "who_procures",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "unit_cost_usd",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "unit_cost_ngn",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "spec1_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec1_value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec1_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec2_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec2_value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec2_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec3_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec3_value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec3_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "contingency_pct",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "notes",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "do_not_miss",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "ddp_cost",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "projected_cost",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "cost_confidence",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "num_purchases",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "cost_projected_at",
+          "type": "timestamptz",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "subassemblies",
+      "label": "Subassemblies",
+      "icon": "\ud83d\udce6",
+      "group": "Catalogue",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "main_component",
+          "type": "text",
+          "ref": "components"
+        },
+        {
+          "name": "assembly_class",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "assembly_type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "assembly_reference_image",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "design_types",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "components_active",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "spec1_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec1_value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec1_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec2_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec2_value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec2_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec3_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec3_value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec3_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "unit_rental_usd_per_month",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "subassembly_components",
+      "label": "Subassembly Components",
+      "icon": "\ud83e\udde9",
+      "group": "Catalogue",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "subassembly",
+          "type": "text",
+          "ref": "subassemblies"
+        },
+        {
+          "name": "component_subassembly",
+          "type": "text",
+          "ref": "subassemblies"
+        },
+        {
+          "name": "component",
+          "type": "text",
+          "ref": "components"
+        },
+        {
+          "name": "qty",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "component_type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec1_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec1_value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec1_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "design_rules",
+      "label": "Design Rules",
+      "icon": "\ud83d\udcd0",
+      "group": "Catalogue",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "description",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "implemented",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "designs",
+      "label": "Designs",
+      "icon": "\u26a1",
+      "group": "Engineering",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "grid",
+          "type": "text",
+          "ref": "grids"
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "inverter_type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "battery_type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "mppt_type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "pv_type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "pv_inverter_type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "max_connections",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "initial_residential_connections",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "initial_business_connections",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "initial_3_phase_connections",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "average_service_drop_length_m",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "number_of_poc_teams_to_install_meters",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "anchor_load_kw",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "force_3_phase",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "wp_per_conn_override",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "constrain_design_to_known_regulation",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "pue_hours_per_day",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "daily_generation_potential_kwh_kwp",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "phases",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "target_kwp",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "target_kwh",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "target_tariff_usd",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "auto_design",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "recalculate_bom_on_design_change",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "max_distance_to_center_of_consumption",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "pv_area_sqm",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "avg_distance_to_pv_combiner",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "distance_to_feeder_pillar",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "spd_type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "usd_to_ngn",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "xrate_updated_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "bom_generated_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "design_checks",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "kwp",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "kva",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "kwh",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "bom_cost_estimate",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "works_cost_estimate",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "monthly_rental_estimate",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "monthly_saleable_kwh_at_expected_cuf",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "monthly_revenue_at_expected_cuf_and_tariff",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "design_subassemblies",
+      "label": "Design Subassemblies",
+      "icon": "\ud83d\udd27",
+      "group": "Engineering",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "design",
+          "type": "text",
+          "ref": "designs"
+        },
+        {
+          "name": "subassembly",
+          "type": "text",
+          "ref": "subassemblies"
+        },
+        {
+          "name": "qty",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "subassembly_image",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "named",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "class",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec1_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec1_value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec1_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec2_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec2_value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec2_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec3_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec3_value",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "spec3_unit",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "kwp",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "kwh",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "kva",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "comment",
+          "type": "text",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "bom_items",
+      "label": "BOM Items",
+      "icon": "\ud83e\uddfe",
+      "group": "Engineering",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "item",
+          "type": "text",
+          "ref": "components"
+        },
+        {
+          "name": "qty",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "qty_with_contingency",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "design",
+          "type": "text",
+          "ref": "designs"
+        },
+        {
+          "name": "job",
+          "type": "text",
+          "ref": "jobs"
+        },
+        {
+          "name": "subassembly",
+          "type": "text",
+          "ref": "subassemblies"
+        },
+        {
+          "name": "design_types",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "unit_cost_ngn",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "total_cost_ngn",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "monthly_rental_usd",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "source",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "who_procures",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "verified_in_shipment",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "engg_comment",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "received_count",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "returned_count",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "technician_comment",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "procedures",
+      "label": "Procedures",
+      "icon": "\ud83d\udccb",
+      "group": "Field Ops",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "code",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "qty",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "comments",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "procedure_steps",
+      "label": "Procedure Steps",
+      "icon": "\u2705",
+      "group": "Field Ops",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "outcomes",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "procedure",
+          "type": "text",
+          "ref": "procedures"
+        },
+        {
+          "name": "detail",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "image",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "requires_proof",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "step_order",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "conditional_on",
+          "type": "text",
+          "ref": "procedure_steps"
+        },
+        {
+          "name": "go_options",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "jobs",
+      "label": "Jobs",
+      "icon": "\ud83d\udee0\ufe0f",
+      "group": "Field Ops",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "type",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "grid",
+          "type": "text",
+          "ref": "grids"
+        },
+        {
+          "name": "jira_reference",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "organization",
+          "type": "text",
+          "ref": "organizations"
+        },
+        {
+          "name": "technician",
+          "type": "text",
+          "ref": "users"
+        },
+        {
+          "name": "start_date",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "expected_days_to_complete",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "cost_to_developer",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "cost_to_nxt",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "job_procedures",
+      "label": "Job Procedures",
+      "icon": "\ud83d\uddc2\ufe0f",
+      "group": "Field Ops",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "job",
+          "type": "text",
+          "ref": "jobs"
+        },
+        {
+          "name": "procedure",
+          "type": "text",
+          "ref": "procedures"
+        },
+        {
+          "name": "qty",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "sequence_in_job",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "comment",
+          "type": "text",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "job_steps",
+      "label": "Job Steps",
+      "icon": "\u2611\ufe0f",
+      "group": "Field Ops",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "step_reference",
+          "type": "text",
+          "ref": "procedure_steps"
+        },
+        {
+          "name": "job",
+          "type": "text",
+          "ref": "jobs"
+        },
+        {
+          "name": "job_procedure",
+          "type": "text",
+          "ref": "job_procedures"
+        },
+        {
+          "name": "sequence",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "conditional_on",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "go_conditions",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "proof",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "status",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "comment",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "approved",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "created_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "updated_by",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "created_at",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "updated_at",
+          "type": "timestamptz",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "job_subassemblies",
+      "label": "Job Subassemblies",
+      "icon": "\ud83d\udce6",
+      "group": "Field Ops",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "job",
+          "type": "text",
+          "ref": "jobs"
+        },
+        {
+          "name": "subassembly",
+          "type": "text",
+          "ref": "subassemblies"
+        },
+        {
+          "name": "qty",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        },
+        {
+          "name": "comment",
+          "type": "text",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "purchases",
+      "label": "Purchases (BoS)",
+      "icon": "\ud83d\uded2",
+      "group": "Procurement",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "date",
+          "type": "timestamptz",
+          "ref": null
+        },
+        {
+          "name": "item_description",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "currency",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "qty",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "landed_unit_cost_usd",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "total_cost",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "unit_rental_prices",
+      "label": "Unit Rental Prices",
+      "icon": "\ud83d\udcb5",
+      "group": "Catalogue",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "item",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "engineering_item_name",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "unit_monthly_rental",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    },
+    {
+      "bare": "wp_per_conn_lookup",
+      "label": "Wp per Conn Lookup",
+      "icon": "\ud83d\udcc8",
+      "group": "Catalogue",
+      "pk": "id",
+      "columns": [
+        {
+          "name": "id",
+          "type": "text",
+          "ref": null
+        },
+        {
+          "name": "nonresidential_threshold",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "wp_per_conn",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "kwh_per_kwp",
+          "type": "numeric",
+          "ref": null
+        },
+        {
+          "name": "active",
+          "type": "boolean",
+          "ref": null
+        }
+      ]
+    }
+  ]
+}

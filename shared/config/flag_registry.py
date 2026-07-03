@@ -396,6 +396,21 @@ _FLAGS: List[Flag] = [
         "Comma-separated emails allowed to issue equipment-control commands.",
         scope=SERVICE_BOT,
     ),
+    _s(
+        "GRID_DESIGN_ALLOWED_USERS",
+        "",
+        "Comma-separated emails with view-only access to the Grid Design tables.",
+    ),
+    _s(
+        "GRID_DESIGN_EDITORS",
+        "",
+        "Comma-separated emails allowed to edit all Grid Design tables except Procurements.",
+    ),
+    _s(
+        "GRID_PROCUREMENT_EDITORS",
+        "",
+        "Comma-separated emails allowed to edit only the Procurements (Purchases/BoS) table.",
+    ),
     # --- System config (read-only display) --------------------------------
     _s(
         "ESCALATION_TELEGRAM_CHAT_ID",

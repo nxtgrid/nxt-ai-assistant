@@ -10,6 +10,7 @@ import base64
 import json
 import logging
 import os
+import re
 import ssl
 import sys
 import time
@@ -35,6 +36,18 @@ except ImportError:
     advance_recurrence = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+# Single source of truth for the placeholder tokens a broadcast message may use.
+# `enrich_message` substitutes these per recipient; `find_unknown_placeholders`
+# uses the same set to reject typo'd/unsupported tags (e.g. <org_grid>) before a
+# message is verified or sent, so a customer never receives an un-substituted tag.
+SUPPORTED_PLACEHOLDERS = ("<org_name>", "<org_hashtag>", "<org_grids>")
+
+# Matches org-placeholder-shaped tokens only (e.g. <org_name>, <oarg_name>).
+# Deliberately narrower than "any <...> token" so ordinary bracketed text in a
+# broadcast (e.g. <b>, <link>, <email>) isn't mistaken for an unknown placeholder
+# and used to block a legitimate send.
+_PLACEHOLDER_PATTERN = re.compile(r"<(?:org|oarg|or|g)[-_][A-Za-z0-9_\-]+>")
 
 
 @dataclass
@@ -321,7 +334,8 @@ class BroadcastService:
         # Get org data for this chat_id
         org_data = self._get_org_data_for_chat(chat_id)
 
-        # Define placeholder handlers (modular for future expansion)
+        # Define placeholder handlers (modular for future expansion).
+        # Keys MUST stay in sync with SUPPORTED_PLACEHOLDERS.
         grids = org_data.get("grids") or []
         placeholders = {
             "<org_name>": org_data.get("name") or "Organization",
@@ -335,6 +349,30 @@ class BroadcastService:
             enriched = enriched.replace(placeholder, value)
 
         return enriched
+
+    @staticmethod
+    def find_unknown_placeholders(message: str) -> List[str]:
+        """
+        Return any `<...>` tokens in the message that are not supported placeholders.
+
+        Used as a deterministic pre-check before verification/sending so a typo'd
+        or unsupported tag (e.g. `<org_grid>`, `<oarg_name>`) is caught locally
+        instead of reaching a customer un-substituted. Order-preserving and
+        de-duplicated.
+
+        Args:
+            message: The raw message template (before enrichment).
+
+        Returns:
+            List of unsupported tokens, e.g. ["<org_grid>"]. Empty if all tags are valid.
+        """
+        seen: set[str] = set()
+        unknown: List[str] = []
+        for token in _PLACEHOLDER_PATTERN.findall(message or ""):
+            if token not in SUPPORTED_PLACEHOLDERS and token not in seen:
+                seen.add(token)
+                unknown.append(token)
+        return unknown
 
     def _get_org_data_for_chat(self, chat_id: str) -> Dict[str, Any]:
         """
@@ -494,17 +532,17 @@ class BroadcastService:
 
             orgs = asyncio.run(fetch_all())
 
-            # Populate cache
+            # Populate cache with confirmed matches only. IDs this bulk query didn't
+            # match (e.g. the escalation group, or a transient lookup miss) are left
+            # uncached so `_get_org_data_for_chat` falls through to its live,
+            # single-recipient lookup — which retries with an int-cast chat_id and is
+            # the same path `enrich_message` preview uses. Caching a blind "Customer"/
+            # no-grids fallback here would permanently lock in wrong placeholders for
+            # the rest of this send with no retry.
             for org in orgs:
                 chat_id = org.get("developer_group_telegram_chat_id")
                 if chat_id:
                     self._org_cache[chat_id] = org
-
-            # Set fallback for IDs not found (e.g., escalation group)
-            fallback = {"name": "Customer", "formal_name": "Customer"}
-            for cid in uncached:
-                if cid not in self._org_cache:
-                    self._org_cache[cid] = fallback
 
         except Exception as e:
             logger.error("Error preloading org cache: %s", e)

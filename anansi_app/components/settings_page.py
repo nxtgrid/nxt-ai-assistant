@@ -556,6 +556,32 @@ def render_settings_page():
             help="Email addresses allowed to use equipment control commands (/inverters_restart, /comms_reboot)",
         )
 
+        st.markdown("---")
+        st.markdown("#### ⚡ Grid Design Access")
+        st.caption(
+            "Whitelists for the Grid Design section. A user must appear in at least one of "
+            "these lists (or in Allowed Viewer Emails above) to see the grid tables at all — "
+            "grid view is the union of all of them. Edit rights are strictly separated."
+        )
+        st.session_state.pending_settings["GRID_DESIGN_ALLOWED_USERS"] = st.text_area(
+            "Grid view-only users (emails separated by commas)",
+            value=st.session_state.pending_settings.get("GRID_DESIGN_ALLOWED_USERS", ""),
+            height=80,
+            help="Can view all Grid Design tables but cannot edit anything.",
+        )
+        st.session_state.pending_settings["GRID_DESIGN_EDITORS"] = st.text_area(
+            "Grid design editors (emails separated by commas)",
+            value=st.session_state.pending_settings.get("GRID_DESIGN_EDITORS", ""),
+            height=80,
+            help="Can edit every Grid Design table EXCEPT Procurements (Purchases/BoS).",
+        )
+        st.session_state.pending_settings["GRID_PROCUREMENT_EDITORS"] = st.text_area(
+            "Procurement editors (emails separated by commas)",
+            value=st.session_state.pending_settings.get("GRID_PROCUREMENT_EDITORS", ""),
+            height=80,
+            help="Can edit ONLY the Procurements (Purchases/BoS) table.",
+        )
+
     # Section 6: Experts (Subagents)
     with st.expander("🧠 Experts (Subagents)", expanded=False):
         st.caption("Settings for expert workflow execution, timeouts, and parameter confirmation.")

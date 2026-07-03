@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Grid Design MCP Server - AppSheet Integration for Design and BOM Generation
+Grid Design MCP Server - Design and BOM Generation
 
 This MCP server provides tools to:
-1. Create a grid in AppSheet if it doesn't exist
-2. Create a new design for a grid with specific inputs
-3. Run design and BOM generation actions
-4. Wait for completion and fetch results
+1. Create a grid if it doesn't exist
+2. Create a new design for a grid with the full AppSheet-form parameter set
+3. Run design and BOM generation
+4. Return energy specs, BOM items and cost summaries
 
-Uses the AppSheet REST API v2.
+Backends (GRID_DESIGN_BACKEND):
+- "internal" (default): the shared grid-design engine against the Chat DB
+  gd_* tables (shared/grid_design, ported from AppSheet's Apps Script).
+- "appsheet": legacy AppSheet REST API v2 workflow, kept for rollback.
 """
 
 import asyncio
@@ -24,10 +27,13 @@ import mcp.types as types
 from dotenv import load_dotenv
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
+from supabase import Client, create_client
 
 # Load environment variables BEFORE importing shared_code
 load_dotenv()
 
+from servers.grid_design_server import internal_engine
+from servers.grid_design_server.internal_engine import compute_bom_cost_summary
 from shared_code.utils.http_client import HTTPClientMixin
 from shared_code.utils.logger import setup_logger
 
@@ -44,12 +50,31 @@ GRID_DESIGN_APP_ID = os.getenv("GRID_DESIGN_APP_ID", "")
 GRID_DESIGN_APP_KEY = os.getenv("GRID_DESIGN_APP_KEY", "")
 APPSHEET_REGION = os.getenv("APPSHEET_REGION", "www.appsheet.com")
 GRID_DESIGN_ACTIONS_ENABLED = os.getenv("GRID_DESIGN_ACTIONS_ENABLED", "true").lower() == "true"
+# "internal" (default) = shared/grid_design engine on the Chat DB gd_* tables;
+# "appsheet" = legacy AppSheet REST workflow (rollback only).
+GRID_DESIGN_BACKEND = os.getenv("GRID_DESIGN_BACKEND", "internal").lower()
 
 # Table names (configurable via env vars)
 GRIDS_TABLE = os.getenv("GRID_DESIGN_GRIDS_TABLE", "Grids")
 DESIGNS_TABLE = os.getenv("GRID_DESIGN_DESIGNS_TABLE", "Designs")
 BOM_TABLE = os.getenv("GRID_DESIGN_BOM_TABLE", "BOM Items")
 ACTIONS_TABLE = os.getenv("GRID_DESIGN_ACTIONS_TABLE", "AAL")  # Actions log table
+
+# Component costs are read from the Chat DB (Postgres), NOT AppSheet: AppSheet's
+# "Projected Cost" is a virtual column that the REST API returns unreliably
+# (populated one moment, 0 the next). gd_components.projected_cost is the
+# deterministic source (recomputed from the purchase ledger by anansi_app's
+# cost_projection service). Reuse the shared Chat DB creds (same DB meta_server
+# reads from), with legacy fallbacks.
+CHAT_DB_URL = (
+    os.getenv("CHAT_DB_URL") or os.getenv("MAIN_SUPABASE_URL") or os.getenv("SUPABASE_URL", "")
+)
+CHAT_DB_SERVICE_KEY = (
+    os.getenv("CHAT_DB_SERVICE_KEY")
+    or os.getenv("MAIN_SUPABASE_KEY")
+    or os.getenv("SUPABASE_KEY", "")
+)
+GD_COMPONENTS_DB_TABLE = os.getenv("GRID_DESIGN_COMPONENTS_DB_TABLE", "gd_components")
 
 # Action types for AAL table
 ACTION_CREATE_BOM = "Create BOM"
@@ -310,6 +335,11 @@ class AppSheetClient(HTTPClientMixin):
         """
         Get the status of an action for a design.
 
+        NOTE: When a design has been processed multiple times there can be
+        several rows matching the same (Reference, Action) pair. This returns
+        an arbitrary match, so prefer get_action_by_id() when the specific
+        triggered row Id is known.
+
         Args:
             design_id: The design UNIQUEID
             action_type: The action type to check (default: Create BOM)
@@ -337,6 +367,39 @@ class AppSheetClient(HTTPClientMixin):
             return actions[0] if actions else None
         except Exception as e:
             logger.warning(f"Error fetching action status for '{design_id}': {e}")
+            return None
+
+    async def get_action_by_id(self, action_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Get a single action row by its UNIQUEID.
+
+        Unlike get_action_status(), this targets the exact row that was just
+        created, so stale BOM-action rows from earlier runs of the same design
+        cannot satisfy or stall the completion poll.
+
+        Args:
+            action_id: The action row UNIQUEID returned when the row was added
+
+        Returns:
+            The action row if found, None otherwise
+        """
+        try:
+            result = await self._make_request(
+                table_name=ACTIONS_TABLE,
+                action="Find",
+                rows=[],
+                properties={
+                    "Locale": "en-US",
+                    "Timezone": "UTC",
+                    "Selector": f'Filter({ACTIONS_TABLE}, [Id]="{action_id}")',
+                },
+            )
+            actions: List[Dict[str, Any]] = (
+                result if isinstance(result, list) else result.get("Rows", [])
+            )
+            return actions[0] if actions else None
+        except Exception as e:
+            logger.warning(f"Error fetching action by id '{action_id}': {e}")
             return None
 
     async def get_design(self, design_id: str) -> Optional[Dict[str, Any]]:
@@ -391,73 +454,136 @@ class AppSheetClient(HTTPClientMixin):
             return []
 
 
-def compute_bom_cost_summary(bom_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _parse_money(value: Any) -> float:
+    """Parse a cost/qty value, tolerating currency formatting and None."""
+    raw = str(value if value is not None else "").replace(",", "").replace("$", "").strip()
+    try:
+        return float(raw) if raw else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _get_chat_db_client() -> Client:
+    """Supabase client for the Chat DB (holds gd_components). Mirrors meta_server."""
+    if not CHAT_DB_URL or not CHAT_DB_SERVICE_KEY:
+        raise ValueError(
+            "Chat DB credentials not configured for component cost lookup. Set "
+            "CHAT_DB_URL and CHAT_DB_SERVICE_KEY (or legacy SUPABASE_URL/SUPABASE_KEY)."
+        )
+    return create_client(CHAT_DB_URL, CHAT_DB_SERVICE_KEY)
+
+
+async def get_component_costs() -> Dict[str, Dict[str, float]]:
+    """Return ``{component_id: {"projected_cost", "ddp_cost"}}`` from the Chat DB.
+
+    ``gd_components.projected_cost`` is the deterministic projection anansi_app
+    writes from the purchase ledger (see ``cost_projection.recompute_component_costs``).
+    We read it here instead of AppSheet's virtual ``Projected Cost`` column, which
+    the REST API returns unreliably (populated one moment, 0 the next). The
+    synchronous Supabase query runs in a thread to avoid blocking the event loop.
     """
-    Compute cost summary by component type groups.
 
-    Groups:
-    - Main Energy Asset: Items with Component Type containing "Main Energy Asset"
-    - Metering: Items with Component Type containing "Metering"
-    - BoS (Balance of System): All other items
+    def _query() -> Dict[str, Dict[str, float]]:
+        client = _get_chat_db_client()
+        rows = (
+            client.table(GD_COMPONENTS_DB_TABLE)
+            .select("id,projected_cost,ddp_cost")
+            .eq("active", True)
+            .execute()
+            .data
+        ) or []
+        return {
+            str(r["id"]): {
+                "projected_cost": _parse_money(r.get("projected_cost")),
+                "ddp_cost": _parse_money(r.get("ddp_cost")),
+            }
+            for r in rows
+            if r.get("id")
+        }
 
-    Excludes: Items with Component Type = "Tools"
+    try:
+        costs = await asyncio.to_thread(_query)
+        logger.info(f"Loaded {len(costs)} component costs from {GD_COMPONENTS_DB_TABLE}")
+        return costs
+    except Exception as e:
+        logger.warning(f"Error loading component costs from Chat DB: {e}")
+        return {}
 
-    Returns:
-        Dict with cost totals per group and item counts
+
+def enrich_bom_projected_cost(
+    bom_items: List[Dict[str, Any]],
+    component_costs: Dict[str, Dict[str, float]],
+) -> List[Dict[str, Any]]:
+    """Set a reliable ``Projected Cost with contingency`` on each BOM row in place.
+
+    AppSheet's ``Projected Cost with contingency`` is a virtual column derived from
+    the (also virtual) ``Projected Cost`` on the Components table, and the REST API
+    returns it as 0/blank unpredictably — which is why LPP BOMs could show $0 costs
+    while the app UI showed real numbers. We recompute each line from the
+    deterministic Chat DB projection instead:
+
+        line cost = (Qty With Contingency, fallback Qty) × gd_components.projected_cost
+
+    Fallbacks when the DB projected cost is unavailable: keep any non-zero value
+    AppSheet already returned on the row, else fall back to the row's
+    ``DDP Cost with contingency`` (physical-backed, reliably populated over the
+    API). ``Tools`` rows are left untouched (they carry no cost). Mirrors the
+    formula in ``anansi_app/grid_app/entities/virtual.py`` (``_proj``/``_ddp``).
     """
-    # Initialize accumulators
-    costs = {
-        "main_energy_asset": 0.0,
-        "metering": 0.0,
-        "bos": 0.0,
-    }
-    counts = {
-        "main_energy_asset": 0,
-        "metering": 0,
-        "bos": 0,
-        "tools_excluded": 0,
-    }
-
     for item in bom_items:
-        component_type = str(item.get("Component Type", "")).strip()
-
-        # Skip Tools
-        if "tools" in component_type.lower():
-            counts["tools_excluded"] += 1
+        component_type = str(item.get("Component Type", "")).strip().lower()
+        if "tools" in component_type:
             continue
 
-        # Parse Estimated Cost (handle empty strings and currency formatting)
-        # Note: Estimated Cost is already the line total (unit price * qty)
-        est_cost_str = (
-            str(item.get("Projected Cost with contingency", "0")).replace(",", "").strip()
-        )
-        try:
-            item_total = float(est_cost_str) if est_cost_str else 0.0
-        except ValueError:
-            item_total = 0.0
+        qty = _parse_money(item.get("Qty With Contingency")) or _parse_money(item.get("Qty"))
+        costs = component_costs.get(str(item.get("Item")), {})
+        computed = round(qty * costs.get("projected_cost", 0.0), 2)
 
-        # Categorize by component type
-        if "main energy asset" in component_type.lower():
-            costs["main_energy_asset"] += item_total
-            counts["main_energy_asset"] += 1
-        elif "metering" in component_type.lower():
-            costs["metering"] += item_total
-            counts["metering"] += 1
+        if computed > 0:
+            item["Projected Cost with contingency"] = computed
+        elif _parse_money(item.get("Projected Cost with contingency")) > 0:
+            # AppSheet already returned a usable computed value — leave it.
+            pass
         else:
-            # Everything else is Balance of System (BoS)
-            costs["bos"] += item_total
-            counts["bos"] += 1
+            # Last resort: physical-backed DDP cost so the BOM is never all-zero.
+            item["Projected Cost with contingency"] = _parse_money(
+                item.get("DDP Cost with contingency")
+            )
+    return bom_items
 
-    # Calculate total
-    total_cost = costs["main_energy_asset"] + costs["metering"] + costs["bos"]
 
-    return {
-        "main_energy_asset_cost": round(costs["main_energy_asset"], 2),
-        "metering_cost": round(costs["metering"], 2),
-        "bos_cost": round(costs["bos"], 2),
-        "total_cost": round(total_cost, 2),
-        "item_counts": counts,
-    }
+# compute_bom_cost_summary lives in internal_engine (imported above) — it is
+# shared by both backends since rows carry the same AppSheet-style keys.
+
+
+def require_appsheet_id(row: Dict[str, Any], entity: str) -> str:
+    """Extract the AppSheet-assigned UNIQUEID from a returned row.
+
+    AppSheet owns Id generation (the key column's UNIQUEID() initial value);
+    Anansi never sets it. We deliberately do NOT fall back to ``_RowNumber``:
+    it is a positional index, not a stable unique key, so persisting it would
+    let later updates/polls target the wrong row (and rows can share a
+    _RowNumber view across syncs). A missing Id usually means the change has
+    not yet propagated to the underlying sheet — fail loudly so the caller can
+    retry instead of continuing with a bad reference.
+
+    Args:
+        row: A row dict returned by an AppSheet Add/Find call
+        entity: Human-readable entity name for the error message (e.g. "design")
+
+    Returns:
+        The AppSheet UNIQUEID as a string
+
+    Raises:
+        Exception: If the row has no truthy "Id" field
+    """
+    row_id = row.get("Id")
+    if not row_id:
+        raise Exception(
+            f"AppSheet did not return an Id for the {entity}. The change may not "
+            "have synced to the underlying sheet yet — please retry shortly."
+        )
+    return str(row_id)
 
 
 # Global client instance
@@ -493,6 +619,7 @@ async def design_and_bom_workflow(
     target_kwp: Optional[float] = None,
     target_kwh: Optional[float] = None,
     avg_service_drop_length_m: Optional[float] = None,
+    spd_type: Optional[str] = None,
     wait_for_completion: bool = True,
     wait_for_bom: bool = True,
 ) -> Dict[str, Any]:
@@ -521,11 +648,7 @@ async def design_and_bom_workflow(
         existing_grid = await client.find_grid_by_name(grid_name)
 
         if existing_grid:
-            grid_id = (
-                existing_grid.get("Id")
-                or existing_grid.get("Grid ID")
-                or existing_grid.get("_RowNumber")
-            )
+            grid_id = existing_grid.get("Id") or existing_grid.get("Grid ID")
             steps.append({"step": "find_grid", "status": "found", "grid_id": grid_id})
             workflow_result["grid"] = existing_grid
             logger.info(f"Found existing grid: {grid_id}")
@@ -534,7 +657,7 @@ async def design_and_bom_workflow(
             rows = create_result.get("Rows", [])
             if rows:
                 # AppSheet returns the UNIQUEID in the "Id" field
-                grid_id = rows[0].get("Id") or rows[0].get("_RowNumber")
+                grid_id = require_appsheet_id(rows[0], "grid")
                 workflow_result["grid"] = rows[0]
             else:
                 grid_id = grid_name  # Fallback to name as reference
@@ -565,13 +688,14 @@ async def design_and_bom_workflow(
             target_kwp=target_kwp,
             target_kwh=target_kwh,
             avg_service_drop_length_m=avg_service_drop_length_m,
+            **({"spd_type": spd_type} if spd_type else {}),
         )
 
         design_result = await client.create_design(design_input, grid_id)
         rows = design_result.get("Rows", [])
         if rows:
             # AppSheet returns the UNIQUEID in the "Id" field
-            design_id = rows[0].get("Id") or rows[0].get("_RowNumber")
+            design_id = require_appsheet_id(rows[0], "design")
             workflow_result["design"] = rows[0]
         else:
             raise Exception("Failed to create design - no rows returned")
@@ -675,6 +799,10 @@ async def design_and_bom_workflow(
 
                 # Fetch active BOM items
                 bom_items = await client.get_bom_for_design(design_id)
+                # Recompute projected costs from the Chat DB — the BOM's virtual
+                # "Projected Cost with contingency" is unreliable over the AppSheet API.
+                if bom_items:
+                    enrich_bom_projected_cost(bom_items, await get_component_costs())
                 workflow_result["bom"] = bom_items
                 steps.append(
                     {
@@ -727,11 +855,15 @@ async def handle_list_tools() -> List[types.Tool]:
         types.Tool(
             name="design_and_bom",
             description=(
-                "Create a grid design and generate Bill of Materials (BOM) in AppSheet. "
+                "Create a grid design and generate Bill of Materials (BOM). "
                 "This tool: 1) Creates a grid if it doesn't exist by name, "
-                "2) Creates a new design with specified parameters, "
-                "3) Triggers design and BOM generation actions, "
-                "4) Waits for completion and returns the results. "
+                "2) Creates a new design with specified parameters (every parameter "
+                "the old AppSheet design form offered is accepted — technology "
+                "choices, connection split, Wp/connection override, regulation "
+                "constraint, 3-phase enforcement, SPD type, distances, tariff), "
+                "3) Runs auto-design sizing and BOM generation, "
+                "4) Returns energy specs, BOM items and cost summary. "
+                "Call list_design_options first to see valid technology choices. "
                 "Use this when users ask to create a new solar grid design or generate a BOM."
             ),
             inputSchema={
@@ -813,6 +945,80 @@ async def handle_list_tools() -> List[types.Tool]:
                         "type": "number",
                         "description": "Target kWh to constrain the design (optional, AppSheet calculates freely if not provided)",
                     },
+                    "avg_service_drop_length_m": {
+                        "type": "number",
+                        "description": "Average service drop cable length per connection in meters (default: 25)",
+                        "default": 25,
+                    },
+                    "wp_per_conn_override": {
+                        "type": "number",
+                        "description": (
+                            "Override the Wp-per-connection sizing constant (e.g. 850). "
+                            "If omitted, looked up from the Wp/conn table based on the "
+                            "business-connection ratio."
+                        ),
+                    },
+                    "regulation_constraint": {
+                        "type": "string",
+                        "description": (
+                            "Constrain the design to a known regulation's minimum sizing "
+                            "rules (default: 'Nigeria - DARES'). Use 'None' to size purely "
+                            "from connections and loads."
+                        ),
+                        "enum": ["None", "Nigeria - DARES"],
+                        "default": "Nigeria - DARES",
+                    },
+                    "pue_hours_per_day": {
+                        "type": "number",
+                        "description": "Hours per day the anchor/PUE load runs (default: 3)",
+                        "default": 3,
+                    },
+                    "daily_generation_potential_kwh_kwp": {
+                        "type": "number",
+                        "description": (
+                            "Daily generation potential in kWh per kWp (optional; "
+                            "defaults to the Design Rules value)"
+                        ),
+                    },
+                    "target_tariff_usd": {
+                        "type": "number",
+                        "description": "Target tariff in USD per kWh (default: 0.45)",
+                        "default": 0.45,
+                    },
+                    "max_distance_to_center_of_consumption_m": {
+                        "type": "number",
+                        "description": (
+                            "Max distance of power plant to center of load to avoid "
+                            "MV lines, in meters (optional)"
+                        ),
+                    },
+                    "avg_distance_to_pv_combiner_m": {
+                        "type": "number",
+                        "description": "Average distance to PV combiner in meters (default: 40)",
+                        "default": 40,
+                    },
+                    "distance_to_feeder_pillar_m": {
+                        "type": "number",
+                        "description": "Distance to feeder pillar in meters (default: 7)",
+                        "default": 7,
+                    },
+                    "spd_type": {
+                        "type": "string",
+                        "description": "Surge protection device strategy (default: keep T1+T2)",
+                        "enum": [
+                            "Keep default T1+T2 Type SPD (Any lightning probability)",
+                            "Use T2 type as T1+T2 Type due to Low (<=16 strikes per sq km per yr) lightning probability",
+                        ],
+                        "default": "Keep default T1+T2 Type SPD (Any lightning probability)",
+                    },
+                    "auto_design": {
+                        "type": "boolean",
+                        "description": (
+                            "Run auto-design sizing after creating the design row "
+                            "(default: true). Set false to only record the inputs."
+                        ),
+                        "default": True,
+                    },
                     "wait_for_completion": {
                         "type": "boolean",
                         "description": "Whether to wait for generation to complete (default: true)",
@@ -830,7 +1036,7 @@ async def handle_list_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="find_grid",
-            description="Find an existing grid by name in AppSheet",
+            description="Find an existing grid by name",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -860,7 +1066,10 @@ async def handle_list_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="update_design",
-            description="Update fields on an existing design row in AppSheet. Use after site layout to set distances.",
+            description=(
+                "Update layout-derived distance fields on an existing design. "
+                "Use after site layout to set real cable distances."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -869,8 +1078,14 @@ async def handle_list_tools() -> List[types.Tool]:
                         "description": "UNIQUEID of the design to update",
                     },
                     "updates": {
-                        "type": "object",
-                        "description": "Dict of AppSheet column names to new values (e.g. {'Avg Distance to PV Combiner (m)': 15.5})",
+                        "type": "string",
+                        "description": (
+                            "JSON object string of column names to new values, e.g. "
+                            '\'{"Avg Distance to PV Combiner (m)": 15.5, '
+                            '"Distance to Feeder Pillar (m)": 12}\'. Allowed columns: '
+                            "Avg Distance to PV Combiner (m), Distance to Feeder "
+                            "Pillar (m), Average Service Drop Length (m)."
+                        ),
                     },
                 },
                 "required": ["design_id", "updates"],
@@ -896,10 +1111,120 @@ async def handle_list_tools() -> List[types.Tool]:
             },
             visible_to_customer=False,
         ),
+        types.Tool(
+            name="list_design_options",
+            description=(
+                "List valid design-creation choices: technology types (inverters, "
+                "batteries, MPPTs, PV panels — from the rental catalogue, with "
+                "assembly classes to tell them apart), SPD type options, regulation "
+                "constraint options, and the form defaults applied when a parameter "
+                "is omitted. Call this before design_and_bom when the user wants to "
+                "choose equipment or override defaults interactively."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            visible_to_customer=False,
+        ),
     ]
 
     logger.info(f"Grid Design server: {len(tools)} tools available")
     return tools
+
+
+# Optional design_and_bom arguments forwarded verbatim to the internal engine
+# when supplied (design_writer applies the AppSheet form defaults to the rest).
+_INTERNAL_PASSTHROUGH_KEYS = (
+    "community",
+    "pv_inverter_type",
+    "initial_residential_connections",
+    "initial_business_connections",
+    "initial_3phase_connections",
+    "num_poc_teams",
+    "anchor_load_kw",
+    "force_3phase",
+    "target_kwp",
+    "target_kwh",
+    "avg_service_drop_length_m",
+    "wp_per_conn_override",
+    "regulation_constraint",
+    "pue_hours_per_day",
+    "daily_generation_potential_kwh_kwp",
+    "target_tariff_usd",
+    "max_distance_to_center_of_consumption_m",
+    "avg_distance_to_pv_combiner_m",
+    "distance_to_feeder_pillar_m",
+    "spd_type",
+    "created_by",
+)
+
+# New-form parameters the legacy AppSheet backend cannot map (logged + ignored
+# there; spd_type IS supported by the AppSheet path).
+_APPSHEET_UNSUPPORTED_KEYS = (
+    "wp_per_conn_override",
+    "regulation_constraint",
+    "pue_hours_per_day",
+    "daily_generation_potential_kwh_kwp",
+    "target_tariff_usd",
+    "max_distance_to_center_of_consumption_m",
+    "avg_distance_to_pv_combiner_m",
+    "distance_to_feeder_pillar_m",
+    "auto_design",
+    "created_by",
+)
+
+
+def _parse_updates(raw: Any) -> Dict[str, Any]:
+    """updates arrives as a JSON object string (Gemini-safe schema); accept
+    dicts too for backward compatibility with older callers."""
+    if isinstance(raw, str):
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("updates must be a JSON object")
+        return parsed
+    return dict(raw or {})
+
+
+def _internal_design_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the internal-engine design_and_bom args from tool arguments."""
+    args: Dict[str, Any] = {
+        "grid_name": arguments["grid_name"],
+        "design_name": arguments["design_name"],
+        "max_connections": arguments["max_connections"],
+        "inverter_type": arguments.get("inverter_type", "Quattro 15kVA"),
+        "battery_type": arguments.get("battery_type", "Pylontech UP5000"),
+        "mppt_type": arguments.get("mppt_type", "Victron 250/85 MPPT"),
+        "pv_type": arguments.get("pv_type", "JA455W Panel"),
+        "auto_design": arguments.get("auto_design", True),
+        "wait_for_bom": arguments.get("wait_for_bom", True),
+    }
+    for key in _INTERNAL_PASSTHROUGH_KEYS:
+        if arguments.get(key) is not None:
+            args[key] = arguments[key]
+    return args
+
+
+async def _handle_internal_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
+    """Route a tool call to the internal (Chat DB) engine backend."""
+    if name == "design_and_bom":
+        result = await internal_engine.design_and_bom(_internal_design_args(arguments))
+    elif name == "find_grid":
+        result = await internal_engine.find_grid(arguments["grid_name"])
+    elif name == "get_design_bom":
+        result = await internal_engine.get_design_bom(arguments["design_id"])
+    elif name == "update_design":
+        result = await internal_engine.update_design(
+            arguments["design_id"], _parse_updates(arguments["updates"])
+        )
+    elif name == "trigger_bom":
+        result = await internal_engine.trigger_bom(
+            arguments["design_id"], arguments.get("grid_name", "")
+        )
+    else:
+        result = {"success": False, "error": f"Unknown tool: {name}"}
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
 
 @server.call_tool()
@@ -920,6 +1245,15 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
                 )
             ]
 
+        # The design-options catalogue lives in the Chat DB regardless of backend.
+        if name == "list_design_options":
+            result = await internal_engine.list_design_options()
+            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+        if GRID_DESIGN_BACKEND == "internal":
+            return await _handle_internal_tool(name, arguments)
+
+        # ── Legacy AppSheet backend (GRID_DESIGN_BACKEND=appsheet) ──
         if not GRID_DESIGN_APP_ID or not GRID_DESIGN_APP_KEY:
             return [
                 types.TextContent(
@@ -934,6 +1268,9 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
             ]
 
         if name == "design_and_bom":
+            ignored = [k for k in _APPSHEET_UNSUPPORTED_KEYS if arguments.get(k) is not None]
+            if ignored:
+                logger.warning(f"AppSheet backend ignores unsupported design parameters: {ignored}")
             result = await design_and_bom_workflow(
                 grid_name=arguments["grid_name"],
                 design_name=arguments["design_name"],
@@ -953,6 +1290,7 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
                 target_kwp=arguments.get("target_kwp"),
                 target_kwh=arguments.get("target_kwh"),
                 avg_service_drop_length_m=arguments.get("avg_service_drop_length_m"),
+                spd_type=arguments.get("spd_type"),
                 wait_for_completion=arguments.get("wait_for_completion", True),
                 wait_for_bom=arguments.get("wait_for_bom", True),
             )
@@ -971,12 +1309,18 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
         elif name == "get_design_bom":
             client = get_client()
             bom = await client.get_bom_for_design(arguments["design_id"])
+            # Recompute projected costs from the Chat DB — the BOM's virtual
+            # "Projected Cost with contingency" is unreliable over the AppSheet API.
+            if bom:
+                enrich_bom_projected_cost(bom, await get_component_costs())
             result = {"success": True, "bom_items": bom, "count": len(bom)}
             return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
         elif name == "update_design":
             client = get_client()
-            result = await client.update_design(arguments["design_id"], arguments["updates"])
+            result = await client.update_design(
+                arguments["design_id"], _parse_updates(arguments["updates"])
+            )
             return [
                 types.TextContent(
                     type="text",
@@ -994,30 +1338,84 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
             action_id = action_rows[0].get("Id") if action_rows else None
             logger.info(f"BOM triggered for {design_id}, action: {action_id}")
 
-            # Poll for BOM completion instead of blind sleep
+            # Poll for BOM completion instead of blind sleep.
+            # Track the exact action row we just created (action_id) rather than
+            # any "Create BOM" row for the design — otherwise stale rows from a
+            # previous run can break the loop early or never report completion,
+            # which is what made the LPP flow appear stuck at create-bom.
             logger.info(f"Polling for BOM completion (max {BOM_GENERATION_WAIT_SECONDS}s)...")
             poll_interval = 10
             elapsed = 0
             bom_items = []
+            completed = False
             while elapsed < BOM_GENERATION_WAIT_SECONDS:
                 await asyncio.sleep(poll_interval)
                 elapsed += poll_interval
-                action = await client.get_action_status(design_id)
+                if action_id:
+                    action = await client.get_action_by_id(action_id)
+                else:
+                    # Fallback when AppSheet did not return the new row Id
+                    action = await client.get_action_status(design_id)
                 if action and action.get("Status") == ACTION_STATUS_COMPLETED:
                     logger.info(f"BOM completed after {elapsed}s")
+                    completed = True
                     break
                 logger.debug(f"BOM not yet complete ({elapsed}s elapsed)...")
 
             # Fetch results
             design = await client.get_design(design_id)
             bom_items = await client.get_bom_for_design(design_id)
+
+            # Fail explicitly when the action never confirmed completion AND no
+            # BOM items were produced, instead of silently returning a $0 BOM.
+            # A clean error lets the workflow surface the problem and retry,
+            # rather than populating the package with empty/zero values.
+            if not completed and not bom_items:
+                logger.error(
+                    f"BOM did not complete for design {design_id} within "
+                    f"{BOM_GENERATION_WAIT_SECONDS}s and 0 items were returned "
+                    f"(action_id={action_id})."
+                )
+                result = {
+                    "success": False,
+                    "error": (
+                        "BOM generation did not finish in time. AppSheet did not "
+                        "report the Create BOM action as completed and produced no "
+                        "BOM items. Please retry the package — if it keeps failing, "
+                        "check the AppSheet Create BOM automation for this design."
+                    ),
+                    "design_id": design_id,
+                    "wait_seconds": BOM_GENERATION_WAIT_SECONDS,
+                }
+                return [
+                    types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))
+                ]
+
             if not bom_items:
                 logger.warning(
                     f"BOM fetch returned 0 items for design {design_id} after "
                     f"{elapsed}s — AppSheet may still be generating. "
                     "cost_summary will show $0 for all categories."
                 )
+
+            # Recompute projected costs from the Chat DB — the BOM's virtual
+            # "Projected Cost with contingency" is unreliable over the AppSheet API.
+            if bom_items:
+                component_costs = await get_component_costs()
+                enrich_bom_projected_cost(bom_items, component_costs)
+                if not component_costs:
+                    logger.warning(
+                        f"No component costs from Chat DB for design {design_id}; BOM "
+                        "projected costs fell back to DDP / raw AppSheet values."
+                    )
+
             cost_summary = compute_bom_cost_summary(bom_items)
+            if cost_summary.get("total_cost", 0) == 0 and bom_items:
+                logger.warning(
+                    f"BOM cost summary is $0 for design {design_id} despite "
+                    f"{len(bom_items)} items — projected and DDP costs both empty "
+                    "over the AppSheet API."
+                )
 
             # Extract energy specs
             design_data = design or {}

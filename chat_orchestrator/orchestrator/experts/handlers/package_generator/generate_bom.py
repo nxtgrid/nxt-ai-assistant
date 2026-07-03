@@ -1,8 +1,8 @@
 """Generate BOM step handler for Light Preliminary Package.
 
-Triggers BOM generation in AppSheet after the design has been updated with
-real cable distances from site layout. Returns BOM items, cost summary,
-and updated energy specs.
+Triggers BOM generation after the design has been updated with real cable
+distances from site layout. Returns BOM items, cost summary, and updated
+energy specs.
 """
 
 import json
@@ -20,10 +20,9 @@ async def generate_site_bom(context: StepContext) -> StepResult:
     """Trigger BOM generation and fetch results.
 
     Calls the trigger_bom MCP tool which:
-    1. Triggers BOM generation action in AppSheet
-    2. Waits for completion
-    3. Fetches design + BOM items
-    4. Computes cost summary
+    1. Runs BOM generation (internal engine, or AppSheet on the legacy backend)
+    2. Fetches design + BOM items
+    3. Computes cost summary
 
     Requires:
     - design_id in state (from generate_powerplant_design)

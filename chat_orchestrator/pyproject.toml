@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [{ name = "Vaibhav Vaidya", email = "akshayvaidya@gmail.com" }]
 requires-python = ">=3.11"
 dependencies = [
-    "fastapi>=0.104,<0.116",
+    "fastapi>=0.104,<0.137",
     "uvicorn>=0.24,<0.41",
     "aiohttp>=3.9,<4",
     "httpx>=0.26,<0.29",
@@ -28,7 +28,7 @@ dependencies = [
     "rapidfuzz>=3.0,<4.0",  # Fuzzy string matching for grid names
     "prettytable>=3.0,<4",  # Metrics table formatting
     "apscheduler>=3.10,<4",  # Scheduled metrics posting
-    "langgraph>=0.2.0,<1.0",  # LangGraph for multi-agent orchestration
+    "langgraph>=0.2.0,<2.0",  # LangGraph for multi-agent orchestration
     "langgraph-checkpoint-postgres>=2.0.0,<4.0",  # PostgreSQL checkpointing for LangGraph
     "shapely>=2.0,<3.0",  # Geometry operations for site mapping
     "matplotlib>=3.7,<4.0",  # Plotting for site maps
@@ -64,9 +64,9 @@ exclude = ["supabase*", "storage*", "tests*"]
 dev = [
     "pytest>=7,<9",
     "pytest-asyncio>=0.23,<1.4",
-    "ruff>=0.1,<0.9"
+    "ruff>=0.1,<0.16"
 ]
-dspy = ["dspy-ai>=2.4,<3"]
+dspy = ["dspy-ai>=2.4,<4"]
 rag = [
     "chromadb>=1.0,<2.0",
     "sentence-transformers>=2.2,<6"

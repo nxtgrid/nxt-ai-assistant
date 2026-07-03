@@ -450,16 +450,37 @@ def _handle_send_with_verification(
     """
     st.session_state.broadcast_sending = True
 
+    # Step 0: Reject unsupported/typo'd placeholder tags deterministically, before
+    # any LLM call. A tag like <org_grid> would survive enrichment and reach the
+    # customer un-substituted, so fail fast with a clear message.
+    unknown_tags = broadcast_service.find_unknown_placeholders(message)
+    if unknown_tags:
+        st.session_state.broadcast_sending = False
+        st.error(
+            "⚠️ Unsupported placeholder(s): "
+            + ", ".join(f"`{t}`" for t in unknown_tags)
+            + ". Supported tags: `<org_name>`, `<org_hashtag>`, `<org_grids>`."
+        )
+        st.info("Fix or remove the tag(s) and try again.")
+        return
+
     # Step 1: Verify the message (if service is configured)
     # The actual VERIFICATION_ENABLED check happens server-side in chat-orchestrator.
     # If disabled, the endpoint returns passed=True with "Verification disabled" feedback.
     verification_configured = verification_service.is_enabled()
 
     if verification_configured:
+        # Verify the ENRICHED message (placeholders substituted for the first
+        # recipient) so the judge sees what customers actually receive, not raw
+        # <org_name>/<org_grids> template tokens.
+        message_to_verify = message
+        if group_ids:
+            message_to_verify = broadcast_service.enrich_message(message, group_ids[0])
+
         with st.spinner("Verifying message..."):
             group_names = [group_options.get(gid, gid) for gid in group_ids]
             verification_result = verification_service.verify_broadcast(
-                message=message,
+                message=message_to_verify,
                 target_groups=group_names[:5],
             )
 

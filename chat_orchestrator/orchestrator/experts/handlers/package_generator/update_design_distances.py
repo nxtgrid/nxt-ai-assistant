@@ -1,7 +1,9 @@
-"""Update AppSheet design row with real cable distances from site layout.
+"""Update the design row with real cable distances from site layout.
 
 After site layout computes actual PV combiner and feeder pillar distances,
-this step updates the design in AppSheet and waits for recalculation.
+this step updates the design so BOM generation uses accurate cable lengths.
+With the internal grid-design engine this is an instant DB update; only the
+legacy AppSheet backend needs a recalculation wait afterwards.
 """
 
 import asyncio
@@ -14,17 +16,19 @@ from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-# Time to wait for AppSheet to recalculate after updating distances
+# Time to wait for AppSheet to recalculate after updating distances (legacy
+# AppSheet backend only — the internal engine reads distances at BOM time)
 APPSHEET_RECALC_WAIT_SECONDS = 60
 
 
 @register_step("update_design_distances")
 async def update_design_distances(context: StepContext) -> StepResult:
-    """Update the AppSheet design row with real distances from site layout.
+    """Update the design row with real distances from site layout.
 
     Reads avg_pv_combiner_distance_m and feeder_pillar_distance_m from
-    generate_site_layout results and updates the design row. Then waits
-    60s for AppSheet to recalculate energy specs with accurate distances.
+    generate_site_layout results and updates the design row. On the legacy
+    AppSheet backend it then waits 60s for AppSheet to recalculate; the
+    internal engine needs no wait (BOM generation reads the distances).
 
     Requires:
     - design_id in state (from generate_powerplant_design)
@@ -58,7 +62,7 @@ async def update_design_distances(context: StepContext) -> StepResult:
             progress_message="Skipped design update: no cable distances from site layout",
         )
 
-    # Build AppSheet column updates
+    # Build design column updates (AppSheet-era labels; both backends map them)
     updates = {}
     if avg_pv_combiner is not None:
         updates["Avg Distance to PV Combiner (m)"] = round(float(avg_pv_combiner), 1)
@@ -70,14 +74,13 @@ async def update_design_distances(context: StepContext) -> StepResult:
 
     await context.send_progress_to_user(
         f"Updating design distances for {site_name}...\n"
-        f"PV combiner: {avg_pv_combiner}m, Feeder pillar: {feeder_pillar}m\n"
-        f"Waiting {APPSHEET_RECALC_WAIT_SECONDS}s for AppSheet to recalculate."
+        f"PV combiner: {avg_pv_combiner}m, Feeder pillar: {feeder_pillar}m"
     )
 
     try:
         result_str = await context.mcp_executor.call_tool(
             "grid_design_update_design",
-            {"design_id": design_id, "updates": updates},
+            {"design_id": design_id, "updates": json.dumps(updates)},
         )
 
         try:
@@ -91,9 +94,14 @@ async def update_design_distances(context: StepContext) -> StepResult:
             LOGGER.error(f"update_design failed: {error}")
             return StepResult.failure(f"Failed to update design distances: {error}")
 
-        # Wait for AppSheet to recalculate with new distances
-        LOGGER.info(f"Waiting {APPSHEET_RECALC_WAIT_SECONDS}s for AppSheet recalculation...")
-        await asyncio.sleep(APPSHEET_RECALC_WAIT_SECONDS)
+        if result.get("backend") == "internal":
+            # Internal engine: the update is a direct DB write; BOM generation
+            # reads the distances at generation time, so no recalc wait.
+            LOGGER.info("Design distances updated via internal engine — no recalc wait")
+        else:
+            # Legacy AppSheet backend: wait for AppSheet to recalculate
+            LOGGER.info(f"Waiting {APPSHEET_RECALC_WAIT_SECONDS}s for AppSheet recalculation...")
+            await asyncio.sleep(APPSHEET_RECALC_WAIT_SECONDS)
 
         return StepResult(
             data={

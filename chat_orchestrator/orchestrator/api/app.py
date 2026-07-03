@@ -1013,13 +1013,19 @@ async def verify_broadcast(request: Request, body: BroadcastVerifyRequest):
             group_list += f" ...and {len(body.target_groups) - 5} more"
         context = f"This is a broadcast message being sent to: {group_list}"
 
-    # Use the SAME verification service as response verification
+    # Use the SAME verification service as response verification, but in
+    # "broadcast" mode so the judge does not expect the text to answer a specific
+    # customer question. The message arrives already enriched (placeholders
+    # substituted for a sample recipient) so the judge sees what customers receive.
     async with ResponseVerificationService() as service:
         result = await service.verify_response(
-            original_message="[Broadcast message - admin composing announcement]",
+            original_message=(
+                "[One-way broadcast announcement — not a reply to a customer question]"
+            ),
             response_text=body.message,
             verification_instructions=criteria,
             conversation_context=context,
+            mode="broadcast",
         )
 
     logger.info(

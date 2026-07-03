@@ -24,3 +24,8 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Vendored grid package: the repo-root .gitignore has a broad "lib/" rule that
+# would otherwise hide grid_app/lib/ (perms, db, settings, auth). Keep it tracked.
+!grid_app/lib/
+!grid_app/lib/**

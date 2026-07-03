@@ -326,17 +326,153 @@ st.markdown(
 )
 
 
+# Anansi's own pages (the "Bot Admin" section). Everything else routes to the
+# vendored Grid Design package.
+_ANANSI_PAGES = {"chat", "documents", "agents", "settings"}
+
+# Group order for the Grid Design nav (mirrors the standalone grid app sidebar).
+_GRID_NAV_GROUP_ORDER = ["Engineering", "Procurement", "Sites", "Catalogue", "Field Ops"]
+
+_BOT_ADMIN_NAV = [
+    ("chat", "💬 Chats"),
+    ("documents", "📚 RAG Knowledgebase"),
+    ("agents", "🤖 Agents"),
+    ("settings", "⚙️ Settings"),
+]
+
+
+def _goto(page_key: str) -> None:
+    """Switch top-level page, clearing stale id/edit/new params from the grid views."""
+    st.query_params.clear()
+    st.query_params["page"] = page_key
+    st.rerun()
+
+
+def _grid_nav_button(spec, current_page: str) -> None:
+    selected = current_page == spec.bare
+    if st.button(
+        f"{spec.icon} {spec.label}",
+        key=f"nav_{spec.bare}",
+        use_container_width=True,
+        type="primary" if selected else "secondary",
+    ):
+        _goto(spec.bare)
+
+
+def _render_grid_nav(current_page: str, expanded: bool) -> None:
+    """Render the Grid Design section of the sidebar (groups + entity buttons).
+
+    The whole section is wrapped in a collapsible expander so its submenu items
+    can be hidden; `expanded` controls the initial open/closed state.
+    """
+    from grid_app.entities import grouped_entities
+    from grid_app.lib import settings as grid_settings
+
+    if "show_field_ops" not in st.session_state:
+        st.session_state["show_field_ops"] = grid_settings.SHOW_FIELD_OPS
+
+    with st.expander("⚡ Grid Design", expanded=expanded):
+        groups = grouped_entities()
+        for group_name in _GRID_NAV_GROUP_ORDER:
+            specs = groups.get(group_name)
+            if not specs:
+                continue
+            if group_name == "Field Ops" and not st.session_state["show_field_ops"]:
+                continue
+            st.markdown(f"**{group_name}**")
+            for spec in specs:
+                _grid_nav_button(spec, current_page)
+
+        admin_specs = groups.get("Admin", [])
+        if admin_specs:
+            st.markdown("**⚙️ Admin**")
+            for spec in admin_specs:
+                _grid_nav_button(spec, current_page)
+
+        st.toggle("Show Field Ops", key="show_field_ops")
+
+
+def _render_bot_admin_nav(current_page: str, expanded: bool) -> None:
+    """Render the Bot Admin section of the sidebar (page buttons).
+
+    Wrapped in a collapsible expander mirroring the Grid Design section.
+    """
+    with st.expander("🤖 Bot Admin", expanded=expanded):
+        for page_key, page_label in _BOT_ADMIN_NAV:
+            is_selected = current_page == page_key
+            if st.button(
+                page_label,
+                key=f"nav_{page_key}",
+                use_container_width=True,
+                type="primary" if is_selected else "secondary",
+            ):
+                _goto(page_key)
+
+        # Langfuse observability dashboard link (a bot-admin tool)
+        langfuse_project_url = os.getenv("LANGFUSE_DASHBOARD_URL", "")
+        if langfuse_project_url.strip():
+            st.divider()
+            st.markdown(f"[📊 LLM Observability]({langfuse_project_url})")
+
+
+def _render_grid_page(spec) -> None:
+    """Dispatch a grid entity page exactly like the standalone grid app did."""
+    from grid_app.lib import settings as grid_settings
+    from grid_app.views.crud import render_detail, render_form, render_list
+
+    if not grid_settings.is_db_configured():
+        st.error("⚠️ Database not configured. Set CHAT_DB_URL and CHAT_DB_SERVICE_KEY.")
+        st.stop()
+
+    if st.query_params.get("new"):
+        render_form(spec, None)
+    elif st.query_params.get("id"):
+        row = spec.repo().get(st.query_params["id"])
+        if not row:
+            st.error("Record not found.")
+            return
+        if st.query_params.get("edit"):
+            render_form(spec, row)
+        else:
+            render_detail(spec, row)
+    else:
+        render_list(spec)
+
+
+def _render_grid_welcome() -> None:
+    st.title("⚡ Grid Designs & BOMs")
+    st.write("Select a table from the sidebar to begin.")
+
+
+def _access_denied() -> None:
+    st.error("🔒 You don't have access to this section.")
+    st.info("Contact your administrator if you believe this is a mistake.")
+
+
 def main():
     """Main application entry point."""
     # Lazy import heavy modules after page config
     from components.auth import require_authentication
     from components.settings_page import render_settings_page
+    from grid_app.entities import get_entity
+    from grid_app.lib import perms
 
-    # Require authentication
+    # Require authentication (admits anansi admins AND grid-whitelisted users)
     user_info = require_authentication()
-    user_name = user_info.get("name", user_info.get("email"))
+    user_email = user_info.get("email", "")
+    user_name = user_info.get("name", user_email)
 
-    # Compact sidebar - logo top-left, then user info, then nav items
+    # Expose the email to the grid RBAC layer (grid_app.lib.perms).
+    st.session_state["grid_user_email"] = user_email
+    can_admin = perms.can_view_bot_admin(user_email)
+    can_grid = perms.can_view_grid(user_email)
+
+    current_page = st.query_params.get("page", "")
+    # Resolve the active page (with landing-page fallback) up front so both the
+    # sidebar's expand/highlight state and routing agree on what's active.
+    active_page = current_page or ("chat" if can_admin else "")
+
+    # Compact sidebar - logo top-left, then user info, then nav sections
     with st.sidebar:
         # Small logo with live bot status indicator (auto-refreshes every 10s)
         _render_status_logo()
@@ -354,47 +490,56 @@ def main():
 
         st.divider()
 
-        # Navigation buttons - compact, left-aligned
-        nav_items = [
-            ("chat", "💬 Chats"),
-            ("documents", "📚 RAG Knowledgebase"),
-            ("agents", "🤖 Agents"),
-            ("settings", "⚙️ Settings"),
-        ]
+        # Decide which section to auto-expand based on the resolved active page
+        # (not the raw, possibly-empty query param) so first-landing state matches
+        # where routing actually sends the user.
+        is_bot_admin_page = active_page in _ANANSI_PAGES
+        is_grid_page = bool(active_page) and active_page not in _ANANSI_PAGES
 
-        current_page_key = st.query_params.get("page", "chat")
+        # Bot Admin section (anansi admins only) — now at the top.
+        if can_admin:
+            _render_bot_admin_nav(active_page, expanded=is_bot_admin_page)
 
-        for page_key, page_label in nav_items:
-            is_selected = current_page_key == page_key
-            button_type = "primary" if is_selected else "secondary"
+        # Grid Design section (any whitelisted grid user) — below Bot Admin.
+        if can_grid:
+            if can_admin:
+                st.divider()
+            _render_grid_nav(active_page, expanded=is_grid_page)
 
-            if st.button(
-                page_label,
-                key=f"nav_{page_key}",
-                use_container_width=True,
-                type=button_type,
-            ):
-                if page_key != current_page_key:
-                    st.query_params["page"] = page_key
-                    st.rerun()
+    # ── Routing ──────────────────────────────────────────────────────────────
+    page = active_page
 
-        # Langfuse observability dashboard link
-        langfuse_project_url = os.getenv("LANGFUSE_DASHBOARD_URL", "")
-        if langfuse_project_url.strip():
-            st.divider()
-            st.markdown(f"[📊 LLM Observability]({langfuse_project_url})")
+    if page in _ANANSI_PAGES:
+        if not can_admin:
+            _access_denied()
+            return
+        if page == "chat":
+            _render_chat_viewer_page(user_info)
+        elif page == "documents":
+            _render_documents_page()
+        elif page == "agents":
+            from components.agents_page import render_agents_page
 
-    # Render appropriate page based on current_page_key
-    if current_page_key == "chat":
+            render_agents_page()
+        else:
+            render_settings_page()
+        return
+
+    spec = get_entity(page) if page else None
+    if spec is not None:
+        if not can_grid:
+            _access_denied()
+            return
+        _render_grid_page(spec)
+        return
+
+    # No / unknown page — land on whichever section the user can see
+    if can_grid:
+        _render_grid_welcome()
+    elif can_admin:
         _render_chat_viewer_page(user_info)
-    elif current_page_key == "documents":
-        _render_documents_page()
-    elif current_page_key == "agents":
-        from components.agents_page import render_agents_page
-
-        render_agents_page()
     else:
-        render_settings_page()
+        _access_denied()
 
 
 @st.fragment(run_every=timedelta(seconds=30))

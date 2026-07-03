@@ -84,6 +84,7 @@ class ResponseVerificationService:
         verification_instructions: str,
         conversation_context: Optional[str] = None,
         available_tools: Optional[List[Dict[str, Any]]] = None,
+        mode: str = "reply",
     ) -> VerificationResult:
         """
         Verify if a response meets quality standards.
@@ -95,6 +96,11 @@ class ResponseVerificationService:
             conversation_context: Optional additional context from conversation
             available_tools: Optional list of tools available to the generating LLM
                 (in Gemini format with functionDeclarations wrapper)
+            mode: Verification mode. "reply" (default) verifies a response to a
+                specific customer question. "broadcast" verifies a one-way
+                announcement sent to many recipients — in this mode the judge does
+                NOT expect the text to address a specific question, and Q&A-only
+                failure categories (completeness/tool_awareness) are dropped.
 
         Returns:
             VerificationResult with passed status, feedback if failed, and categories
@@ -125,6 +131,7 @@ class ResponseVerificationService:
             response_text=response_text,
             conversation_context=conversation_context,
             available_tools=available_tools,
+            mode=mode,
         )
 
         try:
@@ -162,26 +169,70 @@ class ResponseVerificationService:
         response_text: str,
         conversation_context: Optional[str] = None,
         available_tools: Optional[List[Dict[str, Any]]] = None,
+        mode: str = "reply",
     ) -> str:
-        """Build the prompt for verification."""
+        """Build the prompt for verification.
+
+        The ``mode`` argument tailors the framing. For "broadcast" the text is a
+        one-way announcement, so the judge is told not to expect it to answer a
+        specific question and the Q&A-only categories are removed.
+        """
         parts = []
 
         if conversation_context:
             parts.append(f"CONVERSATION CONTEXT:\n{conversation_context}\n")
 
-        # Include tool descriptions so verifier knows what the LLM could do
-        if available_tools:
-            tools_summary = self._format_tools_summary(available_tools)
-            if tools_summary:
-                parts.append(
-                    f"TOOLS AVAILABLE TO THE GENERATING LLM:\n"
-                    f"(The LLM that generated the response had access to these tools. "
-                    f"Consider this when evaluating whether the response appropriately used "
-                    f"or referenced available capabilities.)\n\n{tools_summary}\n"
-                )
+        if mode == "broadcast":
+            parts.append(
+                "MESSAGE TYPE: One-way broadcast announcement.\n"
+                "This message is proactively sent by staff to many customers at once. "
+                "It is NOT a reply to a customer question, so do NOT fail it for not "
+                "addressing a specific question, concern, or conversation. It may ask "
+                "recipients to take an action (e.g. confirm something or send a photo) — "
+                "that is a valid instruction, not an unclear request. Judge it only on "
+                "the criteria in your instructions (tone, professionalism, safety, "
+                "clarity, accuracy, no sensitive/internal information).\n"
+                "Approved placeholder tags have ALREADY been substituted with the "
+                "recipient's real values: organization, community, and grid names "
+                "appearing in the text are real data, NOT placeholder tags. Only a "
+                "literal angle-bracket token still present in the text (e.g. <some_tag>) "
+                "counts as an unrecognized placeholder tag.\n"
+            )
+            parts.append(f"BROADCAST MESSAGE TO VERIFY:\n{response_text}\n")
+            categories_block = """
+Only include categories that actually failed. Common categories:
+- "tone": Message tone is inappropriate
+- "accuracy": Information may be incorrect
+- "safety": Contains potentially harmful content or could cause undue alarm
+- "clarity": Message is confusing or unclear
+- "professionalism": Language is unprofessional
+- "sensitive_info": Exposes internal information not meant for customers
+"""
+        else:
+            # Include tool descriptions so verifier knows what the LLM could do
+            if available_tools:
+                tools_summary = self._format_tools_summary(available_tools)
+                if tools_summary:
+                    parts.append(
+                        f"TOOLS AVAILABLE TO THE GENERATING LLM:\n"
+                        f"(The LLM that generated the response had access to these tools. "
+                        f"Consider this when evaluating whether the response appropriately used "
+                        f"or referenced available capabilities.)\n\n{tools_summary}\n"
+                    )
 
-        parts.append(f"ORIGINAL USER MESSAGE:\n{original_message}\n")
-        parts.append(f"RESPONSE TO VERIFY:\n{response_text}\n")
+            parts.append(f"ORIGINAL USER MESSAGE:\n{original_message}\n")
+            parts.append(f"RESPONSE TO VERIFY:\n{response_text}\n")
+            categories_block = """
+Only include categories that actually failed. Common categories:
+- "tone": Response tone is inappropriate
+- "accuracy": Information may be incorrect
+- "completeness": Response doesn't fully address the question
+- "safety": Contains potentially harmful content
+- "clarity": Response is confusing or unclear
+- "professionalism": Language is unprofessional
+- "tool_awareness": Response claims inability to do something tools could accomplish
+"""
+
         parts.append(
             """
 Evaluate the response against the verification criteria provided in your instructions.
@@ -192,16 +243,8 @@ Respond with a JSON object (and nothing else):
   "feedback": "If failed, explain what needs to be fixed. If passed, leave empty.",
   "categories": ["list", "of", "failed", "criteria"]
 }
-
-Only include categories that actually failed. Common categories:
-- "tone": Response tone is inappropriate
-- "accuracy": Information may be incorrect
-- "completeness": Response doesn't fully address the question
-- "safety": Contains potentially harmful content
-- "clarity": Response is confusing or unclear
-- "professionalism": Language is unprofessional
-- "tool_awareness": Response claims inability to do something tools could accomplish
 """
+            + categories_block
         )
 
         return "\n".join(parts)

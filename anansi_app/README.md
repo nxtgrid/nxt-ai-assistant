@@ -10,6 +10,7 @@ A Streamlit web application for administering the Anansi chat bot. Provides chat
 - **Broadcast Scheduler** — Schedule and manage Telegram broadcast messages to org groups
 - **Bot Status Dashboard** — Live view of which grids are online/offline via VRM integration
 - **Statistics** — Daily message metrics and activity tracking
+- **Grid Design & BOMs** — Metadata-driven CRUD over the grid design / bill-of-materials tables (`gd_*`), in a separate **Grid Design** sidebar section with its own whitelist-based view/edit access control
 
 ## Architecture
 
@@ -97,6 +98,28 @@ ALLOWED_VIEWER_EMAILS=alice@example.com,bob@example.com
 
 ### 2. Staff Organization (Future Enhancement)
 Users whose `organization_id` matches `STAFF_ORG_ID` in the accounts table will be automatically granted access.
+
+### 3. Grid Design Section
+
+The app hosts a second navigation area, **Grid Design**, alongside the existing pages
+(now grouped under **Bot Admin**). It has its own four-whitelist access model — a user
+must appear in at least one list to reach the app at all:
+
+| Env var | Grants |
+|---|---|
+| `ALLOWED_VIEWER_EMAILS` | Bot Admin **+** grid **view** (no grid edit) |
+| `GRID_DESIGN_ALLOWED_USERS` | grid **view-only** |
+| `GRID_DESIGN_EDITORS` | edit every grid table **except** Purchases (BoS) |
+| `GRID_PROCUREMENT_EDITORS` | edit **only** Purchases (BoS) |
+
+- **Grid view** = membership in the union of all four lists. The **Bot Admin** section
+  stays restricted to `ALLOWED_VIEWER_EMAILS`.
+- **Edit rights are strictly separated**: procurement editors touch only Purchases;
+  design editors touch everything else; admins and view-only users edit nothing.
+- Gates are enforced on both the rendered buttons and the router (crafted
+  `?page=…&edit=1` URLs are blocked).
+- The grid code is vendored at `grid_app/` with its entity metadata at `db/entities.json`.
+  `GRID_DESIGN_DEV_NO_AUTH=1` bypasses OAuth and grants all permissions for **local dev only**.
 
 ## Directory Structure
 

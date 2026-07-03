@@ -192,6 +192,18 @@ class ChatViewerAuth:
         if email.lower() in self.allowed_emails:
             return True
 
+        # Grid-only users: anyone in a Grid Design whitelist may log in to reach
+        # the Grid Design section (Bot Admin stays gated to ALLOWED_VIEWER_EMAILS,
+        # enforced by the router). Import is local to avoid a hard dependency if
+        # the grid package is ever absent.
+        try:
+            from grid_app.lib import perms
+
+            if perms.has_any_access(email):
+                return True
+        except Exception:
+            pass
+
         # Check staff organization (requires auth DB query)
         # This will be implemented when we add auth_service
         # For now, rely on whitelist
@@ -221,6 +233,13 @@ def require_authentication() -> Dict[str, Any]:
     Returns:
         User info dict if authenticated and authorized
     """
+    # Local-dev bypass (mirrors grid_app.lib.auth): skip Google OAuth entirely for
+    # localhost testing. NEVER set GRID_DESIGN_DEV_NO_AUTH in production — it grants
+    # full access (incl. all grid edit rights) to anyone who can reach the app.
+    if os.getenv("GRID_DESIGN_DEV_NO_AUTH", "").lower() in ("1", "true", "yes"):
+        st.sidebar.warning("⚠️ Dev mode: auth bypassed")
+        return {"email": "dev@localhost", "name": "Dev User"}
+
     # Create auth instance
     auth = ChatViewerAuth()
 

@@ -1,8 +1,11 @@
 """Generate design step handler for Light Preliminary Package.
 
-This handler calls the grid_design MCP server to create a design in AppSheet
-(without BOM). BOM is triggered separately after site layout provides real
-cable distances.
+This handler calls the grid_design MCP server to create a design (without
+BOM). BOM is triggered separately after site layout provides real cable
+distances. Any design parameter the user/LLM supplied (technology choices,
+connection split, Wp/conn override, regulation constraint, 3-phase
+enforcement, SPD type, tariff, ...) is forwarded; omitted ones fall back to
+the engine's AppSheet-form defaults.
 """
 
 import json
@@ -14,6 +17,30 @@ from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+
+# Optional design parameters forwarded to design_and_bom when the user/LLM
+# supplied them (via parameter confirmation overrides, packet inputs, or
+# LLM-parsed inputs). Unsupplied ones are omitted so the grid-design engine's
+# AppSheet-form defaults apply. Full catalogue: grid_design list_design_options.
+OPTIONAL_DESIGN_PARAMS = (
+    "inverter_type",
+    "battery_type",
+    "mppt_type",
+    "pv_type",
+    "pv_inverter_type",
+    "initial_residential_connections",
+    "initial_business_connections",
+    "initial_3phase_connections",
+    "force_3phase",
+    "wp_per_conn_override",
+    "regulation_constraint",
+    "spd_type",
+    "anchor_load_kw",
+    "pue_hours_per_day",
+    "daily_generation_potential_kwh_kwp",
+    "target_tariff_usd",
+    "num_poc_teams",
+)
 
 
 def _get_requester_name(context: StepContext) -> str:
@@ -35,13 +62,13 @@ def _get_requester_name(context: StepContext) -> str:
 
 @register_step("generate_powerplant_design")
 async def generate_powerplant_design(context: StepContext) -> StepResult:
-    """Generate design and BOM in AppSheet using site submission data.
+    """Generate a grid design using site submission data.
 
     Maps pd_site_submissions fields to design_and_bom inputs:
     - grid_name <- site_name
     - design_name <- "{site_name} LPP {datetime} by {requester}"
     - max_connections <- served_building_count
-    - residential/business split <- let AppSheet calculate 90/10 default
+    - residential/business split <- engine's 90/10 default unless overridden
 
     Requires:
     - site_id and site_name in state (from generate_distribution_map)
@@ -60,7 +87,7 @@ async def generate_powerplant_design(context: StepContext) -> StepResult:
     # Use get_parameter_value() to respect user overrides from confirmation flow
     site_name = context.get_parameter_value("site_name") or context.get_state("site_name")
 
-    # site_name is the AppSheet grid_name — the only identifier this step sends.
+    # site_name is the grid_name — the only identifier this step sends.
     # The community route has no DB site_id, so require site_name only.
     if not site_name:
         return StepResult.failure("No site data in state - run generate_distribution_map first")
@@ -105,7 +132,7 @@ async def generate_powerplant_design(context: StepContext) -> StepResult:
     target_kwh = context.get_parameter_value("editable_total_kwh")
 
     # Build design_and_bom arguments
-    # Don't pass residential/business - let AppSheet use 90/10 default split
+    # Residential/business split defaults to 90/10 in the engine unless overridden below
     # Create design name with date/time and requester for tracking
     requester_name = _get_requester_name(context)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
@@ -123,6 +150,21 @@ async def generate_powerplant_design(context: StepContext) -> StepResult:
         design_args["target_kwp"] = float(target_kwp)
     if target_kwh:
         design_args["target_kwh"] = float(target_kwh)
+
+    # Forward any user/LLM-supplied design parameters; omitted ones keep the
+    # engine's AppSheet-form defaults.
+    forwarded = []
+    for param in OPTIONAL_DESIGN_PARAMS:
+        value = context.get_parameter_value(param)
+        if value is not None and value != "":
+            design_args[param] = value
+            forwarded.append(param)
+    if forwarded:
+        LOGGER.info(f"Forwarding user-specified design parameters: {forwarded}")
+
+    email: str | None = context.effective_email
+    if email:
+        design_args["created_by"] = email
 
     # Calculate average service drop length from layout statistics
     drop_cable_total_m = statistics.get("drop_cable_length_m", 0)
