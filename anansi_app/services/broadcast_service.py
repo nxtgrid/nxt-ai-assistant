@@ -181,6 +181,7 @@ class BroadcastService:
                     password=os.getenv("AUTH_DB_PASSWORD"),
                     ssl=ssl_context,
                     command_timeout=10,
+                    statement_cache_size=0,
                 )
                 try:
                     rows = await conn.fetch(
@@ -407,6 +408,7 @@ class BroadcastService:
                     password=os.getenv("AUTH_DB_PASSWORD"),
                     ssl=ssl_context,
                     command_timeout=10,
+                    statement_cache_size=0,
                 )
                 try:
                     # Try with chat_id as-is first
@@ -450,6 +452,7 @@ class BroadcastService:
                         SELECT name FROM grids
                         WHERE organization_id = $1
                         AND deleted_at IS NULL
+                        AND commissioned_at IS NOT NULL
                         ORDER BY name
                         """,
                         org["id"],
@@ -498,6 +501,7 @@ class BroadcastService:
                     password=os.getenv("AUTH_DB_PASSWORD"),
                     ssl=ssl_context,
                     command_timeout=10,
+                    statement_cache_size=0,
                 )
                 try:
                     rows = await conn.fetch(
@@ -517,6 +521,7 @@ class BroadcastService:
                             SELECT organization_id, name FROM grids
                             WHERE organization_id = ANY($1::int[])
                             AND deleted_at IS NULL
+                            AND commissioned_at IS NOT NULL
                             ORDER BY name
                             """,
                             org_ids,
