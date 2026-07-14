@@ -425,6 +425,14 @@ EXPERT_RUN_STEPS_TOOL_DEF = {
                     "JSON string, not a raw object."
                 ),
             },
+            "packet_inputs_json": {
+                "type": "string",
+                "description": (
+                    "Optional JSON-encoded object of packet inputs for a newly-created "
+                    "packet, e.g. '{\"technology_family\":\"deye\","
+                    "\"wp_per_conn_override\":850}'. Only used when packet_id is omitted."
+                ),
+            },
             "force": {
                 "type": "boolean",
                 "description": (

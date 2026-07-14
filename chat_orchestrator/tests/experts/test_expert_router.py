@@ -114,6 +114,20 @@ class TestExpertRouter:
         assert result["matched_expert_id"] is None
 
     @pytest.mark.asyncio
+    async def test_lpp_parameter_help_request_returns_direct_response(
+        self, base_state, mock_pending_decision_service
+    ):
+        """Parameter help questions should answer directly, not start an LPP."""
+        base_state["user_input"] = "What parameters can I configure for LPP?"
+        base_state["original_input"] = base_state["user_input"]
+
+        result = await expert_router(base_state)
+
+        assert result["expert_routing_decision"] == "continue"
+        assert "technology_family" in result["final_response"]
+        assert result["active_work_packet"] is None
+
+    @pytest.mark.asyncio
     async def test_planned_intent_routes_natural_language_lpp_request(
         self, base_state, mock_pending_decision_service
     ):
@@ -149,6 +163,45 @@ class TestExpertRouter:
         assert result["expert_command"] == "/lpp Site Alpha"
         assert result["expert_packet_type"] == "light_preliminary_package"
         assert result["expert_key_entity"] == "Site Alpha"
+
+    @pytest.mark.asyncio
+    async def test_planned_intent_preserves_original_lpp_raw_request(
+        self, base_state, mock_pending_decision_service
+    ):
+        """Planned routes must not drop natural-language LPP parameters."""
+        base_state["user_input"] = (
+            "Can you create an LPP for the site located at "
+            "9.3947551,9.3176320 using Deye technology not Victron?"
+        )
+        base_state["original_input"] = base_state["user_input"]
+        base_state["user_context"].is_staff = True
+        base_state["planned_expert_route"] = {
+            "command": "/lpp",
+            "packet_type": "light_preliminary_package",
+            "key_entity": "9.3947551,9.3176320",
+            "args": "9.3947551,9.3176320",
+        }
+
+        with (
+            patch("orchestrator.graphs.nodes.expert_router.WorkPacketService") as mock_packet_class,
+            patch(
+                "orchestrator.graphs.nodes.expert_router.ExpertInstructionsProvider"
+            ) as mock_provider_class,
+        ):
+            mock_packet_service = MagicMock()
+            mock_packet_service.get_active_packets_for_session = AsyncMock(return_value=[])
+            mock_packet_service.get_resumable_packets_for_session = AsyncMock(return_value=[])
+            mock_packet_service.find_similar_completed = AsyncMock(return_value=[])
+            mock_packet_class.return_value = mock_packet_service
+
+            mock_provider = MagicMock()
+            mock_provider.get_expert_for_packet_type = AsyncMock(return_value="package_generator")
+            mock_provider_class.return_value = mock_provider
+
+            result = await expert_router(base_state)
+
+        assert result["expert_command"] == "/lpp 9.3947551,9.3176320"
+        assert "Deye technology not Victron" in result["expert_raw_request"]
 
     @pytest.mark.asyncio
     async def test_routes_to_expert_for_active_packet(

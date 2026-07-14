@@ -86,13 +86,20 @@ _OPTIONAL_DESIGN_PARAM_SPECS = (
         name="initial_residential_connections",
         param_type="integer",
         description="Initial number of residential connections.",
-        synonyms=("residential connections",),
+        synonyms=("residential connections", "residential buildings", "household connections"),
     ),
     ParamSpec(
         name="initial_business_connections",
         param_type="integer",
-        description="Initial number of business connections.",
-        synonyms=("business connections",),
+        description="Initial number of business/nonresidential connections.",
+        synonyms=(
+            "business connections",
+            "commercial connections",
+            "nonresidential connections",
+            "non-residential connections",
+            "non residential connections",
+            "business buildings",
+        ),
     ),
     ParamSpec(
         name="initial_3phase_connections",
@@ -110,7 +117,7 @@ _OPTIONAL_DESIGN_PARAM_SPECS = (
         name="wp_per_conn_override",
         param_type="number",
         description="Override for Wp-per-connection sizing.",
-        synonyms=("Wp/conn", "wp per connection"),
+        synonyms=("wp per conn", "wp/conn", "wp per connection", "watts per connection"),
     ),
     ParamSpec(
         name="regulation_constraint",
@@ -371,8 +378,12 @@ async def generate_powerplant_design(context: StepContext) -> StepResult:
     design_args["wait_for_bom"] = False
 
     # Send immediate progress message to user before long operation
+    technology_family = context.get_parameter_value("technology_family") or context.get_state(
+        "technology_family"
+    )
+    technology_label = str(technology_family or "default").upper()
     await context.send_progress_to_user(
-        f"⏳ Generating design for {site_name}...\nThis may take a while."
+        f"⏳ Generating {technology_label} design for {site_name}...\nThis may take a while."
     )
 
     try:

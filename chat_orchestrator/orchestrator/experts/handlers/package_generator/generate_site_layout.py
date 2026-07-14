@@ -48,6 +48,7 @@ LOGGER = get_logger(__name__)
             "site_layout_png_drive_id",
             "site_name",
             "geo_source",
+            "technology_family",
             "editable_site_type",
             "editable_panel_config",
             "site_candidates",
@@ -73,6 +74,14 @@ LOGGER = get_logger(__name__)
             ParamSpec(
                 name="editable_site_type",
                 description="Site type ('ess' or 'victron'); defaults by target kWp.",
+            ),
+            ParamSpec(
+                name="technology_family",
+                description=(
+                    "Power plant technology family/architecture ('deye' for ESS layout, "
+                    "'victron' for container layout)."
+                ),
+                synonyms=("technology type", "design type", "vendor", "equipment family", "deye", "victron"),
             ),
             ParamSpec(
                 name="editable_panel_config",
@@ -150,8 +159,9 @@ async def generate_site_layout(context: StepContext) -> StepResult:
     center_lon = center.get("lon")  # None if absent
     latitude = center_lat or 0  # For sun angle calculations (equatorial fallback)
 
+    layout_label = "DEYE/ESS" if site_type == "ess" and str(technology_family).lower() == "deye" else site_type.upper()
     await context.send_progress_to_user(
-        f"Generating {site_type.upper()} site layout for "
+        f"Generating {layout_label} site layout for "
         f"{site_name or f'Site {site_id}'} ({panel_config})..."
     )
 

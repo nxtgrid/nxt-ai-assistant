@@ -1638,6 +1638,7 @@ class ConversationGraphBuilder:
                     packet_type=args.get("packet_type") or None,
                     key_entity=args.get("key_entity") or None,
                     param_overrides_json=args.get("param_overrides_json") or None,
+                    packet_inputs_json=args.get("packet_inputs_json") or None,
                     force=bool(args.get("force", False)),
                     confirmation_token=args.get("confirmation_token") or None,
                     organization_id=organization_id,

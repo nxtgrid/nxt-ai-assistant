@@ -303,6 +303,27 @@ async def test_design_and_bom_family_defaults_do_not_override_explicit_equipment
 
 
 @pytest.mark.asyncio
+async def test_design_and_bom_deye_family_applies_deye_defaults_without_explicit_equipment():
+    patches, mocks = _workflow_mocks()
+    with patches[0], patches[1], patches[2], patches[3]:
+        result = await internal_engine.design_and_bom(
+            {
+                "grid_name": "TestGrid",
+                "design_name": "Test Deye design",
+                "max_connections": 100,
+                "technology_family": "deye",
+            }
+        )
+
+    assert result["success"] is True
+    payload = mocks["dw"].create_design.call_args[0][0]
+    assert payload["technology_family"] == "deye"
+    assert payload["inverter_type"] == "Deye SUN-30K"
+    assert payload["battery_type"] == "Deye LV Bat 5kWh"
+    mocks["ad"].assert_called_once_with("d1", technology_family="deye")
+
+
+@pytest.mark.asyncio
 async def test_design_and_bom_skips_bom_when_wait_for_bom_false():
     patches, mocks = _workflow_mocks()
     with patches[0], patches[1], patches[2], patches[3]:
