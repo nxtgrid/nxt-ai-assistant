@@ -838,17 +838,28 @@ def _build_lpp_packet_inputs(
     expert_command: str | None,
     key_entity: str | None,
     args: str,
+    raw_request: str | None = None,
 ) -> dict:
     """Build packet inputs, detecting the LPP GPS-anchor (Route B) route from args."""
+    request_text = raw_request or effective_request
     inputs: dict = {
-        "raw_request": effective_request,
+        "raw_request": request_text,
         "parsed_command": expert_command,
         "key_entity": key_entity,
         "args": args,
     }
 
     if packet_type == "light_preliminary_package":
-        from orchestrator.services.command_parser import parse_lpp_anchor_args
+        from orchestrator.services.command_parser import (
+            parse_lpp_anchor_args,
+            parse_lpp_technology_family,
+        )
+
+        technology_family = parse_lpp_technology_family(
+            " ".join(part for part in (request_text, effective_request, args) if part)
+        )
+        if technology_family:
+            inputs["technology_family"] = technology_family
 
         anchor = parse_lpp_anchor_args(args)
         if anchor:
@@ -888,6 +899,7 @@ async def _create_new_packet(
     # expert_command contains the original request like "/report monthly ExampleGrid"
     # user_input might just be "2" (the start fresh selection)
     effective_request = expert_command if expert_command else user_input
+    raw_request = state.get("expert_raw_request") or effective_request
 
     # Parse command for packet type if not already set
     if not packet_type and expert_command:
@@ -931,6 +943,7 @@ async def _create_new_packet(
             expert_command=expert_command,
             key_entity=key_entity,
             args=args,
+            raw_request=raw_request,
         )
 
         # Auto-cancel any existing active packets of the same type for this session

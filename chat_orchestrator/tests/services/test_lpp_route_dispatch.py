@@ -1,4 +1,4 @@
-from orchestrator.services.command_parser import parse_lpp_anchor_args
+from orchestrator.services.command_parser import parse_lpp_anchor_args, parse_lpp_technology_family
 
 
 def test_parse_anchor_full():
@@ -49,3 +49,20 @@ def test_parse_site_names_not_treated_as_coords():
 
 def test_parse_out_of_range_falls_through_to_submission():
     assert parse_lpp_anchor_args("12, 5000") is None
+
+
+def test_parse_lpp_technology_family_deye():
+    assert (
+        parse_lpp_technology_family(
+            "Can you create an LPP for 9.3947551,9.3176320 using Deye technology?"
+        )
+        == "deye"
+    )
+
+
+def test_parse_lpp_technology_family_victron():
+    assert parse_lpp_technology_family("create an LPP with Victron container design") == "victron"
+
+
+def test_parse_lpp_technology_family_absent_returns_none():
+    assert parse_lpp_technology_family("create an LPP for ExampleSite") is None
