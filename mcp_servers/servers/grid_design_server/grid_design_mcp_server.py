@@ -1978,17 +1978,27 @@ def _parse_updates(raw: Any) -> Dict[str, Any]:
 
 def _internal_design_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """Build the internal-engine design_and_bom args from tool arguments."""
+    technology_family = arguments.get("technology_family")
     args: Dict[str, Any] = {
         "grid_name": arguments["grid_name"],
         "design_name": arguments["design_name"],
         "max_connections": arguments["max_connections"],
-        "inverter_type": arguments.get("inverter_type", "Quattro 15kVA"),
-        "battery_type": arguments.get("battery_type", "Pylontech UP5000"),
-        "mppt_type": arguments.get("mppt_type", "Victron 250/85 MPPT"),
-        "pv_type": arguments.get("pv_type", "JA455W Panel"),
         "auto_design": arguments.get("auto_design", True),
         "wait_for_bom": arguments.get("wait_for_bom", True),
     }
+
+    equipment_defaults = {
+        "inverter_type": "Quattro 15kVA",
+        "battery_type": "Pylontech UP5000",
+        "mppt_type": "Victron 250/85 MPPT",
+        "pv_type": "JA455W Panel",
+    }
+    for key, default in equipment_defaults.items():
+        if key in arguments:
+            args[key] = arguments[key]
+        elif not technology_family:
+            args[key] = default
+
     for key in _INTERNAL_PASSTHROUGH_KEYS:
         if arguments.get(key) is not None:
             args[key] = arguments[key]
