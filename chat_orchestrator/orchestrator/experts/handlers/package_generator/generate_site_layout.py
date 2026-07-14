@@ -14,6 +14,7 @@ import re
 from shapely.geometry import Polygon
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
@@ -21,7 +22,70 @@ from shared.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
-@register_step("generate_site_layout")
+@register_step(
+    "generate_site_layout",
+    contract=StepContract(
+        description=(
+            "Generates a to-scale power plant site layout (Draw.io XML + PNG) with "
+            "solar arrays, energy systems, and lightning arresters."
+        ),
+        # site_id: `if not site_id and not is_community: return
+        # StepResult.failure(...)` -- a real hard failure (not a graceful
+        # skip) on the non-community route. editable_total_kwp: ParamSpec
+        # required=True below; `if target_kwp <= 0: return
+        # StepResult.failure(...)`.
+        consumes_state=("site_id", "editable_total_kwp"),
+        # site_layout_png_drive_id: idempotency guard. site_name: `get_input
+        # or get_state`, always guarded by `site_name or f"Site {site_id}"` at
+        # every use site. geo_source: branch selector for the community-route
+        # carve-out on site_id, defaulting to the (primary) non-community
+        # check. editable_site_type / editable_panel_config: each has an
+        # explicit `if not X: X = <kWp/site-type-based default>` fallback.
+        # site_candidates: `context.get_state(...) or []`, with a further
+        # legitimate fallback to a synthetic plant polygon when empty.
+        # site_folder_id: passed to upload_step_output(), "skip if None".
+        optional_consumes_state=(
+            "site_layout_png_drive_id",
+            "site_name",
+            "geo_source",
+            "editable_site_type",
+            "editable_panel_config",
+            "site_candidates",
+            "site_folder_id",
+        ),
+        produces_state=(
+            "site_layout_png_drive_id",
+            "site_layout_drawio_drive_id",
+            "editable_panel_config",
+            "editable_site_type",
+            "earth_pit_count",
+            "avg_pv_combiner_distance_m",
+            "feeder_pillar_distance_m",
+        ),
+        consumes_results=("generate_distribution_map",),
+        params=(
+            ParamSpec(
+                name="editable_total_kwp",
+                param_type="number",
+                description="Target total kWp the site layout must accommodate.",
+                required=True,
+            ),
+            ParamSpec(
+                name="editable_site_type",
+                description="Site type ('ess' or 'victron'); defaults by target kWp.",
+            ),
+            ParamSpec(
+                name="editable_panel_config",
+                description="Panel series/parallel configuration (e.g. '20S2P').",
+            ),
+        ),
+        guard_keys=("site_layout_png_drive_id",),
+        side_effects=(
+            "Runs geometry-packing plus PNG/Draw.io rendering (up to 120s); uploads "
+            "the site layout PNG and Draw.io XML to Google Drive."
+        ),
+    ),
+)
 async def generate_site_layout(context: StepContext) -> StepResult:
     """Generate to-scale power plant site layout (Draw.io + PNG)."""
     # Idempotency guard: layout already uploaded to Drive (handles recovery re-entry)
@@ -57,7 +121,15 @@ async def generate_site_layout(context: StepContext) -> StepResult:
     # Site type: user parameter with kWp-based fallback
     site_type = context.get_parameter_value("editable_site_type")
     if not site_type:
-        site_type = "ess" if target_kwp >= 100 else "victron"
+        technology_family = (
+            context.get_parameter_value("technology_family")
+            or context.get_state("technology_family")
+            or ""
+        )
+        if str(technology_family).lower() == "deye" or target_kwp >= 100:
+            site_type = "ess"
+        else:
+            site_type = "victron"
 
     # Panel config: user parameter with site-type fallback
     panel_config = context.get_parameter_value("editable_panel_config")

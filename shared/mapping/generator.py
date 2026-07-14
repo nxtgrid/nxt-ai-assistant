@@ -23,7 +23,7 @@ def generate_site_map(
     dpi: int = 150,
     figsize: tuple = (16, 12),
     add_satellite: bool = True,
-    zoom: int = 16,
+    zoom: Optional[int] = None,
 ) -> dict[str, Any]:
     """
     Generate a site map and return as JSON with base64-encoded image.

@@ -120,3 +120,100 @@ def test_explicit_connection_split_preserved():
     assert row["initial_residential_connections"] == 60
     assert row["initial_business_connections"] == 30
     assert row["initial_3_phase_connections"] == 10
+
+
+def _get(design_id: str, row: dict | None):
+    """Run get_design with a mocked Repository returning `row`; return the result."""
+    repo = MagicMock()
+    repo.get.return_value = row
+    with patch.object(design_writer, "Repository", return_value=repo):
+        return design_writer.get_design(design_id)
+
+
+def test_get_design_returns_row_as_is():
+    row = {"id": "design1", "name": "Test design", "max_connections": 100}
+    result = _get("design1", row)
+    assert result == row
+
+
+def test_get_design_returns_none_when_not_found():
+    result = _get("missing-id", None)
+    assert result is None
+
+
+def test_design_row_to_payload_maps_columns_to_api_fields():
+    design_row = {
+        "id": "design1",
+        "name": "Test design",
+        "max_connections": 100,
+        "avg_distance_to_pv_combiner": 15.5,
+        "constrain_design_to_known_regulation": "None",
+        "wp_per_conn_override": 850,
+        "initial_3_phase_connections": 5,
+        "created_by": "engineer@example.com",
+    }
+    payload = design_writer.design_row_to_payload(design_row)
+    assert payload["design_name"] == "Test design"
+    assert payload["max_connections"] == 100
+    assert payload["avg_distance_to_pv_combiner_m"] == 15.5
+    assert payload["regulation_constraint"] == "None"
+    assert payload["wp_per_conn_override"] == 850
+    assert payload["initial_3phase_connections"] == 5
+    assert payload["created_by"] == "engineer@example.com"
+    # "id" has no reverse-map entry (it isn't a value in _DESIGN_FIELD_MAP), so it's dropped.
+    assert "id" not in payload
+
+
+def test_design_row_to_payload_omits_none_valued_columns():
+    design_row = {
+        "name": "Test design",
+        "max_connections": 100,
+        "target_kwp": None,
+        "target_kwh": None,
+        "wp_per_conn_override": None,
+    }
+    payload = design_writer.design_row_to_payload(design_row)
+    assert "target_kwp" not in payload
+    assert "target_kwh" not in payload
+    assert "wp_per_conn_override" not in payload
+    assert payload["design_name"] == "Test design"
+    assert payload["max_connections"] == 100
+
+
+def test_design_row_to_payload_preserves_falsy_values():
+    """False and 0 are real values, not "absent" -- must survive, unlike None."""
+    design_row = {
+        "name": "Test design",
+        "force_3_phase": False,
+        "anchor_load_kw": 0,
+        "initial_3_phase_connections": 0,
+    }
+    payload = design_writer.design_row_to_payload(design_row)
+    assert payload["force_3phase"] is False
+    assert payload["anchor_load_kw"] == 0
+    assert payload["initial_3phase_connections"] == 0
+
+
+def test_get_design_and_design_row_to_payload_compose_with_create_design():
+    """The future duplicate_design flow: get_design -> design_row_to_payload -> create_design."""
+    source_row = {
+        "id": "design1",
+        "grid": "grid1",
+        "active": True,
+        "name": "Original design",
+        "max_connections": 100,
+        "avg_distance_to_pv_combiner": 15.5,
+        "wp_per_conn_override": 850,
+        "constrain_design_to_known_regulation": "None",
+    }
+    fetched = _get("design1", source_row)
+    payload = design_writer.design_row_to_payload(fetched)
+    # Simulate the duplicate_design caller's policy decision to rename.
+    payload["design_name"] = "Duplicated design"
+
+    row = _create(payload, grid_id="grid2")
+    assert row["name"] == "Duplicated design"
+    assert row["max_connections"] == 100
+    assert row["avg_distance_to_pv_combiner"] == 15.5
+    assert row["wp_per_conn_override"] == 850
+    assert row["constrain_design_to_known_regulation"] == "None"

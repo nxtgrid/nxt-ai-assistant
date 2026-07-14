@@ -1,4 +1,5 @@
 import asyncio
+import json
 from types import SimpleNamespace  # noqa: F401
 from unittest.mock import patch
 
@@ -91,6 +92,76 @@ def test_load_community_route_uses_previous_result():
     row = asyncio.run(sgs.load_site_row_data(ctx, {"host": "h"}))
     assert row["site_name"] == "Commville"
     assert len(row["buildings_geo_flat"]["features"]) == 3
+
+
+def test_load_community_route_falls_back_to_drive_download_across_executions():
+    """Reproduces the exact cross-execution scenario run_single_step needs:
+    resolve_community_site completed in a PRIOR execution, so
+    get_previous_result("resolve_community_site") is empty in this execution
+    (StepContext.accumulated_results only holds same-execution data) -- the
+    only thing available is what resolve_community_site persisted to
+    packet_state, i.e. community_boundary_drive_id / community_buildings_drive_id.
+    Before the fix, load_site_row_data() fell back to reading
+    community_boundary_geojson/community_buildings_geojson state keys that are
+    NEVER written by resolve_community_site's state_updates -- so this exact
+    case always raised ValueError. After the fix, it downloads the real
+    GeoJSON from Drive via those two drive_id keys and succeeds.
+    """
+    boundary_feature = {
+        "type": "Feature",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[4.58, 6.81], [4.60, 6.81], [4.60, 6.83], [4.58, 6.81]]],
+        },
+        "properties": {},
+    }
+    buildings = {"type": "FeatureCollection", "features": [{"a": 1}, {"a": 2}]}
+
+    ctx = _Ctx(
+        state={
+            "geo_source": "community",
+            "site_name": "Commville",
+            "community_state": "Edo",
+            "community_boundary_drive_id": "drive-boundary-id",
+            "community_buildings_drive_id": "drive-buildings-id",
+        },
+        # No same-execution result at all -- simulates run_single_step calling
+        # this step fresh after resolve_community_site already completed and
+        # persisted in a prior execution.
+        results={},
+    )
+
+    async def fake_download(file_id):
+        if file_id == "drive-boundary-id":
+            return json.dumps(boundary_feature).encode("utf-8")
+        if file_id == "drive-buildings-id":
+            return json.dumps(buildings).encode("utf-8")
+        raise AssertionError(f"unexpected file_id: {file_id}")
+
+    with patch.object(sgs, "download_drive_file", side_effect=fake_download):
+        row = asyncio.run(sgs.load_site_row_data(ctx, {"host": "h"}))
+
+    assert row["site_name"] == "Commville"
+    assert len(row["buildings_geo_flat"]["features"]) == 2
+    geom = wkb.loads(row["outline_geom"])
+    assert geom.equals(shape(boundary_feature["geometry"]))
+
+
+def test_load_community_route_raises_when_no_result_and_no_drive_id():
+    """Genuine failure case: neither same-execution result NOR a persisted
+    drive_id is available (e.g. resolve_community_site never actually ran for
+    this packet) -- load_site_row_data() must still raise ValueError rather
+    than silently producing an empty/fabricated boundary."""
+    ctx = _Ctx(
+        state={"geo_source": "community", "site_name": "Commville"},
+        results={},
+    )
+    try:
+        asyncio.run(sgs.load_site_row_data(ctx, {"host": "h"}))
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
 
 
 def test_surveyed_buildings_override_wins():

@@ -22,8 +22,6 @@ from __future__ import annotations
 import os
 import re
 
-import streamlit as st
-
 # The one table whose edit rights are gated by GRID_PROCUREMENT_EDITORS rather
 # than GRID_DESIGN_EDITORS.
 PROCUREMENT_TABLE = "purchases"
@@ -67,15 +65,22 @@ def _grid_union() -> set[str]:
 
 # ── current user ──────────────────────────────────────────────────────────────
 def current_email() -> str:
-    """Resolve the logged-in user's email (lowercased), or '' if unknown."""
+    """Resolve the logged-in user's email (lowercased), or '' if unknown.
+
+    Only meaningful under Streamlit (reads session_state / st.user); the import
+    is lazy so non-Streamlit hosts (NiceGUI app, scripts) can use this module by
+    passing emails explicitly to the check functions below.
+    """
     if _dev_bypass():
         return _DEV_EMAIL
-    email = st.session_state.get("grid_user_email")
-    if not email:
-        try:
+    try:
+        import streamlit as st
+
+        email = st.session_state.get("grid_user_email")
+        if not email:
             email = st.user.email if st.user.is_logged_in else None
-        except Exception:
-            email = None
+    except Exception:
+        email = None
     return (email or "").lower()
 
 

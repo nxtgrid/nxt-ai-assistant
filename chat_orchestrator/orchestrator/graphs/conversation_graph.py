@@ -1562,6 +1562,116 @@ class ConversationGraphBuilder:
                 output={"error": "Preference operation failed. Please try again."},
             )
 
+    async def _handle_expert_meta_tool_call(
+        self,
+        call: FunctionCall,
+        metadata: Dict[str, Any],
+    ) -> ToolCallResult:
+        """Handle a single expert meta-tool call (Phase D, read-only).
+
+        Dispatches expert_list_steps/expert_find_packet/expert_get_packet_state
+        to orchestrator.services.expert_meta_tools. These are fast, read-only
+        lookups -- each is awaited directly and its result returned
+        synchronously within this tool-call turn, exactly like
+        _handle_preference_call above. There is deliberately no fire-and-poll
+        background-task mechanism here (that pattern in expert_tool_runner.py
+        exists for a different caller -- persistent agents launching a FULL,
+        potentially multi-minute workflow run -- not for these sub-second
+        introspection reads).
+
+        expert_id resolution: expert_list_steps requires the LLM to pass
+        expert_id explicitly as a tool argument (see its schema in
+        prepare_tools.py). There's no synchronous packet_type -> expert_id
+        reverse map available here the way PACKET_TYPE_TO_COMMAND is for
+        slash commands (built once at import time from the synchronous
+        command_registry) -- the expert-side equivalent,
+        ExpertInstructionsProvider.get_expert_for_packet_type, is async (it
+        may fetch the Expert Instructions Google Doc) and isn't something we
+        want to call here just to validate/derive an argument the LLM
+        already has visibility into via its own system instructions (which
+        enumerate each expert's owned packet types). expert_find_packet and
+        expert_get_packet_state don't need expert_id at all: packets are
+        looked up directly by packet_type/key_entity or by packet_id.
+        """
+        from orchestrator.services import expert_meta_tools
+
+        args = call.arguments or {}
+        try:
+            if call.name == "expert_list_steps":
+                output = await expert_meta_tools.list_steps(
+                    expert_id=args.get("expert_id", ""),
+                    packet_type=args.get("packet_type", ""),
+                )
+            elif call.name == "expert_find_packet":
+                # Staff-only tool (gated in prepare_tools.py), so organization_id
+                # should always be present in metadata for a real staff user;
+                # fall back to the canonical staff org if it's ever missing
+                # (e.g. a user_context with no organization_ids) rather than
+                # passing None through to a DB filter.
+                import os
+
+                organization_id = metadata.get("organization_id") or int(
+                    os.getenv("STAFF_ORG_ID", "2")
+                )
+                output = await expert_meta_tools.find_packet(
+                    packet_type=args.get("packet_type", ""),
+                    key_entity=args.get("key_entity", ""),
+                    organization_id=organization_id,
+                )
+            elif call.name == "expert_get_packet_state":
+                output = await expert_meta_tools.get_packet_state(
+                    packet_id=args.get("packet_id", ""),
+                    keys=args.get("keys") or None,
+                )
+            elif call.name == "expert_run_steps":
+                # Staff-only tool (gated in prepare_tools.py); same organization_id
+                # fallback as expert_find_packet above.
+                import os
+
+                organization_id = metadata.get("organization_id") or int(
+                    os.getenv("STAFF_ORG_ID", "2")
+                )
+                output = await expert_meta_tools.run_steps(
+                    steps=args.get("steps") or [],
+                    packet_id=args.get("packet_id") or None,
+                    expert_id=args.get("expert_id") or None,
+                    packet_type=args.get("packet_type") or None,
+                    key_entity=args.get("key_entity") or None,
+                    param_overrides_json=args.get("param_overrides_json") or None,
+                    force=bool(args.get("force", False)),
+                    confirmation_token=args.get("confirmation_token") or None,
+                    organization_id=organization_id,
+                    user_email=metadata.get("user_email"),
+                    session_id=metadata.get("session_id"),
+                )
+            else:
+                output = {"error": f"Unknown expert meta-tool: {call.name}"}
+
+            # expert_run_steps outcomes (blocked / needs_user_input mid-loop
+            # stop / mid-loop failure) carry an explicit "success" key that
+            # must win over the plain "error" absence check below -- e.g. a
+            # "blocked" refusal has no "error" key at all but is definitely
+            # not a success. The other three (read-only) meta-tools never set
+            # an explicit "success" key, so this falls through to the
+            # original "error" not in output check for them unchanged.
+            if isinstance(output, dict) and "success" in output:
+                tool_success = bool(output["success"])
+            else:
+                tool_success = "error" not in output
+
+            return ToolCallResult(
+                name=call.name,
+                success=tool_success,
+                output=output,
+            )
+        except Exception as e:
+            LOGGER.exception(f"Error handling expert meta-tool {call.name}: {e}")
+            return ToolCallResult(
+                name=call.name,
+                success=False,
+                output={"error": "Expert workflow lookup failed. Please try again."},
+            )
+
     async def _execute_tool_calls(
         self,
         function_calls: List[FunctionCall],
@@ -1572,12 +1682,20 @@ class ConversationGraphBuilder:
             return []
 
         # Separate special tool calls from regular ones
-        from orchestrator.graphs.nodes.prepare_tools import PREFERENCE_TOOL_NAMES
+        from orchestrator.graphs.nodes.prepare_tools import (
+            EXPERT_META_TOOL_NAMES,
+            PREFERENCE_TOOL_NAMES,
+        )
 
         escalation_calls = [fc for fc in function_calls if fc.name == "escalate_to_support"]
         training_image_calls = [fc for fc in function_calls if fc.name == "fetch_training_image"]
         preference_calls = [fc for fc in function_calls if fc.name in PREFERENCE_TOOL_NAMES]
-        special_names = {"escalate_to_support", "fetch_training_image"} | PREFERENCE_TOOL_NAMES
+        expert_meta_tool_calls = [fc for fc in function_calls if fc.name in EXPERT_META_TOOL_NAMES]
+        special_names = (
+            {"escalate_to_support", "fetch_training_image"}
+            | PREFERENCE_TOOL_NAMES
+            | EXPERT_META_TOOL_NAMES
+        )
         regular_calls = [fc for fc in function_calls if fc.name not in special_names]
 
         results = []
@@ -1687,6 +1805,11 @@ class ConversationGraphBuilder:
         # Handle user preference tool calls
         for call in preference_calls:
             result = await self._handle_preference_call(call, metadata)
+            results.append(result)
+
+        # Handle expert meta-tool calls (read-only workflow introspection; Phase D)
+        for call in expert_meta_tool_calls:
+            result = await self._handle_expert_meta_tool_call(call, metadata)
             results.append(result)
 
         # Handle regular tool calls via executor

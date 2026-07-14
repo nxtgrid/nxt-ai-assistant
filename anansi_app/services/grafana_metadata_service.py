@@ -23,7 +23,7 @@ import os
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import streamlit as st
+from services._cache_compat import cache_data
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +222,7 @@ def load_all_dashboards_metadata() -> Tuple[Dict[str, Any], Dict[str, List[Dict[
         return {}, {}, ""
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@cache_data(ttl=300, show_spinner=False)
 def load_panels_metadata() -> Dict[str, Dict[str, Any]]:
     """
     Return a {panel_key: {title, dashboard_uid, dashboard_title}} mapping from Supabase.
@@ -257,7 +257,7 @@ def load_panels_metadata() -> Dict[str, Dict[str, Any]]:
         return {}
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@cache_data(ttl=300, show_spinner=False)
 def load_available_dashboards() -> Dict[str, str]:
     """
     Return a {dashboard_uid: dashboard_title} mapping from Supabase.

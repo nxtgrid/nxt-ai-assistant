@@ -8,6 +8,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
+.venv/
 venv/
 env/
 ENV/
@@ -29,3 +30,5 @@ Thumbs.db
 # would otherwise hide grid_app/lib/ (perms, db, settings, auth). Keep it tracked.
 !grid_app/lib/
 !grid_app/lib/**
+# ...but never track compiled bytecode the un-ignore above would otherwise catch.
+grid_app/lib/**/__pycache__/

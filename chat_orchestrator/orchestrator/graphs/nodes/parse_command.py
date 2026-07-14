@@ -69,6 +69,9 @@ async def parse_command(state: ConversationState) -> Dict[str, Any]:
             if model_ov:
                 result["command_model_override"] = model_ov
                 LOGGER.info(f"NL trigger model override: {model_ov}")
+            if nl_match.max_tool_rounds_override:
+                result["max_rounds"] = nl_match.max_tool_rounds_override
+                LOGGER.info(f"NL trigger max_rounds override: {nl_match.max_tool_rounds_override}")
             return result
 
         LOGGER.debug("Input does not start with / and no NL trigger matched")
@@ -82,7 +85,13 @@ async def parse_command(state: ConversationState) -> Dict[str, Any]:
     from orchestrator.services.command_parser import CommandParser
 
     parser = CommandParser()
-    processed_input, is_command, unlocked_tools, model_override = await parser.process_command(
+    (
+        processed_input,
+        is_command,
+        unlocked_tools,
+        model_override,
+        max_tool_rounds,
+    ) = await parser.process_command(
         text=user_input,
         user_context=user_context,
     )
@@ -104,6 +113,9 @@ async def parse_command(state: ConversationState) -> Dict[str, Any]:
         if model_override:
             result["command_model_override"] = model_override
             LOGGER.info(f"Command model override: {model_override}")
+        if max_tool_rounds:
+            result["max_rounds"] = max_tool_rounds
+            LOGGER.info(f"Command max_rounds override: {max_tool_rounds}")
         return result
     else:
         LOGGER.debug("Input starts with / but is not a recognized command")

@@ -13,7 +13,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -44,6 +44,9 @@ _shutdown_in_progress = False
 # Add parent directory to path to import handler
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from handler import async_main
+
+if TYPE_CHECKING:
+    from shared.auth.auth_service import GridNotificationTarget
 
 
 def get_api_key():
@@ -816,6 +819,199 @@ async def handle_chat(request: Request, background_tasks: BackgroundTasks):
     # Delegate to handle_webhook — including BOT_ENABLED handling, which is
     # staff-aware (visible notice for staff, silent for customers).
     return await handle_webhook(request, background_tasks)
+
+
+# ============================================================================
+# External Notification Passthrough (n8n / VRM / Grafana → Telegram)
+# ============================================================================
+
+
+class NotifyRequest(BaseModel):
+    """Payload for an external notification forwarded to a grid's Telegram group.
+
+    n8n (or any authorized upstream) composes the message and posts it here with a
+    grid name only. Anansi resolves the grid to its internal Telegram group (chat +
+    topic) via the Auth DB — the single source of truth — and performs the send, so
+    callers never handle raw chat/topic IDs and outbound formatting, retry, and
+    logging stay consistent with chat replies.
+    """
+
+    source: str = Field(..., description="Origin system, e.g. 'vrm', 'grafana', 'n8n'.")
+    grid_name: str = Field(
+        ...,
+        min_length=1,
+        description="Target grid name. Resolved server-side (fuzzy, 80% threshold) to the "
+        "grid's internal Telegram group chat + topic. Undeliverable if no confident match.",
+    )
+    text: str = Field(..., description="Message body (GitHub-flavoured markdown accepted).")
+    parse_mode: Optional[str] = Field(
+        default="Markdown",
+        description="Telegram parse mode. 'Markdown' converts + falls back to plain text; "
+        "pass null/empty to send verbatim plain text.",
+    )
+    dedup_key: Optional[str] = Field(
+        default=None, description="Optional idempotency hint (logged, not enforced here)."
+    )
+
+
+async def _log_notification_to_chat_db(
+    body: "NotifyRequest",
+    chat_id: str,
+    topic_id: Optional[str],
+    telegram_message_id: int,
+) -> None:
+    """Best-effort: record a forwarded notification in the chat's existing session.
+
+    Gives Anansi context when a user later replies to the alert in the group.
+    Never creates a session (that would pollute session state for chats that have
+    never talked to the bot) and never raises — logging failures are non-fatal.
+    """
+    try:
+        from orchestrator.models.schemas import ConversationMessage
+        from orchestrator.services.supabase_client import get_supabase_client
+
+        client = get_supabase_client()
+        session = await client.get_session_by_chat_id(
+            source="telegram",
+            chat_id=str(chat_id),
+            topic_id=str(topic_id) if topic_id else None,
+        )
+        if not session or session.id is None:
+            return
+
+        message = ConversationMessage(
+            role="model",
+            content=body.text,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            telegram_message_id=telegram_message_id,
+            metadata={
+                "channel": "notify_endpoint",
+                "notification_source": body.source,
+                "grid_name": body.grid_name,
+                **({"dedup_key": body.dedup_key} if body.dedup_key else {}),
+            },
+        )
+        await client.save_messages(session.id, [message], from_chat_id=str(chat_id))
+    except Exception as e:
+        logger.warning("Notify: chat-db logging failed (non-fatal): %s", e)
+
+
+async def _deliver_notification(body: "NotifyRequest", target: "GridNotificationTarget") -> None:
+    """Convert, send, and log a notification to an already-resolved grid target.
+
+    Grid resolution happens synchronously in the handler so an unresolvable grid
+    is reported to the caller (404) rather than silently dropped here; this runs in
+    the background and only covers the Telegram send + best-effort session logging.
+    """
+    from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
+    from shared.utils.telegram_send import send_telegram_message_with_fallback
+
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if not bot_token:
+        logger.error("Notify: TELEGRAM_BOT_TOKEN not configured — dropping notification")
+        return
+
+    parse_mode = (body.parse_mode or "").strip() or None
+    text = body.text
+    if parse_mode and parse_mode.lower().startswith("markdown"):
+        text = convert_github_to_telegram_markdown(body.text)
+
+    message_id = await send_telegram_message_with_fallback(
+        bot_token,
+        target.chat_id,
+        text,
+        parse_mode=parse_mode,
+        topic_id=target.topic_id,
+    )
+    if message_id is None:
+        logger.warning(
+            "Notify: delivery failed source=%s grid=%s chat=%s",
+            body.source,
+            target.grid_name,
+            target.chat_id,
+        )
+        return
+
+    logger.info(
+        "Notify: forwarded source=%s grid=%s (fuzzy=%s) chat=%s message_id=%s",
+        body.source,
+        target.grid_name,
+        target.was_fuzzy,
+        target.chat_id,
+        message_id,
+    )
+    await _log_notification_to_chat_db(body, target.chat_id, target.topic_id, message_id)
+
+
+@app.post("/chat/notify")
+async def handle_notify(
+    request: Request, body: NotifyRequest, background_tasks: BackgroundTasks
+) -> JSONResponse:
+    """Forward an externally-composed notification to a Telegram group.
+
+    Authentication: a shared secret in the ``X-Notify-Secret`` header must match
+    ``NOTIFY_SHARED_SECRET``. Fail-closed — if the secret is not configured the
+    endpoint rejects all requests.
+
+    Gating: ``NOTIFY_ENDPOINT_ENABLED`` must be true (toggle on the admin settings
+    page). When off the endpoint returns 503 so the caller can decide what to do;
+    Anansi neither sends nor queues.
+
+    Resolution is synchronous so failures reach the caller: an unresolvable
+    ``grid_name`` returns 404 (caller should not retry) and a resolution infra
+    error returns 503 (caller may retry). Only the Telegram send + logging run in
+    the background, after which the endpoint has already returned 202.
+
+    Verification bypass: these are internal operational alerts, not customer chat,
+    so they intentionally skip ``ResponseVerificationService`` (see CLAUDE.md
+    "Outgoing Message Verification"). The enable toggle is the operator kill switch.
+    """
+    import hmac
+
+    from shared.auth import get_auth_service
+
+    secret = os.getenv("NOTIFY_SHARED_SECRET", "")
+    if not secret:
+        logger.error("NOTIFY_SHARED_SECRET not configured — rejecting notify request")
+        raise HTTPException(status_code=401, detail="Notify endpoint not configured")
+
+    provided = request.headers.get("X-Notify-Secret", "")
+    if not hmac.compare_digest(provided, secret):
+        logger.warning("Notify: secret mismatch from source=%s", body.source)
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    if os.getenv("NOTIFY_ENDPOINT_ENABLED", "false").lower() not in ("true", "1", "yes"):
+        return JSONResponse(
+            status_code=503, content={"ok": False, "error": "Notify endpoint disabled"}
+        )
+
+    # Resolve synchronously so an unknown grid is reported to the caller rather than
+    # silently dropped in the background. Distinguish "no such grid" (404, terminal)
+    # from an infrastructure failure (503, retryable).
+    try:
+        target = await get_auth_service().resolve_grid_notification_target(body.grid_name)
+    except Exception:
+        logger.exception(
+            "Notify: grid resolution failed for %r (source=%s)", body.grid_name, body.source
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "error": "Grid resolution temporarily unavailable"},
+        )
+    if target is None:
+        logger.warning("Notify: unresolvable grid_name=%r (source=%s)", body.grid_name, body.source)
+        return JSONResponse(
+            status_code=404,
+            content={
+                "ok": False,
+                "error": f"Unknown or unresolvable grid_name: {body.grid_name!r}",
+            },
+        )
+
+    # Return fast; the send + logging happen in the background (mirrors the
+    # Telegram-webhook pattern — responses go out via the Bot API, not this body).
+    background_tasks.add_task(_deliver_notification, body, target)
+    return JSONResponse(status_code=202, content={"ok": True})
 
 
 @app.post("/api/v1/metrics/test")

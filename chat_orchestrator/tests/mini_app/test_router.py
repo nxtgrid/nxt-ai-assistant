@@ -354,6 +354,35 @@ class TestSubmitForm:
         assert resp.status_code == 422
         assert "must be >=" in resp.json()["detail"]
 
+    def test_submit_update_state_contention_returns_friendly_error(self):
+        """If update_state exhausts retries (RuntimeError), return a friendly 503
+
+        instead of letting the exception propagate as a bare 500. This covers the
+        TOCTOU window where a double-submitted form hits genuine write contention.
+        """
+        app, mock_service = _make_app(packet_override=MOCK_PACKET)
+        mock_service.update_state = AsyncMock(
+            side_effect=RuntimeError(
+                "update_state: exceeded 3 retries for packet lpp_design_20260301_abc "
+                "due to concurrent writes"
+            )
+        )
+        client = TestClient(app)
+
+        resp = client.post(
+            "/api/mini-app/submit",
+            json={
+                "packet_id": "lpp_design_20260301_abc",
+                "form_type": "design_params",
+                "values": {"editable_total_kwp": 75.0},
+            },
+        )
+
+        assert resp.status_code == 503
+        assert "try again" in resp.json()["detail"].lower()
+        # Workflow must not be resumed if the override write itself failed.
+        mock_service.resume_from_input.assert_not_called()
+
     def test_submit_unknown_form_type(self):
         """Submit with unknown form_type should return 422."""
         app, _ = _make_app(packet_override=MOCK_PACKET)

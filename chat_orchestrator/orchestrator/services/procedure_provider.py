@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional
 
+from orchestrator.config.settings import get_settings
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -189,7 +190,7 @@ async def generate_suggested_procedure(
         api_key=os.getenv("GOOGLE_API_KEY"),
         http_options={"timeout": 30_000},
     )
-    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    model = get_settings().gemini.model
 
     # Build context about existing procedures
     existing_list = "\n".join(f"- Procedure {p.number}: {p.title}" for p in existing_procedures)
@@ -267,7 +268,7 @@ async def match_content_to_procedures(
         api_key=os.getenv("GOOGLE_API_KEY"),
         http_options={"timeout": 30_000},
     )
-    model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    model = get_settings().gemini.model
 
     # Build procedure descriptions for matching
     procedure_descriptions = "\n\n".join(

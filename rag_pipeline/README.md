@@ -22,7 +22,7 @@ A comprehensive data ingestion pipeline that implements GraphRAG (Graph-based Re
 The RAG pipeline ingests data from multiple sources (GitHub, Google Drive, Telegram) and builds a unified knowledge graph with:
 
 ✅ **Semantic chunking** - Preserves document structure  
-✅ **Vector embeddings** - Google AI Studio text-embedding-005  
+✅ **Vector embeddings** - Vertex AI gemini-embedding-001 (768 dimensions)
 ✅ **Entity extraction** - Identifies concepts, technologies, people, organizations  
 ✅ **Relationship mapping** - Discovers connections between entities  
 ✅ **Community detection** - Finds clusters of related information  
@@ -235,7 +235,7 @@ GraphRAG extends traditional RAG by:
 #### 2. Vector Embeddings
 ```python
 # vector_embedder.py  
-# Google AI Studio text-embedding-005 (768 dimensions)
+# Vertex AI gemini-embedding-001 (768 dimensions)
 # Parallel processing for speed
 ```
 

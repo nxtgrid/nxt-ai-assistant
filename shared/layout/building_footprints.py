@@ -19,6 +19,7 @@ import io
 import json
 import logging
 import os
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,6 +36,8 @@ _HTTP_TIMEOUT_S = 60
 _MS_LINKS_TIMEOUT_S = 120  # dataset-links.csv is ~25 MB — give it more time on first fetch
 
 _ms_links_cache: "pd.DataFrame | None" = None
+
+_TRUE_VALUES = {"1", "true", "yes", "on"}
 
 
 @dataclass
@@ -255,6 +258,20 @@ def fetch_google_open_buildings(boundary: Polygon, min_confidence: float = 0.70)
     return {"type": "FeatureCollection", "features": features}
 
 
+def _should_speculatively_fetch_google(grid3_estimate: int, crosscheck_min_ratio: float) -> bool:
+    """Return whether Google should be started while MS is still streaming.
+
+    This is only useful for sites where a Google cross-check is plausible. Small
+    communities usually finish quickly enough that the extra bandwidth is not
+    worth spending before the MS count is known.
+    """
+    enabled = os.environ.get("FOOTPRINT_SPECULATIVE_GOOGLE", "true").lower() in _TRUE_VALUES
+    if not enabled or crosscheck_min_ratio <= 0 or grid3_estimate <= 0:
+        return False
+    min_grid3 = int(os.environ.get("FOOTPRINT_SPECULATIVE_GOOGLE_MIN_GRID3", "250"))
+    return grid3_estimate >= min_grid3
+
+
 def fetch_building_footprints(
     boundary: Polygon,
     grid3_estimate: int = 0,
@@ -271,47 +288,65 @@ def fetch_building_footprints(
     if crosscheck_min_ratio is None:
         crosscheck_min_ratio = float(os.environ.get("FOOTPRINT_CROSSCHECK_MIN_RATIO", "0.80"))
 
-    ms_fc = fetch_ms_footprints(boundary)
-    ms_count = len(ms_fc.get("features", []))
-    notes: list[str] = [f"Microsoft footprints: {ms_count}"]
+    google_executor: ThreadPoolExecutor | None = None
+    google_future: Future[dict[str, Any]] | None = None
+    if _should_speculatively_fetch_google(grid3_estimate, crosscheck_min_ratio):
+        google_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="google-footprints")
+        google_future = google_executor.submit(
+            fetch_google_open_buildings, boundary, min_confidence
+        )
+        logger.info("Google OB: speculative cross-check started")
 
-    thin = (
-        crosscheck_min_ratio > 0
-        and grid3_estimate > 0
-        and ms_count < crosscheck_min_ratio * grid3_estimate
-    )
-    if not thin:
-        notes.append("Coverage sufficient — Google cross-check skipped")
+    try:
+        ms_fc = fetch_ms_footprints(boundary)
+        ms_count = len(ms_fc.get("features", []))
+        notes: list[str] = [f"Microsoft footprints: {ms_count}"]
+
+        thin = (
+            crosscheck_min_ratio > 0
+            and grid3_estimate > 0
+            and ms_count < crosscheck_min_ratio * grid3_estimate
+        )
+        if not thin:
+            notes.append("Coverage sufficient — Google cross-check skipped")
+            if google_future is not None:
+                google_future.cancel()
+            return FootprintResult(
+                buildings_geojson=ms_fc,
+                source="microsoft",
+                ms_count=ms_count,
+                grid3_estimate=grid3_estimate,
+                notes=notes,
+            )
+
+        notes.append(
+            f"MS coverage thin ({ms_count} < {crosscheck_min_ratio:.0%} of GRID3 "
+            f"estimate {grid3_estimate}) — running Google cross-check"
+        )
+        if google_future is not None:
+            google_fc = google_future.result()
+        else:
+            google_fc = fetch_google_open_buildings(boundary, min_confidence=min_confidence)
+        google_count = len(google_fc.get("features", []))
+        notes.append(f"Google footprints: {google_count}")
+
+        if google_count > ms_count:
+            return FootprintResult(
+                buildings_geojson=google_fc,
+                source="google",
+                ms_count=ms_count,
+                google_count=google_count,
+                grid3_estimate=grid3_estimate,
+                notes=notes,
+            )
         return FootprintResult(
             buildings_geojson=ms_fc,
             source="microsoft",
-            ms_count=ms_count,
-            grid3_estimate=grid3_estimate,
-            notes=notes,
-        )
-
-    notes.append(
-        f"MS coverage thin ({ms_count} < {crosscheck_min_ratio:.0%} of GRID3 "
-        f"estimate {grid3_estimate}) — running Google cross-check"
-    )
-    google_fc = fetch_google_open_buildings(boundary, min_confidence=min_confidence)
-    google_count = len(google_fc.get("features", []))
-    notes.append(f"Google footprints: {google_count}")
-
-    if google_count > ms_count:
-        return FootprintResult(
-            buildings_geojson=google_fc,
-            source="google",
             ms_count=ms_count,
             google_count=google_count,
             grid3_estimate=grid3_estimate,
             notes=notes,
         )
-    return FootprintResult(
-        buildings_geojson=ms_fc,
-        source="microsoft",
-        ms_count=ms_count,
-        google_count=google_count,
-        grid3_estimate=grid3_estimate,
-        notes=notes,
-    )
+    finally:
+        if google_executor is not None:
+            google_executor.shutdown(wait=False, cancel_futures=True)

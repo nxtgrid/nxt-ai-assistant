@@ -222,7 +222,7 @@ _FLAGS: List[Flag] = [
     # --- AI model settings -------------------------------------------------
     _s(
         "GEMINI_MODEL",
-        "gemini-flash-latest",
+        "gemini-2.5-flash",
         "Primary Gemini model id.",
         editable=False,
     ),
@@ -230,6 +230,12 @@ _FLAGS: List[Flag] = [
         "GEMINI_FALLBACK_MODEL",
         "gemini-2.5-flash",
         "Fallback Gemini model for rate-limit recovery.",
+        editable=False,
+    ),
+    _s(
+        "INTENT_ROUTER_MODEL",
+        "gemini-2.5-flash-lite",
+        "Lightweight model for structured natural-language expert routing.",
         editable=False,
     ),
     _f("GEMINI_TEMPERATURE", 0.2, "Generation temperature (Gemini 2.x default; 3+ ignore)."),
@@ -289,6 +295,14 @@ _FLAGS: List[Flag] = [
         "Model used for response verification.",
         scope=SERVICE_BOT,
         editable=False,
+    ),
+    # --- External notifications (n8n / VRM / Grafana passthrough) ----------
+    _b(
+        "NOTIFY_ENDPOINT_ENABLED",
+        False,
+        "Accept external notifications on POST /chat/notify and forward them to "
+        "Telegram (n8n / VRM / Grafana passthrough). When off the endpoint returns 503.",
+        scope=SERVICE_BOT,
     ),
     # --- Expert workflow / interaction ------------------------------------
     _b(

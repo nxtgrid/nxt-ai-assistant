@@ -8,11 +8,14 @@ enforcement, SPD type, tariff, ...) is forwarded; omitted ones fall back to
 the engine's AppSheet-form defaults.
 """
 
+import asyncio
 import json
 from datetime import datetime, timezone
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
+from shared.grid_design.artifact_log import sweep_state_for_artifacts
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
 
@@ -23,6 +26,7 @@ LOGGER = get_logger(__name__)
 # LLM-parsed inputs). Unsupplied ones are omitted so the grid-design engine's
 # AppSheet-form defaults apply. Full catalogue: grid_design list_design_options.
 OPTIONAL_DESIGN_PARAMS = (
+    "technology_family",
     "inverter_type",
     "battery_type",
     "mppt_type",
@@ -43,6 +47,114 @@ OPTIONAL_DESIGN_PARAMS = (
 )
 
 
+# ParamSpecs for the optional design parameters above, plus the other genuinely
+# user-tunable inputs this step reads via get_parameter_value(). Hand-written in
+# the same order as OPTIONAL_DESIGN_PARAMS above — keep both in sync manually
+# if either changes.
+_OPTIONAL_DESIGN_PARAM_SPECS = (
+    ParamSpec(
+        name="technology_family",
+        description="Power plant technology family/architecture ('victron' or 'deye').",
+        synonyms=("technology type", "design type", "vendor", "equipment family"),
+    ),
+    ParamSpec(
+        name="inverter_type",
+        description="Inverter technology type selection.",
+        synonyms=("inverter",),
+    ),
+    ParamSpec(
+        name="battery_type",
+        description="Battery technology type selection.",
+        synonyms=("battery",),
+    ),
+    ParamSpec(
+        name="mppt_type",
+        description="MPPT controller type selection.",
+        synonyms=("mppt",),
+    ),
+    ParamSpec(
+        name="pv_type",
+        description="PV panel technology type selection.",
+        synonyms=("pv", "panel type", "solar panel type"),
+    ),
+    ParamSpec(
+        name="pv_inverter_type",
+        description="PV (string) inverter type selection.",
+        synonyms=("pv inverter",),
+    ),
+    ParamSpec(
+        name="initial_residential_connections",
+        param_type="integer",
+        description="Initial number of residential connections.",
+        synonyms=("residential connections",),
+    ),
+    ParamSpec(
+        name="initial_business_connections",
+        param_type="integer",
+        description="Initial number of business connections.",
+        synonyms=("business connections",),
+    ),
+    ParamSpec(
+        name="initial_3phase_connections",
+        param_type="integer",
+        description="Initial number of 3-phase connections.",
+        synonyms=("3-phase connections", "three phase connections"),
+    ),
+    ParamSpec(
+        name="force_3phase",
+        param_type="boolean",
+        description="Force all connections to 3-phase.",
+        synonyms=("force 3 phase", "3-phase enforcement"),
+    ),
+    ParamSpec(
+        name="wp_per_conn_override",
+        param_type="number",
+        description="Override for Wp-per-connection sizing.",
+        synonyms=("Wp/conn", "wp per connection"),
+    ),
+    ParamSpec(
+        name="regulation_constraint",
+        description="Constrain the design to a known regulation profile.",
+        synonyms=("regulation", "regulatory constraint", "Nigerian law", "DARES"),
+    ),
+    ParamSpec(
+        name="spd_type",
+        description="Surge protection device (SPD) type selection.",
+        synonyms=("spd", "surge protection"),
+    ),
+    ParamSpec(
+        name="anchor_load_kw",
+        param_type="number",
+        description="Anchor load in kW used for sizing.",
+        synonyms=("anchor load",),
+    ),
+    ParamSpec(
+        name="pue_hours_per_day",
+        param_type="number",
+        description="Productive use of energy (PUE) hours per day.",
+        synonyms=("pue hours",),
+    ),
+    ParamSpec(
+        name="daily_generation_potential_kwh_kwp",
+        param_type="number",
+        description="Daily solar generation potential (kWh/kWp).",
+        synonyms=("daily generation potential",),
+    ),
+    ParamSpec(
+        name="target_tariff_usd",
+        param_type="number",
+        description="Target tariff in USD used for sizing.",
+        synonyms=("target tariff",),
+    ),
+    ParamSpec(
+        name="num_poc_teams",
+        param_type="integer",
+        description="Number of point-of-connection installation teams.",
+        synonyms=("poc teams",),
+    ),
+)
+
+
 def _get_requester_name(context: StepContext) -> str:
     """Extract requester name from email or return default.
 
@@ -60,7 +172,85 @@ def _get_requester_name(context: StepContext) -> str:
     return "Staff"
 
 
-@register_step("generate_powerplant_design")
+@register_step(
+    "generate_powerplant_design",
+    contract=StepContract(
+        description=(
+            "Creates a grid design (no BOM yet) via the grid_design MCP server, using "
+            "site submission / distribution-map data and any user-supplied design "
+            "parameters."
+        ),
+        # site_name is the only hard requirement (ParamSpec required=True
+        # below; `if not site_name: return StepResult.failure(...)`).
+        consumes_state=("site_name",),
+        # design_generated/design_id: idempotency guard, absence just runs the
+        # main path. max_connections: `get_parameter_value(...) or
+        # default_max_connections` (served_buildings). editable_total_kwp/kwh:
+        # only passed to the design engine `if target_kwp:` / `if
+        # target_kwh:` -- omitted entirely when falsy/absent, per the "empty
+        # lets the engine calculate freely" contract documented on their
+        # ParamSpecs below. OPTIONAL_DESIGN_PARAMS: forwarded only `if value
+        # is not None and value != ""`, omitted otherwise so the engine's
+        # AppSheet-form defaults apply (see the module docstring and
+        # OPTIONAL_DESIGN_PARAMS' own comment) -- none of these are produced
+        # by any step either, so leaving them required would permanently
+        # block `satisfied` whenever the user hasn't supplied them (i.e.
+        # almost always).
+        optional_consumes_state=(
+            "design_generated",
+            "design_id",
+            "max_connections",
+            "editable_total_kwp",
+            "editable_total_kwh",
+        )
+        + OPTIONAL_DESIGN_PARAMS,
+        produces_state=(
+            "design_generated",
+            "design_id",
+            "design_name",
+            "total_kwp",
+            "total_kwh",
+            "total_kva",
+            "num_subsystems",
+            "num_inverters",
+            "num_batteries",
+            "num_panels",
+            "editable_total_kwp",
+            "editable_total_kwh",
+        ),
+        consumes_results=("generate_distribution_map",),
+        params=(
+            ParamSpec(
+                name="site_name",
+                description="Name of the site to generate the design for.",
+                required=True,
+            ),
+            ParamSpec(
+                name="max_connections",
+                param_type="integer",
+                description="Maximum number of connections for the design (defaults to served buildings).",
+                synonyms=("connections", "max connections"),
+            ),
+            ParamSpec(
+                name="editable_total_kwp",
+                param_type="number",
+                description="User-confirmed target total kWp (empty lets the engine calculate freely).",
+            ),
+            ParamSpec(
+                name="editable_total_kwh",
+                param_type="number",
+                description="User-confirmed target total kWh (empty lets the engine calculate freely).",
+            ),
+        )
+        + _OPTIONAL_DESIGN_PARAM_SPECS,
+        guard_keys=("design_generated",),
+        side_effects=(
+            "Calls the grid_design_design_and_bom MCP tool, which creates a design row "
+            "in the Chat DB (gd_designs); also sweeps packet_state for previously "
+            "uploaded Drive artifact IDs and attaches them to the new design."
+        ),
+    ),
+)
 async def generate_powerplant_design(context: StepContext) -> StepResult:
     """Generate a grid design using site submission data.
 
@@ -224,6 +414,20 @@ async def generate_powerplant_design(context: StepContext) -> StepResult:
 
         # Build state updates — design only, no BOM yet
         design_id = design_data.get("Id")
+
+        # Earlier LPP steps (map generation, community resolution, site layout)
+        # may have already uploaded artifacts to Drive and stashed their file
+        # IDs in packet_state under `*_drive_id` keys — before this design
+        # existed to attach them to. Sweep those in now that we have a
+        # design_id. Non-fatal: sweep_state_for_artifacts never raises.
+        if design_id:
+            await asyncio.to_thread(
+                sweep_state_for_artifacts,
+                design_id,
+                context.packet_state,
+                packet_id=context.packet_id,
+            )
+
         state_updates = {
             "design_generated": True,
             "design_id": design_id,

@@ -18,6 +18,54 @@ from shared.grid_design.data import index_by, load, num, truthy
 from shared.grid_design.db import Repository
 from shared.grid_design.ids import new_id
 
+TECHNOLOGY_FAMILIES = ("victron", "deye")
+
+
+def normalize_design_family(value: str | None) -> str:
+    """Normalize user/tool-facing technology family names.
+
+    `design_type` is already used by this module for lifecycle modes such as
+    Initial/Resize, so the vendor/architecture selector is intentionally called
+    technology_family.
+    """
+    raw = str(value or "victron").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "victron": "victron",
+        "victron_container": "victron",
+        "deye": "deye",
+        "ess": "deye",
+        "hybrid_ess": "deye",
+        "deye_hybrid_ess": "deye",
+    }
+    family = aliases.get(raw)
+    if family not in TECHNOLOGY_FAMILIES:
+        raise ValueError(f"Unsupported technology_family '{value}'. Use 'victron' or 'deye'.")
+    return family
+
+
+def _design_type_tokens(value: str | None) -> set[str]:
+    raw = str(value or "").strip().lower()
+    if not raw or raw == "none":
+        return set()
+    return {part.strip() for part in raw.replace("&", " and ").split("and") if part.strip()}
+
+
+def subassembly_supports_design_family(subassembly: dict, family: str | None) -> bool:
+    tokens = _design_type_tokens(subassembly.get("design_types"))
+    return normalize_design_family(family) in tokens
+
+
+def _infer_design_family(design: dict) -> str:
+    fields = (
+        design.get("inverter_type"),
+        design.get("battery_type"),
+        design.get("mppt_type"),
+        design.get("pv_type"),
+        design.get("pv_inverter_type"),
+    )
+    joined = " ".join(str(value or "") for value in fields).lower()
+    return "deye" if "deye" in joined else "victron"
+
 
 def _build_ds_row(design_id: str, sub: dict, qty: float, sub_components: list[dict]) -> dict:
     in_sub = [
@@ -53,7 +101,9 @@ def _build_ds_row(design_id: str, sub: dict, qty: float, sub_components: list[di
     }
 
 
-def auto_design(design_id: str, design_type: str = "Initial") -> dict:
+def auto_design(
+    design_id: str, design_type: str = "Initial", technology_family: str | None = None
+) -> dict:
     target = Repository("designs").get(design_id)
     if not target:
         return {"ok": False, "error": f"Design {design_id} not found."}
@@ -92,6 +142,7 @@ def auto_design(design_id: str, design_type: str = "Initial") -> dict:
     mppt_type = d.get("mppt_type")
     batt_type = d.get("battery_type")
     pv_type = d.get("pv_type")
+    family = normalize_design_family(technology_family or _infer_design_family(d))
 
     use_pv_inverters = rule("Use PV Inverters for Initial Designs?") == 1
     ratio_conn = 0 if (res + non_res) == 0 else non_res / (res + non_res)
@@ -120,28 +171,34 @@ def auto_design(design_id: str, design_type: str = "Initial") -> dict:
         kwp_per_conn * (res + non_res)
         + num(d.get("anchor_load_kw")) * num(d.get("pue_hours_per_day")) / (daily_gen or 3.5),
     )
-    phases = (
-        3
-        if (
-            truthy(d.get("force_3_phase"))
-            or min_total_kwp > rule("Max kWp for single phase grid", 50)
-        )
-        else 1
-    )
+    if family == "deye":
+        phases = 3
+    elif truthy(d.get("force_3_phase")) or min_total_kwp > rule(
+        "Max kWp for single phase grid", 50
+    ):
+        phases = 3
+    else:
+        phases = 1
 
-    for label, t in (
+    required_types = [
         ("inverter", inverter_type),
         ("battery", batt_type),
-        ("mppt", mppt_type),
-        ("pv", pv_type),
-    ):
+    ]
+    if family == "victron":
+        required_types.extend(
+            [
+                ("mppt", mppt_type),
+                ("pv", pv_type),
+            ]
+        )
+    for label, t in required_types:
         r = comp_id(t)
         if isinstance(r, dict):
             return {"ok": False, "error": r["error"]}
     inverter_c = comp_id(inverter_type)
     batt_c = comp_id(batt_type)
-    mppt_c = comp_id(mppt_type)
-    pv_c = comp_id(pv_type)
+    mppt_c = comp_id(mppt_type) if family == "victron" else None
+    pv_c = comp_id(pv_type) if family == "victron" else None
 
     pv_inverter_c = None
     if pv_inverter_type and use_pv_inverters:
@@ -151,16 +208,32 @@ def auto_design(design_id: str, design_type: str = "Initial") -> dict:
         pv_inverter_c = r
 
     # Inverter sizing
-    batt_inv_candidates = [
-        s
-        for s in active_subs
-        if s.get("main_component") == inverter_c
-        and inverter_type in (s.get("description") or "")
-        and "nverter" in (s.get("assembly_class") or "")
-    ]
+    if family == "deye":
+        batt_inv_candidates = [
+            s
+            for s in active_subs
+            if subassembly_supports_design_family(s, family)
+            and s.get("main_component") == inverter_c
+            and (
+                "nverter" in (s.get("assembly_class") or "")
+                or "Hybrid ESS" in (s.get("assembly_class") or "")
+            )
+        ]
+    else:
+        batt_inv_candidates = [
+            s
+            for s in active_subs
+            if subassembly_supports_design_family(s, family)
+            and s.get("main_component") == inverter_c
+            and inverter_type in (s.get("description") or "")
+            and "nverter" in (s.get("assembly_class") or "")
+        ]
     batt_inv_candidates.sort(key=lambda s: num(s.get("spec1_value")), reverse=True)
     if not batt_inv_candidates:
-        return {"ok": False, "error": "Battery Inverter subassembly not found."}
+        return {
+            "ok": False,
+            "error": f"No {family}-compatible inverter/hybrid ESS subassembly found.",
+        }
     batt_inv = batt_inv_candidates[0]
     unit_inv_kva = num(batt_inv.get("spec1_value"))
     if unit_inv_kva <= 0:
@@ -198,7 +271,11 @@ def auto_design(design_id: str, design_type: str = "Initial") -> dict:
             pv_inv_va_unq = frac * inv_kva_unq
     pv_inverters = int(pv_inv_va_unq // unit_pv_inv_kva) if unit_pv_inv_kva > 0 else 0
     batt_inverters = max(1, round((inv_kva_unq - pv_inverters * unit_pv_inv_kva) / unit_inv_kva))
-    kva_actual = (batt_inverters * unit_inv_kva) / phases
+    kva_actual = (
+        batt_inverters * unit_inv_kva
+        if family == "deye"
+        else (batt_inverters * unit_inv_kva) / phases
+    )
 
     # Battery selection
     target_kwh = num(d.get("target_kwh")) or max(
@@ -210,7 +287,9 @@ def auto_design(design_id: str, design_type: str = "Initial") -> dict:
     all_batts = [
         s
         for s in active_subs
-        if s.get("main_component") == batt_c and "Battery" in (s.get("assembly_class") or "")
+        if subassembly_supports_design_family(s, family)
+        and s.get("main_component") == batt_c
+        and "Battery" in (s.get("assembly_class") or "")
     ]
     all_batts.sort(key=lambda s: num(s.get("spec1_value")), reverse=True)
     remaining_kwh, total_kwh = target_kwh, 0.0
@@ -225,13 +304,22 @@ def auto_design(design_id: str, design_type: str = "Initial") -> dict:
 
     # MPPT selection
     mppt_power_needed = min_total_kwp - (pv_inverters * unit_pv_inv_kva)
-    all_mppts = [
-        s
-        for s in active_subs
-        if mppt_c in str(s.get("main_component"))
-        and pv_c in str(s.get("main_component"))
-        and "MPPT" in (s.get("assembly_class") or "")
-    ]
+    if family == "deye":
+        all_mppts = [
+            s
+            for s in active_subs
+            if subassembly_supports_design_family(s, family)
+            and "MPPT" in (s.get("assembly_class") or "")
+        ]
+    else:
+        all_mppts = [
+            s
+            for s in active_subs
+            if subassembly_supports_design_family(s, family)
+            and mppt_c in str(s.get("main_component"))
+            and pv_c in str(s.get("main_component"))
+            and "MPPT" in (s.get("assembly_class") or "")
+        ]
     all_mppts.sort(key=lambda s: num(s.get("spec1_value")), reverse=True)
     remaining_power, total_mppt_units, mppt_kwp = mppt_power_needed, 0, 0.0
     chosen_mppts = []
@@ -286,12 +374,22 @@ def auto_design(design_id: str, design_type: str = "Initial") -> dict:
     for s, c in chosen_mppts:
         add_sub(s, c)
 
-    if design_type != "Resize":
+    if design_type != "Resize" and family == "deye":
+        for sub in active_subs:
+            if (
+                subassembly_supports_design_family(sub, family)
+                and "Hybrid ESS" in (sub.get("assembly_class") or "")
+                and sub.get("id") != batt_inv.get("id")
+                and num(sub.get("spec1_value")) == 0
+            ):
+                add_sub(sub, 1)
+    elif design_type != "Resize":
         cabin = next(
             (
                 s
                 for s in active_subs
-                if "Cabin" in (s.get("description") or "")
+                if subassembly_supports_design_family(s, family)
+                and "Cabin" in (s.get("description") or "")
                 and num(s.get("spec3_value")) == phases
                 and batt_c in str(s.get("main_component"))
             ),

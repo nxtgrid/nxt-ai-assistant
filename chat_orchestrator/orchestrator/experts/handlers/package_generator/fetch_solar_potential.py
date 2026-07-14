@@ -8,13 +8,35 @@ import json
 from typing import Any, Dict
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
 
-@register_step("fetch_solar_potential")
+@register_step(
+    "fetch_solar_potential",
+    contract=StepContract(
+        description=(
+            "Fetches solar generation potential (kWh/kWp) from Global Solar Atlas for "
+            "the site location produced by generate_distribution_map."
+        ),
+        consumes_state=(),
+        # All three are only read inside the idempotency-guard block (`if
+        # context.get_state("solar_potential_fetched"): ...`); absence just
+        # means the main path runs and fetches fresh data.
+        optional_consumes_state=(
+            "solar_potential_fetched",
+            "gsa_daily_potential",
+            "gsa_yearly_potential",
+        ),
+        consumes_results=("generate_distribution_map",),
+        produces_state=("solar_potential_fetched", "gsa_daily_potential", "gsa_yearly_potential"),
+        guard_keys=("solar_potential_fetched",),
+        side_effects="Calls the solar_get_solar_potential MCP tool (Global Solar Atlas).",
+    ),
+)
 async def fetch_solar_potential(context: StepContext) -> StepResult:
     """Fetch solar potential data from Global Solar Atlas via MCP tool.
 

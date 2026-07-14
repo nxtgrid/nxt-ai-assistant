@@ -249,6 +249,212 @@ NL_EXPERT_TOOL_DEF = {
 # Name for filtering in tool execution
 NL_EXPERT_TOOL_NAME = "start_expert_workflow"
 
+# Expert meta-tools -- read-only introspection into expert workflow recipes and
+# packet state (Phase D of the agentic expert workflows effort). Like
+# NL_EXPERT_TOOL_DEF above, these are plain-dict virtual tool declarations not
+# backed by an mcp_servers server; dispatched in conversation_graph.py's
+# _handle_expert_meta_tool_call (see EXPERT_META_TOOL_NAMES below, mirroring
+# PREFERENCE_TOOL_NAMES's routing pattern).
+EXPERT_LIST_STEPS_TOOL_DEF = {
+    "name": "expert_list_steps",
+    "description": (
+        "Returns an expert workflow's recipe (ordered steps) merged with each "
+        "function step's machine-readable data-dependency contract: which "
+        "packet_state keys and prior-step results it reads/writes, and which "
+        "parameters it accepts (including synonyms/alternate phrasings). Use "
+        "this BEFORE trying to re-run or reason about a specific step of an "
+        "expert workflow -- e.g. for a request like 'regenerate the map with "
+        "different pole spacing', call this first to find which step actually "
+        "produces the map and which parameter name controls pole spacing, "
+        "instead of guessing at step or parameter names."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "expert_id": {
+                "type": "string",
+                "description": "Expert identifier that owns this workflow, e.g. 'lpp_expert'.",
+            },
+            "packet_type": {
+                "type": "string",
+                "description": (
+                    "Packet type whose workflow recipe to inspect, e.g. "
+                    "'light_preliminary_package'."
+                ),
+            },
+        },
+        "required": ["expert_id", "packet_type"],
+    },
+}
+
+EXPERT_FIND_PACKET_TOOL_DEF = {
+    "name": "expert_find_packet",
+    "description": (
+        "Finds an existing work packet -- of ANY status: in-progress, "
+        "awaiting input, failed, blocked, or completed -- for a given expert "
+        "packet type and site/grid/subject name, and summarizes its progress. "
+        "Use this to check whether work already exists before starting fresh, "
+        "e.g. 'is there already an LPP for Foo?' or 'has the GTR for Bar "
+        "finished?'. Returns found=false (not an error) if nothing exists yet."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "packet_type": {
+                "type": "string",
+                "description": "Packet type to search for, e.g. 'light_preliminary_package'.",
+            },
+            "key_entity": {
+                "type": "string",
+                "description": "Site name, grid name, or subject the packet was created for.",
+            },
+        },
+        "required": ["packet_type", "key_entity"],
+    },
+}
+
+EXPERT_GET_PACKET_STATE_TOOL_DEF = {
+    "name": "expert_get_packet_state",
+    "description": (
+        "Fetches the current state of a specific work packet by its "
+        "packet_id -- packet_state for an in-progress/paused packet, with "
+        "packet_outputs merged in for a completed one. Optionally filter to "
+        "specific keys. Use this after expert_find_packet to inspect exactly "
+        "what a packet has produced so far (e.g. a design_id, or a "
+        "*_drive_id artifact reference)."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "packet_id": {
+                "type": "string",
+                "description": (
+                    "The packet_id returned by expert_find_packet, or referenced "
+                    "earlier in the conversation."
+                ),
+            },
+            "keys": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Optional list of specific state keys to fetch. Omit or leave "
+                    "empty to fetch everything."
+                ),
+            },
+        },
+        "required": ["packet_id"],
+    },
+}
+
+EXPERT_RUN_STEPS_TOOL_DEF = {
+    "name": "expert_run_steps",
+    "description": (
+        "Runs one or more named expert workflow steps out of order -- the ONLY "
+        "expert meta-tool that actually executes anything (the other three are "
+        "read-only lookups). ALWAYS call expert_list_steps first to learn the "
+        "real step names, their parameters (including synonyms), and their "
+        "side_effects for the expert_id/packet_type in question -- never guess "
+        "a step name.\n\n"
+        "This tool may need to auto-run OTHER steps first to satisfy missing "
+        "prerequisites (e.g. re-running a map step first requires the layout "
+        "step that produced its input). It NEVER does this silently:\n"
+        "- If the result has needs_confirmation=true, nothing has been run "
+        "yet. Relay auto_inserted_steps (name + description + side_effects) "
+        "and the message to the user. If they agree, call this tool again "
+        "with the exact same steps/param_overrides_json/force PLUS "
+        "confirmation_token set to the confirmation_token value from that "
+        "response -- never invent, guess, or reuse a confirmation_token from "
+        "a different call; it will simply be rejected and a fresh one "
+        "returned.\n"
+        "- If the result has blocked=true, nothing has been run and nothing "
+        "will help -- relay the details (which step needs which missing "
+        "item, with no way to produce it automatically) to the user; do NOT "
+        "retry with a confirmation_token.\n"
+        "- If the result has needs_user_input=true, execution stopped because "
+        "a step is waiting on a question -- relay it to the user.\n"
+        "- success=true with executed_steps means everything requested ran "
+        "(or was already complete).\n\n"
+        "Pass packet_id to act on an existing packet (from expert_find_packet), "
+        "or omit it and pass expert_id/packet_type/key_entity to start a new one."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "steps": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Ordered list of step names to run, e.g. "
+                    "['generate_distribution_map']. Get real names from expert_list_steps."
+                ),
+            },
+            "packet_id": {
+                "type": "string",
+                "description": (
+                    "Existing packet to act on (from expert_find_packet). Omit to "
+                    "create a new packet, in which case expert_id/packet_type/"
+                    "key_entity are all required."
+                ),
+            },
+            "expert_id": {
+                "type": "string",
+                "description": (
+                    "Expert owning the workflow, e.g. 'lpp_expert'. Only used "
+                    "when packet_id is omitted."
+                ),
+            },
+            "packet_type": {
+                "type": "string",
+                "description": (
+                    "Packet type to create, e.g. 'light_preliminary_package'. Only "
+                    "used when packet_id is omitted."
+                ),
+            },
+            "key_entity": {
+                "type": "string",
+                "description": (
+                    "Site/grid/subject name for the new packet. Only used when "
+                    "packet_id is omitted."
+                ),
+            },
+            "param_overrides_json": {
+                "type": "string",
+                "description": (
+                    "Optional JSON-encoded object of per-step parameter overrides, "
+                    'shaped as \'{"step_name": {"param_name": value}}\'. Must be a '
+                    "JSON string, not a raw object."
+                ),
+            },
+            "force": {
+                "type": "boolean",
+                "description": (
+                    "Re-run a step even if already marked completed, clearing its "
+                    "guard keys first. Defaults to false."
+                ),
+            },
+            "confirmation_token": {
+                "type": "string",
+                "description": (
+                    "ONLY set this on a follow-up call, to the exact confirmation_token "
+                    "value returned by a prior needs_confirmation response for this same "
+                    "plan, after the user has explicitly agreed. Do not fabricate or "
+                    "guess a value -- an invalid/stale token is simply rejected with a "
+                    "fresh needs_confirmation response, never executed."
+                ),
+            },
+        },
+        "required": ["steps"],
+    },
+}
+
+# All expert meta-tool names for reference (mirrors PREFERENCE_TOOL_NAMES)
+EXPERT_META_TOOL_NAMES = {
+    "expert_list_steps",
+    "expert_find_packet",
+    "expert_get_packet_state",
+    "expert_run_steps",
+}
+
 
 async def prepare_tools(state: ConversationState) -> Dict[str, Any]:
     """Prepare available tools based on user permissions.
@@ -300,6 +506,15 @@ async def prepare_tools(state: ConversationState) -> Dict[str, Any]:
     if is_staff:
         available_tools.append(NL_EXPERT_TOOL_DEF)
         LOGGER.info("Added NL expert routing tool (start_expert_workflow)")
+
+        available_tools.append(EXPERT_LIST_STEPS_TOOL_DEF)
+        available_tools.append(EXPERT_FIND_PACKET_TOOL_DEF)
+        available_tools.append(EXPERT_GET_PACKET_STATE_TOOL_DEF)
+        available_tools.append(EXPERT_RUN_STEPS_TOOL_DEF)
+        LOGGER.info(
+            "Added expert meta-tools (expert_list_steps/expert_find_packet/"
+            "expert_get_packet_state/expert_run_steps)"
+        )
 
     # Wrap in Gemini format (functionDeclarations wrapper)
     tools_payload = None

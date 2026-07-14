@@ -154,7 +154,7 @@ async def summarize_with_llm(
         from google import genai
 
         client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-        model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
         # Format chunks for the prompt
         chunks_text = ""

@@ -4,6 +4,7 @@ This handler generates a site map image from pd_site_submissions table data,
 showing boundaries, poles, cables, and buildings.
 """
 
+import asyncio
 import base64
 import json
 import os
@@ -13,6 +14,7 @@ import psycopg
 
 from orchestrator.experts.handlers.package_generator.site_geo_source import load_site_row_data
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.layout import generate_layout
 from shared.mapping import generate_site_map
@@ -23,6 +25,8 @@ from shared.utils.logging import get_logger
 from shared.utils.option_parsing import normalize_numeric_input
 
 LOGGER = get_logger(__name__)
+
+FALLBACK_LAYOUT_TIMEOUT_S = 180
 
 
 def _merge_layout_into_row_data(
@@ -181,64 +185,71 @@ def _render_power_heatmap(
     if max_kw <= 0:
         return None
 
-    fig, ax = plt.subplots(figsize=(10, 10), facecolor="#1a1a2e")
-    ax.set_facecolor("#1a1a2e")
-    ax.set_aspect("equal")
-    ax.axis("off")
+    fig = None
+    try:
+        fig, ax = plt.subplots(figsize=(10, 10), facecolor="#1a1a2e")
+        ax.set_facecolor("#1a1a2e")
+        ax.set_aspect("equal")
+        ax.axis("off")
 
-    cmap = cm.get_cmap("hot_r")
-    norm = mcolors.Normalize(vmin=0, vmax=max_kw)
+        cmap = cm.get_cmap("hot_r")
+        norm = mcolors.Normalize(vmin=0, vmax=max_kw)
 
-    # Buildings for context (small grey dots)
-    if buildings_geojson:
-        if isinstance(buildings_geojson, str):
-            try:
-                buildings_geojson = json.loads(buildings_geojson)
-            except (json.JSONDecodeError, TypeError):
-                buildings_geojson = None
-    if buildings_geojson:
-        for f in buildings_geojson.get("features", []):
+        # Buildings for context (small grey dots)
+        if buildings_geojson:
+            if isinstance(buildings_geojson, str):
+                try:
+                    buildings_geojson = json.loads(buildings_geojson)
+                except (json.JSONDecodeError, TypeError):
+                    buildings_geojson = None
+        if buildings_geojson:
+            for f in buildings_geojson.get("features", []):
+                try:
+                    geom = shape(f["geometry"])
+                    cx, cy = geom.centroid.x, geom.centroid.y
+                    color = "#3a5f8a" if f.get("properties", {}).get("connected") else "#4a4a6a"
+                    ax.plot(cx, cy, ".", color=color, markersize=2, alpha=0.6)
+                except Exception:
+                    continue
+
+        # Drop cables (thin, muted)
+        for f in features:
+            if f.get("properties", {}).get("cable_type") == "drop":
+                try:
+                    geom = shape(f["geometry"])
+                    xs, ys = geom.xy
+                    ax.plot(xs, ys, color="#3a3a5a", linewidth=0.6, alpha=0.5)
+                except Exception:
+                    continue
+
+        # Backbone cables colored by load
+        for f in backbone:
             try:
                 geom = shape(f["geometry"])
-                cx, cy = geom.centroid.x, geom.centroid.y
-                color = "#3a5f8a" if f.get("properties", {}).get("connected") else "#4a4a6a"
-                ax.plot(cx, cy, ".", color=color, markersize=2, alpha=0.6)
-            except Exception:
-                continue
-
-    # Drop cables (thin, muted)
-    for f in features:
-        if f.get("properties", {}).get("cable_type") == "drop":
-            try:
-                geom = shape(f["geometry"])
+                power_kw = f["properties"]["power_kw"]
                 xs, ys = geom.xy
-                ax.plot(xs, ys, color="#3a3a5a", linewidth=0.6, alpha=0.5)
+                ax.plot(xs, ys, color=cmap(norm(power_kw)), linewidth=2.5)
             except Exception:
                 continue
 
-    # Backbone cables colored by load
-    for f in backbone:
-        try:
-            geom = shape(f["geometry"])
-            power_kw = f["properties"]["power_kw"]
-            xs, ys = geom.xy
-            ax.plot(xs, ys, color=cmap(norm(power_kw)), linewidth=2.5)
-        except Exception:
-            continue
+        sm = cm.ScalarMappable(cmap=cmap, norm=norm)
+        sm.set_array([])
+        cbar = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
+        cbar.set_label("Load (kW)", color="white", fontsize=11)
+        cbar.ax.yaxis.set_tick_params(color="white")
+        plt.setp(cbar.ax.yaxis.get_ticklabels(), color="white")
+        ax.set_title("Distribution Power Load", color="white", fontsize=13, pad=8)
 
-    sm = cm.ScalarMappable(cmap=cmap, norm=norm)
-    sm.set_array([])
-    cbar = plt.colorbar(sm, ax=ax, fraction=0.03, pad=0.02)
-    cbar.set_label("Load (kW)", color="white", fontsize=11)
-    cbar.ax.yaxis.set_tick_params(color="white")
-    plt.setp(cbar.ax.yaxis.get_ticklabels(), color="white")
-    ax.set_title("Distribution Power Load", color="white", fontsize=13, pad=8)
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor="#1a1a2e")
-    plt.close(fig)
-    buf.seek(0)
-    return buf.read()
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor="#1a1a2e")
+        buf.seek(0)
+        return buf.read()
+    except Exception as e:
+        LOGGER.warning(f"Power heatmap rendering failed (non-fatal): {e}")
+        return None
+    finally:
+        if fig is not None:
+            plt.close(fig)
 
 
 def _get_db_config() -> Dict[str, Any]:
@@ -431,7 +442,109 @@ def _lookup_site_by_id(site_id: int, db_config: Dict[str, Any]) -> Optional[str]
             return str(row[0]) if row else None
 
 
-@register_step("generate_distribution_map")
+@register_step(
+    "generate_distribution_map",
+    contract=StepContract(
+        description=(
+            "Generates a site map image (boundaries, poles, cables, buildings) from "
+            "pd_site_submissions data (or a community boundary), running the layout "
+            "engine when no upstream layout result is available."
+        ),
+        # site_name is the only genuinely hard dependency: absent site_id AND
+        # site_name (on the non-community route) leads to a needs_input pause
+        # asking the user for a site name -- a real (if askable) requirement.
+        consumes_state=("site_name",),
+        # Every one of these is read via context.get_state(...) with genuine
+        # in-body fallback/default logic when absent (idempotency guards that
+        # simply let the main path run, branch selectors with a legitimate
+        # default route, "or <default>" reads, or dead/never-produced keys
+        # whose absence just means the corresponding fallback branch never
+        # fires) -- see generate_distribution_map()'s body for each:
+        #   map_generated / awaiting_site_selection / awaiting_site_name:
+        #     idempotency/resume guards; absence just means the main path runs.
+        #   geo_source: `if ... == "community": ... else: <submission route>`.
+        #   site_id: never read via get_state directly in this handler (only
+        #     via get_input, or the optional selected_site_id override below);
+        #     on the community route it's hardcoded to None and unused.
+        #   selected_site_id: `if selected_site_id: site_id = selected_site_id`.
+        #   site_options / site_candidates: `context.get_state(key) or []`.
+        #   use_site_submission_layout: `... or False`.
+        #   layout_result: falls back to get_previous_result, then to
+        #     _run_layout_engine() -- a fully legitimate alternate path.
+        #   site_options_map_b64: falls back to layout_result.get(...).
+        #   site_folder_id: passed to upload_step_output(), which documents
+        #     "skip if None" (non-fatal).
+        #   site_options_drive_id: `... or ""`, used only to skip a redundant
+        #     re-upload.
+        #   community_boundary_drive_id / community_buildings_drive_id /
+        #     community_state / surveyed_buildings_geojson: read inside
+        #     site_geo_source.load_site_row_data() only on the community
+        #     route. community_state and surveyed_buildings_geojson each have
+        #     their own in-body fallback (an "or <default>" / optional
+        #     cosmetic field); the two drive_id keys are the cross-execution
+        #     Drive-download fallback (used only when
+        #     get_previous_result("resolve_community_site") is empty, i.e.
+        #     run_single_step re-running this step in a later execution) --
+        #     real, working reads now, but only relevant on the community
+        #     route, so they can't be a hard requirement in this flat,
+        #     non-conditional contract model. None of these four are ever
+        #     produced via any step's produces_state THIS step itself
+        #     declares (resolve_community_site produces the drive_id keys),
+        #     so leaving them in consumes_state would permanently block
+        #     `satisfied` on the community route -- the original motivating
+        #     bug this field exists to fix.
+        optional_consumes_state=(
+            "map_generated",
+            "geo_source",
+            "site_id",
+            "selected_site_id",
+            "awaiting_site_selection",
+            "awaiting_site_name",
+            "site_options",
+            "use_site_submission_layout",
+            "layout_result",
+            "site_options_map_b64",
+            "site_candidates",
+            "site_folder_id",
+            "site_options_drive_id",
+            "community_boundary_drive_id",
+            "community_buildings_drive_id",
+            "community_state",
+            "surveyed_buildings_geojson",
+        ),
+        produces_state=(
+            "map_generated",
+            "map_image_drive_id",
+            "power_heatmap_drive_id",
+            "site_id",
+            "site_name",
+            "awaiting_site_selection",
+            "awaiting_site_name",
+            "site_options",
+            "site_state",
+            "site_candidates",
+            "editable_total_buildings",
+            "editable_served_building_count",
+            "editable_total_kwp",
+            "editable_total_kwh",
+            "site_options_drive_id",
+        ),
+        consumes_results=("generate_distribution_layout", "resolve_community_site"),
+        guard_keys=("map_generated",),
+        side_effects=(
+            "Queries Auth DB pd_site_submissions via psycopg; may run the distribution "
+            "layout engine when no upstream layout is present; renders a site map and "
+            "uploads map/site-options/power-heatmap images to Google Drive; may pause "
+            "for user input to disambiguate multiple site-name matches. NOTE: the "
+            "community-route reads (community_state, and — as a cross-execution "
+            "fallback when this execution never ran resolve_community_site itself — "
+            "community_boundary_drive_id/community_buildings_drive_id, downloaded via "
+            "download_drive_file()) happen via the shared load_site_row_data() helper "
+            "(site_geo_source.py) only when geo_source == 'community'; "
+            "surveyed_buildings_geojson is read on both routes."
+        ),
+    ),
+)
 async def generate_distribution_map(context: StepContext) -> StepResult:
     """Generate a site map image from pd_site_submissions data.
 
@@ -762,7 +875,22 @@ async def _render_map_from_row_data(
         layout_result = None
     else:
         # Default: generate a fresh layout regardless of what the DB has
-        layout_result = _run_layout_engine(row_data, site_name=site_name or "")
+        await context.send_progress_to_user(
+            f"Generating distribution layout for {site_name or 'site'}..."
+        )
+        try:
+            layout_result = await asyncio.wait_for(
+                asyncio.to_thread(_run_layout_engine, row_data, site_name=site_name or ""),
+                timeout=FALLBACK_LAYOUT_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            LOGGER.error(
+                f"Fallback distribution layout timed out after "
+                f"{FALLBACK_LAYOUT_TIMEOUT_S}s for {site_name}"
+            )
+            return StepResult.failure(
+                f"Distribution layout timed out for {site_name or 'the site'}."
+            )
 
     # Capture site options image from layout result (if not already in state
     # from a previous generate_distribution_layout step)
@@ -845,53 +973,101 @@ async def _render_map_from_row_data(
     if cable_length:
         stats_msg += f"\nCable length: {cable_length:,.0f}m"
 
-    # Upload distribution map to Drive (non-fatal, async)
-    # Store Drive file IDs in state instead of base64 blobs to keep packet_state small.
-    # Consumers use get_previous_result() for base64 in normal flow;
-    # Drive IDs are the fallback for workflow resume after failure.
-    drive_ids = await upload_step_output(
-        site_folder_id=context.get_state("site_folder_id"),
-        subfolder_name="Distribution Design",
-        site_name=site_name,
-        files=[(base64.b64decode(result["image"]), "image/png", "distribution_map")],
-    )
+    # Upload site options map separately if available.
+    # Skip re-uploading when generate_distribution_layout already uploaded this exact
+    # image: on a fresh (non-QGIS) layout run, that step runs first in the same LPP
+    # execution, uploads site_options_map_b64 to Drive, and stashes the resulting ID in
+    # packet_state under this same key. Re-uploading here would duplicate the Drive file
+    # and, because both handlers write the same `site_options_drive_id` state key, cause
+    # the workflow executor's artifact-history sweep (sweep_state_for_artifacts) to record
+    # two separate versions for what is conceptually one artifact. Reuse the existing ID
+    # instead so only one upload (and one artifact-history entry) is ever produced.
+    existing_site_options_drive_id = context.get_state("site_options_drive_id") or ""
+    site_options_newly_uploaded = bool(site_options_map_b64) and not existing_site_options_drive_id
+    site_options_drive_id = existing_site_options_drive_id
 
-    # Upload site options map separately if available
-    site_options_drive_id = ""
-    if site_options_map_b64:
-        options_ids = await upload_step_output(
+    # Start independent non-fatal artifact work together so user-visible step
+    # latency is not the sum of every Drive upload and optional heatmap render.
+    distribution_upload_task = asyncio.create_task(
+        upload_step_output(
             site_folder_id=context.get_state("site_folder_id"),
             subfolder_name="Distribution Design",
             site_name=site_name,
-            files=[(base64.b64decode(site_options_map_b64), "image/png", "site_options_map")],
+            files=[(base64.b64decode(result["image"]), "image/png", "distribution_map")],
         )
-        site_options_drive_id = options_ids.get("site_options_map", "")
+    )
 
-    # Render and upload power flow heatmap (non-fatal — only produced when power_kw is present)
-    power_heatmap_drive_id = ""
-    power_heatmap_b64 = None
-    dist_geojson = row_data.get("distribution_geo_flat")
-    if dist_geojson:
+    site_options_upload_task = None
+    if site_options_newly_uploaded:
+        site_options_upload_task = asyncio.create_task(
+            upload_step_output(
+                site_folder_id=context.get_state("site_folder_id"),
+                subfolder_name="Distribution Design",
+                site_name=site_name,
+                files=[(base64.b64decode(site_options_map_b64), "image/png", "site_options_map")],
+            )
+        )
+
+    async def _render_and_upload_power_heatmap() -> tuple[str, Optional[str]]:
+        dist_geojson = row_data.get("distribution_geo_flat")
+        if not dist_geojson:
+            return "", None
         try:
-            import asyncio as _asyncio
-
-            heatmap_bytes = await _asyncio.to_thread(
+            heatmap_bytes = await asyncio.to_thread(
                 _render_power_heatmap,
                 dist_geojson,
                 row_data.get("buildings_geo_flat"),
             )
-            if heatmap_bytes:
-                power_heatmap_b64 = base64.b64encode(heatmap_bytes).decode()
-                heatmap_ids = await upload_step_output(
-                    site_folder_id=context.get_state("site_folder_id"),
-                    subfolder_name="Distribution Design",
-                    site_name=site_name,
-                    files=[(heatmap_bytes, "image/png", "power_heatmap")],
-                )
-                power_heatmap_drive_id = heatmap_ids.get("power_heatmap", "")
-                LOGGER.info(f"Power heatmap uploaded: {power_heatmap_drive_id}")
+            if not heatmap_bytes:
+                return "", None
+            heatmap_b64 = base64.b64encode(heatmap_bytes).decode()
+            heatmap_ids = await upload_step_output(
+                site_folder_id=context.get_state("site_folder_id"),
+                subfolder_name="Distribution Design",
+                site_name=site_name,
+                files=[(heatmap_bytes, "image/png", "power_heatmap")],
+            )
+            drive_id = heatmap_ids.get("power_heatmap", "")
+            LOGGER.info(f"Power heatmap uploaded: {drive_id}")
+            return drive_id, heatmap_b64
         except Exception as e:
             LOGGER.warning(f"Power heatmap generation failed (non-fatal): {e}")
+            return "", None
+
+    power_heatmap_task = asyncio.create_task(_render_and_upload_power_heatmap())
+
+    drive_ids = await distribution_upload_task
+    if site_options_upload_task is not None:
+        options_ids = await site_options_upload_task
+        site_options_drive_id = options_ids.get("site_options_map", "")
+    power_heatmap_drive_id, power_heatmap_b64 = await power_heatmap_task
+
+    state_updates = {
+        "map_generated": True,
+        "map_image_drive_id": drive_ids.get("distribution_map", ""),
+        "power_heatmap_drive_id": power_heatmap_drive_id,
+        "site_id": site_id,
+        "site_name": site_name,
+        "awaiting_site_selection": False,
+        "site_state": site_state,
+        # Persist site candidates so generate_site_layout uses the correct polygon.
+        # Only written when candidates came from _run_layout_engine (idempotency /
+        # QGIS fast-path cases where generate_distribution_layout left state empty).
+        "site_candidates": site_candidates_from_layout,
+        # Editable parameters for confirmation flow
+        "editable_total_buildings": statistics.get("total_buildings", 0),
+        "editable_served_building_count": statistics.get("served_buildings", 0),
+        # Optional target energy parameters (empty = let AppSheet calculate freely)
+        "editable_total_kwp": "",
+        "editable_total_kwh": "",
+    }
+    # Only (re-)write site_options_drive_id when this step produced a new upload.
+    # If generate_distribution_layout already uploaded it, that step's own state_updates
+    # already persisted the key — re-emitting the same value here would make the
+    # workflow executor's artifact sweep append a second, redundant version entry for
+    # the same Drive file in the design's artifact history.
+    if site_options_newly_uploaded:
+        state_updates["site_options_drive_id"] = site_options_drive_id
 
     return StepResult(
         data={
@@ -905,26 +1081,8 @@ async def _render_map_from_row_data(
             "center": center,
             "site_state": site_state,
             "power_heatmap_b64": power_heatmap_b64,
-        },
-        state_updates={
-            "map_generated": True,
-            "map_image_drive_id": drive_ids.get("distribution_map", ""),
             "site_options_drive_id": site_options_drive_id,
-            "power_heatmap_drive_id": power_heatmap_drive_id,
-            "site_id": site_id,
-            "site_name": site_name,
-            "awaiting_site_selection": False,
-            "site_state": site_state,
-            # Persist site candidates so generate_site_layout uses the correct polygon.
-            # Only written when candidates came from _run_layout_engine (idempotency /
-            # QGIS fast-path cases where generate_distribution_layout left state empty).
-            "site_candidates": site_candidates_from_layout,
-            # Editable parameters for confirmation flow
-            "editable_total_buildings": statistics.get("total_buildings", 0),
-            "editable_served_building_count": statistics.get("served_buildings", 0),
-            # Optional target energy parameters (empty = let AppSheet calculate freely)
-            "editable_total_kwp": "",
-            "editable_total_kwh": "",
         },
+        state_updates=state_updates,
         progress_message=f"Generated map for {site_name}",
     )

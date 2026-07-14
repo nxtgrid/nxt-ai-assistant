@@ -477,6 +477,70 @@ class WorkPacketService:
 
         return matches
 
+    async def find_packets_by_entity(
+        self,
+        packet_type: str,
+        key_entity: str,
+        organization_id: Optional[int] = None,
+        since_days: int = 90,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        """Find packets of ANY status matching type and key entity.
+
+        Broader than `find_similar_completed` (which only searches
+        `packet_status == "completed"`): this looks across every status --
+        pending, in_progress, awaiting_input, failed, blocked, cancelled, and
+        completed -- so a caller can tell whether a packet for this entity
+        already exists at all, and if so, where it currently sits in its
+        lifecycle. Used by `expert_meta_tools.find_packet` so staff can ask
+        "is there already an LPP for Foo?" and get a real answer regardless
+        of whether that packet is still running, paused for input, or done.
+
+        Uses the same key_entity substring-match convention as
+        `find_similar_completed` (checked against `packet_goal` and
+        `packet_inputs`, case-insensitive) for consistency with the rest of
+        this file's duplicate-detection logic.
+
+        Args:
+            packet_type: Type of packet (light_preliminary_package, etc.)
+            key_entity: Key identifier to match (grid/site name, ticket ID, etc.)
+            organization_id: Optional org filter
+            since_days: Only look back this many days (by updated_at)
+            limit: Maximum packets to inspect (most recently updated first)
+
+        Returns:
+            List of matching packets across all statuses, most recently
+            updated first.
+        """
+        from datetime import timedelta
+
+        since_date = (datetime.utcnow() - timedelta(days=since_days)).isoformat()
+
+        query = (
+            self.client.table("agent_work_packets")
+            .select("*")
+            .eq("packet_type", packet_type)
+            .gte("updated_at", since_date)
+            .order("updated_at", desc=True)
+            .limit(limit)
+        )
+
+        if organization_id:
+            query = query.eq("organization_id", organization_id)
+
+        result = query.execute()
+
+        key_lower = key_entity.lower()
+        matches = []
+        for packet in result.data:
+            goal = (packet.get("packet_goal") or "").lower()
+            inputs_str = str(packet.get("packet_inputs") or {}).lower()
+
+            if key_lower in goal or key_lower in inputs_str:
+                matches.append(packet)
+
+        return matches
+
     # =========================================================================
     # UPDATE Operations
     # =========================================================================
@@ -486,59 +550,104 @@ class WorkPacketService:
         packet_id: str,
         state_updates: Dict[str, Any],
         session_id: Optional[str] = None,
+        max_retries: int = 3,
     ) -> Dict[str, Any]:
-        """Update packet state (merge with existing).
+        """Update packet state (merge with existing), using optimistic concurrency.
+
+        Plain read-then-merge-then-write is a lost-update race: if two
+        callers (e.g. a running full workflow AND a `run_single_step` call)
+        update the same packet concurrently, the second writer's unconditional
+        `.update()` can silently clobber the first writer's changes. Instead,
+        this conditions the UPDATE on both `id` and the `state_version` value
+        read moments earlier (same conditional-update pattern as
+        `claim_signing()`). If a concurrent writer commits in between, the
+        conditional update matches zero rows; we re-fetch the packet, re-merge
+        `state_updates` on top of the FRESH `packet_state` (never the stale
+        copy from before), and retry -- up to `max_retries` attempts total.
 
         Args:
             packet_id: Packet's packet_id or UUID
             state_updates: Dictionary of state updates to merge
             session_id: Session making the update
+            max_retries: Maximum conditional-update attempts before giving up
+                due to sustained concurrent-writer contention (default 3)
 
         Returns:
             Updated packet dictionary
 
         Raises:
             ValueError: If packet not found
+            RuntimeError: If max_retries conditional-update attempts all lose
+                the race to a concurrent writer
         """
         packet = await self.get_packet(packet_id)
         if not packet:
             raise ValueError(f"Packet not found: {packet_id}")
 
-        # Merge state
-        current_state = packet["packet_state"] or {}
-        new_state = {**current_state, **state_updates}
+        for attempt in range(max_retries):
+            # Merge state on top of whatever this iteration's packet snapshot
+            # is (the original read on attempt 0, a fresh re-fetch on later
+            # attempts) -- never the stale snapshot from a prior attempt.
+            current_state = packet.get("packet_state") or {}
+            new_state = {**current_state, **state_updates}
 
-        # Validate if schema exists
-        if packet["packet_type"] in PACKET_TYPE_SCHEMAS:
-            validate_packet_data(packet["packet_type"], "state", new_state)
+            # Validate if schema exists
+            if packet["packet_type"] in PACKET_TYPE_SCHEMAS:
+                validate_packet_data(packet["packet_type"], "state", new_state)
 
-        # Update sessions_involved if new session
-        sessions = packet.get("sessions_involved", []) or []
-        if session_id and session_id not in sessions:
-            sessions = sessions + [session_id]
+            # Update sessions_involved if new session
+            sessions = packet.get("sessions_involved", []) or []
+            if session_id and session_id not in sessions:
+                sessions = sessions + [session_id]
 
-        result = (
-            self.client.table("agent_work_packets")
-            .update(
-                {
-                    "packet_state": new_state,
-                    "sessions_involved": sessions,
-                }
+            current_version = packet.get("state_version", 0) or 0
+
+            result = (
+                self.client.table("agent_work_packets")
+                .update(
+                    {
+                        "packet_state": new_state,
+                        "sessions_involved": sessions,
+                        "state_version": current_version + 1,
+                    }
+                )
+                .eq("id", packet["id"])
+                .eq("state_version", current_version)
+                .execute()
             )
-            .eq("id", packet["id"])
-            .execute()
-        )
 
-        await self._log_event(
-            packet["id"],
-            "state_update",
-            None,
-            f"State updated: {list(state_updates.keys())}",
-            session_id=session_id,
-            input_data=state_updates,
-        )
+            if result.data:
+                # Log message always describes the CALLER's originally-requested
+                # state_updates keys (the method parameter, never mutated by the
+                # retry loop) -- not any intermediate merge artifact.
+                await self._log_event(
+                    packet["id"],
+                    "state_update",
+                    None,
+                    f"State updated: {list(state_updates.keys())}",
+                    session_id=session_id,
+                    input_data=state_updates,
+                )
+                return result.data[0]
 
-        return result.data[0]
+            # Lost the race to a concurrent writer: state_version no longer
+            # matched by the time our conditional update ran.
+            LOGGER.warning(
+                f"update_state: conditional update lost race for packet {packet_id} "
+                f"(attempt {attempt + 1}/{max_retries})"
+            )
+            if attempt == max_retries - 1:
+                break  # out of retries -- skip the pointless final re-fetch
+
+            # Re-fetch and re-merge on the FRESH packet_state before retrying.
+            packet = await self.get_packet(packet_id)
+            if not packet:
+                raise ValueError(f"Packet not found during retry: {packet_id}")
+
+        raise RuntimeError(
+            f"update_state: exceeded {max_retries} retries for packet {packet_id} "
+            "due to concurrent writes"
+        )
 
     async def claim_signing(self, packet_id: str) -> bool:
         """Atomically transition signing_status from "pending"/"failed" → "signing".
@@ -1331,6 +1440,75 @@ class WorkPacketService:
         )
 
         LOGGER.info(f"Reset failed packet for retry: {packet['packet_id']}")
+        return result.data[0]
+
+    async def mark_step_incomplete(
+        self,
+        packet_id: str,
+        step_name: str,
+        clear_state_keys: Optional[List[str]] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Remove step_name from steps_completed and optionally pop state keys,
+        so run_single_step(force=True) can re-execute it from scratch.
+
+        Generalizes reset_failed_packet's single-step-pop logic (which only ever
+        removes the LAST completed step and only ever clears a fixed set of
+        error/recovery keys) to an arbitrary named step and an arbitrary list of
+        state keys to clear -- typically the step's own StepContract.guard_keys,
+        so its idempotency guard doesn't immediately no-op the re-run.
+
+        Args:
+            packet_id: Packet's packet_id or UUID
+            step_name: Name of the step to mark incomplete
+            clear_state_keys: Optional packet_state keys to pop (e.g. the
+                step's StepContract.guard_keys). Defaults to clearing nothing.
+            session_id: Session making the change
+
+        Returns:
+            Updated packet dictionary
+
+        Raises:
+            ValueError: if packet not found.
+        """
+        packet = await self.get_packet(packet_id)
+        if not packet:
+            raise ValueError(f"Packet not found: {packet_id}")
+
+        steps_completed = packet.get("steps_completed") or []
+        if step_name in steps_completed:
+            steps_completed.remove(step_name)
+
+        current_state = packet.get("packet_state") or {}
+        for key in clear_state_keys or []:
+            current_state.pop(key, None)
+
+        sessions = packet.get("sessions_involved") or []
+        if session_id and session_id not in sessions:
+            sessions = sessions + [session_id]
+
+        result = (
+            self.client.table("agent_work_packets")
+            .update(
+                {
+                    "steps_completed": steps_completed,
+                    "packet_state": current_state,
+                    "sessions_involved": sessions,
+                }
+            )
+            .eq("id", packet["id"])
+            .execute()
+        )
+
+        await self._log_event(
+            packet["id"],
+            "step_reset",
+            step_name,
+            f"Step '{step_name}' marked incomplete for re-run (cleared keys: {clear_state_keys or []})",
+            session_id=session_id,
+            triggered_by="user",
+        )
+
         return result.data[0]
 
     # =========================================================================

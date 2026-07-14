@@ -1,22 +1,140 @@
+# Claude Code compound-engineering review output (may contain internal context)
+.context/
+
 # Claude / editor local state
 .claude/launch.json
 .claude/worktrees/
 *-recent.json
 .excalidraw-recent.json
 
-# OS junk
-.DS_Store
+# Backup git folders from old sub-repos
+**/.git.bak/
 
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
-.venv/
+.installed.cfg
+*.egg
+MANIFEST
 venv/
+env/
+ENV/
 
-# Local env / secrets (never commit)
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
 .env
+.env.local
 *.env.local
 
 # Stray patch files (sync artifacts)
 *.patch
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Telegram data files (sensitive private chat exports)
+rag_pipeline/ingestion/telegram_data_cleaning/*.json
+rag_pipeline/test_telegram_export.json
+rag_pipeline/test_telegram_with_links.json
+rag_pipeline/ingestion/telegram_initial_ingestion/**/*.json
+rag_pipeline/ingestion/telegram_initial_ingestion/**/*.py
+
+# RAG storage data (potentially sensitive)
+chat_orchestrator/storage/rag/*.json
+
+# Test files
+chat_orchestrator/test_chat_lookup.py
+
+# Temporary test files
+test_grafana_flow.py
+test_graph.png
+
+# DO spec and env backup files (contain secrets — never commit)
+.do/spec-backup-*.yaml
+.do/env-vars-backup-*.json
+.do/env-vars-backup*.md
+.do/env-vars-backup*.json
+.do/live-spec-backup.yaml
+.do/live-spec-sanitized.yaml
+
+# Cache files (local instruction/context caches)
+cache/
+chat_orchestrator/cache/
+
+# Generated output files
+output/
+
+# Tests (operator-specific, not for public OSS tree)
+# Exception: equipment_control tests use only generic mocks (no internal data) and are tracked with git add -f
+tests/
+mcp_servers/tests/test_meter_actions.py
+
+# Scripts — only .gs and .js files are public; all .py/.sh are internal
+# Exception: backfill_design_artifacts.py is generic gd_designs.artifacts backfill
+# logic (no org IDs/secrets/site names), tracked with git add -f
+scripts/*.py
+scripts/*.sh
+scripts/*.png
+
+# Playwright MCP screenshots
+.playwright-mcp/
+
+# Misc assets
+AnansiLogo.png
+
+# Git worktrees
+.worktrees/
+
+# Internal working documents (not for public OSS tree)
+todos/
+plans/
+
+# Claude & Gemini settings (per-user, not for the public tree)
+.claude/
+.gemini/
+GEMINI.md
+AGENTS.md
+.codex/
+.editor*
+backfill_session_org_id.sql
+
+# Large test output images
+scripts/gate_test_output/
+scripts/layout_batch_test/
+EAPNXTLogoWhite.png
+"NXT GRID LOGO TIGHT WHITE.svg"
+
+# scripts/*.sql — one-off production SQL, not migrations
+scripts/*.sql

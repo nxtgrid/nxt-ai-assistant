@@ -27,6 +27,13 @@ def test_parse_bare_coords_with_space():
     assert parsed == {"latitude": "6.8244", "longitude": "4.5909"}
 
 
+def test_parse_embedded_coords_from_natural_language_lpp_request():
+    parsed = parse_lpp_anchor_args(
+        "Can you create an LPP for the site located at 9.3947551,9.3176320 using Deye technology?"
+    )
+    assert parsed == {"latitude": "9.3947551", "longitude": "9.3176320"}
+
+
 def test_parse_negative_bare_coords():
     parsed = parse_lpp_anchor_args("-1.5, 36.8")
     assert parsed == {"latitude": "-1.5", "longitude": "36.8"}

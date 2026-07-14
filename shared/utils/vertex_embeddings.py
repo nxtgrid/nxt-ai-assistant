@@ -1,8 +1,15 @@
 """
 Vertex AI Embeddings Helper
 
-Uses Google's embedding model via Vertex AI API.
-Model is configurable via EMBEDDING_MODEL env var (default: gemini-embedding-001).
+Uses Google's embedding model on the Vertex AI backend via the Google Gen AI SDK
+(``google-genai``). Model is configurable via EMBEDDING_MODEL env var
+(default: gemini-embedding-001).
+
+Migrated off the legacy Vertex AI SDK (``vertexai.language_models``), which Google
+deprecated on 2025-06-24 and removed on 2026-06-24
+(https://cloud.google.com/vertex-ai/generative-ai/docs/deprecations/genai-vertexai-sdk).
+The embedding model and output dimensionality are unchanged, so stored and query
+vectors remain in the same space — no re-embedding of the corpus is required.
 
 Usage:
     from shared.utils.vertex_embeddings import get_embeddings, get_embedding
@@ -25,35 +32,45 @@ LOGGER = get_logger(__name__)
 # Default embedding model - configurable via environment variable
 DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
 
-# Cache for initialized state
-_vertex_initialized = False
+# Cache for the initialized google-genai client (Vertex AI backend)
+_client = None
 
 
-def _ensure_vertex_initialized():
-    """Initialize Vertex AI with service account credentials."""
-    global _vertex_initialized
-    if _vertex_initialized:
-        return
+def _get_client():
+    """Create (once) a google-genai client on the Vertex AI backend.
 
-    import vertexai
+    Authenticates with the service-account JSON (GOOGLE_SERVICE_ACCOUNT_JSON) and the
+    project/location from it, matching the previous Vertex AI initialization.
+    """
+    global _client
+    if _client is not None:
+        return _client
+
+    from google import genai
     from google.oauth2 import service_account
 
-    # Get service account info
     sa_info = get_service_account_json()
     project_id = sa_info.get("project_id")
-
     if not project_id:
         raise ValueError("project_id not found in service account JSON")
 
-    # Create credentials
-    credentials = service_account.Credentials.from_service_account_info(sa_info)
-
-    # Initialize Vertex AI
+    credentials = service_account.Credentials.from_service_account_info(
+        sa_info,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
     location = os.getenv("VERTEX_AI_LOCATION", "us-central1")
-    vertexai.init(project=project_id, location=location, credentials=credentials)
 
-    LOGGER.info(f"Vertex AI initialized: project={project_id}, location={location}")
-    _vertex_initialized = True
+    _client = genai.Client(
+        vertexai=True,
+        project=project_id,
+        location=location,
+        credentials=credentials,
+    )
+
+    LOGGER.info(
+        f"google-genai (Vertex AI backend) initialized: project={project_id}, location={location}"
+    )
+    return _client
 
 
 async def get_embeddings(
@@ -63,7 +80,7 @@ async def get_embeddings(
     output_dimensionality: int = 768,
 ) -> List[List[float]]:
     """
-    Generate embeddings for multiple texts using Vertex AI.
+    Generate embeddings for multiple texts using Vertex AI (via google-genai).
 
     Args:
         texts: List of texts to embed
@@ -78,22 +95,20 @@ async def get_embeddings(
     if not texts:
         return []
 
-    _ensure_vertex_initialized()
+    from google.genai import types
 
-    from vertexai.language_models import TextEmbeddingInput, TextEmbeddingModel
+    client = _get_client()
 
-    model = TextEmbeddingModel.from_pretrained(model_name or DEFAULT_EMBEDDING_MODEL)
-
-    # Create inputs with task type
-    inputs = [TextEmbeddingInput(text=t, task_type=task_type) for t in texts]
-
-    # Get embeddings (Vertex AI handles batching internally)
-    embeddings = model.get_embeddings(
-        inputs,
-        output_dimensionality=output_dimensionality,
+    response = await client.aio.models.embed_content(
+        model=model_name or DEFAULT_EMBEDDING_MODEL,
+        contents=list(texts),
+        config=types.EmbedContentConfig(
+            task_type=task_type,
+            output_dimensionality=output_dimensionality,
+        ),
     )
 
-    return [e.values for e in embeddings]
+    return [list(e.values) for e in response.embeddings]
 
 
 async def get_embedding(

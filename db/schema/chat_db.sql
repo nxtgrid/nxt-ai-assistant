@@ -65,6 +65,10 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 
 CREATE INDEX IF NOT EXISTS chat_messages_session_id_idx ON chat_messages (session_id);
 CREATE INDEX IF NOT EXISTS chat_messages_session_index_idx ON chat_messages (session_id, message_index);
+-- Telegram edit handling looks messages up by telegram_message_id
+CREATE INDEX IF NOT EXISTS chat_messages_telegram_msg_idx ON chat_messages (session_id, telegram_message_id)
+    WHERE telegram_message_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS chat_messages_created_at_idx ON chat_messages (created_at);
 
 -- ── Conversation Summaries ────────────────────────────────────────────────────
 
@@ -222,8 +226,11 @@ CREATE TABLE IF NOT EXISTS entities (
     UNIQUE (name, type)
 );
 
-CREATE INDEX IF NOT EXISTS entities_embedding_idx ON entities
-    USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- NOTE: the ivfflat index on entities.embedding was removed on 2026-07-11 —
+-- its only consumer (the search_entities / get_entity_graph RPCs) was never
+-- wired up and has been dropped (see
+-- anansi_app/db/migrations/2026-07-11-chat-db-cleanup.sql). The embedding
+-- column is retained; re-add the index if entity vector search is implemented.
 
 CREATE TABLE IF NOT EXISTS entity_mentions (
     id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -258,27 +265,9 @@ CREATE TABLE IF NOT EXISTS relationship_evidence (
     created_at          timestamptz DEFAULT now()
 );
 
-CREATE TABLE IF NOT EXISTS communities (
-    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    title               text,
-    summary             text,
-    level               integer NOT NULL DEFAULT 0,
-    parent_community_id uuid REFERENCES communities (id) ON DELETE CASCADE,
-    embedding           vector(768),
-    embedding_model     text,
-    metadata            jsonb DEFAULT '{}',
-    created_at          timestamptz DEFAULT now(),
-    updated_at          timestamptz DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS community_members (
-    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    community_id    uuid NOT NULL REFERENCES communities (id) ON DELETE CASCADE,
-    entity_id       uuid NOT NULL REFERENCES entities (id) ON DELETE CASCADE,
-    rank            float NOT NULL DEFAULT 1.0,
-    created_at      timestamptz DEFAULT now(),
-    UNIQUE (community_id, entity_id)
-);
+-- NOTE: the GraphRAG "communities"/"community_members" tables were removed on
+-- 2026-07-11 — never populated or queried by any code path
+-- (see anansi_app/db/migrations/2026-07-11-chat-db-cleanup.sql).
 
 -- ── Expert / Workflow Packets ─────────────────────────────────────────────────
 
@@ -306,7 +295,8 @@ CREATE TABLE IF NOT EXISTS agent_work_packets (
     started_at              timestamptz,
     completed_at            timestamptz,
     created_at              timestamptz NOT NULL DEFAULT now(),
-    updated_at              timestamptz NOT NULL DEFAULT now()
+    updated_at              timestamptz NOT NULL DEFAULT now(),
+    state_version           integer NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS agent_work_packets_status_org_idx ON agent_work_packets (packet_status, organization_id);
@@ -418,6 +408,12 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
     result          jsonb,
     retry_count     integer NOT NULL DEFAULT 0
 );
+
+-- Partial indexes covering both branches of the claim_scheduled_messages poll
+CREATE INDEX IF NOT EXISTS scheduled_messages_pending_idx
+    ON scheduled_messages (scheduled_for) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_scheduled_messages_processing
+    ON scheduled_messages (processed_at) WHERE status = 'processing';
 
 -- RPC: atomically claim pending scheduled messages (prevents duplicate processing)
 CREATE OR REPLACE FUNCTION claim_scheduled_messages(batch_size INT, processor_id TEXT)

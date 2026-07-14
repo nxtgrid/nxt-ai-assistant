@@ -32,6 +32,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from orchestrator.config.settings import AppSettings, get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import ParamSpec, StepContract
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -86,12 +87,14 @@ class StepHandlerRegistry:
         self._settings = settings or get_settings()
         self._handlers: Dict[str, StepHandler] = {}
         self._schemas: Dict[str, StepSchema] = {}
+        self._contracts: Dict[str, StepContract] = {}
 
     def register(
         self,
         name: str,
         handler: StepHandler,
         schema: Optional[StepSchema] = None,
+        contract: Optional[StepContract] = None,
     ) -> None:
         """Register a step handler function with optional parameter schema.
 
@@ -99,6 +102,8 @@ class StepHandlerRegistry:
             name: Unique name for the handler
             handler: Async function that takes StepContext and returns StepResult
             schema: Optional parameter schema for interactive confirmation
+            contract: Optional machine-readable data-dependency contract (see
+                `orchestrator.experts.step_contracts.StepContract`)
 
         Raises:
             ValueError: If handler with this name already exists
@@ -109,7 +114,12 @@ class StepHandlerRegistry:
         self._handlers[name] = handler
         if schema:
             self._schemas[name] = schema
-        LOGGER.debug(f"Registered step handler: {name} (schema: {schema is not None})")
+        if contract:
+            self._contracts[name] = contract
+        LOGGER.debug(
+            f"Registered step handler: {name} "
+            f"(schema: {schema is not None}, contract: {contract is not None})"
+        )
 
     def get_handler(self, name: str) -> StepHandler:
         """Get a registered step handler by name.
@@ -160,6 +170,28 @@ class StepHandlerRegistry:
         """
         return name in self._schemas
 
+    def get_contract(self, name: str) -> Optional[StepContract]:
+        """Get the data-dependency contract for a handler.
+
+        Args:
+            name: Handler name
+
+        Returns:
+            StepContract or None if no contract defined
+        """
+        return self._contracts.get(name)
+
+    def has_contract(self, name: str) -> bool:
+        """Check if a handler has a data-dependency contract.
+
+        Args:
+            name: Handler name
+
+        Returns:
+            True if handler has a contract defined
+        """
+        return name in self._contracts
+
     def list_handlers(self) -> list[str]:
         """List all registered handler names.
 
@@ -184,13 +216,14 @@ class StepHandlerRegistry:
         return False
 
     def clear(self) -> None:
-        """Clear all registered handlers and schemas.
+        """Clear all registered handlers, schemas, and contracts.
 
         Useful for testing.
         """
         self._handlers.clear()
         self._schemas.clear()
-        LOGGER.debug("Cleared all step handlers and schemas")
+        self._contracts.clear()
+        LOGGER.debug("Cleared all step handlers, schemas, and contracts")
 
 
 # Global registry instance (lazy initialized)
@@ -209,7 +242,7 @@ def get_step_registry() -> StepHandlerRegistry:
     return _global_registry
 
 
-def register_step(name: str):
+def register_step(name: str, contract: Optional[StepContract] = None):
     """Decorator to register a step handler function.
 
     Parameter confirmation is handled at the expert/workflow level using
@@ -224,15 +257,24 @@ def register_step(name: str):
             site_name = context.get_parameter_value("site_name")
             ...
 
+        # Optionally attach a machine-readable data-dependency contract:
+        @register_step("fetch_metrics", contract=StepContract(...))
+        async def fetch_metrics(context: StepContext) -> StepResult:
+            ...
+
     Args:
         name: Unique name for the handler (must match [function:name] in workflow)
+        contract: Optional machine-readable data-dependency contract (see
+            `orchestrator.experts.step_contracts.StepContract`). Defaults to
+            None so every existing `@register_step("name")` call site keeps
+            working unchanged.
 
     Returns:
         Decorator function
     """
 
     def decorator(func: StepHandler) -> StepHandler:
-        get_step_registry().register(name, func)
+        get_step_registry().register(name, func, contract=contract)
         return func
 
     return decorator
@@ -268,13 +310,28 @@ def get_step_schema(name: str) -> Optional[StepSchema]:
     return get_step_registry().get_schema(name)
 
 
+def get_step_contract(name: str) -> Optional[StepContract]:
+    """Get the data-dependency contract for a handler (convenience function).
+
+    Args:
+        name: Handler name
+
+    Returns:
+        StepContract or None if no contract defined
+    """
+    return get_step_registry().get_contract(name)
+
+
 __all__ = [
     "StepHandlerRegistry",
     "StepHandler",
     "ParameterDefinition",  # Kept for backwards compatibility
     "StepSchema",  # Kept for backwards compatibility
+    "StepContract",
+    "ParamSpec",
     "get_step_registry",
     "register_step",
     "get_step_handler",
     "get_step_schema",  # Deprecated
+    "get_step_contract",
 ]

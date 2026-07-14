@@ -13,6 +13,7 @@ from typing import Any, List, Tuple
 from googleapiclient.discovery import build
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.google_auth import get_sheets_write_credentials
 from shared.utils.logging import get_logger
@@ -20,7 +21,29 @@ from shared.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
-@register_step("dump_lpp_values")
+@register_step(
+    "dump_lpp_values",
+    contract=StepContract(
+        description=(
+            "Dumps all available mapped values (site, location, meta, computed, bom, "
+            "design, energy) to reference columns E/F of the Main Input sheet."
+        ),
+        # document_id is a hard requirement: `if not document_id: return
+        # StepResult.failure(...)`.
+        consumes_state=("document_id",),
+        # Both are only dumped as reference values (`("site.site_name",
+        # context.get_state("site_name"))`, etc.) and later filtered out if
+        # None -- no crash, no degraded behavior, purely cosmetic.
+        optional_consumes_state=("site_name", "site_id"),
+        consumes_results=(
+            "generate_distribution_map",
+            "generate_powerplant_design",
+            "generate_site_bom",
+        ),
+        produces_state=("values_dumped",),
+        side_effects="Writes reference key/value pairs to Google Sheets via the Sheets API.",
+    ),
+)
 async def dump_lpp_values(context: StepContext) -> StepResult:
     """Dump all available mapped values to columns E/F of Main Input sheet.
 

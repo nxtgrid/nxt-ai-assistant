@@ -27,9 +27,9 @@ Graph flow:
         ↓
     [prepare_tools] → Get available tools + escalation/training tools
         ↓
-    [prepare_context] → RAG, instructions, enrichment, date context
-        ↓
     [assign_thread] → Thread disentanglement (filter history to current thread)
+        ↓
+    [prepare_context] → RAG, instructions, enrichment, date context
         ↓
     [expert_router] → Check for active work packets or expert commands
         ↓ (conditional: if expert → [expert_handler])
@@ -185,12 +185,12 @@ class FullConversationGraphBuilder:
             },
         )
         builder.add_edge("prepare_media", "prepare_tools")
-        builder.add_edge("prepare_tools", "prepare_context")
 
         # Early save: persist user message before any processing
-        builder.add_edge("prepare_context", "save_user_message")
+        builder.add_edge("prepare_tools", "save_user_message")
         builder.add_edge("save_user_message", "assign_thread")
-        builder.add_edge("assign_thread", "expert_router")
+        builder.add_edge("assign_thread", "prepare_context")
+        builder.add_edge("prepare_context", "expert_router")
         builder.add_conditional_edges(
             "expert_router",
             self._route_after_expert_check,
@@ -660,6 +660,15 @@ async def invoke_full_graph(
         # Thread disentanglement: extract Telegram signal from metadata
         "thread_id": None,
         "thread_filtered_history": None,
+        "thread_assignment_method": None,
+        "thread_assignment_confidence": None,
+        "thread_is_new": False,
+        # Conversation direction planning
+        "conversation_direction": None,
+        "conversation_context_scope": None,
+        "conversation_direction_method": None,
+        "conversation_issue_type": None,
+        "planned_expert_route": None,
         "sender_telegram_id": (
             str(user_context.user_id)
             if user_context and user_context.user_id and "@" not in str(user_context.user_id)

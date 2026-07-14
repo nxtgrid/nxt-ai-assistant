@@ -1786,6 +1786,16 @@ class GrafanaDataClient:
 
             result = re.sub(r"\$__timeGroup\(([^,]+),\s*([^)]+)\)", replace_time_group, result)
 
+        def sql_quote(value: str) -> str:
+            """Single-quote a value for SQL, escaping embedded quotes (' -> '')."""
+            return f"'{value.replace(chr(39), chr(39) * 2)}'"
+
+        def sql_quote_multi(value: str) -> str:
+            """Quote a (possibly comma-separated multi-value) variable for SQL."""
+            if "," in value:
+                return ", ".join(sql_quote(v.strip()) for v in value.split(","))
+            return sql_quote(value)
+
         for var_name, var_value in variables.items():
             # For SQL queries, check if variable is used in IN clause and quote appropriately
             if is_sql:
@@ -1794,23 +1804,31 @@ class GrafanaDataClient:
                 in_pattern_curly = rf"IN\s*\(\s*\$\{{{var_name}\}}\s*\)"
                 in_pattern_simple = rf"IN\s*\(\s*\${var_name}\b\s*\)"
 
-                # Format value for SQL IN clause: 'value' or 'val1', 'val2' for multi-value
-                if "," in var_value:
-                    # Multi-value: quote each value
-                    quoted_values = ", ".join(f"'{v.strip()}'" for v in var_value.split(","))
-                else:
-                    quoted_values = f"'{var_value}'"
+                quoted_values = sql_quote_multi(var_value)
+                in_replacement = f"IN ({quoted_values})"
 
-                # Replace IN clause patterns with quoted values
+                # Replace IN clause patterns with quoted values. Substituted via a
+                # lambda (not a raw string) so a value containing e.g. "\1" can't be
+                # misread by re.sub as a backreference - re.sub validates the
+                # replacement template eagerly, even on patterns that never match.
                 result = re.sub(
-                    in_pattern_curly, f"IN ({quoted_values})", result, flags=re.IGNORECASE
+                    in_pattern_curly,
+                    lambda _m: in_replacement,
+                    result,
+                    flags=re.IGNORECASE,
                 )
                 result = re.sub(
-                    in_pattern_simple, f"IN ({quoted_values})", result, flags=re.IGNORECASE
+                    in_pattern_simple,
+                    lambda _m: in_replacement,
+                    result,
+                    flags=re.IGNORECASE,
                 )
 
-            # Handle ${varName} syntax (non-IN clause contexts)
-            result = result.replace(f"${{{var_name}}}", var_value)
+            # Handle ${varName} syntax (non-IN clause contexts). For SQL queries this is
+            # Grafana's default (escaped) formatting, so quote+escape it here too -
+            # only the explicit :raw/:csv forms below are meant to bypass escaping.
+            default_value = sql_quote_multi(var_value) if is_sql else var_value
+            result = result.replace(f"${{{var_name}}}", default_value)
             # Handle ${varName:raw} syntax (Grafana raw formatting - no escaping)
             result = result.replace(f"${{{var_name}:raw}}", var_value)
             # Handle ${varName:csv} syntax (comma-separated values)
@@ -1819,16 +1837,16 @@ class GrafanaDataClient:
             else:
                 result = result.replace(f"${{{var_name}:csv}}", var_value)
             # Handle ${varName:singlequote} syntax (single-quoted for SQL)
-            if "," in var_value:
-                quoted = ", ".join(f"'{v.strip()}'" for v in var_value.split(","))
-            else:
-                quoted = f"'{var_value}'"
+            quoted = sql_quote_multi(var_value)
             result = result.replace(f"${{{var_name}:singlequote}}", quoted)
             # Handle any other ${varName:format} syntax (catch-all for unhandled formats)
-            # Replaces with the value as-is (same as :raw)
-            result = re.sub(rf"\${{{var_name}:[^}}]+\}}", var_value, result)
-            # Handle $varName syntax (word boundary to avoid partial matches)
-            result = re.sub(rf"\${var_name}\b", var_value, result)
+            # Replaces with the value as-is (same as :raw). Lambda avoids re.sub
+            # misreading a "\1"-shaped value as a backreference.
+            result = re.sub(rf"\${{{var_name}:[^}}]+\}}", lambda _m: var_value, result)
+            # Handle $varName syntax (word boundary to avoid partial matches). Same
+            # escaping rule as the ${varName} default form above. Substituted via a
+            # lambda so the value can't be misread as a regex backreference (\1 etc).
+            result = re.sub(rf"\${var_name}\b", lambda _m: default_value, result)
 
         return result
 

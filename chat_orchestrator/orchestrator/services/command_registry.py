@@ -60,6 +60,12 @@ class CommandDefinition:
     model_override: str = ""
     """Env var name for model override (e.g., 'GEMINI_DEEP_THINKING_MODEL'). Resolved at runtime."""
 
+    max_tool_rounds_override: int = 0
+    """Override for orchestrator/graphs/state.py's max_rounds for this command's conversation turn.
+    0 means no override (use the global default, settings.max_tool_rounds). Design-tuning
+    conversations (get current params -> change one -> regenerate BOM -> summarize) need more
+    back-and-forth than the default cap of 3 allows."""
+
     nl_triggers: List[str] = field(default_factory=list)
     """Natural language phrases that trigger this command (matched against user input).
     Each phrase is checked as a substring of the lowercased input."""
@@ -763,6 +769,37 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
         nl_triggers=[
             "community at",
             "kwp for",
+        ],
+    ),
+    "design": CommandDefinition(
+        command="design",
+        command_type="tool",
+        description="Create, view, or tune a grid power-plant design (Wp/conn, regulation, subassemblies, BOM)",
+        exclusive_tools=["prefix:grid_design_"],
+        prompt_template=(
+            "The user wants to work with a grid design. Use the grid_design tools as needed: "
+            "get_design to see current parameters, create_design/duplicate_design to make a new one, "
+            "list_design_technology_families/change_design_technology for vendor or architecture "
+            "requests like Victron vs Deye, update_design/run_auto_design to change parameters "
+            "(Wp/conn = wp_per_conn_override, "
+            "Nigerian law/DARES = regulation_constraint), add_subassembly/remove_subassembly/"
+            "set_subassembly_qty to edit what's in the design, trigger_bom to regenerate costs. "
+            "Call list_design_options first if the user wants to pick equipment interactively. "
+            "For anything not covered by the tools above, call gd_describe_tables to see every "
+            "gd_* table and use gd_list_rows/gd_get_row/gd_upsert_row/gd_delete_row as a generic "
+            "fallback. "
+            "User's request: {args}"
+        ),
+        requires_args=False,
+        staff_only=True,
+        max_tool_rounds_override=8,
+        nl_triggers=[
+            "change the wp per conn",
+            "change the wp/conn",
+            "regenerate the bom",
+            "duplicate the design",
+            "add a subassembly",
+            "remove a subassembly",
         ],
     ),
     "editdoc": CommandDefinition(

@@ -1,5 +1,5 @@
 import asyncio
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from orchestrator.experts.handlers.package_generator import generate_design as gd
 
@@ -7,6 +7,8 @@ from orchestrator.experts.handlers.package_generator import generate_design as g
 class _Ctx:
     def __init__(self):
         self._state = {"geo_source": "community", "site_name": "Commville"}
+        self.packet_state = self._state
+        self.packet_id = "lpp-packet-1"
         self.effective_email = "staff@example.com"
         self.accumulated_results = {
             "generate_distribution_map": {"statistics": {"served_buildings": 50}}
@@ -62,6 +64,15 @@ def test_design_forwards_optional_user_parameters():
     assert args["created_by"] == "staff@example.com"
 
 
+def test_design_forwards_technology_family():
+    ctx = _Ctx()
+    ctx._state["technology_family"] = "deye"
+    result = asyncio.run(gd.generate_powerplant_design(ctx))
+    assert result.error is None
+    args = ctx.mcp_executor.call_tool.call_args[0][1]
+    assert args["technology_family"] == "deye"
+
+
 def test_design_omits_unsupplied_optional_parameters():
     """Without user input the engine's own defaults must apply (args omitted)."""
     ctx = _Ctx()
@@ -70,3 +81,48 @@ def test_design_omits_unsupplied_optional_parameters():
     assert "inverter_type" not in args
     assert "wp_per_conn_override" not in args
     assert "regulation_constraint" not in args
+
+
+def test_design_sweeps_preexisting_drive_ids_into_new_design():
+    """Drive IDs stashed by earlier steps (map, community, layout) must be
+    attached to the design's artifact history once the design_id exists."""
+    ctx = _Ctx()
+    ctx._state.update(
+        {
+            "map_image_drive_id": "file-map",
+            "community_boundary_drive_id": "file-boundary",
+            "unrelated_key": "not-a-drive-id",
+        }
+    )
+    with patch.object(gd, "sweep_state_for_artifacts") as mock_sweep:
+        result = asyncio.run(gd.generate_powerplant_design(ctx))
+
+    assert result.error is None
+    mock_sweep.assert_called_once_with("d1", ctx.packet_state, packet_id=ctx.packet_id)
+
+
+def test_design_sweep_uses_asyncio_to_thread():
+    """Regression guard: sweep_state_for_artifacts does blocking supabase-py
+    network I/O (shared/grid_design/db.py Repository.get/.update), so the
+    call site must go through asyncio.to_thread rather than calling it
+    inline from this async handler. Patching sweep_state_for_artifacts
+    directly (as test_design_sweeps_preexisting_drive_ids_into_new_design
+    does above) can't distinguish a blocking inline call from a
+    thread-wrapped one -- both satisfy the same assert_called_once_with.
+    This test patches asyncio.to_thread itself so a future edit that drops
+    the thread-wrapping fails."""
+    ctx = _Ctx()
+    ctx._state.update(
+        {
+            "map_image_drive_id": "file-map",
+            "community_boundary_drive_id": "file-boundary",
+            "unrelated_key": "not-a-drive-id",
+        }
+    )
+    with patch.object(gd.asyncio, "to_thread", new_callable=AsyncMock) as mock_to_thread:
+        result = asyncio.run(gd.generate_powerplant_design(ctx))
+
+    assert result.error is None
+    mock_to_thread.assert_called_once_with(
+        gd.sweep_state_for_artifacts, "d1", ctx.packet_state, packet_id=ctx.packet_id
+    )

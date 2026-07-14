@@ -16,6 +16,7 @@ import json
 from typing import Any, Dict, List
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
@@ -42,10 +43,48 @@ def _candidate_summary(candidate: Dict[str, Any]) -> str:
     lon = candidate.get("lon", "?")
     flood = candidate.get("flood_worst_case_depth_m", "?")
     elev = candidate.get("site_elevation_m", "?")
-    return f"Rank {rank} ({lat:.4f},{lon:.4f}): flood={flood}m elev={elev}m"
+    summary = f"Rank {rank} ({lat:.4f},{lon:.4f}): flood={flood}m elev={elev}m"
+    warnings = candidate.get("data_warnings") or []
+    if warnings:
+        summary += f" [{'; '.join(warnings)}]"
+    return summary
 
 
-@register_step("fetch_geo_hazard")
+@register_step(
+    "fetch_geo_hazard",
+    contract=StepContract(
+        description=(
+            "Fetches worst-case flood depth (WRI Aqueduct RP1000) and terrain elevation "
+            "(Copernicus DEM GLO-30) for each power plant site candidate."
+        ),
+        consumes_state=(),
+        # geo_hazard_fetched/geo_hazard_per_candidate: idempotency guard,
+        # `context.get_state(...) or []` inside the guard block only.
+        # site_candidates: `(layout_result or {}).get(...) or
+        # context.get_state("site_candidates") or []`, with a further
+        # legitimate fallback to the community-center coordinates from
+        # generate_distribution_map when still empty.
+        optional_consumes_state=(
+            "geo_hazard_fetched",
+            "geo_hazard_per_candidate",
+            "site_candidates",
+        ),
+        consumes_results=("generate_distribution_layout", "generate_distribution_map"),
+        produces_state=(
+            "geo_hazard_fetched",
+            "geo_hazard_per_candidate",
+            "flood_worst_case_depth_m",
+            "flood_riverine_rp1000_m",
+            "flood_coastal_rp1000_m",
+            "flood_rp100_historical_m",
+            "flood_rp100_rcp85_2050_median_m",
+            "flood_rp100_rcp85_2050_max_m",
+            "site_elevation_m",
+        ),
+        guard_keys=("geo_hazard_fetched",),
+        side_effects="Calls the solar_get_site_geo_hazard MCP tool once per site candidate.",
+    ),
+)
 async def fetch_geo_hazard(context: StepContext) -> StepResult:
     """Fetch flood depth and terrain elevation for each power plant site candidate.
 
@@ -104,6 +143,7 @@ async def fetch_geo_hazard(context: StepContext) -> StepResult:
     )
 
     geo_hazard_per_candidate: List[Dict[str, Any]] = []
+    skip_reasons: List[str] = []
 
     for candidate in site_candidates:
         lat = candidate.get("lat")
@@ -111,7 +151,9 @@ async def fetch_geo_hazard(context: StepContext) -> StepResult:
         rank = candidate.get("rank", 1)
 
         if lat is None or lon is None:
-            LOGGER.warning(f"Candidate rank={rank} has no coordinates — skipping")
+            reason = f"Rank {rank}: no coordinates available — skipping"
+            LOGGER.warning(reason)
+            skip_reasons.append(reason)
             continue
 
         tool_args: Dict[str, Any] = {"latitude": lat, "longitude": lon}
@@ -126,30 +168,42 @@ async def fetch_geo_hazard(context: StepContext) -> StepResult:
             )
 
             if isinstance(result_str, str) and result_str.startswith("Error:"):
+                # Only reached on a total loss for this candidate (no flood AND no
+                # terrain data at all) — solar_mcp_server degrades individual data
+                # sources gracefully otherwise. The tool's error text already names
+                # the specific data source(s) that failed.
+                reason = f"Rank {rank}: {result_str}"
                 LOGGER.warning(f"Geo hazard tool error for candidate rank={rank}: {result_str}")
+                skip_reasons.append(reason)
                 continue
 
             result: Dict[str, Any] = (
                 json.loads(result_str) if isinstance(result_str, str) else result_str
             )
         except json.JSONDecodeError as e:
+            reason = f"Rank {rank}: could not parse geo hazard response ({e})"
             LOGGER.error(f"Failed to parse geo hazard response for candidate rank={rank}: {e}")
+            skip_reasons.append(reason)
             continue
         except Exception as e:
+            reason = f"Rank {rank}: geo hazard lookup failed ({e})"
             LOGGER.error(f"Geo hazard call failed for candidate rank={rank}: {e}")
+            skip_reasons.append(reason)
             continue
 
         entry: Dict[str, Any] = {"rank": rank, "lat": lat, "lon": lon}
         for field in _FLOOD_FIELDS:
             entry[field] = result.get(field)
+        entry["data_warnings"] = result.get("data_warnings", [])
         geo_hazard_per_candidate.append(entry)
 
         LOGGER.info(f"Geo hazard fetched: {_candidate_summary(entry)}")
 
     if not geo_hazard_per_candidate:
+        detail = "; ".join(skip_reasons) if skip_reasons else "no site candidates were usable"
         return StepResult.failure(
             sanitize_error_for_user(
-                "Geo hazard lookup failed for all site candidates", "geo_hazard"
+                f"Geo hazard lookup failed for all site candidates: {detail}", "geo_hazard"
             )
         )
 
@@ -158,6 +212,8 @@ async def fetch_geo_hazard(context: StepContext) -> StepResult:
 
     summaries = " | ".join(_candidate_summary(c) for c in geo_hazard_per_candidate)
     progress = f"Geo hazard ({len(geo_hazard_per_candidate)} candidates): {summaries}"
+    if skip_reasons:
+        progress += f" | Skipped: {'; '.join(skip_reasons)}"
 
     return StepResult(
         data={

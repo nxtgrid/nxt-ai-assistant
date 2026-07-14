@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=83"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -11,7 +11,7 @@ authors = [{ name = "Vaibhav Vaidya", email = "akshayvaidya@gmail.com" }]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.104,<0.137",
-    "uvicorn>=0.24,<0.41",
+    "uvicorn>=0.24,<0.51",
     "aiohttp>=3.9,<4",
     "httpx>=0.26,<0.29",
     "pydantic>=2.5,<3",
@@ -33,10 +33,9 @@ dependencies = [
     "shapely>=2.0,<3.0",  # Geometry operations for site mapping
     "matplotlib>=3.7,<4.0",  # Plotting for site maps
     "Pillow>=10.0,<13.0",  # Image processing for Apps Script client
-    "google-genai>=1.0,<2.0",  # Google AI Studio SDK for Gemini
-    "google-cloud-aiplatform>=1.38,<2.0",  # Vertex AI SDK for text-embedding-005
+    "google-genai>=1.0,<3.0",  # Gemini (Developer API) + embeddings (Vertex AI backend)
     "beautifulsoup4>=4.12,<5.0",  # HTML parsing for table extraction
-    "pymupdf4llm>=0.2.0,<1.0",  # PDF extraction optimized for LLM (markdown output, no PyTorch)
+    "pymupdf4llm>=0.2.0,<2.0",  # PDF extraction optimized for LLM (markdown output, no PyTorch)
     # Distribution layout designer dependencies
     "osmnx>=2.0,<3.0",  # Road network extraction from OpenStreetMap
     "networkx>=3.0,<4.0",  # Graph algorithms (Steiner tree)
@@ -52,7 +51,7 @@ dependencies = [
     "croniter>=2.0.0",  # Schedule server
     "pytz>=2024.1",  # Timezone handling
     # LLM observability (Langfuse)
-    "langfuse>=3.0,<4",
+    "langfuse>=3.0,<5",
     "s2sphere>=0.2.5",
 ]
 

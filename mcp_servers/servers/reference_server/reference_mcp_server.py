@@ -197,7 +197,7 @@ async def _translate_tariff_query(query: str) -> str:
             "contents": [{"role": "user", "parts": [{"text": prompt}]}],
             "generationConfig": {"maxOutputTokens": 32, "thinkingConfig": {"thinkingBudget": 0}},
         }
-        model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
         async with aiohttp.ClientSession() as session:
             async with session.post(

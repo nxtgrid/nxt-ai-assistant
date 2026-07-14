@@ -36,7 +36,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Coroutine, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 
 # Import handlers module to trigger @register_step decorators
 # Without this import, Python's import system skips __init__.py when importing
@@ -55,8 +55,14 @@ from orchestrator.experts.parameter_resolver import (
     get_parameter_resolver,
 )
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_registry import get_step_handler
+from orchestrator.experts.step_registry import (
+    get_step_contract,
+    get_step_handler,
+    get_step_registry,
+)
 from orchestrator.mini_app.schemas import build_mini_app_url, build_view_state_url
+from shared.grid_design.artifact_log import sweep_state_for_artifacts
+from shared.grid_design.db import Repository
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.langfuse_utils import langfuse_observe, update_trace
 from shared.utils.logging import get_logger
@@ -74,6 +80,12 @@ if TYPE_CHECKING:
     from orchestrator.services.work_packet_service import WorkPacketService
 
 LOGGER = get_logger(__name__)
+
+# Mirrors shared.grid_design.artifact_log._DRIVE_ID_SUFFIX -- a packet_state key
+# ending in this suffix is a Drive file ID whose "existence" can also be
+# satisfied by a non-empty gd_designs.artifacts[artifact_type] entry (see
+# validate_step_prerequisites's Tier 3 check).
+_DRIVE_ID_SUFFIX = "_drive_id"
 
 
 class StepStatus(Enum):
@@ -217,6 +229,50 @@ class ParsedStep:
     name: str  # Step name or function name
     description: str
     serial: bool = False  # If True, run one site at a time in multi-site mode
+
+
+@dataclass
+class StepLoopSignal:
+    """What the caller of _execute_one_step should do next in the while-loop."""
+
+    action: str  # "advance" | "retry" | "return" | "break"
+    # populated only when action == "return". The response text is Optional[str]
+    # (not str) because the redirect_to_main_llm path returns None for it -- this
+    # mirrors a pre-existing mypy debt in _execute_workflow_inner's own signature
+    # (declared -> Tuple[str, Dict[str, Any]] despite that same None case).
+    return_value: Optional[Tuple[Optional[str], Dict[str, Any]]] = None
+    final_response: Optional[str] = None  # populated only by the LLM-step success path
+
+
+@dataclass
+class PrereqReport:
+    """Read-only report: what does step_name need that isn't currently available?
+
+    Produced by `WorkflowExecutor.validate_step_prerequisites` -- a pure
+    reporting method (no DB writes, no packet_state mutation) that answers
+    "if I ran this step right now, what's missing?" so a later task (out-of-
+    order step execution) can decide whether to auto-run a producer step
+    first, ask the user, or refuse.
+    """
+
+    step_name: str
+    satisfied: bool  # True iff missing_state/missing_results/missing_params are all empty
+    missing_state: Tuple[str, ...] = ()
+    missing_results: Tuple[str, ...] = ()
+    missing_params: Tuple[str, ...] = ()
+    # Informational only: `optional_consumes_state` keys (see step_contracts.py)
+    # that aren't currently available via any tier. This never affects
+    # `satisfied` and is never searched for a producer_chain entry -- these are
+    # opportunistic reads with in-handler fallback logic (not real
+    # prerequisites), so there's nothing for run_single_step to auto-produce.
+    missing_optional_state: Tuple[str, ...] = ()
+    # For each missing item (state key or result step name) that SOME other
+    # registered step's contract claims to produce, maps it to the step
+    # name(s) that could produce it. Missing items with no known producer are
+    # absent from this dict (not mapped to an empty tuple) -- callers should
+    # treat "not in producer_chain" as "no known way to satisfy this
+    # automatically".
+    producer_chain: Dict[str, Tuple[str, ...]] = field(default_factory=dict)
 
 
 class WorkflowExecutor:
@@ -510,449 +566,33 @@ class WorkflowExecutor:
         final_response = ""
 
         # Execute remaining steps
-        # Outer while loop allows re-executing a step when the headless
-        # input resolver provides a response (see _retry_current_step flag).
+        # Outer while loop allows re-executing a step when a step signals
+        # action="retry" (headless input-resolver retry). Kept as a
+        # first-class action so a future run_single_step entry point can
+        # reuse the same signal contract -- see _execute_one_step for a note
+        # on why the one original code path that looked like a retry
+        # actually behaves as action="break" instead.
         _step_idx = current_idx
-        _retry_current_step = False
         while _step_idx < len(steps):
             step = steps[_step_idx]
-            self._current_step_name = step.name
-            LOGGER.info(
-                f"Executing step {step.index + 1}/{len(steps)}: [{step.step_type}] {step.name}"
+            signal = await self._execute_one_step(
+                step,
+                steps,
+                expert_config,
+                packet,
+                context,
+                accumulated_results,
+                execution_summary,
+                on_progress,
+                _wf_chat_id,
             )
-
-            # Create execution record for this step
-            step_record = StepExecutionRecord(
-                step_name=step.name,
-                step_type=step.step_type,
-                description=step.description,
-                status=StepStatus.IN_PROGRESS,
-                started_at=time.time(),
-            )
-
-            if on_progress:
-                try:
-                    await on_progress(f"Step {step.index + 1}/{len(steps)}: {step.description}")
-                except Exception:
-                    pass  # Don't fail workflow on progress callback errors
-
-            # Persist execution_summary with the current step marked as
-            # in_progress BEFORE executing it.  This way, if the step
-            # handler calls send_progress_to_user() (which attaches a
-            # View State button), the mini app already has step data to
-            # display — otherwise the first View State open shows nothing.
-            execution_summary.add_record(step_record)
-            await self.packet_service.update_state(
-                packet["packet_id"],
-                {"execution_summary": execution_summary.to_dict()},
-                context.session_id,
-            )
-
-            if step.step_type == "function":
-                # Check for parameter confirmation before function steps
-                # Shows current state values, allows user to override any of them
-                confirmation_result = await self._handle_function_step_confirmation(
-                    step, context, len(steps), packet, accumulated_results
-                )
-                if confirmation_result is not None:
-                    # Need to pause for user confirmation (record already in summary)
-                    step_record.status = StepStatus.PENDING
-                    step_record.result_summary = "awaiting parameter confirmation"
-
-                    state_to_persist = {
-                        **(confirmation_result.state_updates or {}),
-                        "accumulated_results": accumulated_results,
-                        "execution_summary": execution_summary.to_dict(),
-                    }
-                    await self.packet_service.update_state(
-                        packet["packet_id"],
-                        state_to_persist,
-                        context.session_id,
-                    )
-                    if confirmation_result.state_updates:
-                        context.packet_state.update(confirmation_result.state_updates)
-
-                    await self.packet_service.set_awaiting_input(
-                        packet["packet_id"],
-                        confirmation_result.user_prompt or "Please confirm parameters",
-                        context.session_id,
-                    )
-
-                    # Attach Mini App form button if configured
-                    reply_markup = None
-                    form_url = None
-                    if confirmation_result.mini_app_form:
-                        form_url = build_mini_app_url(
-                            packet["packet_id"], confirmation_result.mini_app_form
-                        )
-                    state_url = build_view_state_url(packet["packet_id"])
-
-                    if form_url and state_url:
-                        reply_markup = build_multi_webapp_keyboard(
-                            [("Edit Parameters", form_url), ("View State", state_url)],
-                            chat_id=_wf_chat_id,
-                        )
-                    elif form_url:
-                        reply_markup = build_webapp_keyboard(
-                            "Edit Parameters", form_url, chat_id=_wf_chat_id
-                        )
-                    elif state_url:
-                        reply_markup = build_webapp_keyboard(
-                            "View State", state_url, chat_id=_wf_chat_id
-                        )
-
-                    return confirmation_result.user_prompt or "Please confirm parameters", {
-                        "needs_user_input": True,
-                        "awaiting_param_confirmation": True,
-                        "reply_markup": reply_markup,
-                    }
-
-                # Persist confirmation state (snapshot, cleared flags) to DB
-                # so it survives workflow resume across pause/resume cycles.
-                confirmation_state = {}
-                for key in (
-                    "confirmed_editable_snapshot",
-                    "awaiting_param_confirmation",
-                    "param_confirmation_context",
-                    "auto_continue_enabled",
-                ):
-                    if key in context.packet_state:
-                        confirmation_state[key] = context.packet_state[key]
-                if confirmation_state:
-                    await self.packet_service.update_state(
-                        packet["packet_id"],
-                        confirmation_state,
-                        context.session_id,
-                    )
-
-                # Execute function handler (with heartbeat to prevent stale-packet timeout)
-                result = await self._run_with_heartbeat(
-                    self._execute_function_step(step, context, accumulated_results),
-                    packet["packet_id"],
-                    context.session_id,
-                )
-
-                # Clear any confirmation state after successful execution
-                if context.get_state("awaiting_param_confirmation"):
-                    context.packet_state["awaiting_param_confirmation"] = False
-                    context.clear_parameter_overrides()
-
-                # Record timing
-                step_record.ended_at = time.time()
-                step_record.duration_ms = int(
-                    (step_record.ended_at - (step_record.started_at or 0)) * 1000
-                )
-
-                if result.error:
-                    step_record.status = StepStatus.FAILED
-                    step_record.error = result.error
-                    execution_summary.failed_steps += 1
-                    execution_summary.final_status = "failed"
-                    execution_summary.failure_reason = f"Step '{step.name}' failed: {result.error}"
-
-                    # Mark remaining steps as skipped
-                    for remaining_step in steps[step.index + 1 :]:
-                        skipped_record = StepExecutionRecord(
-                            step_name=remaining_step.name,
-                            step_type=remaining_step.step_type,
-                            description=remaining_step.description,
-                            status=StepStatus.SKIPPED,
-                            result_summary="skipped due to earlier failure",
-                        )
-                        execution_summary.add_record(skipped_record)
-
-                    LOGGER.error(f"Step {step.name} failed: {result.error}")
-
-                    # Log detailed execution summary to database
-                    packet_uuid = packet.get("id") or packet.get("packet_id")
-                    if packet_uuid:
-                        await self._log_execution_summary(
-                            packet_uuid, execution_summary, context.session_id
-                        )
-
-                    await self.packet_service.fail_packet(
-                        packet["packet_id"],
-                        f"Step {step.name} failed: {result.error}",
-                        context.session_id,
-                        error_state={
-                            "last_error": result.error,
-                            "error_step": step.name,
-                            "execution_summary": execution_summary.to_dict(),
-                        },
-                    )
-
-                    # Build user-friendly message with context about what happened
-                    user_message = self._build_failure_message(execution_summary)
-                    return user_message, {
-                        "error": result.error,
-                        "execution_summary": execution_summary.to_dict(),
-                    }
-
-                if result.needs_user_input:
-                    # Headless mode: try to resolve input via callback then re-run step
-                    if self._input_resolver:
-                        resolved = self._input_resolver(step.name, result.user_prompt or "")
-                        if resolved is not None:
-                            # Guard against infinite re-execution of the same step
-                            _headless_retries = getattr(self, "_headless_step_retries", {})
-                            _headless_retries[step.name] = _headless_retries.get(step.name, 0) + 1
-                            self._headless_step_retries = _headless_retries
-                            if _headless_retries[step.name] > 3:
-                                step_record.status = StepStatus.FAILED
-                                step_record.error = (
-                                    f"Headless: step {step.name} still requesting input "
-                                    f"after 3 resolve attempts"
-                                )
-                                execution_summary.final_status = "failed"
-                                LOGGER.error(
-                                    f"Headless step {step.name} stuck in input loop, aborting"
-                                )
-                                return f"Step {step.name} stuck requesting input", {
-                                    "error": f"Headless: input loop in step {step.name}",
-                                    "execution_summary": execution_summary.to_dict(),
-                                }
-
-                            LOGGER.info(
-                                f"Input resolver provided response for step "
-                                f"{step.name} (attempt {_headless_retries[step.name]}): "
-                                f"{resolved[:50]}..."
-                            )
-                            context.user_input = resolved
-                            # Re-execute THIS step by jumping back to step execution.
-                            # We use a flag + break to exit this result-handling block,
-                            # then the outer _should_retry_step check re-runs the step.
-                            _retry_current_step = True
-                            break
-                        else:
-                            # No prefilled input — fail gracefully
-                            step_record.status = StepStatus.FAILED
-                            step_record.error = f"Headless: no input for step {step.name}"
-                            execution_summary.final_status = "failed"
-                            LOGGER.warning(
-                                f"Headless execution failed: no input for step {step.name}"
-                            )
-                            return f"Missing required input for step: {step.name}", {
-                                "error": f"Headless: no prefilled input for step {step.name}",
-                                "execution_summary": execution_summary.to_dict(),
-                            }
-
-                    step_record.status = StepStatus.PENDING
-                    step_record.result_summary = "awaiting user input"
-                    execution_summary.final_status = "paused"
-
-                    # Apply state updates BEFORE pausing (so they're available on resume)
-                    # Always persist accumulated_results so step data survives resume
-                    pause_state = dict(result.state_updates) if result.state_updates else {}
-                    pause_state["accumulated_results"] = accumulated_results
-                    pause_state["execution_summary"] = execution_summary.to_dict()
-                    await self.packet_service.update_state(
-                        packet["packet_id"],
-                        pause_state,
-                        context.session_id,
-                    )
-                    if result.state_updates:
-                        # Also update context in memory for consistency
-                        context.packet_state.update(result.state_updates)
-
-                    # Build inline keyboard for Telegram buttons
-                    reply_markup = None
-                    form_url = None
-                    if result.mini_app_form:
-                        # Mini App popup form button
-                        form_url = build_mini_app_url(packet["packet_id"], result.mini_app_form)
-                    state_url = build_view_state_url(packet["packet_id"])
-
-                    if form_url and state_url:
-                        reply_markup = build_multi_webapp_keyboard(
-                            [("Edit Parameters", form_url), ("View State", state_url)],
-                            chat_id=_wf_chat_id,
-                        )
-                    elif form_url:
-                        reply_markup = build_webapp_keyboard(
-                            "Edit Parameters", form_url, chat_id=_wf_chat_id
-                        )
-                    elif is_inline_buttons_enabled():
-                        if result.inline_options:
-                            reply_markup = build_step_input_keyboard(result.inline_options)
-                        else:
-                            # Auto-detect numbered options from user_prompt
-                            detected = parse_numbered_options(result.user_prompt or "")
-                            if detected:
-                                reply_markup = build_step_input_keyboard(detected)
-                    elif state_url:
-                        reply_markup = build_webapp_keyboard(
-                            "View State", state_url, chat_id=_wf_chat_id
-                        )
-
-                    # Pause workflow, wait for user input
-                    await self.packet_service.set_awaiting_input(
-                        packet["packet_id"],
-                        result.user_prompt or "Please provide more information",
-                        context.session_id,
-                    )
-                    return result.user_prompt or "Please provide more information", {
-                        "needs_user_input": True,
-                        "execution_summary": execution_summary.to_dict(),
-                        "reply_markup": reply_markup,
-                    }
-
-                if result.redirect_to_main_llm:
-                    # User input doesn't belong to this step - pause and redirect
-                    step_record.status = StepStatus.PENDING
-                    step_record.result_summary = "redirecting to main LLM"
-                    execution_summary.final_status = "paused"
-
-                    LOGGER.info(
-                        f"Step {step.name} detected unrelated input, "
-                        f"redirecting to main LLM: {result.progress_message}"
-                    )
-
-                    # Keep workflow paused but signal redirect
-                    await self.packet_service.set_awaiting_input(
-                        packet["packet_id"],
-                        "Workflow paused - processing new request",
-                        context.session_id,
-                    )
-                    return None, {
-                        "redirect_to_main_llm": True,
-                        "redirect_reason": result.progress_message,
-                        "execution_summary": execution_summary.to_dict(),
-                    }
-
-                # Success - update the already-added record in place
-                step_record.status = StepStatus.SUCCESS
-                step_record.result_summary = self._summarize_result(result.data)
-                execution_summary.completed_steps += 1
-
-                # Store result in local dict AND sync back to context so that
-                # any code reading context.accumulated_results (e.g. confirmation
-                # handler fallback) sees up-to-date results.
-                accumulated_results[step.name] = result.data
-                context.accumulated_results = accumulated_results
-
-                # Apply state updates
-                if result.state_updates:
-                    await self.packet_service.update_state(
-                        packet["packet_id"],
-                        result.state_updates,
-                        context.session_id,
-                    )
-                    # Also update context in memory so subsequent steps see the new state
-                    context.packet_state.update(result.state_updates)
-
-                # Persist execution_summary after each step so the mini app
-                # can show real-time progress (otherwise it stays blank until
-                # the workflow pauses or completes).
-                await self.packet_service.update_state(
-                    packet["packet_id"],
-                    {"execution_summary": execution_summary.to_dict()},
-                    context.session_id,
-                )
-
-                # Check for early completion
-                if result.skip_remaining:
-                    LOGGER.info(f"Step {step.name} requested skip_remaining")
-                    # Mark remaining steps as skipped
-                    for remaining_step in steps[step.index + 1 :]:
-                        skipped_record = StepExecutionRecord(
-                            step_name=remaining_step.name,
-                            step_type=remaining_step.step_type,
-                            description=remaining_step.description,
-                            status=StepStatus.SKIPPED,
-                            result_summary="skipped (early completion)",
-                        )
-                        execution_summary.add_record(skipped_record)
-                    break
-
-                # Multi-site: after resolve_sites completes with >1 site,
-                # run remaining steps once per site. This avoids modifying
-                # individual handlers — they keep using site_name/site_id
-                # from state, which we update before each iteration.
-                sites_to_process = context.get_state("sites_to_process", [])
-                if step.name == "resolve_sites" and len(sites_to_process) > 1:
-                    per_site_steps = steps[step.index + 1 :]
-                    return await self._execute_multi_site_steps(
-                        sites_to_process=sites_to_process,
-                        per_site_steps=per_site_steps,
-                        expert_config=expert_config,
-                        packet=packet,
-                        context=context,
-                        accumulated_results=accumulated_results,
-                        execution_summary=execution_summary,
-                    )
-
-            else:  # LLM step
-                try:
-                    result = await self._run_with_heartbeat(
-                        self._execute_llm_step(
-                            step,
-                            expert_config,
-                            packet,
-                            context,
-                            accumulated_results,
-                            execution_summary,
-                        ),
-                        packet["packet_id"],
-                        context.session_id,
-                    )
-                    step_record.ended_at = time.time()
-                    step_record.duration_ms = int(
-                        (step_record.ended_at - (step_record.started_at or 0)) * 1000
-                    )
-                    step_record.status = StepStatus.SUCCESS
-                    step_record.result_summary = f"Generated {len(result)} chars"
-                    execution_summary.completed_steps += 1
-
-                    accumulated_results[step.name] = {"response": result}
-                    context.accumulated_results = accumulated_results
-                    final_response = result  # Last LLM response is the final response
-
-                    # Persist execution_summary for mini app real-time progress
-                    await self.packet_service.update_state(
-                        packet["packet_id"],
-                        {"execution_summary": execution_summary.to_dict()},
-                        context.session_id,
-                    )
-
-                except Exception as e:
-                    step_record.ended_at = time.time()
-                    step_record.duration_ms = int(
-                        (step_record.ended_at - (step_record.started_at or 0)) * 1000
-                    )
-                    step_record.status = StepStatus.FAILED
-                    step_record.error = str(e)
-                    execution_summary.failed_steps += 1
-                    execution_summary.final_status = "failed"
-                    execution_summary.failure_reason = f"LLM step '{step.name}' failed: {e}"
-
-                    LOGGER.error(f"LLM step {step.name} failed: {e}")
-
-                    packet_uuid = packet.get("id") or packet.get("packet_id")
-                    if packet_uuid:
-                        await self._log_execution_summary(
-                            packet_uuid, execution_summary, context.session_id
-                        )
-
-                    await self.packet_service.fail_packet(
-                        packet["packet_id"],
-                        f"LLM step {step.name} failed: {e}",
-                        context.session_id,
-                        error_state={
-                            "last_error": str(e),
-                            "error_step": step.name,
-                            "execution_summary": execution_summary.to_dict(),
-                        },
-                    )
-
-                    user_message = self._build_failure_message(execution_summary)
-                    return user_message, {
-                        "error": str(e),
-                        "execution_summary": execution_summary.to_dict(),
-                    }
-
-            # Headless retry: re-execute this step instead of advancing
-            if _retry_current_step:
-                _retry_current_step = False
+            if signal.final_response is not None:
+                final_response = signal.final_response
+            if signal.action == "return":
+                return signal.return_value
+            if signal.action == "break":
+                break
+            if signal.action == "retry":
                 continue  # Re-run while loop with same _step_idx
 
             # Advance to next step
@@ -986,6 +626,563 @@ class WorkflowExecutor:
             "accumulated_results": accumulated_results,
             "execution_summary": execution_summary.to_dict(),
         }
+
+    async def _execute_one_step(
+        self,
+        step: ParsedStep,
+        steps: List[ParsedStep],
+        expert_config: "ExpertConfig",
+        packet: Dict[str, Any],
+        context: StepContext,
+        accumulated_results: Dict[str, Any],
+        execution_summary: ExecutionSummary,
+        on_progress: Optional[Callable[[str], Any]],
+        wf_chat_id: Any,
+        allow_multi_site_handoff: bool = True,
+    ) -> StepLoopSignal:
+        """Execute exactly one workflow step (function or LLM). Extracted from the
+        single-site loop in _execute_workflow_inner so the same per-step logic can
+        later be invoked out of order by run_single_step (a follow-up task).
+
+        Mutates accumulated_results and execution_summary in place (same objects
+        the caller passed in) -- this preserves the exact mutation semantics the
+        original inline loop body had, since both are mutable and were read/written
+        by reference throughout the original code.
+
+        Args:
+            allow_multi_site_handoff: If True (the default -- preserves the
+                original behavior for _execute_workflow_inner's call site),
+                a successful "resolve_sites" step that discovers more than one
+                site hands off the rest of `steps` to
+                `_execute_multi_site_steps`. If False (used by
+                `run_single_step`, which is explicitly single-site-scoped),
+                that hand-off is refused instead of executed -- see the
+                "resolve_sites" branch below.
+        """
+        self._current_step_name = step.name
+        LOGGER.info(f"Executing step {step.index + 1}/{len(steps)}: [{step.step_type}] {step.name}")
+
+        # Create execution record for this step
+        step_record = StepExecutionRecord(
+            step_name=step.name,
+            step_type=step.step_type,
+            description=step.description,
+            status=StepStatus.IN_PROGRESS,
+            started_at=time.time(),
+        )
+
+        if on_progress:
+            try:
+                await on_progress(f"Step {step.index + 1}/{len(steps)}: {step.description}")
+            except Exception:
+                pass  # Don't fail workflow on progress callback errors
+
+        # Persist execution_summary with the current step marked as
+        # in_progress BEFORE executing it.  This way, if the step
+        # handler calls send_progress_to_user() (which attaches a
+        # View State button), the mini app already has step data to
+        # display — otherwise the first View State open shows nothing.
+        execution_summary.add_record(step_record)
+        await self.packet_service.update_state(
+            packet["packet_id"],
+            {"execution_summary": execution_summary.to_dict()},
+            context.session_id,
+        )
+
+        step_final_response: Optional[str] = None
+
+        if step.step_type == "function":
+            # Check for parameter confirmation before function steps
+            # Shows current state values, allows user to override any of them
+            confirmation_result = await self._handle_function_step_confirmation(
+                step, context, len(steps), packet, accumulated_results
+            )
+            if confirmation_result is not None:
+                # Need to pause for user confirmation (record already in summary)
+                step_record.status = StepStatus.PENDING
+                step_record.result_summary = "awaiting parameter confirmation"
+
+                state_to_persist = {
+                    **(confirmation_result.state_updates or {}),
+                    "accumulated_results": accumulated_results,
+                    "execution_summary": execution_summary.to_dict(),
+                }
+                await self.packet_service.update_state(
+                    packet["packet_id"],
+                    state_to_persist,
+                    context.session_id,
+                )
+                if confirmation_result.state_updates:
+                    context.packet_state.update(confirmation_result.state_updates)
+
+                await self.packet_service.set_awaiting_input(
+                    packet["packet_id"],
+                    confirmation_result.user_prompt or "Please confirm parameters",
+                    context.session_id,
+                )
+
+                # Attach Mini App form button if configured
+                reply_markup = None
+                form_url = None
+                if confirmation_result.mini_app_form:
+                    form_url = build_mini_app_url(
+                        packet["packet_id"], confirmation_result.mini_app_form
+                    )
+                state_url = build_view_state_url(packet["packet_id"])
+
+                if form_url and state_url:
+                    reply_markup = build_multi_webapp_keyboard(
+                        [("Edit Parameters", form_url), ("View State", state_url)],
+                        chat_id=wf_chat_id,
+                    )
+                elif form_url:
+                    reply_markup = build_webapp_keyboard(
+                        "Edit Parameters", form_url, chat_id=wf_chat_id
+                    )
+                elif state_url:
+                    reply_markup = build_webapp_keyboard(
+                        "View State", state_url, chat_id=wf_chat_id
+                    )
+
+                return StepLoopSignal(
+                    action="return",
+                    return_value=(
+                        confirmation_result.user_prompt or "Please confirm parameters",
+                        {
+                            "needs_user_input": True,
+                            "awaiting_param_confirmation": True,
+                            "reply_markup": reply_markup,
+                        },
+                    ),
+                )
+
+            # Persist confirmation state (snapshot, cleared flags) to DB
+            # so it survives workflow resume across pause/resume cycles.
+            confirmation_state = {}
+            for key in (
+                "confirmed_editable_snapshot",
+                "awaiting_param_confirmation",
+                "param_confirmation_context",
+                "auto_continue_enabled",
+            ):
+                if key in context.packet_state:
+                    confirmation_state[key] = context.packet_state[key]
+            if confirmation_state:
+                await self.packet_service.update_state(
+                    packet["packet_id"],
+                    confirmation_state,
+                    context.session_id,
+                )
+
+            # Execute function handler (with heartbeat to prevent stale-packet timeout)
+            result = await self._run_with_heartbeat(
+                self._execute_function_step(step, context, accumulated_results),
+                packet["packet_id"],
+                context.session_id,
+            )
+
+            # Clear any confirmation state after successful execution
+            if context.get_state("awaiting_param_confirmation"):
+                context.packet_state["awaiting_param_confirmation"] = False
+                context.clear_parameter_overrides()
+
+            # Record timing
+            step_record.ended_at = time.time()
+            step_record.duration_ms = int(
+                (step_record.ended_at - (step_record.started_at or 0)) * 1000
+            )
+
+            if result.error:
+                step_record.status = StepStatus.FAILED
+                step_record.error = result.error
+                execution_summary.failed_steps += 1
+                execution_summary.final_status = "failed"
+                execution_summary.failure_reason = f"Step '{step.name}' failed: {result.error}"
+
+                # Mark remaining steps as skipped
+                for remaining_step in steps[step.index + 1 :]:
+                    skipped_record = StepExecutionRecord(
+                        step_name=remaining_step.name,
+                        step_type=remaining_step.step_type,
+                        description=remaining_step.description,
+                        status=StepStatus.SKIPPED,
+                        result_summary="skipped due to earlier failure",
+                    )
+                    execution_summary.add_record(skipped_record)
+
+                LOGGER.error(f"Step {step.name} failed: {result.error}")
+
+                # Log detailed execution summary to database
+                packet_uuid = packet.get("id") or packet.get("packet_id")
+                if packet_uuid:
+                    await self._log_execution_summary(
+                        packet_uuid, execution_summary, context.session_id
+                    )
+
+                await self.packet_service.fail_packet(
+                    packet["packet_id"],
+                    f"Step {step.name} failed: {result.error}",
+                    context.session_id,
+                    error_state={
+                        "last_error": result.error,
+                        "error_step": step.name,
+                        "execution_summary": execution_summary.to_dict(),
+                    },
+                )
+
+                # Build user-friendly message with context about what happened
+                user_message = self._build_failure_message(execution_summary)
+                return StepLoopSignal(
+                    action="return",
+                    return_value=(
+                        user_message,
+                        {
+                            "error": result.error,
+                            "execution_summary": execution_summary.to_dict(),
+                        },
+                    ),
+                )
+
+            if result.needs_user_input:
+                # Headless mode: try to resolve input via callback then re-run step
+                if self._input_resolver:
+                    resolved = self._input_resolver(step.name, result.user_prompt or "")
+                    if resolved is not None:
+                        # Guard against infinite re-execution of the same step
+                        _headless_retries = getattr(self, "_headless_step_retries", {})
+                        _headless_retries[step.name] = _headless_retries.get(step.name, 0) + 1
+                        self._headless_step_retries = _headless_retries
+                        if _headless_retries[step.name] > 3:
+                            step_record.status = StepStatus.FAILED
+                            step_record.error = (
+                                f"Headless: step {step.name} still requesting input "
+                                f"after 3 resolve attempts"
+                            )
+                            execution_summary.final_status = "failed"
+                            LOGGER.error(f"Headless step {step.name} stuck in input loop, aborting")
+                            return StepLoopSignal(
+                                action="return",
+                                return_value=(
+                                    f"Step {step.name} stuck requesting input",
+                                    {
+                                        "error": f"Headless: input loop in step {step.name}",
+                                        "execution_summary": execution_summary.to_dict(),
+                                    },
+                                ),
+                            )
+
+                        LOGGER.info(
+                            f"Input resolver provided response for step "
+                            f"{step.name} (attempt {_headless_retries[step.name]}): "
+                            f"{resolved[:50]}..."
+                        )
+                        context.user_input = resolved
+                        # Re-execute THIS step by jumping back to step execution.
+                        # We use a flag + break to exit this result-handling block,
+                        # then the outer _should_retry_step check re-runs the step.
+                        #
+                        # NOTE (verified during Phase C Task 3a extraction): the
+                        # original `break` here has no enclosing for/while other
+                        # than the single-site step-execution while loop, so it
+                        # exits that loop directly -- it never reaches the
+                        # `if _retry_current_step: continue` check that lived
+                        # further down in the same loop body (that check was
+                        # unreachable dead code in the original, since a break
+                        # always targets the nearest enclosing loop). In other
+                        # words, this path does not actually retry the step; it
+                        # ends step processing early, same as the
+                        # `skip_remaining` break below. Translated 1:1 as
+                        # action="break" to preserve that exact (pre-existing,
+                        # untested) behavior.
+                        return StepLoopSignal(action="break")
+                    else:
+                        # No prefilled input — fail gracefully
+                        step_record.status = StepStatus.FAILED
+                        step_record.error = f"Headless: no input for step {step.name}"
+                        execution_summary.final_status = "failed"
+                        LOGGER.warning(f"Headless execution failed: no input for step {step.name}")
+                        return StepLoopSignal(
+                            action="return",
+                            return_value=(
+                                f"Missing required input for step: {step.name}",
+                                {
+                                    "error": f"Headless: no prefilled input for step {step.name}",
+                                    "execution_summary": execution_summary.to_dict(),
+                                },
+                            ),
+                        )
+
+                step_record.status = StepStatus.PENDING
+                step_record.result_summary = "awaiting user input"
+                execution_summary.final_status = "paused"
+
+                # Apply state updates BEFORE pausing (so they're available on resume)
+                # Always persist accumulated_results so step data survives resume
+                pause_state = dict(result.state_updates) if result.state_updates else {}
+                pause_state["accumulated_results"] = accumulated_results
+                pause_state["execution_summary"] = execution_summary.to_dict()
+                await self.packet_service.update_state(
+                    packet["packet_id"],
+                    pause_state,
+                    context.session_id,
+                )
+                if result.state_updates:
+                    # Also update context in memory for consistency
+                    context.packet_state.update(result.state_updates)
+
+                # Build inline keyboard for Telegram buttons
+                reply_markup = None
+                form_url = None
+                if result.mini_app_form:
+                    # Mini App popup form button
+                    form_url = build_mini_app_url(packet["packet_id"], result.mini_app_form)
+                state_url = build_view_state_url(packet["packet_id"])
+
+                if form_url and state_url:
+                    reply_markup = build_multi_webapp_keyboard(
+                        [("Edit Parameters", form_url), ("View State", state_url)],
+                        chat_id=wf_chat_id,
+                    )
+                elif form_url:
+                    reply_markup = build_webapp_keyboard(
+                        "Edit Parameters", form_url, chat_id=wf_chat_id
+                    )
+                elif is_inline_buttons_enabled():
+                    if result.inline_options:
+                        reply_markup = build_step_input_keyboard(result.inline_options)
+                    else:
+                        # Auto-detect numbered options from user_prompt
+                        detected = parse_numbered_options(result.user_prompt or "")
+                        if detected:
+                            reply_markup = build_step_input_keyboard(detected)
+                elif state_url:
+                    reply_markup = build_webapp_keyboard(
+                        "View State", state_url, chat_id=wf_chat_id
+                    )
+
+                # Pause workflow, wait for user input
+                await self.packet_service.set_awaiting_input(
+                    packet["packet_id"],
+                    result.user_prompt or "Please provide more information",
+                    context.session_id,
+                )
+                return StepLoopSignal(
+                    action="return",
+                    return_value=(
+                        result.user_prompt or "Please provide more information",
+                        {
+                            "needs_user_input": True,
+                            "execution_summary": execution_summary.to_dict(),
+                            "reply_markup": reply_markup,
+                        },
+                    ),
+                )
+
+            if result.redirect_to_main_llm:
+                # User input doesn't belong to this step - pause and redirect
+                step_record.status = StepStatus.PENDING
+                step_record.result_summary = "redirecting to main LLM"
+                execution_summary.final_status = "paused"
+
+                LOGGER.info(
+                    f"Step {step.name} detected unrelated input, "
+                    f"redirecting to main LLM: {result.progress_message}"
+                )
+
+                # Keep workflow paused but signal redirect
+                await self.packet_service.set_awaiting_input(
+                    packet["packet_id"],
+                    "Workflow paused - processing new request",
+                    context.session_id,
+                )
+                return StepLoopSignal(
+                    action="return",
+                    return_value=(
+                        None,
+                        {
+                            "redirect_to_main_llm": True,
+                            "redirect_reason": result.progress_message,
+                            "execution_summary": execution_summary.to_dict(),
+                        },
+                    ),
+                )
+
+            # Success - update the already-added record in place
+            step_record.status = StepStatus.SUCCESS
+            step_record.result_summary = self._summarize_result(result.data)
+            execution_summary.completed_steps += 1
+
+            # Store result in local dict AND sync back to context so that
+            # any code reading context.accumulated_results (e.g. confirmation
+            # handler fallback) sees up-to-date results.
+            accumulated_results[step.name] = result.data
+            context.accumulated_results = accumulated_results
+
+            # Apply state updates
+            if result.state_updates:
+                await self.packet_service.update_state(
+                    packet["packet_id"],
+                    result.state_updates,
+                    context.session_id,
+                )
+                # Also update context in memory so subsequent steps see the new state
+                context.packet_state.update(result.state_updates)
+
+                # Best-effort: attach any newly-produced Drive artifacts to the
+                # design's artifact history now that a design_id exists.
+                design_id = context.packet_state.get("design_id")
+                if design_id:
+                    await asyncio.to_thread(
+                        sweep_state_for_artifacts,
+                        design_id,
+                        result.state_updates,
+                        packet_id=packet["packet_id"],
+                    )
+
+            # Persist execution_summary after each step so the mini app
+            # can show real-time progress (otherwise it stays blank until
+            # the workflow pauses or completes).
+            await self.packet_service.update_state(
+                packet["packet_id"],
+                {"execution_summary": execution_summary.to_dict()},
+                context.session_id,
+            )
+
+            # Check for early completion
+            if result.skip_remaining:
+                LOGGER.info(f"Step {step.name} requested skip_remaining")
+                # Mark remaining steps as skipped
+                for remaining_step in steps[step.index + 1 :]:
+                    skipped_record = StepExecutionRecord(
+                        step_name=remaining_step.name,
+                        step_type=remaining_step.step_type,
+                        description=remaining_step.description,
+                        status=StepStatus.SKIPPED,
+                        result_summary="skipped (early completion)",
+                    )
+                    execution_summary.add_record(skipped_record)
+                return StepLoopSignal(action="break")
+
+            # Multi-site: after resolve_sites completes with >1 site,
+            # run remaining steps once per site. This avoids modifying
+            # individual handlers — they keep using site_name/site_id
+            # from state, which we update before each iteration.
+            sites_to_process = context.get_state("sites_to_process", [])
+            if step.name == "resolve_sites" and len(sites_to_process) > 1:
+                if not allow_multi_site_handoff:
+                    # run_single_step is explicitly single-site-scoped (see its
+                    # own Step 0 guard). With `steps=[step]` there is no real
+                    # per-site step list to hand off to -- executing the
+                    # hand-off here would run zero per-site work yet still
+                    # let _execute_multi_site_steps mark the whole packet
+                    # "completed". Refuse cleanly instead.
+                    return StepLoopSignal(
+                        action="return",
+                        return_value=(
+                            f"Step '{step.name}' discovered {len(sites_to_process)} sites; "
+                            "run_single_step does not support multi-site fan-out.",
+                            {
+                                "error": "unsupported_multi_site_discovered",
+                                "refused": True,
+                                "sites_to_process": sites_to_process,
+                            },
+                        ),
+                    )
+                per_site_steps = steps[step.index + 1 :]
+                return StepLoopSignal(
+                    action="return",
+                    return_value=await self._execute_multi_site_steps(
+                        sites_to_process=sites_to_process,
+                        per_site_steps=per_site_steps,
+                        expert_config=expert_config,
+                        packet=packet,
+                        context=context,
+                        accumulated_results=accumulated_results,
+                        execution_summary=execution_summary,
+                    ),
+                )
+
+        else:  # LLM step
+            try:
+                result = await self._run_with_heartbeat(
+                    self._execute_llm_step(
+                        step,
+                        expert_config,
+                        packet,
+                        context,
+                        accumulated_results,
+                        execution_summary,
+                    ),
+                    packet["packet_id"],
+                    context.session_id,
+                )
+                step_record.ended_at = time.time()
+                step_record.duration_ms = int(
+                    (step_record.ended_at - (step_record.started_at or 0)) * 1000
+                )
+                step_record.status = StepStatus.SUCCESS
+                step_record.result_summary = f"Generated {len(result)} chars"
+                execution_summary.completed_steps += 1
+
+                accumulated_results[step.name] = {"response": result}
+                context.accumulated_results = accumulated_results
+                step_final_response = result  # Last LLM response is the final response
+
+                # Persist execution_summary for mini app real-time progress
+                await self.packet_service.update_state(
+                    packet["packet_id"],
+                    {"execution_summary": execution_summary.to_dict()},
+                    context.session_id,
+                )
+
+            except Exception as e:
+                step_record.ended_at = time.time()
+                step_record.duration_ms = int(
+                    (step_record.ended_at - (step_record.started_at or 0)) * 1000
+                )
+                step_record.status = StepStatus.FAILED
+                step_record.error = str(e)
+                execution_summary.failed_steps += 1
+                execution_summary.final_status = "failed"
+                execution_summary.failure_reason = f"LLM step '{step.name}' failed: {e}"
+
+                LOGGER.error(f"LLM step {step.name} failed: {e}")
+
+                packet_uuid = packet.get("id") or packet.get("packet_id")
+                if packet_uuid:
+                    await self._log_execution_summary(
+                        packet_uuid, execution_summary, context.session_id
+                    )
+
+                await self.packet_service.fail_packet(
+                    packet["packet_id"],
+                    f"LLM step {step.name} failed: {e}",
+                    context.session_id,
+                    error_state={
+                        "last_error": str(e),
+                        "error_step": step.name,
+                        "execution_summary": execution_summary.to_dict(),
+                    },
+                )
+
+                user_message = self._build_failure_message(execution_summary)
+                return StepLoopSignal(
+                    action="return",
+                    return_value=(
+                        user_message,
+                        {
+                            "error": str(e),
+                            "execution_summary": execution_summary.to_dict(),
+                        },
+                    ),
+                )
+
+        # Fall-through: function step succeeded (no skip_remaining / multi-site
+        # handoff above) or LLM step succeeded. The original inline loop
+        # reached its "Headless retry" check and then the "Advance to next
+        # step" section at this exact point; both now live in the caller
+        # (_execute_workflow_inner), keyed off this "advance" signal.
+        return StepLoopSignal(action="advance", final_response=step_final_response)
 
     def _inject_lpp_entry_steps(
         self, steps: List["ParsedStep"], geo_source: Optional[str]
@@ -1366,6 +1563,18 @@ class WorkflowExecutor:
                     packet["packet_id"],
                     result.state_updates,
                     context.session_id,
+                )
+
+            # Best-effort: attach any newly-produced Drive artifacts to the
+            # design's artifact history now that a design_id exists. Not part
+            # of the packet_state write above, so it stays outside the lock.
+            design_id = site_ctx.packet_state.get("design_id")
+            if design_id:
+                await asyncio.to_thread(
+                    sweep_state_for_artifacts,
+                    design_id,
+                    result.state_updates,
+                    packet_id=packet["packet_id"],
                 )
 
         if result.skip_remaining:
@@ -2445,6 +2654,440 @@ Be specific and actionable. Reference data from previous steps as needed.
         """Return automated facts section for the given packet type, or empty string."""
         return self.AUTOMATED_FACTS.get(packet_type, "")
 
+    async def validate_step_prerequisites(
+        self, packet: Dict[str, Any], step_name: str
+    ) -> PrereqReport:
+        """Read-only report: what does `step_name` need that isn't available right now?
+
+        Does NOT mutate `packet`, packet_state, or any DB row -- this is pure
+        reporting for a later task that will run steps out of normal recipe
+        order and needs to know, up front, whether that's safe.
+
+        Checks the step's `StepContract` (see `step_contracts.py`) against
+        three tiers of availability, in order:
+        1. The packet's own current `packet_state`.
+        2. A prior similar-completed packet's `packet_state` (best-effort via
+           `packet_service.find_similar_completed`; non-fatal on failure).
+        3. For `consumes_state`/param keys ending in `_drive_id` only: the
+           Phase B artifact jsonb on the design row (`gd_designs.artifacts`),
+           keyed by the artifact type derived from stripping the suffix;
+           only consulted when a `design_id` is available from tier 1/2
+           (non-fatal on failure).
+
+        `consumes_results` is checked literally against
+        `packet.steps_completed` -- it describes this packet's own execution
+        history, so tiers 2/3 (which are about a *different* packet's state)
+        don't apply.
+
+        `contract.optional_consumes_state` keys are checked through the same
+        three-tier `_available()` resolution as `consumes_state`, but any
+        missing entries are reported informationally on
+        `PrereqReport.missing_optional_state` only -- they never affect
+        `satisfied` and are never looked up in `producer_chain` (there is
+        nothing to auto-run for a key the step already has fallback logic
+        for).
+
+        Args:
+            packet: Current packet dict (as returned by WorkPacketService).
+            step_name: Name of the step to validate (must be registered).
+
+        Returns:
+            A `PrereqReport` describing what's missing (if anything) and,
+            for any missing item, which other registered step(s) could
+            produce it.
+
+        Raises:
+            ValueError: if `step_name` has no registered handler at all --
+                that's a caller error, not a data-availability question.
+        """
+        if get_step_handler(step_name) is None:
+            raise ValueError(f"No step handler registered with name: {step_name!r}")
+
+        contract = get_step_contract(step_name)
+        if contract is None:
+            # No contract attached (e.g. an LLM step, or a function step that
+            # predates contracts) -- nothing to validate against, so don't block.
+            LOGGER.debug(
+                "validate_step_prerequisites: step %r has no StepContract attached; "
+                "nothing to validate, treating prerequisites as satisfied",
+                step_name,
+            )
+            return PrereqReport(step_name=step_name, satisfied=True)
+
+        packet_state: Dict[str, Any] = packet.get("packet_state") or {}
+
+        # Tier 2: a prior similar-completed packet's state (best-effort, non-fatal).
+        # Uses the same key_entity resolution convention as existing callers of
+        # find_similar_completed (see work_packet_service.cancel_stale_packets_for_entity,
+        # expert_router._extract_key_entity call sites): packet_inputs["key_entity"],
+        # falling back to packet_inputs/packet_state["site_name"].
+        similar_state: Dict[str, Any] = {}
+        packet_inputs = packet.get("packet_inputs") or {}
+        key_entity = (
+            packet_inputs.get("key_entity")
+            or packet_inputs.get("site_name")
+            or packet_state.get("site_name")
+        )
+        if key_entity:
+            try:
+                similar_packets = await self.packet_service.find_similar_completed(
+                    packet_type=packet.get("packet_type"),
+                    key_entity=key_entity,
+                    organization_id=packet.get("organization_id"),
+                )
+                if similar_packets:
+                    similar_state = similar_packets[0].get("packet_state") or {}
+            except Exception:
+                LOGGER.warning(
+                    "validate_step_prerequisites: find_similar_completed lookup failed "
+                    "for step %r; continuing without Tier 2 data",
+                    step_name,
+                    exc_info=True,
+                )
+
+        # Tier 3: Phase B design-artifact jsonb, cached per design_id so repeat
+        # *_drive_id lookups against the same design don't refetch.
+        design_row_cache: Dict[str, Optional[Dict[str, Any]]] = {}
+
+        async def _design_row(design_id: str) -> Optional[Dict[str, Any]]:
+            if design_id not in design_row_cache:
+                try:
+                    repo = Repository("designs")
+                    design_row_cache[design_id] = await asyncio.to_thread(repo.get, design_id)
+                except Exception:
+                    LOGGER.warning(
+                        "validate_step_prerequisites: design artifact lookup failed for "
+                        "design_id=%s; continuing without Tier 3 data",
+                        design_id,
+                        exc_info=True,
+                    )
+                    design_row_cache[design_id] = None
+            return design_row_cache[design_id]
+
+        async def _available(key: str) -> bool:
+            # Presence check (`in`), not truthiness: a legitimately-set falsy
+            # value (0, "", False) is genuinely present. This matches
+            # StepContext.get_state()'s own semantics -- `packet_state.get(key,
+            # default)` returns the real falsy value as-is rather than treating
+            # it as absent, so a truthiness check here would be *less*
+            # consistent with actual runtime behavior, not more.
+            if key in packet_state:
+                return True
+            if key in similar_state:
+                return True
+            if key.endswith(_DRIVE_ID_SUFFIX):
+                design_id = packet_state.get("design_id") or similar_state.get("design_id")
+                if design_id:
+                    design = await _design_row(design_id)
+                    if design is not None:
+                        artifact_type = key[: -len(_DRIVE_ID_SUFFIX)]
+                        # `artifacts` is a nullable jsonb column -- backfilled/
+                        # pre-existing design rows can have it as NULL, not `{}`.
+                        # `.get("artifacts", {})` only substitutes the default
+                        # when the KEY is absent, not when its value is None, so
+                        # use `or {}` to guard against the None case too.
+                        if (design.get("artifacts") or {}).get(artifact_type):
+                            return True
+            return False
+
+        missing_state = [key for key in contract.consumes_state if not await _available(key)]
+        missing_optional_state = [
+            key for key in contract.optional_consumes_state if not await _available(key)
+        ]
+
+        completed = set(packet.get("steps_completed", []) or [])
+        missing_results = [name for name in contract.consumes_results if name not in completed]
+
+        missing_params = []
+        for param in contract.params:
+            if not param.required:
+                continue
+            if param.default is not None:
+                continue
+            # get_parameter_value()'s real resolution order is:
+            # pending_param_overrides -> packet_inputs -> parsed_inputs ->
+            # packet_state. `packet_inputs` is where params supplied at packet
+            # creation time live (e.g. site_name), before they're copied into
+            # packet_state -- _available() only sees packet_state-derived
+            # sources, so consult packet_inputs here too or an early step would
+            # be falsely reported as missing a param get_parameter_value()
+            # would resolve fine at runtime. (get_state() never falls back to
+            # packet_inputs, so this is deliberately params-only -- the
+            # consumes_state check via _available() above is unaffected.)
+            if param.name in packet_inputs:
+                continue
+            if await _available(param.name):
+                continue
+            missing_params.append(param.name)
+
+        # Producer chain: for missing_state items, search every registered step's
+        # contract for one that claims to produce that key. For missing_results
+        # items, the "producer" is trivially the step itself -- no search needed.
+        producer_chain: Dict[str, Tuple[str, ...]] = {}
+        if missing_state:
+            registry = get_step_registry()
+            all_names = registry.list_handlers()
+            for item in missing_state:
+                producers = tuple(
+                    name
+                    for name in all_names
+                    if name != step_name
+                    and (other_contract := registry.get_contract(name)) is not None
+                    and item in other_contract.produces_state
+                )
+                if producers:
+                    producer_chain[item] = producers
+        for item in missing_results:
+            producer_chain[item] = (item,)
+
+        satisfied = not missing_state and not missing_results and not missing_params
+
+        return PrereqReport(
+            step_name=step_name,
+            satisfied=satisfied,
+            missing_state=tuple(missing_state),
+            missing_results=tuple(missing_results),
+            missing_params=tuple(missing_params),
+            missing_optional_state=tuple(missing_optional_state),
+            producer_chain=producer_chain,
+        )
+
+    async def run_single_step(
+        self,
+        packet: Dict[str, Any],
+        step_name: str,
+        context: StepContext,
+        expert_config: "ExpertConfig",
+        param_overrides: Optional[Dict[str, Any]] = None,
+        force: bool = False,
+        run_missing_prerequisites: bool = False,
+        _producer_visited: Optional[Set[str]] = None,
+    ) -> Tuple[str, Dict[str, Any]]:
+        """Execute exactly one named step out of the normal workflow order.
+
+        Unlike `_execute_workflow_inner`'s while-loop (which walks a parsed
+        workflow sequence), this runs ONE step directly by name, using
+        `validate_step_prerequisites` to decide whether it's safe to run, and
+        optionally auto-running producer steps first.
+
+        v1 scope: single-site packets only; only steps registered as function
+        handlers (via `@register_step`) are supported -- there's no stable
+        standalone identity for an LLM step outside a parsed workflow sequence.
+
+        This method never raises for "normal" bad-input outcomes (unknown
+        step, multi-site packet, missing prerequisites) -- those are all
+        regular `(message, dict)` return-tuple outcomes, matching this file's
+        established convention (see `_execute_one_step`'s `action="return"`
+        cases). A genuinely unexpected internal exception (e.g. a DB
+        connection failure) is allowed to propagate uncaught.
+
+        Args:
+            packet: Current packet dict (as returned by WorkPacketService).
+            step_name: Name of the registered function step to run.
+            context: Step execution context for this packet.
+            expert_config: Expert configuration (workflow/system instructions).
+            param_overrides: Optional parameter overrides applied via
+                `context.set_parameter_override` before execution.
+            force: If True, re-run the step even if already in
+                `steps_completed`, clearing its contract's `guard_keys` first
+                (via `mark_step_incomplete`) so the step's own idempotency
+                guard doesn't immediately no-op the re-run.
+            run_missing_prerequisites: If True, attempt to auto-run producer
+                steps for any missing state/result prerequisite (one pass
+                only -- see `validate_step_prerequisites`'s `producer_chain`).
+            _producer_visited: Internal recursion-cycle guard. Do not pass
+                explicitly.
+
+        Returns:
+            A `(message, dict)` tuple describing the outcome. Notable dict
+            shapes: `{"refused": True, "error": ...}` for v1-scope refusals,
+            `{"already_completed": True}`, `{"needs_user_input": True, ...}`
+            for unmet prerequisites, or `{"success": True, ...}` /
+            whatever `_execute_one_step` itself returned for `action="return"`.
+        """
+        # --- Step 0: v1 guards -------------------------------------------------
+        # Mirror _execute_workflow_inner's own multi-site detection exactly
+        # (see the "resolve_sites" handoff in _execute_one_step).
+        sites_to_process = context.get_state("sites_to_process", [])
+        if len(sites_to_process) > 1:
+            return (
+                "run_single_step does not yet support multi-site packets.",
+                {"error": "unsupported_multi_site", "refused": True},
+            )
+
+        if get_step_handler(step_name) is None:
+            return (f"No such step: {step_name}", {"error": "unknown_step", "refused": True})
+
+        # Refuse if the packet looks like it's actively being driven by a live
+        # full-workflow run right now. Unlike claim_signing's 10-minute
+        # process-death recovery threshold (which exists to reclaim a packet
+        # stranded by a crashed process), this threshold's job is to detect a
+        # workflow that is genuinely still executing: a live run touches
+        # `updated_at` roughly once per step, so a short 2-minute window is
+        # enough to catch an in-flight run while not misfiring on a packet
+        # that merely happens to still carry `in_progress` status from a
+        # normal, unremarkable earlier step. Running a step out-of-order
+        # against a packet another process is actively mutating risks the
+        # exact lost-update race update_state's optimistic concurrency
+        # guards against, so refuse cleanly up front instead.
+        if packet.get("packet_status") == "in_progress":
+            from datetime import datetime, timezone
+
+            updated_at_str = packet.get("updated_at")
+            if updated_at_str:
+                try:
+                    updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+                    age_minutes = (datetime.now(timezone.utc) - updated_at).total_seconds() / 60
+                except (ValueError, TypeError):
+                    age_minutes = None
+                # Fail open on missing/unparseable updated_at -- a parsing
+                # quirk shouldn't block all out-of-order execution.
+                if age_minutes is not None and age_minutes < 2:
+                    return (
+                        f"Packet {packet['packet_id']} appears to be actively running "
+                        f"(updated {age_minutes:.1f} min ago); refusing to run a step "
+                        "out-of-order to avoid a state race.",
+                        {"error": "packet_actively_running", "refused": True},
+                    )
+
+        # --- Step 1: already-completed check ------------------------------------
+        steps_completed = list(packet.get("steps_completed") or [])
+        if step_name in steps_completed and not force:
+            return (f"Step '{step_name}' already completed.", {"already_completed": True})
+
+        if force:
+            contract = get_step_contract(step_name)
+            guard_keys = list(contract.guard_keys) if contract else []
+            await self.packet_service.mark_step_incomplete(
+                packet["packet_id"],
+                step_name,
+                clear_state_keys=guard_keys,
+                session_id=context.session_id,
+            )
+            # Refresh our view of the packet -- mark_step_incomplete just
+            # mutated steps_completed/packet_state in the DB out from under us.
+            packet = await self.packet_service.get_packet(packet["packet_id"])
+            context.packet_state = packet.get("packet_state") or {}
+            context.steps_completed = list(packet.get("steps_completed") or [])
+
+        # --- Step 2: prerequisite check ------------------------------------------
+        report = await self.validate_step_prerequisites(packet, step_name)
+
+        if not report.satisfied:
+            if run_missing_prerequisites:
+                visited = (_producer_visited or set()) | {step_name}
+                # Tracks producer steps already recursed into during THIS pass,
+                # so that when two or more missing items resolve to the SAME
+                # producer step, that producer only runs once. Without this,
+                # each iteration recurses using the same stale `packet` (only
+                # re-fetched once, after the whole loop) and doesn't see the
+                # first iteration's completion, so the producer's handler
+                # would otherwise be invoked once per missing item it satisfies.
+                already_attempted_producers: Set[str] = set()
+                for item in list(report.missing_state) + list(report.missing_results):
+                    producers = report.producer_chain.get(item)
+                    if not producers:
+                        continue
+                    producer_step_name = producers[0]
+                    if producer_step_name in visited:
+                        # Cycle guard: two steps' contracts claim to mutually
+                        # produce each other's missing dependency (or a
+                        # producer_chain entry maps a missing_results item
+                        # back to step_name itself).
+                        continue
+                    if producer_step_name in already_attempted_producers:
+                        # Already recursed into this producer earlier in this
+                        # same pass -- skip to avoid running its handler twice.
+                        continue
+                    already_attempted_producers.add(producer_step_name)
+                    await self.run_single_step(
+                        packet,
+                        producer_step_name,
+                        context,
+                        expert_config,
+                        force=False,
+                        run_missing_prerequisites=True,
+                        _producer_visited=visited,
+                    )
+
+                # Re-fetch and re-validate after one pass over the producer chain.
+                packet = await self.packet_service.get_packet(packet["packet_id"])
+                context.packet_state = packet.get("packet_state") or {}
+                context.steps_completed = list(packet.get("steps_completed") or [])
+                report = await self.validate_step_prerequisites(packet, step_name)
+
+            if not report.satisfied:
+                return (
+                    f"Cannot run '{step_name}': missing prerequisites.",
+                    {
+                        "needs_user_input": True,
+                        "missing_state": list(report.missing_state),
+                        "missing_results": list(report.missing_results),
+                        "missing_params": list(report.missing_params),
+                        "producer_chain": {k: list(v) for k, v in report.producer_chain.items()},
+                    },
+                )
+
+        # --- Step 3: apply overrides and execute ---------------------------------
+        for key, value in (param_overrides or {}).items():
+            context.set_parameter_override(key, value)
+
+        contract = get_step_contract(step_name)
+        step = ParsedStep(
+            index=0,
+            step_type="function",
+            name=step_name,
+            description=contract.description if contract else step_name,
+        )
+        execution_summary = ExecutionSummary(
+            packet_id=packet["packet_id"],
+            packet_type=packet["packet_type"],
+            total_steps=1,
+            all_steps=[step],
+        )
+
+        accumulated_results = context.accumulated_results.copy()
+        signal = await self._execute_one_step(
+            step,
+            [step],
+            expert_config,
+            packet,
+            context,
+            accumulated_results,
+            execution_summary=execution_summary,
+            on_progress=None,
+            wf_chat_id=None,
+            allow_multi_site_handoff=False,
+        )
+
+        if signal.action in ("advance", "break"):
+            await self.packet_service.complete_step(
+                packet["packet_id"],
+                step_name,
+                next_step=None,
+                session_id=context.session_id,
+            )
+            return (
+                f"Step '{step_name}' completed.",
+                {
+                    "success": True,
+                    "step_name": step_name,
+                    "final_response": signal.final_response,
+                },
+            )
+
+        if signal.action == "return":
+            return signal.return_value
+
+        # signal.action == "retry": no real code path in _execute_one_step
+        # currently produces this (see StepLoopSignal's own docstring / Task
+        # 3a's finding) -- treat defensively rather than looping or crashing.
+        return (
+            f"Step '{step_name}' requested a retry, which run_single_step does not "
+            "support (headless mode only).",
+            {"error": "unsupported_retry", "refused": True},
+        )
+
     def _format_result(self, result: Any) -> str:
         """Format a step result for display in prompt.
 
@@ -2475,4 +3118,5 @@ __all__ = [
     "StepStatus",
     "StepExecutionRecord",
     "ExecutionSummary",
+    "PrereqReport",
 ]

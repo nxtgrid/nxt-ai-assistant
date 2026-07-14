@@ -221,9 +221,19 @@ class ConversationState(TypedDict, total=False):
     # Thread disentanglement
     thread_id: Optional[str]  # Assigned thread for this message
     thread_filtered_history: Optional[List[ConversationMessage]]  # Thread-scoped history
+    thread_assignment_method: Optional[str]  # How the thread was selected
+    thread_assignment_confidence: Optional[float]  # Confidence from thread assignment
+    thread_is_new: bool  # Whether this turn created a new thread
     sender_telegram_id: Optional[str]  # Telegram user ID of the sender
     telegram_message_id: Optional[int]  # Telegram message ID for reply chains
     reply_to_telegram_message_id: Optional[int]  # Telegram message ID being replied to
+
+    # Conversation direction planning
+    conversation_direction: Optional[str]  # normal_chat | new_expert_workflow | active_workflow
+    conversation_context_scope: Optional[str]  # session | thread | packet
+    conversation_direction_method: Optional[str]  # deterministic | model
+    conversation_issue_type: Optional[str]  # lpp | kpi | support taxonomy | other
+    planned_expert_route: Optional[Dict[str, str]]  # Precomputed natural-language expert route
 
 
 def create_initial_state(

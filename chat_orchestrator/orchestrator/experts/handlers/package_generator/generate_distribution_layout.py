@@ -13,6 +13,7 @@ import os
 from orchestrator.experts.handlers.package_generator.generate_map import _get_db_config
 from orchestrator.experts.handlers.package_generator.site_geo_source import load_site_row_data
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.mapping.data_reader import _ensure_dict
 from shared.utils.error_messages import sanitize_error_for_user
@@ -60,7 +61,118 @@ def _existing_layout_state(
     }
 
 
-@register_step("generate_distribution_layout")
+@register_step(
+    "generate_distribution_layout",
+    contract=StepContract(
+        description=(
+            "Auto-generates a distribution network layout (poles, backbone/drop cables) "
+            "from OpenStreetMap road data, or (for sites with an existing QGIS layout) "
+            "runs site-selection-only to populate plant site candidates."
+        ),
+        # Every consumes_state key this step used to declare turns out to have
+        # a genuine in-body fallback (this handler is built around "try
+        # opportunistically, skip/degrade gracefully" -- see optional_consumes_state
+        # below for the per-key reasoning), so none remain hard-required.
+        consumes_state=(),
+        optional_consumes_state=(
+            # Idempotency guard; absence just means the main path runs.
+            "layout_generated",
+            # Branch selector: `is_community = ... == "community"`; absence
+            # defaults to the (primary) submission route.
+            "geo_source",
+            # `site_id = get_input(...) or get_state(...)`; on the non-community
+            # route, absence returns a documented `{"skipped": True,
+            # "skip_reason": "no_site_id"}` stub (a legitimate "not ready yet,
+            # defer" outcome, not a crash) -- matches the "if X: ... else:
+            # <legitimate alternate path>" pattern exactly.
+            "site_id",
+            # `site_name = get_input(...) or get_state(...)`; used only for
+            # display/logging and layout naming, always guarded by
+            # `site_name or f"Site {site_id}"` at every call site.
+            "site_name",
+            # All five editable_* reads go through get_parameter_value() with
+            # an explicit `or DEFAULT_...` fallback in the body (and each also
+            # has a ParamSpec default below, independently covering
+            # missing_params) -- never a hard requirement.
+            "editable_pole_spacing_m",
+            "editable_max_drop_distance_m",
+            "editable_target_coverage_pct",
+            "editable_total_kwp",
+            "editable_number_of_phases",
+            # Passed to upload_step_output(), which documents "skip if None"
+            # (non-fatal).
+            "site_folder_id",
+            # Read inside site_geo_source.load_site_row_data() only on the
+            # community route. community_state and surveyed_buildings_geojson
+            # each have their own in-body fallback (an "or <default>" /
+            # purely cosmetic field). The two drive_id keys are the
+            # cross-execution Drive-download fallback (only used when
+            # get_previous_result("resolve_community_site") is empty, i.e.
+            # run_single_step re-running this step in a later execution) --
+            # a real, working read now, but still only relevant on the
+            # community route. This step's own produces_state never writes
+            # any of these four (resolve_community_site produces the
+            # drive_id keys), so leaving them required would permanently
+            # block `satisfied` on the community route.
+            "community_boundary_drive_id",
+            "community_buildings_drive_id",
+            "community_state",
+            "surveyed_buildings_geojson",
+        ),
+        produces_state=(
+            "layout_generated",
+            "layout_coverage_pct",
+            "site_options_drive_id",
+            "site_candidates",
+            "editable_pole_spacing_m",
+            "editable_max_drop_distance_m",
+            "editable_target_coverage_pct",
+            "editable_number_of_phases",
+        ),
+        consumes_results=("resolve_community_site",),
+        params=(
+            ParamSpec(
+                name="editable_pole_spacing_m",
+                param_type="number",
+                description="Pole spacing in metres for the distribution layout algorithm.",
+                default=45.0,
+            ),
+            ParamSpec(
+                name="editable_max_drop_distance_m",
+                param_type="number",
+                description="Maximum drop-cable distance in metres from pole to building.",
+                default=40.0,
+            ),
+            ParamSpec(
+                name="editable_target_coverage_pct",
+                param_type="number",
+                description="Target building coverage percentage for the layout algorithm.",
+                default=90.0,
+            ),
+            ParamSpec(
+                name="editable_total_kwp",
+                param_type="number",
+                description="Confirmed target total kWp, used to size plant site candidates.",
+            ),
+            ParamSpec(
+                name="editable_number_of_phases",
+                description="Number of electrical phases for the distribution design.",
+                default="1",
+            ),
+        ),
+        guard_keys=("layout_generated",),
+        side_effects=(
+            "Runs OSMnx road-network extraction and a pole/cable placement algorithm "
+            "(up to 180s); uploads a site-options map image to Google Drive. NOTE: the "
+            "community-route reads (community_state, and — as a cross-execution "
+            "fallback when this execution never ran resolve_community_site itself — "
+            "community_boundary_drive_id/community_buildings_drive_id, downloaded via "
+            "download_drive_file()) happen via the shared load_site_row_data() helper "
+            "(site_geo_source.py) only when geo_source == 'community'; "
+            "surveyed_buildings_geojson is read on both routes."
+        ),
+    ),
+)
 async def generate_distribution_layout(context: StepContext) -> StepResult:
     """Generate distribution layout for the site.
 
@@ -296,6 +408,12 @@ async def generate_distribution_layout(context: StepContext) -> StepResult:
 
     # Upload site options map to Drive (non-fatal, async)
     # Store Drive file ID instead of base64 blob to avoid packet_state bloat
+    # NOTE: generate_map.py's generate_distribution_map step (which runs after this one
+    # in the LPP workflow) reuses this same site_options_drive_id state key for the same
+    # conceptual artifact — it checks packet_state before uploading its own copy and skips
+    # re-uploading when this step already produced one. Don't rename this key without
+    # updating that guard, or the skip logic silently breaks and duplicate Drive uploads
+    # (and duplicate artifact-history versions) come back.
     site_options_drive_id = ""
     site_options_b64 = layout_result.get("site_options_map_b64")
     if site_options_b64:

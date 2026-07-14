@@ -8,6 +8,58 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from orchestrator.models.schemas import UserContext
+
+
+def test_build_tool_executor_metadata_uses_current_user_context():
+    from orchestrator.graphs.nodes.expert_handler import _build_tool_executor_metadata
+
+    user_context = UserContext(
+        user_id="1570892239",
+        user_email="requester@example.com",
+        username="Requester",
+        source="telegram",
+        chat_id="1570892239",
+        organization_ids=["2"],
+        organization_name="Staff",
+    )
+
+    metadata = _build_tool_executor_metadata(
+        state={
+            "session_id": "telegram_session",
+            "thread_id": "thr_123",
+            "user_context": user_context,
+            "user_permissions": {
+                "organization_ids": ["2"],
+                "email": "requester@example.com",
+                "is_staff": True,
+            },
+        },
+        packet={"requested_by_email": "packet@example.com", "organization_id": 99},
+    )
+
+    assert metadata["user_email"] == "requester@example.com"
+    assert metadata["user_name"] == "Requester"
+    assert metadata["original_chat_id"] == "1570892239"
+    assert metadata["session_id"] == "telegram_session"
+    assert metadata["thread_id"] == "thr_123"
+    assert metadata["organization_id"] == 2
+    assert metadata["organization_name"] == "Staff"
+    assert metadata["user_permissions"]["organization_ids"] == ["2"]
+
+
+def test_build_tool_executor_metadata_falls_back_to_packet_requester():
+    from orchestrator.graphs.nodes.expert_handler import _build_tool_executor_metadata
+
+    metadata = _build_tool_executor_metadata(
+        state={"session_id": "telegram_session"},
+        packet={"requested_by_email": "packet@example.com", "organization_id": 2},
+    )
+
+    assert metadata["user_email"] == "packet@example.com"
+    assert metadata["organization_id"] == 2
+    assert metadata["user_permissions"]["organization_ids"] == ["2"]
+
 
 class TestExpertHandler:
     """Test expert_handler node function."""

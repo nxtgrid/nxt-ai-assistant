@@ -1,83 +1,57 @@
 # =============================================================================
 # DigitalOcean App Platform Spec — EXAMPLE TEMPLATE
 #
-# This lists EVERY environment variable the running app uses, so you know what
-# to set. Replace placeholders before deploying:
-#   * "${VARNAME}" + "type: SECRET"  -> a credential. Supply your own value;
-#     DigitalOcean encrypts it once set. These are fake/non-functional here.
-#   * "your-*", "example.com", "YOUR_COMPANY", empty ""  -> non-secret config
-#     (hosts, doc IDs, org names). Replace with your own; "" disables optional
-#     integrations until configured.
-#   * Plain values (booleans, model names, numeric tunables) are sane defaults
-#     you can usually keep.
-# See the "Deployment" section in README.md for the full walkthrough.
+# Copy this file to app.yaml and replace all "your-*" placeholders with
+# your own values before deploying.
 #
-# ---------------------------------------------------------------------------
-# DO SPEC SAFETY — READ BEFORE UPDATING A LIVE APP
-# ---------------------------------------------------------------------------
-# NEVER run `doctl apps update --spec .do/app.yaml` against a deployed app: it
-# OVERWRITES DigitalOcean's encrypted secrets (EV[1:...]) with the "${VAR}"
-# placeholders below and breaks the deployment.
-# Safe workflow for an existing app:
-#   1. Back up first:  doctl apps spec get <app-id> > .do/spec-backup-$(date +%Y%m%d).yaml
-#   2. Edit that pulled file (it retains the encrypted secrets), then:
-#   3. doctl apps update <app-id> --spec /tmp/live-spec.yaml
-# Copy this template to app.yaml for a FIRST deploy only; never commit app.yaml
-# with real credentials.
-#
-# Topology: 2 services — anansi-bot (orchestrator + MCP tools, bundled in one
-# image; serves /chat, /mini-app, /api/mini-app) and anansi-app (Streamlit
-# admin + broadcast scheduler; serves /). Forking? change each `repo:` below.
+# IMPORTANT: Never commit app.yaml with real credentials.
 # =============================================================================
 name: anansi
 region: ams
 
+# =============================================================================
+# Custom Domains
+# IMPORTANT: This section MUST be preserved during any spec updates.
+# DNS: your-app.example.com CNAME -> your-app-id.ondigitalocean.app
+# =============================================================================
 domains:
   - domain: your-app.example.com
     type: PRIMARY
 
 # =============================================================================
-# App-Level Environment Variables (inherited by all services)
+# App-Level Environment Variables (shared across all services)
 # =============================================================================
 envs:
+  # API Security
   - key: API_KEY
     value: "${API_KEY}"
     scope: RUN_TIME
     type: SECRET
-  - key: EMBEDDING_MODEL
-    value: "gemini-embedding-001"
-    scope: RUN_TIME
-  - key: TAVILY_API_KEY
-    value: "${TAVILY_API_KEY}"
-    scope: RUN_TIME
-    type: SECRET
+
+  # Logging (can be changed via anansi-app Settings UI)
   - key: LOG_LEVEL
     value: "INFO"
     scope: RUN_TIME
-  - key: GRID_DESIGN_APP_ID
-    value: "your-appsheet-app-id"
-    scope: RUN_TIME
-  - key: GRID_DESIGN_APP_KEY
-    value: "${GRID_DESIGN_APP_KEY}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: GRID_DESIGN_ACTIONS_ENABLED
-    value: "true"
-    scope: RUN_TIME
+
+  # Chat Database (Supabase) - legacy name still used by some components
   - key: SUPABASE_URL
-    value: "https://your-project.supabase.co"
+    value: "${SUPABASE_URL}"
     scope: RUN_TIME
-  - key: CHAT_DB_URL
-    value: "https://your-project.supabase.co"
-    scope: RUN_TIME
-  - key: CHAT_DB_POSTGRES_URL
-    value: "${CHAT_DB_POSTGRES_URL}"
+  - key: SUPABASE_KEY
+    value: "${SUPABASE_KEY}"
     scope: RUN_TIME
     type: SECRET
+
+  # Chat Database (preferred names)
+  - key: CHAT_DB_URL
+    value: "${CHAT_DB_URL}"
+    scope: RUN_TIME
   - key: CHAT_DB_SERVICE_KEY
     value: "${CHAT_DB_SERVICE_KEY}"
     scope: RUN_TIME
     type: SECRET
+
+  # Auth Database
   - key: AUTH_DB_DIRECT_CONNECTION
     value: "true"
     scope: RUN_TIME
@@ -102,78 +76,72 @@ envs:
   - key: AUTH_DB_SSL_MODE
     value: "require"
     scope: RUN_TIME
+
+  # Session ID Security
   - key: SESSION_ID_SECRET
     value: "${SESSION_ID_SECRET}"
     scope: RUN_TIME
     type: SECRET
+
+  # Google Services
   - key: GOOGLE_API_KEY
     value: "${GOOGLE_API_KEY}"
     scope: RUN_TIME
     type: SECRET
+  - key: GOOGLE_SERVICE_ACCOUNT_JSON
+    value: "${GOOGLE_SERVICE_ACCOUNT_JSON}"
+    scope: RUN_TIME
+    type: SECRET
+
+  # Google Docs - System Instructions (doc IDs, not secrets)
   - key: CUSTOMER_SUPPORT_DOC_ID
-    value: "your-customer-support-doc-id"
+    value: "your-customer-support-doc-id"  # pragma: allowlist secret
     scope: RUN_TIME
   - key: STAFF_SUPPORT_DOC_ID
-    value: "your-staff-support-doc-id"
+    value: "your-staff-support-doc-id"  # pragma: allowlist secret
     scope: RUN_TIME
-  - key: EXPERT_INSTRUCTIONS_DOC_ID
-    value: "your-expert-instructions-doc-id"
+
+  # Telegram
+  - key: TELEGRAM_BOT_TOKEN
+    value: "${TELEGRAM_BOT_TOKEN}"
     scope: RUN_TIME
-  - key: TROUBLESHOOTING_PROCEDURES_DOC_ID
-    value: "your-troubleshooting-doc-id"
-    scope: RUN_TIME
-  - key: AFTER_HOURS_START_HOUR
-    value: "17"
-    scope: RUN_TIME
-  - key: STAFF_ORG_ID
-    value: "2"
-    scope: RUN_TIME
-  - key: DEFAULT_TIMEZONE
-    value: "UTC"
-    scope: RUN_TIME
-  - key: PLATFORM_BASE_URL
-    value: "https://your-platform.example.com"
-    scope: RUN_TIME
+    type: SECRET
   - key: ESCALATION_TELEGRAM_CHAT_ID
     value: "your-escalation-telegram-chat-id"
     scope: RUN_TIME
   - key: DEBUG_TELEGRAM_CHAT_ID
     value: "your-debug-telegram-chat-id"
     scope: RUN_TIME
-  - key: GOOGLE_SERVICE_ACCOUNT_JSON
-    value: "${GOOGLE_SERVICE_ACCOUNT_JSON}"
-    scope: RUN_TIME
-    type: SECRET
+
+  # LLM Settings
   - key: ALLOW_PARALLEL_CALLS
     value: "true"
     scope: RUN_TIME
   - key: MAX_TOOL_ROUNDS
-    value: "20"
+    value: "3"
     scope: RUN_TIME
+  - key: GEMINI_TEMPERATURE
+    value: "0.2"
+    scope: RUN_TIME
+  - key: GEMINI_MODEL
+    value: "gemini-flash-latest"
+    scope: RUN_TIME
+  - key: GEMINI_FALLBACK_MODEL
+    value: "gemini-2.5-flash"
+    scope: RUN_TIME
+
+  # Feature Flags
   - key: DEBUG
     value: "false"
     scope: RUN_TIME
   - key: DEVELOPMENT_MODE
     value: "false"
     scope: RUN_TIME
-  - key: GEMINI_TEMPERATURE
-    value: "0.2"
+  - key: BOT_ENABLED
+    value: "true"
     scope: RUN_TIME
-  - key: GEMINI_MODEL
-    value: "gemini-2.5-flash"
-    scope: RUN_TIME
-  - key: GEMINI_FALLBACK_MODEL
-    value: "gemini-2.5-flash"
-    scope: RUN_TIME
-  - key: GEMINI_MAX_OUTPUT_TOKENS
-    value: "65536"
-    scope: RUN_TIME
-  - key: GEMINI_LITE_MAX_OUTPUT_TOKENS
-    value: "1024"
-    scope: RUN_TIME
-  - key: GEMINI_DEEP_THINKING_MODEL
-    value: "gemini-pro-latest"
-    scope: RUN_TIME
+
+  # Action Feature Flags (tools that write/modify data)
   - key: JIRA_ACTIONS_ENABLED
     value: "true"
     scope: RUN_TIME
@@ -189,21 +157,24 @@ envs:
   - key: GRAFANA_ACTIONS_ENABLED
     value: "true"
     scope: RUN_TIME
+
+  # RAG Settings
   - key: rag__enabled
     value: "true"
     scope: RUN_TIME
   - key: rag__top_k
     value: "5"
     scope: RUN_TIME
+
+  # Metrics
   - key: METRICS_ENABLED
     value: "true"
     scope: RUN_TIME
   - key: METRICS_SCHEDULE_HOUR
     value: "9"
     scope: RUN_TIME
-  - key: BOT_ENABLED
-    value: "true"
-    scope: RUN_TIME
+
+  # Grafana
   - key: GRAFANA_URL
     value: "https://grafana.example.com"
     scope: RUN_TIME
@@ -215,10 +186,13 @@ envs:
     scope: RUN_TIME
     type: SECRET
   - key: GRAFANA_FOLDER_NAME
-    value: "Your Team"
+    value: ""
+    scope: RUN_TIME
+  - key: ORGANIZATION_NAME
+    value: "Your Organization"
     scope: RUN_TIME
   - key: GRAFANA_PANEL_DESCRIPTION_PROMPT
-    value: "You are a system that generates tool descriptions for Grafana dashboard panels. Given a panel with title, description, query, and dashboard variables, create a concise tool description that explains what data this panel shows and what variables it requires."
+    value: "You are a system that generates tool descriptions for Grafana dashboard panels. Given a panel with title, description, query, and dashboard variables, create a concise tool description that explains what data this panel shows and what variables it requires. Format: A tool description suitable for an LLM to understand when to use this panel."
     scope: RUN_TIME
   - key: GRAFANA_ENABLED_PANELS
     value: ""
@@ -230,25 +204,18 @@ envs:
     value: "2"
     scope: RUN_TIME
   - key: GRAFANA_FORCE_FULL_REINDEX
-    value: "false"
+    value: "true"
     scope: RUN_TIME
+
+  # Admin UI
   - key: ALLOWED_VIEWER_EMAILS
     value: "admin@example.com"
     scope: RUN_TIME
   - key: DEFAULT_BROADCAST_GROUPS
     value: ""
     scope: RUN_TIME
-  - key: SUPABASE_KEY
-    value: "${SUPABASE_KEY}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: TELEGRAM_BOT_TOKEN
-    value: "${TELEGRAM_BOT_TOKEN}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: TELEGRAM_BOT_USERNAME
-    value: "YourSupportBot"
-    scope: RUN_TIME
+
+  # JIRA
   - key: JIRA_BASE_URL
     value: "https://your-org.atlassian.net"
     scope: RUN_TIME
@@ -259,19 +226,14 @@ envs:
     value: "${JIRA_API_TOKEN}"
     scope: RUN_TIME
     type: SECRET
-  - key: JIRA_WEBHOOK_SECRET
-    value: "${JIRA_WEBHOOK_SECRET}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: JIRA_ORGANIZATION_FIELD_ID
-    value: "your-jira-org-field-id"
-    scope: RUN_TIME
   - key: JIRA_OPS_CLOUD_ID
     value: "your-jira-ops-cloud-id"
     scope: RUN_TIME
   - key: JIRA_OPS_SCHEDULE_ID
     value: "your-jira-ops-schedule-id"
     scope: RUN_TIME
+
+  # TimescaleDB
   - key: TIMESCALE_HOST
     value: "your-timescale-host.tsdb.cloud.timescale.com"
     scope: RUN_TIME
@@ -288,6 +250,8 @@ envs:
     value: "${TIMESCALE_PASSWORD}"
     scope: RUN_TIME
     type: SECRET
+
+  # Calin Meter API V1
   - key: CALIN_V1_BASE_URL
     value: "http://your-calin-v1-host:6001"
     scope: RUN_TIME
@@ -301,6 +265,8 @@ envs:
   - key: CALIN_V1_COMPANY
     value: "YOUR_COMPANY"
     scope: RUN_TIME
+
+  # Calin Meter API V2
   - key: CALIN_V2_BASE_URL
     value: "http://your-calin-v2-host:9400"
     scope: RUN_TIME
@@ -314,6 +280,8 @@ envs:
   - key: CALIN_V2_COMPANY
     value: "YOUR_COMPANY"
     scope: RUN_TIME
+
+  # VRM (Victron Remote Management)
   - key: VRM_TOKEN
     value: "${VRM_TOKEN}"
     scope: RUN_TIME
@@ -325,9 +293,13 @@ envs:
     value: "${VRM_MQTT_PASSWORD}"
     scope: RUN_TIME
     type: SECRET
+
+  # ChirpStack (LoRaWAN)
   - key: CHIRPSTACK_BASE_URL
     value: "https://lorawan.example.com"
     scope: RUN_TIME
+
+  # Metering Platform API
   - key: METERING_API_URL
     value: "https://your-metering-api.example.com/"
     scope: RUN_TIME
@@ -335,125 +307,6 @@ envs:
     value: "${METERING_BEARER_TOKEN}"
     scope: RUN_TIME
     type: SECRET
-  - key: METERING_API_KEY
-    value: "${METERING_API_KEY}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: CUSTOMER_METER_ACTIONS_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: GRAFANA_PANELS_METADATA
-    value: ""
-    scope: RUN_TIME
-  - key: GRAFANA_AVAILABLE_DASHBOARDS
-    value: ""
-    scope: RUN_TIME
-  - key: GRAFANA_DASHBOARD_VARIABLES
-    value: ""
-    scope: RUN_TIME
-  - key: PAYMENT_PROCESSOR_SECRET_KEY
-    value: "${PAYMENT_PROCESSOR_SECRET_KEY}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: LOKI_URL
-    value: "https://grafana.example.com/loki"
-    scope: RUN_TIME
-  - key: LOKI_USERNAME
-    value: "your-loki-user"
-    scope: RUN_TIME
-  - key: LOKI_PASSWORD
-    value: "${LOKI_PASSWORD}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: NXT_ADDON_DEPLOYMENT_ID
-    value: "your-apps-script-deployment-id"
-    scope: RUN_TIME
-  - key: NXT_ADDON_API_KEY
-    value: "${NXT_ADDON_API_KEY}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: ANANSI_HELPER_DEPLOYMENT_ID
-    value: "your-apps-script-deployment-id"
-    scope: RUN_TIME
-  - key: ANANSI_HELPER_API_KEY
-    value: "${ANANSI_HELPER_API_KEY}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: EQUIPMENT_DIAGNOSTICS_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: JIRA_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: METERS_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: EQUIPMENT_CONTROL_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: CUSTOMER_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: GRAFANA_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: SCHEDULE_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: META_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: GRID_DESIGN_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: SOLAR_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: KNOWLEDGE_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: LOGS_ENABLED
-    value: "false"
-    scope: RUN_TIME
-  - key: CODEBASE_ENABLED
-    value: "false"
-    scope: RUN_TIME
-  - key: PAYMENT_PROCESSOR_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: MCP_DISABLED_TOOLS
-    value: "[]"
-    scope: RUN_TIME
-  - key: GITHUB_TOKEN
-    value: "${GITHUB_TOKEN}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: PLATFORM_GITHUB_REPO
-    value: "your-org/your-platform-repo"
-    scope: RUN_TIME
-  - key: ANANSI_GITHUB_REPO
-    value: "your-org/your-repo"
-    scope: RUN_TIME
-  - key: GRID3_GPKG_PATH
-    value: ""
-    scope: RUN_TIME
-  - key: DO_SPACES_KEY
-    value: "${DO_SPACES_KEY}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: DO_SPACES_SECRET
-    value: "${DO_SPACES_SECRET}"
-    scope: RUN_TIME
-    type: SECRET
-  - key: DO_SPACES_REGION
-    value: "ams3"
-    scope: RUN_TIME
-  - key: MESSAGING_ENABLED
-    value: "true"
-    scope: RUN_TIME
-  - key: REFERENCE_ENABLED
-    value: "true"
-    scope: RUN_TIME
 
 # =============================================================================
 # Ingress Rules
@@ -461,20 +314,25 @@ envs:
 ingress:
   rules:
     - component:
-        name: anansi-bot
+        name: chat-orchestrator
       match:
         path:
           prefix: /chat
     - component:
-        name: anansi-bot
+        name: chat-orchestrator
       match:
         path:
           prefix: /mini-app
     - component:
-        name: anansi-bot
+        name: chat-orchestrator
       match:
         path:
           prefix: /api/mini-app
+    - component:
+        name: tools-service
+      match:
+        path:
+          prefix: /mcp
     - component:
         name: anansi-app
       match:
@@ -486,178 +344,104 @@ ingress:
 # =============================================================================
 services:
   # ---------------------------------------------------------------------------
-  # anansi-bot — Gemini orchestrator + MCP tools (consolidated, no HTTP bridge).
-  # chat_orchestrator/Dockerfile bundles mcp_servers/ on PYTHONPATH.
+  # Service 1: Chat Orchestrator
+  # Main API endpoint for chat interactions
+  # IMPORTANT: Uses Dockerfile to include shared/ and rag_pipeline/ directories
   # ---------------------------------------------------------------------------
-  - name: anansi-bot
+  - name: chat-orchestrator
     github:
-      repo: your-org/your-repo
+      repo: your-org/anansi
       branch: main
       deploy_on_push: true
     dockerfile_path: chat_orchestrator/Dockerfile
     http_port: 8000
     instance_count: 1
-    instance_size_slug: basic-xs  # 1GB RAM (LPP layout + footprints need headroom)
+    instance_size_slug: basic-xxs  # 512MB RAM, 1 vCPU
+    termination:
+      drain_seconds: 30        # Wait for LB to drain before SIGTERM
+      grace_period_seconds: 600  # Covers full 10-min LPP + cleanup (max allowed)
     health_check:
       http_path: /health
       initial_delay_seconds: 10
       period_seconds: 30
+
     envs:
+      # Bridge URL (internal service communication)
+      - key: BRIDGE_URL
+        value: "${tools-service.PRIVATE_URL}"
+        scope: RUN_TIME
+      # Tools service URL (same as BRIDGE_URL, used by user_permissions.py)
+      - key: TOOLS_SERVICE_URL
+        value: "${tools-service.PRIVATE_URL}"
+        scope: RUN_TIME
+
+      # JIRA Configuration
       - key: JIRA_PROJECT_KEY
-        value: "OPS"
+        value: ""
         scope: RUN_TIME
       - key: JIRA_ISSUE_TYPE
-        value: "Task"
+        value: "Support"
         scope: RUN_TIME
+
+      # Response Verification (LLM-as-judge for customer mode)
       - key: VERIFICATION_ENABLED
         value: "true"
         scope: RUN_TIME
       - key: VERIFICATION_DOC_ID
-        value: "your-verification-doc-id"
+        value: "your-verification-doc-id"  # pragma: allowlist secret
         scope: RUN_TIME
       - key: VERIFICATION_MODEL
         value: "gemini-2.5-flash-lite"
         scope: RUN_TIME
-      - key: LANGFUSE_ENABLED
-        value: "true"
+
+      # Mini App Forms (Telegram WebApp popup)
+      - key: MINI_APP_BASE_URL
+        value: "https://your-app.example.com/mini-app/"
         scope: RUN_TIME
-      - key: LANGFUSE_SECRET_KEY
-        value: "${LANGFUSE_SECRET_KEY}"
-        scope: RUN_TIME
-        type: SECRET
-      - key: LANGFUSE_PUBLIC_KEY
-        value: "your-langfuse-public-key"
-        scope: RUN_TIME
-      - key: LANGFUSE_HOST
-        value: "https://cloud.langfuse.com"
-        scope: RUN_TIME
-      - key: CONVERSATION_SUMMARY_ENABLED
-        value: "true"
-        scope: RUN_TIME
-      - key: CONTEXT_FILTER_ENABLED
-        value: "false"
-        scope: RUN_TIME
-      - key: USE_LANGGRAPH_FULL
-        value: "true"
-        scope: RUN_TIME
-      - key: LPP_TEMPLATE_ID
-        value: ""
-        scope: RUN_TIME
-      - key: LPP_OUTPUT_FOLDER_ID
-        value: ""
-        scope: RUN_TIME
-      - key: QGIS_TEMPLATE_FILE_ID
-        value: ""
-        scope: RUN_TIME
-      - key: NIGERIA_IMPORT_TARIFF_SHEET_ID
-        value: ""
-        scope: RUN_TIME
-      - key: NIGERIA_IMPORT_STANDARDS_PDF_ID
-        value: ""
-        scope: RUN_TIME
-      - key: WORKFLOW_PARAMETER_CONFIRMATION
-        value: "true"
-        scope: RUN_TIME
+      # All other env vars inherited from app-level
+
+  # ---------------------------------------------------------------------------
+  # Service 2: Tools Service
+  # REST API bridge for MCP server tools
+  # IMPORTANT: Uses Dockerfile to include shared/ directory
+  # ---------------------------------------------------------------------------
+  - name: tools-service
+    github:
+      repo: your-org/anansi
+      branch: main
+      deploy_on_push: true
+    dockerfile_path: mcp_servers/Dockerfile
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: basic-xxs  # 512MB RAM, 1 vCPU
+    health_check:
+      http_path: /
+      initial_delay_seconds: 10
+      period_seconds: 30
+
+    envs:
+      # Service-specific Feature Flags
       - key: VRM_ACTIONS_ENABLED
         value: "true"
         scope: RUN_TIME
       - key: EQUIPMENT_CONTROL_ACTIONS_ENABLED
         value: "true"
         scope: RUN_TIME
+      # Equipment control whitelist - comma-separated emails
+      # Users in this list can execute /inverters_restart and /comms_reboot commands
       - key: EQUIPMENT_CONTROL_ALLOWED_USERS
         value: "admin@example.com"
         scope: RUN_TIME
-      - key: INLINE_BUTTONS_ENABLED
-        value: "true"
-        scope: RUN_TIME
-      - key: PROCEDURE_BUTTONS_ENABLED
-        value: "true"
-        scope: RUN_TIME
-      - key: MINI_APP_FORMS_ENABLED
-        value: "true"
-        scope: RUN_TIME
-      - key: MINI_APP_BASE_URL
-        value: "https://your-app.example.com/mini-app/"
-        scope: RUN_TIME
-      - key: THREAD_DISENTANGLEMENT_ENABLED
-        value: "true"
-        scope: RUN_TIME
-      - key: LAYOUT_POLE_SPACING_M
-        value: "45.0"
-        scope: RUN_TIME
-      - key: LAYOUT_MAX_DROP_DISTANCE_M
-        value: "40.0"
-        scope: RUN_TIME
-      - key: LAYOUT_TARGET_COVERAGE_PCT
-        value: "90.0"
-        scope: RUN_TIME
-      - key: LAYOUT_SQM_PER_KWP
-        value: "15.5"
-        scope: RUN_TIME
-      - key: LAYOUT_KWP_PER_BUILDING
-        value: "0.25"
-        scope: RUN_TIME
-      - key: LAYOUT_MIN_ESTIMATED_KWP
-        value: "30.0"
-        scope: RUN_TIME
-      - key: LAYOUT_BUILDING_BUFFER_M
-        value: "15.0"
-        scope: RUN_TIME
-      - key: LAYOUT_SITE_SETBACK_M
-        value: "5.0"
-        scope: RUN_TIME
-      - key: LAYOUT_ROAD_SETBACK_M
-        value: "5.0"
-        scope: RUN_TIME
-      - key: LAYOUT_CORRIDOR_CLEARANCE_M
-        value: "10.0"
-        scope: RUN_TIME
-      - key: LAYOUT_CANOPY_THRESHOLD_M
-        value: "5.0"
-        scope: RUN_TIME
-      - key: LAYOUT_MIN_CANDIDATE_SEPARATION_M
-        value: "100.0"
-        scope: RUN_TIME
-      - key: LAYOUT_MAX_CANDIDATES
-        value: "3"
-        scope: RUN_TIME
-      - key: LAYOUT_POLE_DEDUP_DISTANCE_M
-        value: "5.0"
-        scope: RUN_TIME
-      - key: LAYOUT_SNAP_NODE_TOLERANCE_M
-        value: "1.0"
-        scope: RUN_TIME
-      - key: LAYOUT_MERGE_GAP_THRESHOLD_M
-        value: "5.0"
-        scope: RUN_TIME
-      - key: LAYOUT_REDISTRIBUTE_GAP_MAX_M
-        value: "10.0"
-        scope: RUN_TIME
-      - key: ACTIVE_THREAD_WINDOW_MINUTES
-        value: "60"
-        scope: RUN_TIME
-      - key: AWAITING_INPUT_TIMEOUT_MINUTES
-        value: "180"
-        scope: RUN_TIME
-      - key: PERSISTENT_AGENTS_ENABLED
-        value: "true"
-        scope: RUN_TIME
-      - key: EXPERT_INSTRUCTIONS_DOC_ID
-        value: "your-expert-instructions-doc-id"
-        scope: RUN_TIME
-      - key: GEMINI_DEEP_THINKING_MODEL
-        value: "gemini-pro-latest"
-        scope: RUN_TIME
-      - key: LAYOUT_LIGHTNING_RADIUS_M
-        value: "13.5"
-        scope: RUN_TIME
+      # All other env vars inherited from app-level
 
   # ---------------------------------------------------------------------------
-  # anansi-app — Streamlit admin UI + broadcast scheduler (background process).
+  # Service 3: Anansi App
+  # NiceGUI app for chat history, settings, grid design, and broadcasts
+  # Uses Dockerfile to include shared/ for telegram_markdown, etc.
   # ---------------------------------------------------------------------------
   - name: anansi-app
     github:
-      repo: your-org/your-repo
+      repo: your-org/anansi
       branch: main
       deploy_on_push: true
     dockerfile_path: anansi_app/Dockerfile
@@ -665,20 +449,21 @@ services:
     instance_count: 1
     instance_size_slug: basic-xxs
     health_check:
-      http_path: /_stcore/health
+      # NiceGUI app serves /healthz (was Streamlit's /_stcore/health).
+      http_path: /healthz
       initial_delay_seconds: 60
       period_seconds: 30
       timeout_seconds: 10
+
     envs:
-      - key: CHAT_ORCHESTRATOR_URL
-        value: "${anansi-bot.PRIVATE_URL}"
-        scope: RUN_TIME
-      - key: ANANSI_BOT_HEALTH_URL
-        value: "${anansi-bot.PRIVATE_URL}/health"
-        scope: RUN_TIME
       - key: APP_URL
         value: "https://your-app.example.com"
         scope: RUN_TIME
+      # Internal URL for scheduled command execution
+      - key: CHAT_ORCHESTRATOR_URL
+        value: "${chat-orchestrator.PRIVATE_URL}"
+        scope: RUN_TIME
+      # SUPABASE_URL, SUPABASE_KEY, CHAT_DB_URL, CHAT_DB_SERVICE_KEY inherited from app-level
       - key: DIGITALOCEAN_APP_ID
         value: "your-digitalocean-app-id"
         scope: RUN_TIME
@@ -686,6 +471,7 @@ services:
         value: "${DIGITALOCEAN_API_TOKEN}"
         scope: RUN_AND_BUILD_TIME
         type: SECRET
+      # Google OAuth Configuration
       - key: AUTH_CLIENT_ID
         value: "${AUTH_CLIENT_ID}"
         scope: RUN_TIME
@@ -704,6 +490,61 @@ services:
         value: "${AUTH_COOKIE_SECRET}"
         scope: RUN_TIME
         type: SECRET
-      - key: LANGFUSE_HOST
-        value: "https://cloud.langfuse.com"
+      # Telegram (for broadcast sender)
+      - key: TELEGRAM_BOT_TOKEN
+        value: "${TELEGRAM_BOT_TOKEN}"
         scope: RUN_TIME
+        type: SECRET
+      # Admin access list (service-specific override)
+      - key: ALLOWED_VIEWER_EMAILS
+        value: "admin@example.com"
+        scope: RUN_TIME
+      # All other env vars inherited from app-level
+
+# =============================================================================
+# Jobs (Scheduled/One-time tasks)
+# =============================================================================
+# Note: Broadcast scheduler runs as background process in anansi-app service
+# jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: RAG Pipeline (disabled - uncomment to enable)
+  # ---------------------------------------------------------------------------
+  # - name: rag-pipeline
+  #   github:
+  #     repo: your-org/anansi
+  #     branch: main
+  #   source_dir: /
+  #   dockerfile_path: rag_pipeline/Dockerfile
+  #   instance_count: 1
+  #   instance_size_slug: basic-xs
+  #   kind: SCHEDULED
+  #   cron: "0 2 * * *"  # Daily at 2 AM UTC
+  #   envs:
+  #     - key: ENVIRONMENT
+  #       value: "production"
+  #       scope: RUN_TIME
+  #     - key: SUPABASE_SERVICE_KEY
+  #       value: "${SUPABASE_KEY}"
+  #       scope: RUN_TIME
+  #       type: SECRET
+  #     - key: GOOGLE_API_KEY
+  #       value: "${GOOGLE_API_KEY}"
+  #       scope: RUN_TIME
+  #       type: SECRET
+  #     - key: GITHUB_TOKEN
+  #       value: "${GITHUB_TOKEN}"
+  #       scope: RUN_TIME
+  #       type: SECRET
+  #     - key: GITHUB_REPO
+  #       value: "${GITHUB_REPO}"
+  #       scope: RUN_TIME
+  #     - key: GOOGLE_DRIVE_FOLDER_IDS
+  #       value: "${GOOGLE_DRIVE_FOLDER_IDS}"
+  #       scope: RUN_TIME
+  #     - key: GOOGLE_DRIVE_TELEGRAM_CHAT_EXPORTS
+  #       value: "${GOOGLE_DRIVE_TELEGRAM_CHAT_EXPORTS}"
+  #       scope: RUN_TIME
+  #     - key: GOOGLE_SERVICE_ACCOUNT_JSON
+  #       value: "${GOOGLE_SERVICE_ACCOUNT_JSON}"
+  #       scope: RUN_TIME
+  #       type: SECRET

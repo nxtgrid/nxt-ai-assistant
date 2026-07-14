@@ -207,3 +207,45 @@ class TestGenerateSiteLayoutStep:
 
         assert result.state_updates["editable_site_type"] == "ess"
         assert result.state_updates["editable_panel_config"] == "20S2P"
+
+    @pytest.mark.asyncio
+    async def test_deye_technology_family_defaults_to_ess_layout(self, mock_context):
+        """Deye designs use the ESS physical layout even below the kWp threshold."""
+        state = {"technology_family": "deye"}
+        mock_context.get_state = MagicMock(side_effect=lambda k, d=None: state.get(k, d))
+        mock_context.get_parameter_value = MagicMock(
+            side_effect=lambda k: {
+                "editable_total_kwp": "45.5",
+                "editable_site_type": None,
+                "editable_panel_config": None,
+            }.get(k)
+        )
+
+        mock_boundary = Polygon([(0, 0), (60, 0), (60, 50), (0, 50)])
+        fake_layout = MagicMock()
+        fake_layout.total_modules = 40
+        fake_layout.achieved_kwp = 36.4
+        fake_layout.target_kwp = 45.5
+        fake_layout.arrays = [MagicMock()] * 2
+        fake_layout.lightning_positions = [(10, 10)]
+        fake_layout.earth_pit_positions = []
+        fake_layout.cable_routes = [_make_fake_cable_route("dc", 20.0)]
+
+        with (
+            patch(
+                "orchestrator.experts.handlers.package_generator.generate_site_layout._make_synthetic_plant_polygon",
+                return_value=(mock_boundary, "EPSG:32631"),
+            ),
+            patch(
+                "orchestrator.experts.handlers.package_generator.generate_site_layout._project_boundary_to_utm",
+                return_value=mock_boundary,
+            ),
+            patch("asyncio.to_thread", new_callable=AsyncMock) as mock_thread,
+            patch("shared.utils.drive_upload.upload_step_output", new_callable=AsyncMock),
+        ):
+            mock_thread.return_value = (fake_layout, "<xml/>", "cG5nX2RhdGE=")
+            result = await generate_site_layout(mock_context)
+
+        assert result.error is None
+        assert result.state_updates["editable_site_type"] == "ess"
+        assert result.state_updates["editable_panel_config"] == "20S2P"

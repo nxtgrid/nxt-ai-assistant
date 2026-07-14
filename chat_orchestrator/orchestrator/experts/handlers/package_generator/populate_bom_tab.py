@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 from googleapiclient.discovery import build
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.google_auth import get_sheets_write_credentials
 from shared.utils.logging import get_logger
@@ -322,7 +323,19 @@ def create_bom_sheet(
     }
 
 
-@register_step("populate_bom_tab")
+@register_step(
+    "populate_bom_tab",
+    contract=StepContract(
+        description=(
+            "Creates a 'Full BOM' sheet tab in the LPP spreadsheet, populated with "
+            "item name/quantity/estimated cost grouped by Component Type."
+        ),
+        consumes_state=("document_id",),
+        consumes_results=("generate_site_bom", "generate_powerplant_design"),
+        produces_state=("bom_tab_populated",),
+        side_effects="Writes a 'Full BOM' sheet tab via the Sheets API, with cell formatting.",
+    ),
+)
 async def populate_bom_tab(context: StepContext) -> StepResult:
     """Create and populate a Full BOM sheet tab in the LPP spreadsheet.
 

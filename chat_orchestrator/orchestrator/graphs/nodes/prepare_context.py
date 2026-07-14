@@ -426,7 +426,9 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
         try:
             from shared.utils.grid_matcher import find_best_grid_match
 
-            conversation_history = state.get("conversation_history", [])
+            conversation_history = state.get("thread_filtered_history") or state.get(
+                "conversation_history", []
+            )
             recent_messages = conversation_history[-10:]  # Last ~10 messages
             recently_discussed_grid = None
 

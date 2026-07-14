@@ -10,6 +10,7 @@ import asyncio
 import json
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
@@ -21,7 +22,37 @@ LOGGER = get_logger(__name__)
 APPSHEET_RECALC_WAIT_SECONDS = 60
 
 
-@register_step("update_design_distances")
+@register_step(
+    "update_design_distances",
+    contract=StepContract(
+        description=(
+            "Updates the design row with real PV combiner / feeder pillar cable "
+            "distances computed by generate_site_layout, so BOM generation uses "
+            "accurate cable lengths."
+        ),
+        # design_id is a hard requirement: `if not design_id: return
+        # StepResult.failure(...)`.
+        consumes_state=("design_id",),
+        # design_distances_updated: idempotency guard. avg_pv_combiner_distance_m
+        # / feeder_pillar_distance_m: `if avg_pv_combiner is None and
+        # feeder_pillar is None: return StepResult(data={"skipped": True,
+        # ...})` -- a documented, non-fatal skip, not a failure; either one
+        # alone is enough to proceed. site_name: `get_input(...) or
+        # get_state(...) or "site"`, used only for logging/progress messages.
+        optional_consumes_state=(
+            "design_distances_updated",
+            "avg_pv_combiner_distance_m",
+            "feeder_pillar_distance_m",
+            "site_name",
+        ),
+        produces_state=("design_distances_updated",),
+        guard_keys=("design_distances_updated",),
+        side_effects=(
+            "Calls the grid_design_update_design MCP tool; waits 60s for AppSheet "
+            "recalculation on the legacy backend only (the internal engine needs no wait)."
+        ),
+    ),
+)
 async def update_design_distances(context: StepContext) -> StepResult:
     """Update the design row with real distances from site layout.
 

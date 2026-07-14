@@ -11,6 +11,7 @@ from typing import Any, Dict
 import aiohttp
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -79,7 +80,26 @@ async def _send_telegram_photo(
                 return {"success": False, "error": error}
 
 
-@register_step("send_lpp_map_to_telegram")
+@register_step(
+    "send_lpp_map_to_telegram",
+    contract=StepContract(
+        description="Sends the generated distribution map (and site-options map, if any) to the user via Telegram.",
+        # This handler never calls StepResult.failure() at all -- every
+        # missing piece of data (image, site name, options map, candidates)
+        # degrades to a documented non-fatal outcome (a data={"map_sent":
+        # False, "reason": ...} result or simply omitting the bonus
+        # site-options photo), so nothing here is a hard requirement.
+        consumes_state=(),
+        optional_consumes_state=(
+            "map_image_drive_id",
+            "site_name",
+            "site_options_drive_id",
+            "site_candidates",
+        ),
+        consumes_results=("generate_distribution_map",),
+        side_effects="Sends photo(s) to Telegram via the Bot API sendPhoto endpoint; downloads images from Google Drive as a fallback.",
+    ),
+)
 async def send_lpp_map_to_telegram(context: StepContext) -> StepResult:
     """Send the generated map image to Telegram.
 

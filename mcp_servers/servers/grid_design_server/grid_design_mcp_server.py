@@ -32,10 +32,12 @@ from supabase import Client, create_client
 # Load environment variables BEFORE importing shared_code
 load_dotenv()
 
-from servers.grid_design_server import internal_engine
+from servers.grid_design_server import gd_auth, gd_crud, internal_engine
 from servers.grid_design_server.internal_engine import compute_bom_cost_summary
 from shared_code.utils.http_client import HTTPClientMixin
 from shared_code.utils.logger import setup_logger
+
+from shared.auth.auth_service import STAFF_ORG_ID
 
 logger = setup_logger("grid-design-server")
 
@@ -885,6 +887,16 @@ async def handle_list_tools() -> List[types.Tool]:
                         "type": "string",
                         "description": "Community name/location for the grid",
                     },
+                    "technology_family": {
+                        "type": "string",
+                        "description": (
+                            "Power-plant technology family/architecture. Use 'deye' "
+                            "for Deye Hybrid ESS designs and 'victron' for the "
+                            "legacy Victron container architecture."
+                        ),
+                        "enum": ["victron", "deye"],
+                        "default": "victron",
+                    },
                     "inverter_type": {
                         "type": "string",
                         "description": "Inverter type (default: Quattro 15kVA)",
@@ -1067,8 +1079,15 @@ async def handle_list_tools() -> List[types.Tool]:
         types.Tool(
             name="update_design",
             description=(
-                "Update layout-derived distance fields on an existing design. "
-                "Use after site layout to set real cable distances."
+                "Update parameters on an existing design. Accepts any design "
+                "parameter (not just layout distances) — e.g. wp_per_conn_override "
+                "(also called Wp/conn, Wp per connection), regulation_constraint "
+                "(also called Nigerian law/DARES; allowed values 'None'/'Nigeria - "
+                "DARES'), max_connections, technology types (inverter_type, "
+                "battery_type, mppt_type, pv_type), and the layout-derived distance "
+                "fields (Avg Distance to PV Combiner (m), Distance to Feeder Pillar "
+                "(m), Average Service Drop Length (m)). Use after site layout to set "
+                "real cable distances, or any time a design parameter needs to change."
             ),
             inputSchema={
                 "type": "object",
@@ -1080,12 +1099,35 @@ async def handle_list_tools() -> List[types.Tool]:
                     "updates": {
                         "type": "string",
                         "description": (
-                            "JSON object string of column names to new values, e.g. "
-                            '\'{"Avg Distance to PV Combiner (m)": 15.5, '
-                            '"Distance to Feeder Pillar (m)": 12}\'. Allowed columns: '
-                            "Avg Distance to PV Combiner (m), Distance to Feeder "
-                            "Pillar (m), Average Service Drop Length (m)."
+                            "JSON object string of field/column names to new values, "
+                            'e.g. \'{"wp_per_conn_override": 150, "max_connections": 200}\' '
+                            "or the legacy distance-column form "
+                            "'{\"Avg Distance to PV Combiner (m)\": 15.5}'. Accepts any "
+                            "design parameter, not a fixed small whitelist."
                         ),
+                    },
+                    "rerun_auto_design": {
+                        "type": "boolean",
+                        "description": (
+                            "Re-run sizing after applying updates. WARNING: replaces "
+                            "ALL of the design's subassemblies, including any manually "
+                            "added/removed/resized ones, unless `force` is also true."
+                        ),
+                        "default": False,
+                    },
+                    "regenerate_bom": {
+                        "type": "boolean",
+                        "description": "Regenerate the BOM after applying updates.",
+                        "default": False,
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": (
+                            "Required to `rerun_auto_design` when the design has "
+                            "manually-edited subassemblies — without it, the call is "
+                            "refused to protect your manual edits."
+                        ),
+                        "default": False,
                     },
                 },
                 "required": ["design_id", "updates"],
@@ -1094,7 +1136,12 @@ async def handle_list_tools() -> List[types.Tool]:
         ),
         types.Tool(
             name="trigger_bom",
-            description="Trigger BOM generation for a design, wait for completion, and return results.",
+            description=(
+                "Trigger BOM generation for a design, wait for completion, and return "
+                "results. Use when component costs may have changed — this recomputes "
+                "costs from the gd_purchases ledger and replaces gd_bom_items, "
+                "stamping bom_generated_at."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -1116,15 +1163,700 @@ async def handle_list_tools() -> List[types.Tool]:
             description=(
                 "List valid design-creation choices: technology types (inverters, "
                 "batteries, MPPTs, PV panels — from the rental catalogue, with "
-                "assembly classes to tell them apart), SPD type options, regulation "
-                "constraint options, and the form defaults applied when a parameter "
-                "is omitted. Call this before design_and_bom when the user wants to "
-                "choose equipment or override defaults interactively."
+                "assembly classes and compatible technology families to tell them "
+                "apart), technology families, SPD type options, regulation constraint "
+                "options, and the form defaults applied when a parameter is omitted. "
+                "Call this before design_and_bom when the user wants to choose "
+                "equipment or override defaults interactively."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {},
                 "required": [],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="list_design_technology_families",
+            description=(
+                "List first-class design technology families/architectures such as "
+                "victron and deye. Use this for requests like 'redo this design using "
+                "Deye' before editing individual equipment fields. Each family includes "
+                "its default design parameters, compatible subassemblies from "
+                "gd_subassemblies.design_types, and the matching site-layout type."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="create_design",
+            description=(
+                "Create a new design row for a grid WITHOUT auto-sizing or "
+                "generating a BOM by default — the low-drama 'just record it' tool. "
+                "Contrast with design_and_bom, which defaults to auto-sizing AND "
+                "generating a BOM in one call. Creates the grid if it doesn't exist "
+                "by name. `params` accepts the same fields as design_and_bom's flat "
+                "schema (technology choices, connection split, wp_per_conn_override "
+                "— also called Wp/conn, Wp per connection — regulation_constraint — "
+                "also called Nigerian law/DARES, allowed values 'None'/'Nigeria - "
+                "DARES' — 3-phase enforcement, SPD type, distances, tariff), just as "
+                "a JSON blob instead of individual arguments. Set run_auto_design "
+                "and/or generate_bom to true to also size and/or BOM the design in "
+                "the same call."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "grid_name": {
+                        "type": "string",
+                        "description": "Name of the grid (will be created if it doesn't exist)",
+                    },
+                    "design_name": {
+                        "type": "string",
+                        "description": "Name for the new design",
+                    },
+                    "params": {
+                        "type": "string",
+                        "description": (
+                            "JSON object string of additional design parameters, keyed "
+                            "by the same field names as design_and_bom, e.g. "
+                            '\'{"max_connections": 100, "wp_per_conn_override": 150, '
+                            '"regulation_constraint": "Nigeria - DARES"}\'.'
+                        ),
+                        "default": "{}",
+                    },
+                    "run_auto_design": {
+                        "type": "boolean",
+                        "description": (
+                            "Run auto-design sizing after creating the design row "
+                            "(default: false — opposite of design_and_bom's default, "
+                            "since this tool is explicitly the 'just record it' path)."
+                        ),
+                        "default": False,
+                    },
+                    "generate_bom": {
+                        "type": "boolean",
+                        "description": (
+                            "Generate a BOM after creating (and, if requested, sizing) "
+                            "the design (default: false — opposite of design_and_bom's "
+                            "default)."
+                        ),
+                        "default": False,
+                    },
+                },
+                "required": ["grid_name", "design_name"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="get_design",
+            description=(
+                "Return current design parameters, energy specs, and "
+                "design_parameters for an existing design — use before proposing a "
+                "parameter change so you can quote current values."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "design_id": {
+                        "type": "string",
+                        "description": "UNIQUEID of the design to fetch",
+                    },
+                },
+                "required": ["design_id"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="list_design_artifacts",
+            description=(
+                "List artifact types (maps, layouts, QGIS projects, etc.) generated "
+                "for this design, with version counts and the latest version's "
+                "metadata. Use before get_design_artifact to see what's available."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "design_id": {
+                        "type": "string",
+                        "description": "UNIQUEID of the design",
+                    },
+                },
+                "required": ["design_id"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="get_design_artifact",
+            description=(
+                "Fetch one version of a generated design artifact (e.g. a "
+                "site map image or QGIS project file). `version` is a 0-based index "
+                "into the artifact's version history, newest first — 0 is the "
+                "latest version, 1 is the one before that, etc. Stale or otherwise "
+                "unreachable versions (files removed from Drive) are automatically "
+                "skipped in favor of the next available older version. The "
+                "returned entry includes a `web_view_link` — relay this link to "
+                "the user (Telegram unfurls Drive links)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "design_id": {
+                        "type": "string",
+                        "description": "UNIQUEID of the design",
+                    },
+                    "artifact_type": {
+                        "type": "string",
+                        "description": (
+                            "The artifact type to fetch. Artifact types vary by workflow "
+                            "and design — call list_design_artifacts first to see what's "
+                            "actually available for this design, e.g. 'map_image', "
+                            "'distribution_design_draft', or 'site_layout_png'."
+                        ),
+                    },
+                    "version": {
+                        "type": "integer",
+                        "description": (
+                            "0-based version index, newest first. 0 = latest "
+                            "(default). Out-of-range or all-stale/unreachable "
+                            "versions return an error."
+                        ),
+                        "default": 0,
+                    },
+                },
+                "required": ["design_id", "artifact_type"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="run_auto_design",
+            description=(
+                "Re-run sizing (inverter/battery/MPPT/PV selection, kWp/kWh/kVA) for "
+                "an existing design, optionally applying parameter overrides first. "
+                "WARNING: re-running auto-design REPLACES ALL of the design's "
+                "subassemblies. If any subassembly on this design has been manually "
+                "added, removed, or resized, the call is blocked unless force=true — "
+                "which discards those manual edits."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "design_id": {
+                        "type": "string",
+                        "description": "UNIQUEID of the design to (re-)size",
+                    },
+                    "param_overrides": {
+                        "type": "string",
+                        "description": (
+                            "JSON object string of parameter overrides to apply before "
+                            "re-sizing, e.g. '{\"wp_per_conn_override\": 150}'."
+                        ),
+                        "default": "{}",
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": (
+                            "Required when the design has manually-edited "
+                            "subassemblies — without it, the call is refused to "
+                            "protect your manual edits."
+                        ),
+                        "default": False,
+                    },
+                },
+                "required": ["design_id"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="change_design_technology",
+            description=(
+                "Change an existing design to a first-class technology family such "
+                "as 'deye' or 'victron'. Prefer this over manually editing "
+                "inverter_type/battery_type for requests like 'redo this design "
+                "using Deye'. Applies the family-compatible equipment defaults, "
+                "optionally reruns auto-design and BOM, and returns the matching "
+                "site_layout_type hint for LPP artifact reruns."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "design_id": {
+                        "type": "string",
+                        "description": "UNIQUEID of the design to convert",
+                    },
+                    "technology_family": {
+                        "type": "string",
+                        "description": "Target technology family",
+                        "enum": ["victron", "deye"],
+                    },
+                    "rerun_auto_design": {
+                        "type": "boolean",
+                        "description": "Rerun auto-design after applying family defaults",
+                        "default": True,
+                    },
+                    "regenerate_bom": {
+                        "type": "boolean",
+                        "description": "Regenerate BOM after applying family defaults",
+                        "default": True,
+                    },
+                    "force": {
+                        "type": "boolean",
+                        "description": (
+                            "Required when manually-edited design subassemblies should "
+                            "be replaced by the family auto-design output."
+                        ),
+                        "default": False,
+                    },
+                },
+                "required": ["design_id", "technology_family"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="duplicate_design",
+            description=(
+                "Create a new design cloned from an existing one, with optional "
+                "parameter overrides — e.g. 'new design like X but with Wp/conn 150 "
+                "instead of 120'. Clones onto the same grid as the source design."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_design_id": {
+                        "type": "string",
+                        "description": "UNIQUEID of the design to clone",
+                    },
+                    "new_design_name": {
+                        "type": "string",
+                        "description": "Name for the cloned design",
+                    },
+                    "param_overrides": {
+                        "type": "string",
+                        "description": (
+                            "JSON object string of design parameters to override on "
+                            "the clone, e.g. '{\"wp_per_conn_override\": 150}'."
+                        ),
+                        "default": "{}",
+                    },
+                    "run_auto_design": {
+                        "type": "boolean",
+                        "description": "Run auto-design sizing on the clone (default: true).",
+                        "default": True,
+                    },
+                    "generate_bom": {
+                        "type": "boolean",
+                        "description": "Generate a BOM for the clone (default: true).",
+                        "default": True,
+                    },
+                },
+                "required": ["source_design_id", "new_design_name"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="list_design_subassemblies",
+            description="List the active subassembly instances on an existing design.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "design_id": {
+                        "type": "string",
+                        "description": "UNIQUEID of the design",
+                    },
+                },
+                "required": ["design_id"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="add_subassembly",
+            description=(
+                "Add a subassembly instance to an existing design by catalogue name "
+                "(fuzzy-matched — if the name is ambiguous, the closest candidates "
+                "are returned instead of an arbitrary guess). Marks the design as "
+                "manually-edited, which blocks a future run_auto_design/update_design "
+                "rerun_auto_design call unless force=true is passed there."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "design_id": {
+                        "type": "string",
+                        "description": "UNIQUEID of the design to add the subassembly to",
+                    },
+                    "subassembly_name": {
+                        "type": "string",
+                        "description": (
+                            "Name of the subassembly in the catalogue (fuzzy-matched; "
+                            "closest candidates are returned if ambiguous)."
+                        ),
+                    },
+                    "qty": {
+                        "type": "number",
+                        "description": "Quantity of this subassembly to add",
+                    },
+                },
+                "required": ["design_id", "subassembly_name", "qty"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="remove_subassembly",
+            description=(
+                "Remove (soft-delete) a subassembly instance from a design. Requires "
+                "the design_subassembly_row_id from list_design_subassemblies — NOT "
+                "the design id. Marks the design as manually-edited, which blocks a "
+                "future run_auto_design/update_design rerun_auto_design call unless "
+                "force=true is passed there."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "design_subassembly_row_id": {
+                        "type": "string",
+                        "description": (
+                            "The row id of the design subassembly to remove, from "
+                            "list_design_subassemblies (not the design id)."
+                        ),
+                    },
+                },
+                "required": ["design_subassembly_row_id"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="set_subassembly_qty",
+            description=(
+                "Change the quantity of a subassembly instance already on a design "
+                "(kWp/kWh/kVA on the row are scaled proportionally). Requires the "
+                "design_subassembly_row_id from list_design_subassemblies — NOT the "
+                "design id. Marks the design as manually-edited, which blocks a "
+                "future run_auto_design/update_design rerun_auto_design call unless "
+                "force=true is passed there."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "design_subassembly_row_id": {
+                        "type": "string",
+                        "description": (
+                            "The row id of the design subassembly to update, from "
+                            "list_design_subassemblies (not the design id)."
+                        ),
+                    },
+                    "qty": {
+                        "type": "number",
+                        "description": "New quantity for this subassembly instance",
+                    },
+                },
+                "required": ["design_subassembly_row_id", "qty"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="list_subassembly_components",
+            description=(
+                "Catalogue-level (staff-only): lists what a subassembly TEMPLATE is "
+                "made of — components and/or nested subassemblies — as opposed to "
+                "list_design_subassemblies, which lists subassembly instances on a "
+                "specific design."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "subassembly_id": {
+                        "type": "string",
+                        "description": "ID of the subassembly template",
+                    },
+                },
+                "required": ["subassembly_id"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="add_subassembly_component",
+            description=(
+                "Catalogue-level (staff-only): add a child component or nested "
+                "subassembly to a subassembly TEMPLATE. This is a GLOBAL catalogue "
+                "edit — it affects EVERY design that uses this subassembly template "
+                "on its next BOM/auto-design regen, not just one design. Exactly one "
+                "of component_name or child_subassembly_name must be given. Nesting a "
+                "subassembly inside something it already (directly or indirectly) "
+                "contains is rejected as a circular reference. Consider "
+                "duplicate_subassembly first if you want a design-specific variant "
+                "instead of changing the shared template."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "subassembly_id": {
+                        "type": "string",
+                        "description": "ID of the subassembly template to add a child to",
+                    },
+                    "component_name": {
+                        "type": "string",
+                        "description": (
+                            "Name of the plain component to add (fuzzy-matched). "
+                            "Exactly one of component_name/child_subassembly_name "
+                            "must be given."
+                        ),
+                    },
+                    "child_subassembly_name": {
+                        "type": "string",
+                        "description": (
+                            "Name of the subassembly to nest as a child (fuzzy-"
+                            "matched). Exactly one of component_name/"
+                            "child_subassembly_name must be given. Rejected if it "
+                            "would create a circular reference."
+                        ),
+                    },
+                    "qty": {
+                        "type": "number",
+                        "description": "Quantity of this child per parent unit (default: 1)",
+                        "default": 1,
+                    },
+                    "unit": {
+                        "type": "string",
+                        "description": "Unit label for the quantity (optional)",
+                    },
+                },
+                "required": ["subassembly_id"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="remove_subassembly_component",
+            description=(
+                "Catalogue-level (staff-only): remove a child component/subassembly "
+                "from a subassembly TEMPLATE. GLOBAL catalogue edit — affects every "
+                "design using this template on its next BOM/auto-design regen."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "row_id": {
+                        "type": "string",
+                        "description": (
+                            "Row id from list_subassembly_components identifying the "
+                            "child to remove."
+                        ),
+                    },
+                },
+                "required": ["row_id"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="set_subassembly_component_qty",
+            description=(
+                "Catalogue-level (staff-only): change the quantity of a child "
+                "component/subassembly within a subassembly TEMPLATE. GLOBAL "
+                "catalogue edit — affects every design using this template on its "
+                "next BOM/auto-design regen."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "row_id": {
+                        "type": "string",
+                        "description": (
+                            "Row id from list_subassembly_components identifying the "
+                            "child to update."
+                        ),
+                    },
+                    "qty": {
+                        "type": "number",
+                        "description": "New quantity for this child within the template",
+                    },
+                },
+                "required": ["row_id", "qty"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="duplicate_subassembly",
+            description=(
+                "Catalogue-level (staff-only): clone a subassembly TEMPLATE (all "
+                "fields plus its full component list) under a new description. Use "
+                "before editing composition to create a design-specific variant "
+                "without affecting the original template used elsewhere."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "source_subassembly_id": {
+                        "type": "string",
+                        "description": "ID of the subassembly template to clone",
+                    },
+                    "new_description": {
+                        "type": "string",
+                        "description": "Description for the cloned subassembly",
+                    },
+                },
+                "required": ["source_subassembly_id", "new_description"],
+            },
+            visible_to_customer=False,
+        ),
+        # ── Generic gd_* CRUD (Phase E): long-tail escape hatch over every
+        # table not covered by a dedicated tool above. ─────────────────────
+        types.Tool(
+            name="gd_describe_tables",
+            description=(
+                "Returns the full registry of gd_* tables available to "
+                "gd_list_rows/gd_get_row/gd_upsert_row/gd_delete_row, each with its "
+                "scope, writable columns, and a one-line description. Scopes: "
+                "'grid' tables are anchored to a single grid/site and require a grid "
+                "filter on every read/write; 'catalog' tables are global reference "
+                "data (shared across every grid) and are staff-only, since a write "
+                "there affects every grid that references it; 'denied' tables "
+                "(identity/permission surfaces) are never accessible through generic "
+                "CRUD. Call this BEFORE attempting to use the other four generic "
+                "tools — it's the schema map that tells you which table to use and "
+                "what columns it accepts."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="gd_list_rows",
+            description=(
+                "Generic row listing for any gd_* table from gd_describe_tables. "
+                "For 'grid'-scoped tables you MUST supply a grid filter — either "
+                "grid_name or filters['grid']/filters['grid_id'] — otherwise the "
+                "call is rejected; 'catalog' tables are staff-only and ignore "
+                "grid_name. Prefer the dedicated Phase A tools (get_design, "
+                "list_design_subassemblies, list_subassembly_components, etc.) for "
+                "common operations — reserve this for the long tail of tables that "
+                "don't have a purpose-built tool."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Bare table name from gd_describe_tables (no 'gd_' prefix), e.g. 'designs'",
+                    },
+                    "grid_name": {
+                        "type": "string",
+                        "description": (
+                            "Required for grid-scoped tables unless a grid id is "
+                            "already known via filters; ignored for catalog tables."
+                        ),
+                    },
+                    "filters": {
+                        "type": "string",
+                        "description": (
+                            "JSON object string of additional exact-match column "
+                            'filters, e.g. \'{"status": "active"}\'.'
+                        ),
+                    },
+                    "limit": {
+                        "type": "number",
+                        "description": "Max rows to return",
+                        "default": 50,
+                    },
+                    "include_inactive": {
+                        "type": "boolean",
+                        "description": "Include soft-deleted (active=false) rows",
+                        "default": False,
+                    },
+                },
+                "required": ["table"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="gd_get_row",
+            description=(
+                "Fetch a single row by id from any gd_* table from gd_describe_tables, "
+                "with the same scope-based access rules as gd_list_rows (grid-scoped "
+                "tables check the row's own grid; catalog tables are staff-only; "
+                "denied tables are never accessible)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Bare table name from gd_describe_tables (no 'gd_' prefix)",
+                    },
+                    "row_id": {
+                        "type": "string",
+                        "description": "Row id to fetch",
+                    },
+                },
+                "required": ["table", "row_id"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="gd_upsert_row",
+            description=(
+                "Create or update a row in any gd_* table from gd_describe_tables. "
+                "Omit row_id to create a new row; provide it to update an existing "
+                "one. Call gd_describe_tables first to see this table's "
+                "writable_columns — unknown columns are rejected. created_by/"
+                "updated_by are stamped automatically from the caller and can never "
+                "be set here. IMPORTANT: writes to a 'catalog'-scope table affect "
+                "EVERY grid that references that row — confirm with the user before "
+                "writing to a catalog table. Soft-deleted rows are NOT resurrected "
+                "by omitting 'active' from values (there is no 'active' column in "
+                "any writable_columns set; it's server-managed — use gd_delete_row "
+                "for delete, not an upsert). Moving a row's grid-anchor column (e.g. "
+                "a design's 'grid') to a different grid re-checks access against the "
+                "new grid, not just the row's current one."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Bare table name from gd_describe_tables (no 'gd_' prefix)",
+                    },
+                    "row_id": {
+                        "type": "string",
+                        "description": "Omit to create a new row; provide to update an existing one",
+                    },
+                    "values": {
+                        "type": "string",
+                        "description": (
+                            "JSON object string of column: value pairs to write. Call "
+                            "gd_describe_tables first to see writable_columns for this "
+                            "table — unknown columns are rejected."
+                        ),
+                    },
+                },
+                "required": ["table", "values"],
+            },
+            visible_to_customer=False,
+        ),
+        types.Tool(
+            name="gd_delete_row",
+            description=(
+                "SOFT delete a row (sets active=false) in any gd_* table from "
+                "gd_describe_tables — never a hard delete. Check with the user "
+                "before deleting rows in a 'catalog'-scope table, since that has "
+                "global impact across every grid that references it. No automatic "
+                "referential check is performed — other rows may still reference "
+                "this one after it's deactivated."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "table": {
+                        "type": "string",
+                        "description": "Bare table name from gd_describe_tables (no 'gd_' prefix)",
+                    },
+                    "row_id": {
+                        "type": "string",
+                        "description": "Row id to soft-delete",
+                    },
+                },
+                "required": ["table", "row_id"],
             },
             visible_to_customer=False,
         ),
@@ -1138,6 +1870,7 @@ async def handle_list_tools() -> List[types.Tool]:
 # when supplied (design_writer applies the AppSheet form defaults to the rest).
 _INTERNAL_PASSTHROUGH_KEYS = (
     "community",
+    "technology_family",
     "pv_inverter_type",
     "initial_residential_connections",
     "initial_business_connections",
@@ -1172,8 +1905,64 @@ _APPSHEET_UNSUPPORTED_KEYS = (
     "avg_distance_to_pv_combiner_m",
     "distance_to_feeder_pillar_m",
     "auto_design",
+    "technology_family",
     "created_by",
 )
+
+
+async def _require_grid_access_for_design(design_id: str, organization_id: Optional[int]) -> None:
+    """Resolve a design's grid and enforce grid-level access before any read/write.
+
+    Deliberately raises the SAME generic message whether the design doesn't
+    exist or exists but belongs to a grid the caller can't access — revealing
+    neither fact avoids leaking another organization's grid name or turning
+    this into an existence oracle for design_ids the caller doesn't own.
+    """
+    denial = ValueError(f"You don't have access to design {design_id}, or it doesn't exist.")
+    grid_name = await asyncio.to_thread(gd_auth.resolve_grid_name_for_design, design_id)
+    if grid_name is None:
+        raise denial from None
+    try:
+        await gd_auth.assert_grid_access(grid_name, organization_id)
+    except gd_auth.GridAccessDenied:
+        raise denial from None
+
+
+async def _require_grid_access_for_subassembly_row(
+    row_id: str, organization_id: Optional[int]
+) -> str:
+    """Resolve a design_subassembly row's design/grid and enforce access.
+
+    Returns the design_id since some callers (none currently, but kept for
+    symmetry/future use) may need it after the check.
+
+    Same generic-denial reasoning as `_require_grid_access_for_design` applies
+    here: a missing row_id and a row_id that resolves to a design/grid the
+    caller can't access must be indistinguishable to the caller. So this
+    function's OWN "row not found" path AND the delegated design-level check's
+    failure (which would otherwise surface a *different*-worded, design_id-
+    bearing message) are both collapsed into this single row-scoped wording —
+    otherwise the two differently-worded denials would themselves become the
+    oracle this fix is meant to close.
+    """
+    denial = ValueError(f"You don't have access to row {row_id}, or it doesn't exist.")
+    design_id: Optional[str] = await internal_engine.get_design_id_for_subassembly_row(row_id)
+    if design_id is None:
+        raise denial from None
+    try:
+        await _require_grid_access_for_design(design_id, organization_id)
+    except ValueError:
+        raise denial from None
+    return design_id
+
+
+async def _require_staff_org(organization_id: Optional[int], action_label: str) -> None:
+    """Catalogue-level edits (subassembly templates, not per-design instances) are
+    staff-only: a change here affects EVERY design across every organization that
+    references this subassembly/component template on its next auto_design/BOM regen.
+    """
+    if organization_id != STAFF_ORG_ID:
+        raise gd_auth.GridAccessDenied(f"You don't have access to {action_label}.")
 
 
 def _parse_updates(raw: Any) -> Dict[str, Any]:
@@ -1207,20 +1996,164 @@ def _internal_design_args(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def _handle_internal_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
-    """Route a tool call to the internal (Chat DB) engine backend."""
+    """Route a tool call to the internal (Chat DB) engine backend.
+
+    Every branch enforces grid-level (or staff-only, for catalogue-level
+    tools) access BEFORE calling into internal_engine. organization_id is
+    injected into `arguments` non-LLM-controllably by tool_executor.py — it
+    is not part of any tool's inputSchema.
+    """
+    organization_id = arguments.get("organization_id")
+
     if name == "design_and_bom":
+        await gd_auth.assert_grid_access(arguments["grid_name"], organization_id)
         result = await internal_engine.design_and_bom(_internal_design_args(arguments))
     elif name == "find_grid":
+        await gd_auth.assert_grid_access(arguments["grid_name"], organization_id)
         result = await internal_engine.find_grid(arguments["grid_name"])
+    elif name == "create_design":
+        await gd_auth.assert_grid_access(arguments["grid_name"], organization_id)
+        params = _parse_updates(arguments.get("params", "{}"))
+        args = {
+            "grid_name": arguments["grid_name"],
+            "design_name": arguments["design_name"],
+            **params,
+            "auto_design": arguments.get("run_auto_design", False),
+            "wait_for_bom": arguments.get("generate_bom", False),
+        }
+        result = await internal_engine.design_and_bom(args)
     elif name == "get_design_bom":
+        await _require_grid_access_for_design(arguments["design_id"], organization_id)
         result = await internal_engine.get_design_bom(arguments["design_id"])
     elif name == "update_design":
+        await _require_grid_access_for_design(arguments["design_id"], organization_id)
         result = await internal_engine.update_design(
-            arguments["design_id"], _parse_updates(arguments["updates"])
+            arguments["design_id"],
+            _parse_updates(arguments["updates"]),
+            rerun_auto_design=arguments.get("rerun_auto_design", False),
+            regenerate_bom=arguments.get("regenerate_bom", False),
+            force=arguments.get("force", False),
         )
     elif name == "trigger_bom":
+        await _require_grid_access_for_design(arguments["design_id"], organization_id)
         result = await internal_engine.trigger_bom(
             arguments["design_id"], arguments.get("grid_name", "")
+        )
+    elif name == "get_design":
+        await _require_grid_access_for_design(arguments["design_id"], organization_id)
+        result = await internal_engine.get_design(arguments["design_id"])
+    elif name == "list_design_artifacts":
+        await _require_grid_access_for_design(arguments["design_id"], organization_id)
+        result = await internal_engine.list_design_artifacts(arguments["design_id"])
+    elif name == "get_design_artifact":
+        await _require_grid_access_for_design(arguments["design_id"], organization_id)
+        result = await internal_engine.get_design_artifact(
+            arguments["design_id"], arguments["artifact_type"], arguments.get("version", 0)
+        )
+    elif name == "run_auto_design":
+        await _require_grid_access_for_design(arguments["design_id"], organization_id)
+        param_overrides = _parse_updates(arguments.get("param_overrides", "{}"))
+        result = await internal_engine.run_auto_design(
+            arguments["design_id"], param_overrides, arguments.get("force", False)
+        )
+    elif name == "change_design_technology":
+        await _require_grid_access_for_design(arguments["design_id"], organization_id)
+        result = await internal_engine.change_design_technology(
+            arguments["design_id"],
+            arguments["technology_family"],
+            rerun_auto_design=arguments.get("rerun_auto_design", True),
+            regenerate_bom=arguments.get("regenerate_bom", True),
+            force=arguments.get("force", False),
+        )
+    elif name == "duplicate_design":
+        await _require_grid_access_for_design(arguments["source_design_id"], organization_id)
+        param_overrides = _parse_updates(arguments.get("param_overrides", "{}"))
+        result = await internal_engine.duplicate_design(
+            arguments["source_design_id"],
+            arguments["new_design_name"],
+            param_overrides,
+            arguments.get("run_auto_design", True),
+            arguments.get("generate_bom", True),
+        )
+    elif name == "list_design_subassemblies":
+        await _require_grid_access_for_design(arguments["design_id"], organization_id)
+        result = await internal_engine.list_design_subassemblies(arguments["design_id"])
+    elif name == "add_subassembly":
+        await _require_grid_access_for_design(arguments["design_id"], organization_id)
+        result = await internal_engine.add_subassembly(
+            arguments["design_id"], arguments["subassembly_name"], arguments["qty"]
+        )
+    elif name == "remove_subassembly":
+        await _require_grid_access_for_subassembly_row(
+            arguments["design_subassembly_row_id"], organization_id
+        )
+        result = await internal_engine.remove_subassembly(arguments["design_subassembly_row_id"])
+    elif name == "set_subassembly_qty":
+        await _require_grid_access_for_subassembly_row(
+            arguments["design_subassembly_row_id"], organization_id
+        )
+        result = await internal_engine.set_subassembly_qty(
+            arguments["design_subassembly_row_id"], arguments["qty"]
+        )
+    elif name == "list_subassembly_components":
+        await _require_staff_org(organization_id, "subassembly catalogue composition")
+        result = await internal_engine.list_subassembly_components(arguments["subassembly_id"])
+    elif name == "add_subassembly_component":
+        await _require_staff_org(organization_id, "subassembly catalogue composition")
+        result = await internal_engine.add_subassembly_component(
+            arguments["subassembly_id"],
+            arguments.get("component_name"),
+            arguments.get("child_subassembly_name"),
+            arguments.get("qty", 1),
+            arguments.get("unit"),
+        )
+    elif name == "remove_subassembly_component":
+        await _require_staff_org(organization_id, "subassembly catalogue composition")
+        result = await internal_engine.remove_subassembly_component(arguments["row_id"])
+    elif name == "set_subassembly_component_qty":
+        await _require_staff_org(organization_id, "subassembly catalogue composition")
+        result = await internal_engine.set_subassembly_component_qty(
+            arguments["row_id"], arguments["qty"]
+        )
+    elif name == "duplicate_subassembly":
+        await _require_staff_org(organization_id, "subassembly catalogue cloning")
+        result = await internal_engine.duplicate_subassembly(
+            arguments["source_subassembly_id"], arguments["new_description"]
+        )
+    elif name == "gd_describe_tables":
+        result = await gd_crud.gd_describe_tables()
+    elif name == "gd_list_rows":
+        filters = _parse_updates(arguments.get("filters", "{}"))
+        grid_name = arguments.get("grid_name")
+        # Precedence: the dedicated `grid_name` argument wins over a
+        # `grid_name` the model may have embedded inside the `filters` JSON
+        # instead — it's a typed, purpose-built field, so treat any
+        # JSON-embedded value as a fallback rather than letting it silently
+        # override an explicit top-level arg.
+        if grid_name:
+            filters["grid_name"] = grid_name
+        result = await gd_crud.gd_list_rows(
+            arguments["table"],
+            organization_id,
+            filters=filters,
+            limit=arguments.get("limit", 50),
+            include_inactive=arguments.get("include_inactive", False),
+        )
+    elif name == "gd_get_row":
+        result = await gd_crud.gd_get_row(arguments["table"], arguments["row_id"], organization_id)
+    elif name == "gd_upsert_row":
+        user_email = arguments.get("user_email")
+        values = _parse_updates(arguments["values"])
+        result = await gd_crud.gd_upsert_row(
+            arguments["table"],
+            organization_id,
+            user_email,
+            row_id=arguments.get("row_id"),
+            values=values,
+        )
+    elif name == "gd_delete_row":
+        result = await gd_crud.gd_delete_row(
+            arguments["table"], arguments["row_id"], organization_id
         )
     else:
         result = {"success": False, "error": f"Unknown tool: {name}"}
@@ -1249,11 +2182,20 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
         if name == "list_design_options":
             result = await internal_engine.list_design_options()
             return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+        if name == "list_design_technology_families":
+            result = await internal_engine.list_design_technology_families()
+            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
         if GRID_DESIGN_BACKEND == "internal":
             return await _handle_internal_tool(name, arguments)
 
         # ── Legacy AppSheet backend (GRID_DESIGN_BACKEND=appsheet) ──
+        # SECURITY NOTE: this rollback path does NOT enforce grid-level
+        # authorization (gd_auth.assert_grid_access) the way the internal
+        # backend does above. Switching to appsheet reverts to pre-Phase-A
+        # behavior where any caller can read/write any grid's design. Only
+        # use this for emergency rollback, and be aware the access-control
+        # model is backend-dependent until this path gets its own auth gate.
         if not GRID_DESIGN_APP_ID or not GRID_DESIGN_APP_KEY:
             return [
                 types.TextContent(

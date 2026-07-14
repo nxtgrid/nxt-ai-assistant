@@ -732,7 +732,16 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
             padded = f" {input_lower} "  # pad so triggers like " lpp " match at word boundaries
             for nl_command, nl_packet_type, triggers in NL_EXPERT_TRIGGERS:
                 if any(t in padded for t in triggers):
-                    key_entity = _extract_key_entity(user_input, nl_packet_type)
+                    key_entity = None
+                    if nl_packet_type == "light_preliminary_package":
+                        from orchestrator.services.command_parser import parse_lpp_anchor_args
+
+                        anchor = parse_lpp_anchor_args(user_input)
+                        if anchor:
+                            key_entity = f"{anchor['latitude']},{anchor['longitude']}"
+
+                    if not key_entity:
+                        key_entity = _extract_key_entity(user_input, nl_packet_type)
                     if key_entity:
                         user_input = f"{nl_command} {key_entity}"
                         input_lower = user_input.lower()
@@ -743,6 +752,19 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
                             f"{nl_command} → synthetic command '{user_input}'"
                         )
                         break
+
+        if not matched_command:
+            intent_route = state.get("planned_expert_route")
+            if intent_route:
+                route_args = intent_route.get("args") or intent_route.get("key_entity") or ""
+                user_input = f"{intent_route['command']} {route_args}".strip()
+                input_lower = user_input.lower()
+                matched_command = intent_route["command"]
+                matched_packet_type = intent_route["packet_type"]
+                LOGGER.info(
+                    f"Planned expert routing matched {matched_command} "
+                    f"for packet_type={matched_packet_type}"
+                )
 
         # =====================================================================
         # Check 3: Resumable packets - ONLY if same type AND same site

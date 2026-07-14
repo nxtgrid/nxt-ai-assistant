@@ -23,11 +23,11 @@ COPY shared/ /app/shared/
 # Set Python path so shared/ is importable
 ENV PYTHONPATH=/app
 
-# Expose Streamlit port
+# Expose the web port (NiceGUI app; health check served at /healthz)
 EXPOSE 8501
 
 RUN adduser --disabled-password --gecos "" appuser
 USER appuser
 
-# Run the application
+# Run the application (scheduler + NiceGUI app; see start.sh)
 CMD ["bash", "start.sh"]

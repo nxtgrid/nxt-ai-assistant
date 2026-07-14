@@ -1,0 +1,31 @@
+-- Add a state_version column to agent_work_packets (run in the Chat DB /
+-- Supabase SQL editor).
+--
+-- WorkPacketService.update_state() historically did a plain
+-- read-then-merge-then-write: fetch the packet, merge state_updates into
+-- packet_state, then an unconditional `.update({...}).eq("id", packet["id"])`.
+-- If two callers update the same packet concurrently (e.g. a running full
+-- workflow AND a run_single_step call from some future LLM-facing tool), the
+-- second writer's update can silently clobber the first writer's changes --
+-- a classic lost update, since neither writer's UPDATE is conditioned on
+-- anything having changed since it read the row.
+--
+-- state_version is a monotonically-incrementing counter used for optimistic
+-- concurrency: update_state() now conditions its UPDATE on both `id` and the
+-- `state_version` value it read moments earlier (the same conditional-update
+-- pattern already used by claim_signing() in work_packet_service.py). If a
+-- concurrent writer commits in between, the conditional update matches zero
+-- rows; update_state() detects this, re-fetches the packet, re-merges its
+-- state_updates on top of the FRESH packet_state, and retries (bounded by
+-- max_retries).
+--
+-- NOT NULL in both the migration and this file's mirror (unlike some other
+-- columns mirrored elsewhere in this repo without NOT NULL) because every
+-- comparison in the optimistic-concurrency check needs a concrete integer to
+-- condition on -- a NULL state_version would never satisfy a
+-- `.eq("state_version", N)` filter and would permanently strand that
+-- packet's updates in the retry-then-fail path. Defaults to 0 so existing
+-- rows are unaffected and immediately participate correctly.
+
+ALTER TABLE agent_work_packets
+    ADD COLUMN IF NOT EXISTS state_version integer NOT NULL DEFAULT 0;

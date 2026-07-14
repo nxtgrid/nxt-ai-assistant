@@ -1,0 +1,119 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: Lint & format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install pre-commit
+        run: pip install pre-commit
+      - name: Run pre-commit
+        run: pre-commit run --all-files
+
+  test:
+    name: Tests (chat_orchestrator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        working-directory: chat_orchestrator
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -e .[dev]
+      - name: Run tests
+        working-directory: chat_orchestrator
+        env:
+          # Minimal env for unit tests — no real credentials needed
+          GOOGLE_API_KEY: test-key  # pragma: allowlist secret
+          CHAT_DB_URL: https://placeholder.supabase.co  # pragma: allowlist secret
+          CHAT_DB_SERVICE_KEY: placeholder  # pragma: allowlist secret
+        run: |
+          source .venv/bin/activate
+          pytest tests/ -x -q
+
+  validate:
+    name: Validate (mcp_servers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Validate tool_definitions.json
+        run: python3 -c "import json; json.load(open('mcp_servers/tool_definitions.json')); print('tool_definitions.json OK')"
+      - name: Install test dependencies
+        run: pip install pytest httpx "mcp>=1.0.0" vl-convert-python pydantic pydantic-settings python-dotenv loguru
+      - name: Run Grafana variable-substitution tests
+        env:
+          GRAFANA_URL: http://localhost
+          GRAFANA_API_KEY: test-key  # pragma: allowlist secret
+        run: |
+          PYTHONPATH="$PWD:$PWD/mcp_servers" pytest mcp_servers/tests/test_grafana_variable_substitution.py -v
+
+  audit-orchestrator:
+    name: Dependency CVE audit (chat_orchestrator)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        working-directory: chat_orchestrator
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip "setuptools>=83"
+          pip install -e .[dev]
+          pip install pip-audit
+      - name: Audit installed environment
+        working-directory: chat_orchestrator
+        run: |
+          source .venv/bin/activate
+          # PYSEC-2026-1845: pytest local tmpdir DoS/race, only exploitable by another
+          # local user racing the same CI runner's /tmp - not applicable to GitHub's
+          # single-tenant, ephemeral runners, and pytest is a dev-only dependency never
+          # shipped in the deployed container. Fixed in 9.0.3, above our <9 cap; not
+          # worth a major-version test-runner bump for a finding that doesn't apply here.
+          pip-audit --progress-spinner off --ignore-vuln PYSEC-2026-1845
+
+  audit-requirements:
+    name: Dependency CVE audit
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [mcp_servers, rag_pipeline, anansi_app]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit ${{ matrix.target }}/requirements.txt
+        working-directory: ${{ matrix.target }}
+        run: |
+          # PYSEC-2026-311 / CVE-2026-45829: pre-auth code injection in ChromaDB's
+          # HTTP server API. We only use the embedded chromadb.PersistentClient
+          # (mcp_servers/servers/logs_server/logs_mcp_server.py) - no Chroma server
+          # is ever started, so this finding does not apply to our deployment.
+          if [ "${{ matrix.target }}" = "mcp_servers" ]; then
+            pip-audit --progress-spinner off -r requirements.txt --ignore-vuln PYSEC-2026-311 --ignore-vuln GHSA-f4j7-r4q5-qw2c --ignore-vuln CVE-2026-45829
+          else
+            pip-audit --progress-spinner off -r requirements.txt
+          fi

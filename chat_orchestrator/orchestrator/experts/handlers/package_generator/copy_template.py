@@ -25,6 +25,7 @@ from orchestrator.experts.handlers.package_generator.generate_map import (
     _lookup_site_by_name,
 )
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.drive_upload import DEFAULT_LPP_OUTPUT_FOLDER_ID
 from shared.utils.gdrive_template_creator import create_from_template
@@ -67,7 +68,36 @@ def _resolve_template_id(context: StepContext) -> str:
     return DEFAULT_LPP_TEMPLATE_ID
 
 
-@register_step("copy_lpp_template")
+@register_step(
+    "copy_lpp_template",
+    contract=StepContract(
+        description=(
+            "Copies the LPP Google Sheets/Slides template into the output folder and "
+            "registers it with the Apps Script document tracker for a doc code."
+        ),
+        # site_name is a hard requirement: `if not site_name: return
+        # StepResult.failure(...)` -- there's no LPP document without one.
+        consumes_state=("site_name",),
+        # template_copied/document_id/document_url: idempotency guard only.
+        # geo_source: branch selector for skipping site_submissions
+        # validation on the community route; absence defaults to the
+        # (primary) submission-route validation. site_folder_id: `if
+        # site_folder_id: ... else: <fall back to input/env/default>`.
+        optional_consumes_state=(
+            "template_copied",
+            "document_id",
+            "document_url",
+            "geo_source",
+            "site_folder_id",
+        ),
+        produces_state=("template_copied", "document_id", "document_url", "document_title"),
+        guard_keys=("template_copied",),
+        side_effects=(
+            "Copies a Google Drive template document and registers it with the Apps "
+            "Script document tracker."
+        ),
+    ),
+)
 async def copy_lpp_template(context: StepContext) -> StepResult:
     """Copy LPP template and register with document tracker for a doc code.
 

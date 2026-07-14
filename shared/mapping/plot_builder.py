@@ -8,13 +8,13 @@ This module handles matplotlib-based visualization:
 """
 
 import io
-from typing import Tuple
+from typing import Optional, Tuple
 
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.axes import Axes
-from matplotlib.collections import LineCollection
+from matplotlib.collections import LineCollection, PatchCollection
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
@@ -50,12 +50,34 @@ def _meters_to_degrees(meters: float, latitude: float) -> float:
     return meters / meters_per_degree
 
 
+def _compute_adaptive_zoom(
+    boundary: SiteBoundary,
+    max_pixels: int = 2048,
+    min_zoom: int = 12,
+    max_zoom: int = 16,
+) -> int:
+    """Choose a satellite tile zoom from the site extent.
+
+    Fixed zoom 16 is unnecessarily expensive for larger communities because it
+    requests many more tiles than the output image can use. This mirrors the
+    community-map approach: preserve detail for small extents, reduce zoom as
+    the bounds grow.
+    """
+    width_m = (
+        (boundary.maxx - boundary.minx) * 111_320.0 * float(np.cos(np.radians(boundary.center_lat)))
+    )
+    height_m = (boundary.maxy - boundary.miny) * 111_320.0
+    max_extent_m = max(width_m, height_m, 1.0)
+    zoom = int(np.log2(max_pixels * 40_075_016 / (max_extent_m * 256)))
+    return max(min_zoom, min(max_zoom, zoom))
+
+
 def prepare_base_map(
     boundary: SiteBoundary,
     figsize: Tuple[int, int] = (16, 12),
     padding_pct: float = 0.05,
     add_satellite: bool = True,
-    zoom: int = 16,
+    zoom: Optional[int] = None,
 ) -> Tuple[Figure, Axes]:
     """
     Create a figure and axes with optional satellite basemap.
@@ -85,11 +107,12 @@ def prepare_base_map(
     # Add satellite basemap
     if add_satellite and HAS_CONTEXTILY:
         try:
+            tile_zoom = zoom if zoom is not None else _compute_adaptive_zoom(boundary)
             ctx.add_basemap(
                 ax,
                 crs="EPSG:4326",
                 source=ctx.providers.Esri.WorldImagery,
-                zoom=zoom,
+                zoom=tile_zoom,
             )
         except Exception:
             # Fallback to solid background if tiles fail
@@ -128,37 +151,44 @@ def add_poles(
     radius_deg = _meters_to_degrees(coverage_radius_m, center_lat)
 
     if show_coverage:
-        # Draw coverage circles with gradient effect (multiple layers)
+        # Draw coverage circles with gradient effect (multiple layers).
+        # PatchCollection keeps large sites from adding hundreds of artists one
+        # by one to the axes.
+        outer = []
+        middle = []
+        inner = []
         for pole in poles:
-            # Outer circle (lighter)
-            circle_outer = plt.Circle(
-                pole.coords,
-                radius_deg,
-                color=COLORS["pole_coverage"],
+            outer.append(plt.Circle(pole.coords, radius_deg))
+            middle.append(plt.Circle(pole.coords, radius_deg * 0.7))
+            inner.append(plt.Circle(pole.coords, radius_deg * 0.4))
+
+        ax.add_collection(
+            PatchCollection(
+                outer,
+                facecolor=COLORS["pole_coverage"],
+                edgecolor=COLORS["pole_coverage"],
                 alpha=0.3,
                 zorder=2,
             )
-            ax.add_patch(circle_outer)
-
-            # Middle circle
-            circle_mid = plt.Circle(
-                pole.coords,
-                radius_deg * 0.7,
-                color=COLORS["pole_coverage"],
+        )
+        ax.add_collection(
+            PatchCollection(
+                middle,
+                facecolor=COLORS["pole_coverage"],
+                edgecolor=COLORS["pole_coverage"],
                 alpha=0.3,
                 zorder=2,
             )
-            ax.add_patch(circle_mid)
-
-            # Inner circle (darker center)
-            circle_inner = plt.Circle(
-                pole.coords,
-                radius_deg * 0.4,
-                color=COLORS["pole_coverage_center"],
+        )
+        ax.add_collection(
+            PatchCollection(
+                inner,
+                facecolor=COLORS["pole_coverage_center"],
+                edgecolor=COLORS["pole_coverage_center"],
                 alpha=0.4,
                 zorder=2,
             )
-            ax.add_patch(circle_inner)
+        )
 
     if show_markers:
         # Separate plant poles from regular poles
@@ -268,17 +298,35 @@ def add_buildings(
     if not buildings:
         return
 
+    served_patches = []
+    unserved_patches = []
     for building in buildings:
-        color = COLORS["served_building"] if building.connected else COLORS["unserved_building"]
+        polygon = mpatches.Polygon(building.coordinates)
+        if building.connected:
+            served_patches.append(polygon)
+        else:
+            unserved_patches.append(polygon)
 
-        polygon = plt.Polygon(
-            building.coordinates,
-            facecolor=color,
-            edgecolor=color,
-            alpha=alpha,
-            zorder=4,
+    if served_patches:
+        ax.add_collection(
+            PatchCollection(
+                served_patches,
+                facecolor=COLORS["served_building"],
+                edgecolor=COLORS["served_building"],
+                alpha=alpha,
+                zorder=4,
+            )
         )
-        ax.add_patch(polygon)
+    if unserved_patches:
+        ax.add_collection(
+            PatchCollection(
+                unserved_patches,
+                facecolor=COLORS["unserved_building"],
+                edgecolor=COLORS["unserved_building"],
+                alpha=alpha,
+                zorder=4,
+            )
+        )
 
 
 def add_boundary(ax: Axes, boundary: SiteBoundary, linewidth: float = 3) -> None:
@@ -488,7 +536,7 @@ def prepare_site_plot(
     site_data: SiteData,
     figsize: Tuple[int, int] = (16, 12),
     add_satellite: bool = True,
-    zoom: int = 16,
+    zoom: Optional[int] = None,
     show_served_unserved: bool = True,
 ) -> Tuple[Figure, Axes]:
     """

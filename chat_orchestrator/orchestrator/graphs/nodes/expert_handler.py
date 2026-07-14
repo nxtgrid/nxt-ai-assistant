@@ -45,6 +45,65 @@ from orchestrator.experts.input_detection import looks_like_new_request
 CANCEL_KEYWORDS = {"cancel", "abort", "quit", "exit", "stop"}
 
 
+def _build_tool_executor_metadata(
+    state: ConversationState,
+    packet: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build non-LLM-controllable metadata for expert workflow tool calls."""
+    metadata: Dict[str, Any] = dict(state.get("metadata", {}))
+    user_context = state.get("user_context")
+    user_permissions = state.get("user_permissions")
+
+    if user_context:
+        metadata.update(
+            {
+                "user_email": user_context.user_email,
+                "user_name": user_context.username,
+                "original_chat_id": user_context.chat_id,
+                "topic_id": user_context.topic_id,
+                "session_id": state.get("session_id"),
+                "thread_id": state.get("thread_id"),
+                "organization_name": user_context.organization_name,
+                "telegram_id": user_context.user_id if user_context.source == "telegram" else None,
+                "user_input": state.get("user_input", ""),
+            }
+        )
+        if user_context.organization_ids:
+            metadata["organization_id"] = int(user_context.organization_ids[0])
+        if not user_permissions:
+            user_permissions = {
+                "email": user_context.user_email,
+                "organization_ids": user_context.organization_ids,
+                "grid_ids": user_context.grid_ids,
+                "meter_ids": user_context.meter_ids,
+                "roles": user_context.roles,
+                "is_admin": user_context.is_admin,
+                "is_staff": user_context.is_staff,
+            }
+
+    if packet:
+        if not metadata.get("user_email") and packet.get("requested_by_email"):
+            metadata["user_email"] = packet.get("requested_by_email")
+        packet_org_id = packet.get("organization_id")
+        if metadata.get("organization_id") is None and packet_org_id is not None:
+            metadata["organization_id"] = int(packet_org_id)
+        if not user_permissions and packet_org_id is not None:
+            user_permissions = {
+                "email": packet.get("requested_by_email"),
+                "organization_ids": [str(packet_org_id)],
+                "grid_ids": [],
+                "meter_ids": [],
+                "roles": [],
+                "is_admin": False,
+                "is_staff": False,
+            }
+
+    if user_permissions:
+        metadata["user_permissions"] = user_permissions
+
+    return metadata
+
+
 def _is_cancel_request(user_input: str) -> bool:
     """Check if user input is a cancel request.
 
@@ -543,7 +602,11 @@ async def expert_handler(state: ConversationState) -> Dict[str, Any]:
             from orchestrator.services.tool_registry import ToolRegistry
 
             registry = ToolRegistry(settings)
-            tool_executor = ToolExecutor(registry, settings)
+            tool_executor = ToolExecutor(
+                registry,
+                settings,
+                default_metadata=_build_tool_executor_metadata(state, packet),
+            )
             LOGGER.info("Created tool executor for expert handler")
         except Exception as e:
             LOGGER.error(f"Failed to create tool executor: {e}")

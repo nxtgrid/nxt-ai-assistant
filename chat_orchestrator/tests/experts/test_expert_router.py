@@ -114,6 +114,43 @@ class TestExpertRouter:
         assert result["matched_expert_id"] is None
 
     @pytest.mark.asyncio
+    async def test_planned_intent_routes_natural_language_lpp_request(
+        self, base_state, mock_pending_decision_service
+    ):
+        """Expert router consumes the pre-Gemini conversation direction plan."""
+        base_state["user_input"] = "Please prepare the preliminary package for Site Alpha"
+        base_state["user_context"].is_staff = True
+        base_state["planned_expert_route"] = {
+            "command": "/lpp",
+            "packet_type": "light_preliminary_package",
+            "key_entity": "Site Alpha",
+            "args": "Site Alpha",
+        }
+
+        with (
+            patch("orchestrator.graphs.nodes.expert_router.WorkPacketService") as mock_packet_class,
+            patch(
+                "orchestrator.graphs.nodes.expert_router.ExpertInstructionsProvider"
+            ) as mock_provider_class,
+        ):
+            mock_packet_service = MagicMock()
+            mock_packet_service.get_active_packets_for_session = AsyncMock(return_value=[])
+            mock_packet_service.get_resumable_packets_for_session = AsyncMock(return_value=[])
+            mock_packet_service.find_similar_completed = AsyncMock(return_value=[])
+            mock_packet_class.return_value = mock_packet_service
+
+            mock_provider = MagicMock()
+            mock_provider.get_expert_for_packet_type = AsyncMock(return_value="package_generator")
+            mock_provider_class.return_value = mock_provider
+
+            result = await expert_router(base_state)
+
+        assert result["expert_routing_decision"] == "expert"
+        assert result["expert_command"] == "/lpp Site Alpha"
+        assert result["expert_packet_type"] == "light_preliminary_package"
+        assert result["expert_key_entity"] == "Site Alpha"
+
+    @pytest.mark.asyncio
     async def test_routes_to_expert_for_active_packet(
         self, base_state, mock_pending_decision_service
     ):

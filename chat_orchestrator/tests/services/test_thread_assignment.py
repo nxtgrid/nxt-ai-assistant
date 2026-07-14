@@ -385,34 +385,63 @@ class TestFeatureFlag:
 
 class TestAssignThreadNode:
     @pytest.mark.asyncio
-    async def test_disabled_returns_empty(self):
-        """When feature flag is off, node is pass-through."""
+    async def test_disabled_plans_session_scoped_direction(self):
+        """When thread flag is off, node still plans direction without thread filtering."""
         from orchestrator.graphs.nodes.assign_thread import assign_thread
 
-        with patch.dict("os.environ", {"THREAD_DISENTANGLEMENT_ENABLED": "false"}):
+        with (
+            patch.dict("os.environ", {"THREAD_DISENTANGLEMENT_ENABLED": "false"}),
+            patch(
+                "orchestrator.graphs.nodes.assign_thread.ConversationDirectionService"
+            ) as MockPlanner,
+        ):
+            from orchestrator.services.conversation_direction import ConversationDirection
+
+            instance = MockPlanner.return_value
+            instance.plan = AsyncMock(
+                return_value=ConversationDirection(
+                    direction="normal_chat",
+                    context_scope="session",
+                )
+            )
+
             result = await assign_thread({"user_input": "hello"})
-        assert result == {}
+
+        assert result["conversation_direction"] == "normal_chat"
+        assert result["conversation_context_scope"] == "session"
+        assert result["thread_id"] is None
 
     @pytest.mark.asyncio
     async def test_enabled_assigns_thread(self):
-        """When enabled, node assigns thread and filters history."""
+        """When enabled, node returns planned thread context."""
         from orchestrator.graphs.nodes.assign_thread import assign_thread
 
-        assignment = ThreadAssignment(thread_id="thr_test123", is_new=True, method="first_message")
+        with (
+            patch.dict("os.environ", {"THREAD_DISENTANGLEMENT_ENABLED": "true"}),
+            patch(
+                "orchestrator.graphs.nodes.assign_thread.ConversationDirectionService"
+            ) as MockPlanner,
+        ):
+            from orchestrator.services.conversation_direction import ConversationDirection
 
-        with patch.dict("os.environ", {"THREAD_DISENTANGLEMENT_ENABLED": "true"}):
-            with patch(
-                "orchestrator.graphs.nodes.assign_thread.ThreadAssignmentService"
-            ) as MockService:
-                instance = MockService.return_value
-                instance.assign_thread = AsyncMock(return_value=assignment)
-
-                result = await assign_thread(
-                    {
-                        "user_input": "hello",
-                        "conversation_history": [_msg(content="old", thread_id=None)],
-                    }
+            instance = MockPlanner.return_value
+            instance.plan = AsyncMock(
+                return_value=ConversationDirection(
+                    direction="normal_chat",
+                    context_scope="thread",
+                    thread_id="thr_test123",
+                    thread_filtered_history=[_msg(content="old", thread_id=None)],
+                    thread_method="first_message",
+                    thread_is_new=False,
                 )
+            )
+
+            result = await assign_thread(
+                {
+                    "user_input": "hello",
+                    "conversation_history": [_msg(content="old", thread_id=None)],
+                }
+            )
 
         assert result["thread_id"] == "thr_test123"
         assert result["thread_filtered_history"] is not None

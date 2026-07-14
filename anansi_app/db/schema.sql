@@ -188,7 +188,8 @@ CREATE TABLE IF NOT EXISTS gd_designs (
     monthly_rental_estimate            numeric,
     monthly_saleable_kwh_at_expected_cuf numeric,
     monthly_revenue_at_expected_cuf_and_tariff numeric,
-    active                             boolean DEFAULT true
+    active                             boolean DEFAULT true,
+    artifacts                          jsonb DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS gd_designs_grid_idx ON gd_designs (grid);  -- FK -> gd_grids(id)
 
@@ -214,7 +215,8 @@ CREATE TABLE IF NOT EXISTS gd_design_subassemblies (
     kwh                                numeric,
     kva                                numeric,
     active                             boolean DEFAULT true,
-    comment                            text
+    comment                            text,
+    manually_edited                    boolean DEFAULT false
 );
 CREATE INDEX IF NOT EXISTS gd_design_subassemblies_design_idx ON gd_design_subassemblies (design);  -- FK -> gd_designs(id)
 CREATE INDEX IF NOT EXISTS gd_design_subassemblies_subassembly_idx ON gd_design_subassemblies (subassembly);  -- FK -> gd_subassemblies(id)

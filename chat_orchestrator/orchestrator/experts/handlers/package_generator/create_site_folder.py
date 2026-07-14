@@ -9,6 +9,7 @@ import asyncio
 import os
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.drive_upload import DEFAULT_LPP_OUTPUT_FOLDER_ID
 from shared.utils.logging import get_logger
@@ -16,7 +17,21 @@ from shared.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
-@register_step("create_site_folder")
+@register_step(
+    "create_site_folder",
+    contract=StepContract(
+        description="Creates a per-site Google Drive subfolder for LPP outputs.",
+        # site_name is a hard requirement: `if not site_name: return
+        # StepResult.failure(...)`.
+        consumes_state=("site_name",),
+        # Idempotency guard only (`existing_folder_id = get_state(...); if
+        # existing_folder_id: ... skip`); absence just creates the folder.
+        optional_consumes_state=("site_folder_id",),
+        produces_state=("site_folder_id",),
+        guard_keys=("site_folder_id",),
+        side_effects="Creates a Google Drive subfolder for site outputs.",
+    ),
+)
 async def create_site_folder(context: StepContext) -> StepResult:
     """Create per-site subfolder in the LPP output folder.
 

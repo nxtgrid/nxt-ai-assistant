@@ -92,7 +92,7 @@ class CommandParser:
         self,
         text: str,
         user_context: "UserContext",
-    ) -> Tuple[str, bool, List[str], str]:
+    ) -> Tuple[str, bool, List[str], str, int]:
         """
         Process a command and return the transformed prompt.
 
@@ -101,14 +101,14 @@ class CommandParser:
             user_context: User context with is_staff flag
 
         Returns:
-            Tuple of (processed_text, is_command, unlocked_tools, model_override)
-            - If tool command: (prompt, True, exclusive_tools, model_override or "")
-            - If expert command: (original text, False, [], "")
-            - If unrecognized/unauthorized: (error prompt, True, [], "")
-            - If not a command: (original text, False, [], "")
+            Tuple of (processed_text, is_command, unlocked_tools, model_override, max_tool_rounds)
+            - If tool command: (prompt, True, exclusive_tools, model_override or "", max_tool_rounds_override or 0)
+            - If expert command: (original text, False, [], "", 0)
+            - If unrecognized/unauthorized: (error prompt, True, [], "", 0)
+            - If not a command: (original text, False, [], "", 0)
         """
         if not self.is_command(text):
-            return (text, False, [], "")
+            return (text, False, [], "", 0)
 
         command, args = self.parse_command(text)
         LOGGER.info(f"Processing command: /{command} with args: '{args}'")
@@ -119,18 +119,18 @@ class CommandParser:
         if not cmd_def:
             # Unrecognized command
             LOGGER.info(f"Unrecognized command: /{command}")
-            return (UNRECOGNIZED_COMMAND_TEMPLATE.format(command=command), True, [], "")
+            return (UNRECOGNIZED_COMMAND_TEMPLATE.format(command=command), True, [], "", 0)
 
         # Check if command is staff-only and user is not staff
         if cmd_def.staff_only and not user_context.is_staff:
             LOGGER.info(f"Non-staff user attempted staff-only command /{command}")
-            return (UNRECOGNIZED_COMMAND_TEMPLATE.format(command=command), True, [], "")
+            return (UNRECOGNIZED_COMMAND_TEMPLATE.format(command=command), True, [], "", 0)
 
         # Direct commands: Pass through unchanged — handled in expert_router
         # before any LLM or expert processing.
         if cmd_def.command_type == "direct":
             LOGGER.info(f"Passing direct command /{command} to expert_router")
-            return (text, False, [], "")
+            return (text, False, [], "", 0)
 
         # Expert commands: Pass through unchanged to expert_router.
         # If we reach here, expert_router already ran and returned "continue"
@@ -140,7 +140,7 @@ class CommandParser:
                 LOGGER.info(f"Expert /{command} disabled, falling back to tool-based flow")
             else:
                 LOGGER.info(f"Passing expert command /{command} to expert_router")
-                return (text, False, [], "")
+                return (text, False, [], "", 0)
 
         # Tool commands: Check if args are required but missing
         if cmd_def.requires_args and not args:
@@ -150,6 +150,7 @@ class CommandParser:
                 True,
                 [],
                 "",
+                0,
             )
 
         # Build the prompt from template
@@ -168,11 +169,15 @@ class CommandParser:
             if model_override:
                 LOGGER.info(f"Command /{command} uses model override: {model_override}")
 
+        max_tool_rounds = cmd_def.max_tool_rounds_override
+        if max_tool_rounds:
+            LOGGER.info(f"Command /{command} uses max_tool_rounds override: {max_tool_rounds}")
+
         LOGGER.info(f"Command /{command} transformed to prompt: {prompt[:100]}...")
         if unlocked_tools:
             LOGGER.info(f"Command /{command} unlocks tools: {unlocked_tools}")
 
-        return (prompt, True, unlocked_tools, model_override)
+        return (prompt, True, unlocked_tools, model_override, max_tool_rounds)
 
     def _build_prompt(self, cmd_def: CommandDefinition, args: str) -> str:
         """
@@ -240,7 +245,9 @@ class CommandParser:
 
 # --- /lpp GPS-anchor route (Route B) ---
 
-_BARE_LATLON_RE = _re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$")
+_NUMBER_RE = r"-?\d+(?:\.\d+)?"
+_BARE_LATLON_RE = _re.compile(rf"^\s*({_NUMBER_RE})\s*,\s*({_NUMBER_RE})\s*$")
+_EMBEDDED_LATLON_RE = _re.compile(rf"(?<![\w.-])({_NUMBER_RE})\s*,\s*({_NUMBER_RE})(?![\w.-])")
 
 
 def _valid_latlon(lat_s: str, lon_s: str) -> bool:
@@ -257,6 +264,7 @@ def parse_lpp_anchor_args(args: str) -> dict | None:
     Recognizes either form:
       - anchor:<lat>,<lon> [name:"Community Name"]   (explicit, supports a name)
       - bare coordinates:  <lat>,<lon>  or  <lat>, <lon>   (whole string, no name)
+      - embedded decimal coordinates in natural language LPP requests
 
     Returns {latitude, longitude, community_name?} or None when the args are not
     a GPS anchor (site name or multi-site list fall through to the submission route).
@@ -275,6 +283,13 @@ def parse_lpp_anchor_args(args: str) -> dict | None:
     bare = _BARE_LATLON_RE.match(args)
     if bare and _valid_latlon(bare.group(1), bare.group(2)):
         return {"latitude": bare.group(1), "longitude": bare.group(2)}
+
+    for embedded in _EMBEDDED_LATLON_RE.finditer(args):
+        lat_s, lon_s = embedded.group(1), embedded.group(2)
+        if "." not in lat_s and "." not in lon_s:
+            continue
+        if _valid_latlon(lat_s, lon_s):
+            return {"latitude": lat_s, "longitude": lon_s}
 
     return None
 

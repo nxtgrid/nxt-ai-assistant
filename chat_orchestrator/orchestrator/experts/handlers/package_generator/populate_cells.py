@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 from googleapiclient.discovery import build
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.apps_script_client import replace_sheet_image
 from shared.utils.google_auth import get_sheets_credentials, get_sheets_write_credentials
@@ -495,7 +496,72 @@ def _write_mapped_values(
         return {"success": False, "error": str(e)}
 
 
-@register_step("populate_lpp_cells")
+@register_step(
+    "populate_lpp_cells",
+    contract=StepContract(
+        description=(
+            "Populates the Main Input sheet with site/design/energy data via explicit "
+            "Cell Mapping (from the expert config), replaces the map image in the "
+            "'Proposed Budget' sheet, and creates the Full BOM tab."
+        ),
+        # document_id is a hard requirement: `if not document_id: return
+        # StepResult.failure(...)`.
+        consumes_state=("document_id",),
+        # cells_populated: idempotency guard. site_name/site_id: only dumped
+        # as reference values via _collect_all_available_values(), filtered
+        # out if None. map_image_drive_id: `if not map_image_b64: drive_id =
+        # get_state(...); if drive_id: <download>` -- falls through to "no
+        # image available" logging, not a failure, when absent. The four
+        # editable_* overrides: `override_value =
+        # get_parameter_value(editable_key); if override_value is not None:
+        # <apply>` -- skipped entirely when absent.
+        optional_consumes_state=(
+            "cells_populated",
+            "site_name",
+            "site_id",
+            "map_image_drive_id",
+            "editable_total_buildings",
+            "editable_served_building_count",
+            "editable_total_kwp",
+            "editable_total_kwh",
+        ),
+        produces_state=("cells_populated", "map_image_replaced", "bom_tab_populated"),
+        consumes_results=(
+            "generate_distribution_map",
+            "generate_powerplant_design",
+            "generate_site_bom",
+            "fetch_solar_potential",
+        ),
+        params=(
+            ParamSpec(
+                name="editable_total_buildings",
+                param_type="integer",
+                description="User-confirmed total building count override (maps to computed.total_buildings).",
+            ),
+            ParamSpec(
+                name="editable_served_building_count",
+                param_type="integer",
+                description="User-confirmed served-building count override (maps to meta.served_building_count).",
+            ),
+            ParamSpec(
+                name="editable_total_kwp",
+                param_type="number",
+                description="User-confirmed total kWp override (maps to energy.total_kwp).",
+            ),
+            ParamSpec(
+                name="editable_total_kwh",
+                param_type="number",
+                description="User-confirmed total kWh override (maps to energy.total_kwh).",
+            ),
+        ),
+        guard_keys=("cells_populated",),
+        side_effects=(
+            "Writes to the Main Input sheet and replaces the map image in the "
+            "'Proposed Budget' sheet via the Sheets/Apps Script API; creates the Full "
+            "BOM tab (calls create_bom_sheet from populate_bom_tab.py)."
+        ),
+    ),
+)
 async def populate_lpp_cells(context: StepContext) -> StepResult:
     """Populate the sheet with site data using LLM-based matching.
 

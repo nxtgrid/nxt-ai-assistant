@@ -11,6 +11,7 @@ This handler uses Gemini LLM to classify documents into categories:
 import json
 import os
 
+from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
@@ -84,7 +85,7 @@ async def classify_document(context: StepContext) -> StepResult:
             api_key=os.getenv("GOOGLE_API_KEY"),
             http_options={"timeout": 30_000},
         )
-        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        model = get_settings().gemini.model
 
         response = client.models.generate_content(
             model=model,

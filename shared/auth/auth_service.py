@@ -20,6 +20,7 @@ from typing import Any, List, Optional
 
 from pydantic import BaseModel
 
+from shared.utils.grid_matcher import find_best_grid_match
 from shared.utils.logging import get_logger
 
 # Staff organization ID — the org whose members get staff-mode access.
@@ -37,6 +38,16 @@ if not __import__("re").fullmatch(r"[a-z][a-z0-9_]*", MANAGED_GENERATION_COLUMN)
     raise ValueError(
         f"MANAGED_GENERATION_COLUMN must be a valid SQL identifier, got: {MANAGED_GENERATION_COLUMN!r}"
     )
+
+
+@dataclass
+class GridNotificationTarget:
+    """Resolved internal-Telegram destination for a grid notification."""
+
+    grid_name: str
+    chat_id: str
+    topic_id: Optional[str] = None
+    was_fuzzy: bool = False
 
 
 @dataclass
@@ -1142,6 +1153,62 @@ class AuthService:
         except Exception as e:
             LOGGER.warning(f"Error getting grid telegram sources for {grid_name}: {e}")
             return GridTelegramSources()
+
+    async def resolve_grid_notification_target(
+        self, grid_name: str
+    ) -> Optional[GridNotificationTarget]:
+        """Resolve a grid name to its internal Telegram group chat + topic.
+
+        Matches ``grid_name`` against all non-deleted grids that have an internal
+        Telegram group configured, using the same fuzzy matcher as the rest of the
+        app (exact first, then rapidfuzz at the 80% threshold with the ambiguity
+        guard). Returns ``None`` when there is no confident match — callers should
+        treat that as an undeliverable notification rather than guessing.
+
+        Grid names are effectively unique per deployment; if two share a name, the
+        first row wins (both map to distinct groups, so an internal alert still
+        lands in a valid one).
+
+        Returns ``None`` only for a genuine no-match. Infrastructure failures
+        (DB unavailable, etc.) propagate so callers can distinguish "unknown grid"
+        from "try again later".
+        """
+        if not grid_name or not grid_name.strip():
+            return None
+
+        pool = await self._get_db_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT name,
+                       internal_telegram_group_chat_id AS chat_id,
+                       internal_telegram_group_thread_id AS topic_id
+                FROM public.grids
+                WHERE deleted_at IS NULL
+                  AND internal_telegram_group_chat_id IS NOT NULL
+                """
+            )
+
+        by_name: dict[str, Any] = {}
+        for r in rows:
+            if r["name"]:
+                by_name.setdefault(r["name"], r)
+
+        matched, was_fuzzy, _score = find_best_grid_match(grid_name, list(by_name.keys()))
+        if not matched:
+            LOGGER.warning(
+                "resolve_grid_notification_target: no confident grid match for %r", grid_name
+            )
+            return None
+
+        row = by_name[matched]
+        topic_id = row["topic_id"]
+        return GridNotificationTarget(
+            grid_name=matched,
+            chat_id=str(row["chat_id"]),
+            topic_id=str(topic_id) if topic_id is not None else None,
+            was_fuzzy=was_fuzzy,
+        )
 
     async def get_all_logbook_grid_mapping(self) -> dict[tuple[str, str], str]:
         """Get mapping of (logbook_chat_id, logbook_topic_id) → grid_name.

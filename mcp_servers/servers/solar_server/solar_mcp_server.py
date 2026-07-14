@@ -96,13 +96,20 @@ def _sample(url: str, lng: float, lat: float) -> float:
         return _clamp_flood(val, src.nodata)
 
 
-def _sample_safe(url: str, lng: float, lat: float) -> float:
-    """Like _sample but logs failures and returns 0.0 on error (used for ensemble models)."""
+def _sample_or_none(
+    url: str, lng: float, lat: float, label: str
+) -> tuple[Optional[float], Optional[str]]:
+    """Sample a COG at a point. Returns (value, None) on success or (None, reason) on
+    failure — never raises, so one missing/unreachable data source doesn't take down
+    the others. `reason` is a short, user-facing sentence naming the specific layer."""
     try:
-        return _sample(url, lng, lat)
+        return _sample(url, lng, lat), None
+    except rasterio.errors.RasterioIOError as e:
+        logger.warning(f"{label} sample failed for ({lat}, {lng}): {e}")
+        return None, f"{label} unavailable (data source unreachable)"
     except Exception as e:
-        logger.warning(f"RCP8.5 model sample failed for {url}: {e}")
-        return 0.0
+        logger.warning(f"{label} sample failed for ({lat}, {lng}): {e}")
+        return None, f"{label} unavailable ({e})"
 
 
 def _query_flood(lat: float, lng: float) -> Dict[str, Any]:
@@ -112,6 +119,10 @@ def _query_flood(lat: float, lng: float) -> Dict[str, Any]:
     RCP8.5 ensemble reads parallelised with ThreadPoolExecutor (different URLs, no shared VSI handles).
     Returns depth in metres above ground (no DEM subtraction needed).
 
+    Each layer is sampled independently — a failure in one (e.g. an upstream data
+    provider taking a file down) leaves the others intact instead of failing the
+    whole query. Missing fields are returned as None with a reason in "flood_warnings".
+
     Fields:
     - flood_worst_case_depth_m: max(riverine RP1000, coastal RP1000) — structural design flood
     - flood_riverine_rp1000_m / flood_coastal_rp1000_m: components of worst case
@@ -119,27 +130,64 @@ def _query_flood(lat: float, lng: float) -> Dict[str, Any]:
     - flood_rp100_rcp85_2050_median_m: median across 5 CMIP5 models, RCP8.5 2050 RP100
     - flood_rp100_rcp85_2050_max_m: max across 5 CMIP5 models (conservative planning value)
     """
-    riverine_rp1000 = _sample(_FLOOD_RIVERINE_RP1000_URL, lng, lat)
-    coastal_rp1000 = _sample(_FLOOD_COASTAL_RP1000_URL, lng, lat)
-    rp100_historical = _sample(_FLOOD_RIVERINE_RP100_URL, lng, lat)
+    warnings: List[str] = []
+
+    riverine_rp1000, err = _sample_or_none(
+        _FLOOD_RIVERINE_RP1000_URL, lng, lat, "Riverine RP1000 flood depth"
+    )
+    if err:
+        warnings.append(err)
+    coastal_rp1000, err = _sample_or_none(
+        _FLOOD_COASTAL_RP1000_URL, lng, lat, "Coastal RP1000 flood depth"
+    )
+    if err:
+        warnings.append(err)
+    rp100_historical, err = _sample_or_none(
+        _FLOOD_RIVERINE_RP100_URL, lng, lat, "Historical RP100 flood depth"
+    )
+    if err:
+        warnings.append(err)
 
     # Read 5 RCP8.5 CMIP5 models in parallel — different URLs share no VSI handles.
     with concurrent.futures.ThreadPoolExecutor(max_workers=5) as pool:
         futures = [
-            pool.submit(_sample_safe, url, lng, lat) for url in _FLOOD_RCP85_2050_RP100_MODELS
+            pool.submit(_sample_or_none, url, lng, lat, "RCP8.5 2050 flood ensemble model")
+            for url in _FLOOD_RCP85_2050_RP100_MODELS
         ]
-        rcp85_vals = sorted(f.result() for f in futures)
-    n = len(rcp85_vals)
-    rcp85_median = rcp85_vals[n // 2]  # median of 5 = index 2
-    rcp85_max = rcp85_vals[-1]
+        rcp85_results = [f.result() for f in futures]
+    rcp85_vals = sorted(v for v, _ in rcp85_results if v is not None)
+    n_available = len(rcp85_vals)
+    if n_available == 0:
+        rcp85_median: Optional[float] = None
+        rcp85_max: Optional[float] = None
+        warnings.append("RCP8.5 2050 flood ensemble unavailable (all 5 models failed)")
+    else:
+        rcp85_median = rcp85_vals[n_available // 2]
+        rcp85_max = rcp85_vals[-1]
+        if n_available < len(_FLOOD_RCP85_2050_RP100_MODELS):
+            warnings.append(
+                f"RCP8.5 2050 flood ensemble partial ({n_available}/"
+                f"{len(_FLOOD_RCP85_2050_RP100_MODELS)} models available)"
+            )
+
+    worst_case: Optional[float] = None
+    if riverine_rp1000 is not None or coastal_rp1000 is not None:
+        worst_case = max(v for v in (riverine_rp1000, coastal_rp1000) if v is not None)
 
     return {
-        "flood_worst_case_depth_m": round(max(riverine_rp1000, coastal_rp1000), 3),
-        "flood_riverine_rp1000_m": round(riverine_rp1000, 3),
-        "flood_coastal_rp1000_m": round(coastal_rp1000, 3),
-        "flood_rp100_historical_m": round(rp100_historical, 3),
-        "flood_rp100_rcp85_2050_median_m": round(rcp85_median, 3),
-        "flood_rp100_rcp85_2050_max_m": round(rcp85_max, 3),
+        "flood_worst_case_depth_m": round(worst_case, 3) if worst_case is not None else None,
+        "flood_riverine_rp1000_m": round(riverine_rp1000, 3)
+        if riverine_rp1000 is not None
+        else None,
+        "flood_coastal_rp1000_m": round(coastal_rp1000, 3) if coastal_rp1000 is not None else None,
+        "flood_rp100_historical_m": (
+            round(rp100_historical, 3) if rp100_historical is not None else None
+        ),
+        "flood_rp100_rcp85_2050_median_m": (
+            round(rcp85_median, 3) if rcp85_median is not None else None
+        ),
+        "flood_rp100_rcp85_2050_max_m": round(rcp85_max, 3) if rcp85_max is not None else None,
+        "flood_warnings": warnings,
     }
 
 
@@ -157,6 +205,7 @@ def _query_terrain(lat: float, lng: float, boundary_geometry: Optional[Dict]) ->
     boundary_min = None
     boundary_max = None
     boundary_range = None
+    warnings: List[str] = []
 
     try:
         with rasterio.open(tile_url) as src:
@@ -164,6 +213,8 @@ def _query_terrain(lat: float, lng: float, boundary_geometry: Optional[Dict]) ->
             val = float(list(src.sample([(lng, lat)]))[0][0])
             if src.nodata is None or abs(val - src.nodata) > 1.0:
                 site_elevation_m = round(val, 1)
+            else:
+                warnings.append("Site elevation unavailable (no-data pixel at this location)")
 
             # Boundary terrain stats — only if polygon provided
             if boundary_geometry is not None:
@@ -185,17 +236,24 @@ def _query_terrain(lat: float, lng: float, boundary_geometry: Optional[Dict]) ->
                             f"No valid DEM pixels within boundary polygon at ({lat}, {lng}) "
                             f"— polygon may be outside tile bounds"
                         )
+                        warnings.append(
+                            "Boundary terrain stats unavailable (no valid DEM pixels "
+                            "within the site boundary)"
+                        )
                 except Exception as e:
                     logger.warning(f"DEM boundary mask failed at ({lat}, {lng}): {e}")
+                    warnings.append(f"Boundary terrain stats unavailable ({e})")
 
     except rasterio.errors.RasterioIOError as e:
         logger.warning(f"DEM tile unavailable for ({lat}, {lng}): {e}")
+        warnings.append("Terrain elevation unavailable (no DEM tile covers this location)")
 
     return {
         "site_elevation_m": site_elevation_m,
         "boundary_min_elevation_m": boundary_min,
         "boundary_max_elevation_m": boundary_max,
         "boundary_elevation_range_m": boundary_range,
+        "terrain_warnings": warnings,
     }
 
 
@@ -347,14 +405,51 @@ async def _handle_get_site_geo_hazard(args: Dict[str, Any]) -> List[types.TextCo
                 )
 
     # Run flood and terrain queries in parallel — different S3 buckets, no shared VSI handles.
-    try:
-        flood_data, terrain_data = await asyncio.gather(
-            asyncio.to_thread(_query_flood, latitude, longitude),
-            asyncio.to_thread(_query_terrain, latitude, longitude, boundary_geometry),
+    # Each query is internally resilient per-layer (see _query_flood/_query_terrain), so a
+    # failure in one data source degrades gracefully instead of failing the whole lookup.
+    # return_exceptions=True is a last-resort net for a genuinely unexpected bug in either
+    # function — it should not normally trigger.
+    flood_result: Any
+    terrain_result: Any
+    flood_result, terrain_result = await asyncio.gather(
+        asyncio.to_thread(_query_flood, latitude, longitude),
+        asyncio.to_thread(_query_terrain, latitude, longitude, boundary_geometry),
+        return_exceptions=True,
+    )
+
+    data_warnings: List[str] = []
+
+    if isinstance(flood_result, BaseException):
+        logger.error(
+            f"Flood query failed unexpectedly for ({latitude}, {longitude}): {flood_result}"
         )
-    except Exception as e:
-        logger.error(f"Geo hazard query failed for ({latitude}, {longitude}): {e}")
-        return list(compose_error_response(Exception("Geo hazard lookup failed")))
+        flood_data: Dict[str, Any] = {
+            "flood_worst_case_depth_m": None,
+            "flood_riverine_rp1000_m": None,
+            "flood_coastal_rp1000_m": None,
+            "flood_rp100_historical_m": None,
+            "flood_rp100_rcp85_2050_median_m": None,
+            "flood_rp100_rcp85_2050_max_m": None,
+        }
+        data_warnings.append("Flood hazard data unavailable due to an internal error.")
+    else:
+        flood_data = dict(flood_result)
+        data_warnings.extend(flood_data.pop("flood_warnings", []))
+
+    if isinstance(terrain_result, BaseException):
+        logger.error(
+            f"Terrain query failed unexpectedly for ({latitude}, {longitude}): {terrain_result}"
+        )
+        terrain_data: Dict[str, Any] = {
+            "site_elevation_m": None,
+            "boundary_min_elevation_m": None,
+            "boundary_max_elevation_m": None,
+            "boundary_elevation_range_m": None,
+        }
+        data_warnings.append("Terrain elevation data unavailable due to an internal error.")
+    else:
+        terrain_data = dict(terrain_result)
+        data_warnings.extend(terrain_data.pop("terrain_warnings", []))
 
     result = {
         "latitude": latitude,
@@ -362,11 +457,30 @@ async def _handle_get_site_geo_hazard(args: Dict[str, Any]) -> List[types.TextCo
         **flood_data,
         **terrain_data,
     }
+    if data_warnings:
+        result["data_warnings"] = data_warnings
+
+    # Only a total loss (nothing at all could be determined) is a hard failure —
+    # partial data (e.g. terrain succeeded but flood didn't) is returned as-is so
+    # callers can proceed with what's available and see exactly what's missing and why.
+    if all(
+        v is None for k, v in result.items() if k not in ("latitude", "longitude", "data_warnings")
+    ):
+        logger.error(f"Geo hazard lookup returned no usable data for ({latitude}, {longitude})")
+        return list(
+            compose_error_response(
+                Exception(
+                    "Geo hazard lookup failed: "
+                    + ("; ".join(data_warnings) if data_warnings else "no data sources available")
+                )
+            )
+        )
 
     logger.info(
         f"Geo hazard for ({latitude}, {longitude}): "
         f"flood={result['flood_worst_case_depth_m']}m, "
         f"elevation={result['site_elevation_m']}m"
+        + (f", warnings={data_warnings}" if data_warnings else "")
     )
 
     return list(compose_json_response(result))

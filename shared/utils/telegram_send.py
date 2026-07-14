@@ -6,7 +6,7 @@ Used by both handler.py and messaging_mcp_server.py to avoid duplication.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, cast
 
 import aiohttp
 
@@ -74,6 +74,88 @@ async def send_telegram_message(
             return msg_id
     except Exception as e:
         logger.warning(f"Error sending Telegram message: {e}")
+        return None
+
+
+def is_markdown_parse_error(result: Dict[str, Any]) -> bool:
+    """True if a Telegram sendMessage response failed because of malformed Markdown.
+
+    Telegram returns HTTP 400 with a "can't parse entities" description when the
+    message text contains a character it reads as an unterminated Markdown entity
+    — e.g. the lone underscore in "CLEAR_TAMPER" opens an italic entity that never
+    closes. Callers retry such sends as plain text so the message still gets
+    delivered (see CLAUDE.md "Telegram Message Formatting").
+    """
+    if not result or result.get("ok"):
+        return False
+    description = str(result.get("description", "")).lower()
+    return result.get("error_code") == 400 and "can't parse entities" in description
+
+
+async def send_telegram_message_with_fallback(
+    bot_token: str,
+    chat_id: str,
+    text: str,
+    reply_markup: Optional[Dict[str, Any]] = None,
+    parse_mode: Optional[str] = "Markdown",
+    topic_id: Optional[int | str] = None,
+) -> Optional[int]:
+    """Send a message with an automatic plain-text retry on a Markdown parse error.
+
+    Sends ``text`` with ``parse_mode`` (default ``"Markdown"``). If Telegram rejects
+    it with a "can't parse entities" 400, the same text is resent without a
+    ``parse_mode`` so the content still reaches the chat as plain text. Any other
+    failure returns ``None`` after a single attempt.
+
+    Returns:
+        The message_id of the sent message, or None on failure.
+    """
+    import json
+
+    async def _post(payload: Dict[str, Any]) -> Dict[str, Any]:
+        url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+        session = _get_session()
+        async with session.post(
+            url,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as response:
+            try:
+                return cast(Dict[str, Any], await response.json())
+            except Exception:
+                return {
+                    "ok": False,
+                    "error_code": response.status,
+                    "description": await response.text(),
+                }
+
+    payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = json.dumps(reply_markup)
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    if topic_id is not None and str(topic_id).strip() != "":
+        # A malformed topic_id must not sink the whole send — drop the thread id
+        # and deliver to the group root instead of raising into the outer except.
+        try:
+            payload["message_thread_id"] = int(topic_id)
+        except (TypeError, ValueError):
+            logger.warning("Ignoring invalid topic_id %r for chat %s", topic_id, chat_id)
+
+    try:
+        result = await _post(payload)
+        if not result.get("ok") and is_markdown_parse_error(result) and "parse_mode" in payload:
+            logger.info("Retrying Telegram send as plain text after Markdown parse error")
+            payload.pop("parse_mode", None)
+            result = await _post(payload)
+
+        if not result.get("ok"):
+            logger.warning("Failed to send Telegram message: %s", result.get("description"))
+            return None
+        msg_id: Optional[int] = result.get("result", {}).get("message_id")
+        return msg_id
+    except Exception as e:
+        logger.warning(f"Error sending Telegram message with fallback: {e}")
         return None
 
 

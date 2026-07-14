@@ -22,6 +22,7 @@ import math
 from shapely.geometry import shape
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.layout.building_footprints import fetch_building_footprints
 from shared.layout.community_detector import detect_communities
@@ -37,7 +38,38 @@ from shared.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
-@register_step("resolve_community_site")
+@register_step(
+    "resolve_community_site",
+    contract=StepContract(
+        description=(
+            "Route B entry step: resolves a GPS anchor to a community boundary "
+            "(GRID3 dataset) and fetches building footprints within it."
+        ),
+        consumes_state=(),
+        # geo_source/footprint_count: idempotency guard (`if
+        # get_state("geo_source") == "community" and
+        # get_state("footprint_count"): <skip>`); absence just runs
+        # resolution fresh. site_folder_id: passed to upload_step_output(),
+        # which documents "skip if None" (non-fatal).
+        optional_consumes_state=("geo_source", "footprint_count", "site_folder_id"),
+        produces_state=(
+            "geo_source",
+            "site_name",
+            "community_state",
+            "footprint_count",
+            "footprint_source",
+            "grid3_building_count",
+            "community_boundary_drive_id",
+            "community_buildings_drive_id",
+        ),
+        guard_keys=("geo_source", "footprint_count"),
+        side_effects=(
+            "Reverse-geocodes the anchor to a country dataset, runs GRID3 community "
+            "boundary detection, fetches building footprints, and uploads the "
+            "boundary + buildings GeoJSON to Google Drive."
+        ),
+    ),
+)
 async def resolve_community_site(context: StepContext) -> StepResult:
     # Idempotency: already resolved
     if context.get_state("geo_source") == "community" and context.get_state("footprint_count"):

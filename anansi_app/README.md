@@ -1,6 +1,6 @@
 # Anansi Admin App
 
-A Streamlit web application for administering the Anansi chat bot. Provides chat history browsing, settings management, MCP server toggles, broadcast scheduling, and live bot status — all behind Google OAuth authentication.
+A NiceGUI web application for administering the Anansi chat bot. Provides chat history browsing, settings management, MCP server toggles, broadcast scheduling, and live bot status — all behind Google OAuth authentication.
 
 ## Features
 
@@ -17,20 +17,30 @@ A Streamlit web application for administering the Anansi chat bot. Provides chat
 This is a **separate service** from the chat_orchestrator, designed to:
 - Run independently without affecting the production bot
 - Read the Chat DB (Supabase) and read/write app settings via the DigitalOcean API
-- Deploy on minimal infrastructure (no background jobs needed)
+- Deploy on minimal infrastructure (co-launches the broadcast scheduler as a background process; no separate worker service needed)
 
 ```
 anansi_app/
-├── app.py                        # Main Streamlit app + page router
-├── components/
-│   ├── chat_history_page.py      # Conversation browser
-│   ├── settings_page.py          # Env var editor + MCP toggles
-│   ├── broadcast_page.py         # Broadcast scheduler UI
-│   ├── grid_status_page.py       # Live grid status dashboard
-│   └── ...
+├── nicegui_app/
+│   ├── main.py                    # App entry point, routes, /healthz
+│   ├── auth.py                    # Google OAuth (Authlib) + whitelist gating
+│   ├── layout.py                  # Sidebar shell, nav, live bot-status dot
+│   ├── services_access.py         # Cached accessors over services/
+│   └── pages/
+│       ├── chat.py                # Conversation browser
+│       ├── documents.py           # RAG knowledgebase management
+│       ├── agents.py              # Persistent agents management
+│       ├── settings.py            # Env var editor + MCP toggles (registry-driven)
+│       ├── broadcast.py           # Broadcast compose/templates/scheduled/history
+│       ├── grid.py                # Grid Design list/detail/form (ui.aggrid)
+│       └── grid_actions.py        # Grid detail-view compute-engine actions
+├── rendering/
+│   └── conversation_html.py       # Pure message-HTML builders (used by pages/chat.py)
+├── grid_app/                      # Vendored grid metadata/entities/RBAC (framework-agnostic)
 └── services/
     ├── supabase_reader.py         # Read-only Chat DB queries
     ├── settings_service.py        # Read/write env vars via DO API
+    ├── broadcast_service.py       # Broadcast send/schedule/templates
     └── bot_status_service.py      # DigitalOcean deployment status
 ```
 
@@ -52,7 +62,7 @@ cp .env.example .env
 
 3. **Run the app:**
 ```bash
-streamlit run app.py
+python -m nicegui_app.main
 ```
 
 4. **Open browser:**
@@ -72,23 +82,26 @@ http://localhost:8501
    GOOGLE_CLIENT_ID=your-client-id.apps.googleusercontent.com   # alias
    GOOGLE_CLIENT_SECRET=your-client-secret                      # alias
    ```
-4. Add your Google account email to `ALLOWED_VIEWER_EMAILS` and run `streamlit run app.py`.
+4. Add your Google account email to `ALLOWED_VIEWER_EMAILS` and run `python -m nicegui_app.main`.
+
+For local testing without Google OAuth, set `GRID_DESIGN_DEV_NO_AUTH=1` — this bypasses auth entirely and grants full access. **Never set this in production.**
 
 ## Deployment
 
 ### DigitalOcean App Platform (Recommended)
 
-Deploy as part of the `anansi` app spec (see `.do/app.example.yaml`). The admin app runs as a separate service alongside the chat orchestrator.
+Deploy as part of the `anansi` app spec (see `.do/app.example.yaml`). The admin app runs as a separate service alongside the chat orchestrator. See [DEPLOY_NICEGUI.md](DEPLOY_NICEGUI.md) for the full deploy/rollback runbook.
 
 1. **Add to your app spec** — copy the `anansi-app` service block from `.do/app.example.yaml` into your live spec.
 2. **Set env vars** — at minimum `AUTH_CLIENT_ID`, `AUTH_CLIENT_SECRET`, `AUTH_COOKIE_SECRET`, `SUPABASE_URL`, `SUPABASE_KEY`, `TELEGRAM_BOT_TOKEN`, `ALLOWED_VIEWER_EMAILS`, and `DIGITALOCEAN_API_TOKEN`.
 3. **Update OAuth redirect URIs** in Google Cloud Console to include `https://your-app.example.com/oauth2callback`.
+4. **Health check** — the service serves `/healthz`; the live DO spec's `health_check.http_path` must point there.
 
 **Cost:** ~$5/month (basic-xxs instance)
 
 ## Access Control
 
-The viewer implements two-tier access control:
+The admin app implements two-tier access control:
 
 ### 1. Explicit Whitelist
 Configured in `.env` / environment variables:
@@ -116,32 +129,10 @@ must appear in at least one list to reach the app at all:
   stays restricted to `ALLOWED_VIEWER_EMAILS`.
 - **Edit rights are strictly separated**: procurement editors touch only Purchases;
   design editors touch everything else; admins and view-only users edit nothing.
-- Gates are enforced on both the rendered buttons and the router (crafted
-  `?page=…&edit=1` URLs are blocked).
+- Gates are enforced both in the rendered UI and on every route dispatch (crafted
+  `?id=…&edit=1` URLs are blocked server-side).
 - The grid code is vendored at `grid_app/` with its entity metadata at `db/entities.json`.
   `GRID_DESIGN_DEV_NO_AUTH=1` bypasses OAuth and grants all permissions for **local dev only**.
-
-## Directory Structure
-
-```
-chat_viewer/
-├── app.py                      # Main Streamlit application
-├── requirements.txt            # Python dependencies
-├── .env.example                # Environment template
-├── .gitignore                  # Git ignore rules
-├── project.yml                 # DigitalOcean deployment config
-├── README.md                   # This file
-├── .streamlit/
-│   └── config.toml             # Streamlit configuration
-├── components/
-│   ├── __init__.py
-│   ├── auth.py                 # Google OAuth + whitelist
-│   ├── sidebar.py              # Navigation component
-│   └── conversation_view.py    # Message display
-└── services/
-    ├── __init__.py
-    └── supabase_reader.py      # Read-only DB queries
-```
 
 ## Environment Variables
 
@@ -174,7 +165,7 @@ STAFF_ORG_ID=2                 # organization_id that grants staff-mode access
 
 ## Database Schema
 
-The viewer queries the following tables (read-only):
+The chat viewer queries the following tables (read-only):
 
 ### chat_messages
 - `id`: Message UUID
@@ -203,9 +194,8 @@ The viewer queries the following tables (read-only):
 
 - ✅ Google OAuth with domain restriction
 - ✅ Whitelist-based access control
-- ✅ Read-only database permissions
+- ✅ Read-only database permissions for the chat viewer (grid design has scoped write access, see Access Control)
 - ✅ HTTPS only in production
-- ✅ No write capabilities
 - ✅ Session-based authentication
 
 ## Troubleshooting
@@ -232,17 +222,16 @@ The viewer queries the following tables (read-only):
 
 ### Adding New Features
 
-1. **New component:** Add to `components/`
+1. **New page:** Add to `nicegui_app/pages/`, register the route in `nicegui_app/main.py`
 2. **New service:** Add to `services/`
-3. **Update main app:** Import and use in `app.py`
-4. **Test locally** before deploying
+3. **Test locally** before deploying
 
 ### Code Style
 
 - Use type hints
 - Document functions with docstrings
 - Follow PEP 8 style guide
-- Keep components modular
+- Keep pages modular
 
 ## Support
 

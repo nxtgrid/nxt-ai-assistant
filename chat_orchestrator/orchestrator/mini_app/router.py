@@ -39,6 +39,7 @@ from orchestrator.mini_app.schemas import (
     verify_signature,
 )
 from orchestrator.services.work_packet_service import WorkPacketService
+from shared.utils.error_messages import ErrorCategory, get_user_message
 from shared.utils.logging import get_logger
 from shared.utils.telegram_markdown import escape_markdown
 
@@ -318,10 +319,19 @@ async def submit_form(
     overrides.update(validated_values)
 
     # Update overrides and resume in sequence (2 DB calls total)
-    await service.update_state(
-        body.packet_id,
-        {"pending_param_overrides": overrides},
-    )
+    try:
+        await service.update_state(
+            body.packet_id,
+            {"pending_param_overrides": overrides},
+        )
+    except Exception:
+        LOGGER.exception(
+            "Failed to save form overrides for packet=%s (write contention?)", body.packet_id
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=get_user_message(ErrorCategory.TRANSIENT, "service_unavailable"),
+        )
 
     session_id = packet.get("requested_in_session")
     await service.resume_from_input(

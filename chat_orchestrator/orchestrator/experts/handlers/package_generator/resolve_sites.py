@@ -13,6 +13,7 @@ from typing import Any
 import asyncpg
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.auth.auth_service import STAFF_ORG_ID as _STAFF_ORG_ID
 from shared.utils.grid_matcher import find_best_grid_match, parse_multi_site_args
@@ -133,7 +134,23 @@ def _match_site_names(
     return matched, unmatched
 
 
-@register_step("resolve_sites")
+@register_step(
+    "resolve_sites",
+    contract=StepContract(
+        description=(
+            "Parses comma-separated site names, fuzzy-matches each against Auth DB, "
+            "deduplicates, and stores the validated site list in state. No-ops on the "
+            "community route (resolve_community_site handles that route's geo)."
+        ),
+        consumes_state=(),
+        # Branch selector: `if get_state("geo_source") == "community": return
+        # <no-op>`; absence defaults to the (primary) submission-route
+        # resolution -- a legitimate alternate path, not an error.
+        optional_consumes_state=("geo_source",),
+        produces_state=("sites_to_process", "site_name", "site_id"),
+        side_effects="Queries Auth DB pd_site_submissions via asyncpg (read-only) for site name validation.",
+    ),
+)
 async def resolve_sites(context: StepContext) -> StepResult:
     """Validate and resolve site names for multi-site execution.
 

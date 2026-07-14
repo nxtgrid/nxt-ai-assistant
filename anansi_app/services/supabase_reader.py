@@ -11,8 +11,9 @@ import os
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import streamlit as st
 from supabase import Client, create_client  # type: ignore[attr-defined]
+
+from services._cache_compat import cache_data
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ class SupabaseReader:
         """Check if database connections are configured."""
         return self.client is not None
 
-    @st.cache_data(ttl=300, show_spinner=False)  # Cache for 5 minutes
+    @cache_data(ttl=300, show_spinner=False)  # Cache for 5 minutes
     def get_chat_contexts(_self, user_email: str, days_back: int = 30) -> List[Dict[str, Any]]:
         """
         Get all unique chat contexts (groups and individual users) with recent activity.
@@ -578,7 +579,7 @@ class SupabaseReader:
             logger.error("Error searching messages: %s", e)
             return []
 
-    @st.cache_data(ttl=300, show_spinner=False)  # Cache for 5 minutes
+    @cache_data(ttl=300, show_spinner=False)  # Cache for 5 minutes
     def search_conversations_by_content(
         _self, search_term: str, days_back: int, user_email: str
     ) -> List[Dict[str, Any]]:
@@ -754,7 +755,7 @@ class SupabaseReader:
             logger.error("Error fetching daily stats: %s", e)
             return {"users": 0, "messages": 0, "sessions": 0}
 
-    @st.cache_data(ttl=600, show_spinner=False)  # Cache for 10 minutes
+    @cache_data(ttl=600, show_spinner=False)  # Cache for 10 minutes
     def get_period_stats(
         _self, user_email: str, start_date: datetime, end_date: datetime
     ) -> Dict[str, Any]:
@@ -1664,7 +1665,7 @@ class SupabaseReader:
             logger.error("Error updating document title: %s", e)
             return False
 
-    @st.cache_data(ttl=60, show_spinner=False)
+    @cache_data(ttl=60, show_spinner=False)
     def get_all_user_schedules(_self) -> List[Dict[str, Any]]:
         """Fetch all user schedules from Supabase, ordered by next_run_at."""
         if not _self.client:

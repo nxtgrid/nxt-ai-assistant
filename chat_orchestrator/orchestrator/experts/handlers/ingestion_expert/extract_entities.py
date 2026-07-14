@@ -9,6 +9,7 @@ import os
 import re
 from typing import Any, Dict, List
 
+from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
@@ -105,7 +106,7 @@ async def extract_with_gemini(content: str) -> Dict[str, Any]:
         api_key=os.getenv("GOOGLE_API_KEY"),
         http_options={"timeout": 30_000},
     )
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    model = get_settings().gemini.model
 
     prompt = EXTRACTION_PROMPT.format(content=content[:8000])
 

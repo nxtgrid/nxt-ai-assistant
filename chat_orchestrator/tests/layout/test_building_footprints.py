@@ -1,3 +1,5 @@
+import time
+
 from shapely.geometry import Polygon
 
 from shared.layout.building_footprints import FootprintResult, _quadkeys_for_boundary
@@ -178,3 +180,35 @@ def test_reconcile_uses_google_when_ms_thin():
     assert res.source == "google"  # denser set wins
     assert res.count == 95
     assert res.ms_count == 40 and res.google_count == 95
+
+
+def test_reconcile_runs_google_speculatively_for_large_estimates():
+    from shared.layout import building_footprints as bf
+
+    boundary = _Polygon([(4.58, 6.81), (4.60, 6.81), (4.60, 6.83), (4.58, 6.83)])
+    ms_fc = {"type": "FeatureCollection", "features": [{"i": i} for i in range(100)]}
+    google_fc = {"type": "FeatureCollection", "features": [{"j": j} for j in range(450)]}
+
+    def slow_ms(_boundary):
+        time.sleep(0.2)
+        return ms_fc
+
+    def slow_google(_boundary, min_confidence):
+        time.sleep(0.2)
+        return google_fc
+
+    started = time.monotonic()
+    with (
+        patch.object(bf, "fetch_ms_footprints", side_effect=slow_ms),
+        patch.object(bf, "fetch_google_open_buildings", side_effect=slow_google),
+    ):
+        res = bf.fetch_building_footprints(
+            boundary,
+            grid3_estimate=500,
+            crosscheck_min_ratio=0.80,
+        )
+    elapsed = time.monotonic() - started
+
+    assert res.source == "google"
+    assert res.count == 450
+    assert elapsed < 0.35

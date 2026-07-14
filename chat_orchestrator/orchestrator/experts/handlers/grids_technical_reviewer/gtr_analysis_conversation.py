@@ -12,6 +12,7 @@ import os
 import re
 from typing import Any, Dict, List
 
+from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
 from shared.utils.error_messages import sanitize_error_for_user
@@ -288,7 +289,7 @@ async def _run_analysis_turn(
         api_key=os.getenv("GOOGLE_API_KEY"),
         http_options={"timeout": 30_000},
     )
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    model = get_settings().gemini.model
 
     # Build config
     config: Dict[str, Any] = {

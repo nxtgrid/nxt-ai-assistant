@@ -493,7 +493,7 @@ python global_graph_builder.py
 ### Pipeline Stages
 
 1. **Chunking** (`semantic_chunker.py`) - Split into ~512 token chunks
-2. **Embeddings** (`vector_embedder.py`) - Google AI Studio text-embedding-005
+2. **Embeddings** (`vector_embedder.py`) - Vertex AI gemini-embedding-001 (768 dimensions)
 3. **Entity Extraction** (`entity_extractor.py`) - Extract concepts, people, technologies
 4. **Relationship Extraction** (`graph_extractor.py`) - Find connections
 5. **Community Detection** (`community_detector.py`) - Cluster related entities

@@ -42,9 +42,11 @@ class ToolExecutor:
         registry: Optional[ToolRegistry],
         settings: AppSettings,
         client: Optional[httpx.AsyncClient] = None,
+        default_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._registry = registry
         self._settings = settings
+        self._default_metadata = dict(default_metadata or {})
         timeout = httpx.Timeout(30.0)
         self._client = client or httpx.AsyncClient(timeout=timeout)
 
@@ -210,7 +212,9 @@ class ToolExecutor:
         # organization_id is the primary identifier, user_email is optional
         user_permissions = metadata.get("user_permissions", {})
         organization_ids = user_permissions.get("organization_ids", [])
-        organization_id = int(organization_ids[0]) if organization_ids else None
+        organization_id = (
+            int(organization_ids[0]) if organization_ids else metadata.get("organization_id")
+        )
 
         enriched_arguments = {
             **arguments,
@@ -349,7 +353,9 @@ class ToolExecutor:
         # Inject user context into arguments (same as HTTP path)
         user_permissions = metadata.get("user_permissions", {})
         organization_ids = user_permissions.get("organization_ids", [])
-        organization_id = int(organization_ids[0]) if organization_ids else None
+        organization_id = (
+            int(organization_ids[0]) if organization_ids else metadata.get("organization_id")
+        )
 
         enriched_arguments = {
             **arguments,
@@ -434,7 +440,8 @@ class ToolExecutor:
             Exception: If tool call fails
         """
         call = FunctionCall(name=tool_name, arguments=arguments)
-        result = await self.execute(call, metadata or {})
+        effective_metadata = {**self._default_metadata, **(metadata or {})}
+        result = await self.execute(call, effective_metadata)
 
         if not result.success:
             raise Exception(result.error or f"Tool {tool_name} failed")

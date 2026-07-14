@@ -8,6 +8,7 @@ energy specs.
 import json
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
@@ -15,7 +16,52 @@ from shared.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
-@register_step("generate_site_bom")
+@register_step(
+    "generate_site_bom",
+    contract=StepContract(
+        description=(
+            "Triggers BOM generation for an existing design and fetches BOM items, "
+            "cost summary, and updated energy specs."
+        ),
+        # design_id is a hard requirement: `if not design_id: return
+        # StepResult.failure(...)`.
+        consumes_state=("design_id",),
+        # bom_generated/cost_summary/total_*/num_*: only read inside the
+        # idempotency-guard block to re-expose cached values on recovery
+        # re-entry; the main path computes fresh values regardless.
+        # site_name: `get_input(...) or get_state(...) or "site"`.
+        optional_consumes_state=(
+            "bom_generated",
+            "cost_summary",
+            "total_kwp",
+            "total_kwh",
+            "total_kva",
+            "num_subsystems",
+            "num_inverters",
+            "num_batteries",
+            "num_panels",
+            "site_name",
+        ),
+        produces_state=(
+            "bom_generated",
+            "cost_summary",
+            "total_kwp",
+            "total_kwh",
+            "total_kva",
+            "num_subsystems",
+            "num_inverters",
+            "num_batteries",
+            "num_panels",
+            "editable_total_kwp",
+            "editable_total_kwh",
+        ),
+        guard_keys=("bom_generated",),
+        side_effects=(
+            "Calls the grid_design_trigger_bom MCP tool, which runs the BOM generation "
+            "engine and recomputes component costs from the purchase ledger."
+        ),
+    ),
+)
 async def generate_site_bom(context: StepContext) -> StepResult:
     """Trigger BOM generation and fetch results.
 

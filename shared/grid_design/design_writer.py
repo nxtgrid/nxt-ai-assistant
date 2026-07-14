@@ -45,6 +45,10 @@ _DESIGN_FIELD_MAP = {
     "created_by": "created_by",
 }
 
+# gd_designs column -> API request field (inverse of _DESIGN_FIELD_MAP; every
+# value in _DESIGN_FIELD_MAP is a unique column, so this inverts with no collisions).
+_REVERSE_DESIGN_FIELD_MAP = {col: field for field, col in _DESIGN_FIELD_MAP.items()}
+
 REGULATION_OPTIONS = ["None", "Nigeria - DARES"]
 SPD_OPTIONS = [
     "Keep default T1+T2 Type SPD (Any lightning probability)",
@@ -73,6 +77,33 @@ FORM_DEFAULTS: dict[str, Any] = {
 def find_grid_by_name(name: str) -> dict | None:
     rows: list[dict] = Repository("grids").list(active_only=True, filters={"name": name}, limit=1)
     return rows[0] if rows else None
+
+
+def get_design(design_id: str) -> dict | None:
+    """Fetch a single gd_designs row by id, or None if it doesn't exist."""
+    return Repository("designs").get(design_id)
+
+
+def design_row_to_payload(design_row: dict) -> dict:
+    """Convert a gd_designs row (column-keyed, e.g. from get_design) back into an
+    API-field-keyed payload suitable for create_design(payload, grid_id).
+
+    This is a generic, faithful reverse mapping via _REVERSE_DESIGN_FIELD_MAP —
+    it does not special-case design_name/name or created_by, and it does not
+    touch the database. A caller that wants to duplicate a design (new name,
+    re-stamped created_by, merged overrides) is responsible for making those
+    policy decisions on the returned payload before calling create_design;
+    that is out of scope for this helper.
+
+    Columns whose value is None or absent from design_row are omitted from the
+    output payload, mirroring how create_design treats None as "not provided".
+    """
+    payload: dict = {}
+    for column, api_field in _REVERSE_DESIGN_FIELD_MAP.items():
+        value = design_row.get(column)
+        if value is not None:
+            payload[api_field] = value
+    return payload
 
 
 def create_grid(name: str, community: str | None = None) -> dict:
