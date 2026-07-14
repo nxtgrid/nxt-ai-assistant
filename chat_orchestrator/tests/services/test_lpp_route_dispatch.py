@@ -60,6 +60,16 @@ def test_parse_lpp_technology_family_deye():
     )
 
 
+def test_parse_lpp_technology_family_deye_not_victron():
+    assert (
+        parse_lpp_technology_family(
+            "Can you create an LPP for the site located at "
+            "9.3947551,9.3176320 using Deye technology not Victron?"
+        )
+        == "deye"
+    )
+
+
 def test_parse_lpp_technology_family_victron():
     assert parse_lpp_technology_family("create an LPP with Victron container design") == "victron"
 

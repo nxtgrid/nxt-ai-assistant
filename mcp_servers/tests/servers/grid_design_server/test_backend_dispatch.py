@@ -131,6 +131,38 @@ async def test_design_and_bom_routes_to_internal_engine():
 
 
 @pytest.mark.asyncio
+async def test_design_and_bom_deye_family_does_not_inject_victron_defaults():
+    """Family-level Deye requests must reach the engine without Victron equipment defaults.
+
+    The internal engine applies family-compatible defaults from technology_family.
+    If the backend wrapper injects Quattro/Pylontech/Victron MPPT before that
+    point, those values override the engine's Deye defaults.
+    """
+    mock = AsyncMock(return_value={"success": True, "backend": "internal"})
+    with (
+        patch.object(gd, "GRID_DESIGN_ACTIONS_ENABLED", True),
+        patch.object(gd, "GRID_DESIGN_BACKEND", "internal"),
+        patch.object(gd.internal_engine, "design_and_bom", mock),
+    ):
+        result = await gd.handle_call_tool(
+            "design_and_bom",
+            {
+                "grid_name": "G",
+                "design_name": "D",
+                "max_connections": 50,
+                "technology_family": "deye",
+                "organization_id": STAFF_ORG_ID,
+            },
+        )
+    assert _parse(result)["success"] is True
+    args = mock.call_args[0][0]
+    assert args["technology_family"] == "deye"
+    assert "inverter_type" not in args
+    assert "battery_type" not in args
+    assert "mppt_type" not in args
+
+
+@pytest.mark.asyncio
 async def test_update_design_accepts_json_string_updates():
     mock = AsyncMock(return_value={"success": True, "backend": "internal", "updated": {}})
     with (
