@@ -10,6 +10,7 @@ class _Ctx:
         self.packet_state = self._state
         self.packet_id = "lpp-packet-1"
         self.effective_email = "staff@example.com"
+        self.sent_messages = []
         self.accumulated_results = {
             "generate_distribution_map": {"statistics": {"served_buildings": 50}}
         }
@@ -32,6 +33,7 @@ class _Ctx:
         return self._state.get(k, d)
 
     async def send_progress_to_user(self, *a, **k):
+        self.sent_messages.append(a[0])
         return True
 
 
@@ -71,6 +73,15 @@ def test_design_forwards_technology_family():
     assert result.error is None
     args = ctx.mcp_executor.call_tool.call_args[0][1]
     assert args["technology_family"] == "deye"
+
+
+def test_design_progress_names_deye_family():
+    ctx = _Ctx()
+    ctx._state["technology_family"] = "deye"
+    result = asyncio.run(gd.generate_powerplant_design(ctx))
+
+    assert result.error is None
+    assert "DEYE" in ctx.sent_messages[0].upper()
 
 
 def test_design_omits_unsupplied_optional_parameters():

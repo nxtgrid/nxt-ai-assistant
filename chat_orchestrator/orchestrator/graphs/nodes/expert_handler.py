@@ -850,16 +850,10 @@ def _build_lpp_packet_inputs(
     }
 
     if packet_type == "light_preliminary_package":
-        from orchestrator.services.command_parser import (
-            parse_lpp_anchor_args,
-            parse_lpp_technology_family,
-        )
+        from orchestrator.services.command_parser import parse_lpp_anchor_args
+        from orchestrator.services.lpp_parameter_parser import merge_lpp_parameter_inputs
 
-        technology_family = parse_lpp_technology_family(
-            " ".join(part for part in (request_text, effective_request, args) if part)
-        )
-        if technology_family:
-            inputs["technology_family"] = technology_family
+        inputs.update(merge_lpp_parameter_inputs(request_text, effective_request, args))
 
         anchor = parse_lpp_anchor_args(args)
         if anchor:

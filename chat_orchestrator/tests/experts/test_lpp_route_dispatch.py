@@ -62,6 +62,24 @@ def test_packet_inputs_preserve_technology_from_original_nl_request():
     assert "using Deye technology" in inputs["raw_request"]
 
 
+def test_packet_inputs_include_natural_language_design_parameters():
+    inputs = _build_lpp_packet_inputs(
+        packet_type="light_preliminary_package",
+        effective_request="/lpp 9.3947551,9.3176320",
+        expert_command="/lpp 9.3947551,9.3176320",
+        key_entity="9.3947551,9.3176320",
+        args="9.3947551,9.3176320",
+        raw_request=(
+            "Can you create an LPP for 9.3947551,9.3176320 using Deye not Victron, "
+            "120 residential connections, 35 non-residential connections, 850 Wp/conn?"
+        ),
+    )
+    assert inputs["technology_family"] == "deye"
+    assert inputs["initial_residential_connections"] == 120
+    assert inputs["initial_business_connections"] == 35
+    assert inputs["wp_per_conn_override"] == 850
+
+
 def test_packet_inputs_submission_route_unchanged():
     inputs = _build_lpp_packet_inputs(
         packet_type="light_preliminary_package",

@@ -69,6 +69,7 @@ def _normalize_route(data: Dict[str, Any]) -> Optional[Dict[str, str]]:
         "packet_type": packet_type,
         "key_entity": str(data.get("key_entity") or "").strip(),
         "args": str(data.get("args") or "").strip(),
+        "raw_request": str(data.get("raw_request") or "").strip(),
     }
 
     latitude = str(data.get("latitude") or "").strip()
@@ -121,7 +122,8 @@ async def route_expert_intent(user_input: str) -> Optional[Dict[str, str]]:
         '"key_entity": "site name or coordinate pair, if present", '
         '"args": "slash-command arguments, if present", '
         '"latitude": "decimal latitude, if present", '
-        '"longitude": "decimal longitude, if present"'
+        '"longitude": "decimal longitude, if present", '
+        '"raw_request": "original user message"'
         "}"
     )
 
@@ -143,7 +145,10 @@ async def route_expert_intent(user_input: str) -> Optional[Dict[str, str]]:
         data = json.loads(_clean_json_text(response.text))
         if not isinstance(data, dict):
             return None
-        return _normalize_route(data)
+        route = _normalize_route(data)
+        if route and not route.get("raw_request"):
+            route["raw_request"] = user_input
+        return route
     except Exception as e:
         LOGGER.warning(f"Intent router model failed; continuing without expert route: {e}")
         return None

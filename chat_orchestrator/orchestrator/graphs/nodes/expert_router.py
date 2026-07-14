@@ -36,6 +36,10 @@ from typing import Any, Dict, List, Optional
 from orchestrator.graphs.state import ConversationState
 from orchestrator.services.command_registry import get_command, get_expert_command_mapping
 from orchestrator.services.expert_instructions_provider import ExpertInstructionsProvider
+from orchestrator.services.lpp_parameter_help import (
+    detect_lpp_parameter_help_request,
+    format_lpp_parameter_help,
+)
 from orchestrator.services.pending_decision_service import (
     DECISION_TYPE_CANCEL,
     DECISION_TYPE_DUPLICATE,
@@ -208,6 +212,12 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
         "expert_raw_request": None,
         "expert_key_entity": None,  # Site/entity name extracted from command
     }
+
+    if detect_lpp_parameter_help_request(user_input):
+        return {
+            **result,
+            "final_response": format_lpp_parameter_help(user_input),
+        }
 
     # Skip expert routing if no session
     if not session_id:
@@ -765,6 +775,7 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
                 input_lower = user_input.lower()
                 matched_command = intent_route["command"]
                 matched_packet_type = intent_route["packet_type"]
+                expert_raw_request = intent_route.get("raw_request") or original_user_input
                 LOGGER.info(
                     f"Planned expert routing matched {matched_command} "
                     f"for packet_type={matched_packet_type}"

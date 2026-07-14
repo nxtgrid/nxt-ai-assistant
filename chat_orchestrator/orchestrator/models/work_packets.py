@@ -192,6 +192,51 @@ class LPPInputs(BaseModel):
         default=None,
         description="Power plant technology family/architecture: 'victron' or 'deye'",
     )
+    max_connections: Optional[int] = Field(
+        default=None,
+        description="Maximum connections for power-plant design",
+    )
+    initial_residential_connections: Optional[int] = Field(
+        default=None,
+        description="Initial residential connections",
+    )
+    initial_business_connections: Optional[int] = Field(
+        default=None,
+        description="Initial business/nonresidential connections",
+    )
+    initial_3phase_connections: Optional[int] = Field(
+        default=None,
+        description="Initial 3-phase connections",
+    )
+    force_3phase: Optional[bool] = Field(default=None, description="Force 3-phase design")
+    wp_per_conn_override: Optional[float] = Field(
+        default=None,
+        description="Wp per connection override",
+    )
+    regulation_constraint: Optional[str] = Field(
+        default=None,
+        description="Regulation constraint, e.g. None or Nigeria - DARES",
+    )
+    editable_total_kwp: Optional[float] = Field(default=None, description="Target total kWp")
+    editable_total_kwh: Optional[float] = Field(default=None, description="Target total kWh")
+    editable_site_type: Optional[str] = Field(
+        default=None,
+        description="Physical layout type: ess or victron",
+    )
+    editable_panel_config: Optional[str] = Field(
+        default=None,
+        description="Panel string configuration such as 20S2P",
+    )
+    target_tariff_usd: Optional[float] = Field(default=None, description="Target tariff in USD/kWh")
+    anchor_load_kw: Optional[float] = Field(default=None, description="Anchor load in kW")
+    pue_hours_per_day: Optional[float] = Field(
+        default=None,
+        description="Anchor/PUE runtime hours per day",
+    )
+    num_poc_teams: Optional[int] = Field(
+        default=None,
+        description="Number of PoC metering teams",
+    )
     raw_request: str = Field(default="", description="Original user request")
 
 

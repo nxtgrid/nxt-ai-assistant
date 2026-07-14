@@ -767,6 +767,19 @@ class TestRunSteps:
         assert "error" in result
         assert "param_overrides_json" in result["error"]
 
+    @pytest.mark.asyncio
+    async def test_bad_packet_inputs_json_returns_clean_error_not_raise(self):
+        result = await expert_meta_tools.run_steps(
+            steps=["whatever"],
+            expert_id="lpp_expert",
+            packet_type="light_preliminary_package",
+            key_entity="ExampleSite",
+            packet_inputs_json="{not valid json",
+        )
+
+        assert "error" in result
+        assert "packet_inputs_json" in result["error"]
+
     # -- Packet resolution errors ------------------------------------------------
 
     @pytest.mark.asyncio
@@ -914,6 +927,7 @@ class TestDispatchWiring:
                 "packet_id": "pkt-1",
                 "confirmation_token": "abc123",
                 "force": True,
+                "packet_inputs_json": '{"technology_family":"deye"}',
             },
         )
 
@@ -932,6 +946,7 @@ class TestDispatchWiring:
             packet_type=None,
             key_entity=None,
             param_overrides_json=None,
+            packet_inputs_json='{"technology_family":"deye"}',
             force=True,
             confirmation_token="abc123",
             organization_id=1,

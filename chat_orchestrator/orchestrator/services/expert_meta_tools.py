@@ -456,6 +456,7 @@ async def run_steps(
     packet_type: Optional[str] = None,
     key_entity: Optional[str] = None,
     param_overrides_json: Optional[str] = None,
+    packet_inputs_json: Optional[str] = None,
     force: bool = False,
     confirmation_token: Optional[str] = None,
     organization_id: Optional[int] = None,
@@ -563,6 +564,10 @@ async def run_steps(
             `{"step_name": {"param_name": value, ...}, ...}` -- a per-step
             parameter override dict. Parsed defensively: invalid JSON
             returns a clean `{"error": ...}` dict, never raises.
+        packet_inputs_json: Optional JSON string shaped as
+            `{"technology_family": "deye", "wp_per_conn_override": 850}`.
+            Only used when creating a new packet because packet_id is omitted.
+            Parsed defensively: invalid JSON returns a clean error.
         force: Passed straight through to every `run_single_step` call --
             its existing "re-run even if already completed, clearing
             guard_keys" semantics. Does NOT change confirmation-gate
@@ -618,6 +623,16 @@ async def run_steps(
                 return {"error": "param_overrides_json must decode to a JSON object."}
             param_overrides = parsed_overrides
 
+        packet_inputs_extra: Dict[str, Any] = {}
+        if packet_inputs_json:
+            try:
+                parsed_packet_inputs = json.loads(packet_inputs_json)
+            except (TypeError, ValueError) as e:
+                return {"error": f"packet_inputs_json is not valid JSON: {e}"}
+            if not isinstance(parsed_packet_inputs, dict):
+                return {"error": "packet_inputs_json must decode to a JSON object."}
+            packet_inputs_extra = parsed_packet_inputs
+
         packet_service = WorkPacketService()
         provider = ExpertInstructionsProvider()
 
@@ -649,12 +664,17 @@ async def run_steps(
                 }
 
             resolved_org_id = organization_id or int(os.getenv("STAFF_ORG_ID", "2"))
+            packet_inputs = {
+                "key_entity": key_entity,
+                "site_name": key_entity,
+                **packet_inputs_extra,
+            }
             packet = await packet_service.create_packet(
                 packet_type=packet_type,
                 packet_title=f"[expert_run_steps] {expert_id}: {packet_type} ({key_entity})",
                 packet_goal=f"Run step(s) {steps} for {key_entity}",
                 assigned_expert=expert_id,
-                packet_inputs={"key_entity": key_entity, "site_name": key_entity},
+                packet_inputs=packet_inputs,
                 session_id=session_id or "",
                 organization_id=resolved_org_id,
                 requested_by_email=user_email,
