@@ -187,6 +187,7 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
     """
     session_id = state.get("session_id")
     user_input = state.get("user_input", "").strip()
+    original_user_input = state.get("original_input") or user_input
     user_context = state.get("user_context")
 
     # Debug: Log key state values for routing decisions
@@ -204,6 +205,7 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
         "similar_work_packet": None,
         "matched_expert_id": None,
         "expert_command": None,
+        "expert_raw_request": None,
         "expert_key_entity": None,  # Site/entity name extracted from command
     }
 
@@ -718,6 +720,7 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
         input_lower = user_input.lower()
         matched_command = None
         matched_packet_type = None
+        expert_raw_request = None
 
         for command, packet_type in EXPERT_COMMANDS.items():
             if input_lower.startswith(command):
@@ -743,6 +746,7 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
                     if not key_entity:
                         key_entity = _extract_key_entity(user_input, nl_packet_type)
                     if key_entity:
+                        expert_raw_request = original_user_input
                         user_input = f"{nl_command} {key_entity}"
                         input_lower = user_input.lower()
                         matched_command = nl_command
@@ -812,6 +816,7 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
                         "resumable_packet": packet,
                         "matched_expert_id": packet["assigned_expert"],
                         "expert_command": user_input,  # Keep current user input for "start fresh"
+                        "expert_raw_request": expert_raw_request,
                         "expert_packet_type": matched_packet_type,
                         "expert_key_entity": current_key_entity,  # Site name from NEW request
                     }
@@ -870,6 +875,7 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
                             "matched_expert_id": expert_id,
                             # Pass FULL user input (e.g., "/lpp ExampleGrid" not just "/lpp")
                             "expert_command": user_input,
+                            "expert_raw_request": expert_raw_request,
                             "expert_packet_type": matched_packet_type,
                             "expert_key_entity": key_entity,  # Site/entity name for packet
                         }
@@ -887,6 +893,7 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
                     "matched_expert_id": expert_id,
                     # Pass FULL user input as expert_command (e.g., "/lpp ExampleGrid" not just "/lpp")
                     "expert_command": user_input,
+                    "expert_raw_request": expert_raw_request,
                     "expert_packet_type": matched_packet_type,
                     "expert_key_entity": key_entity,  # Site/entity name for packet
                 }

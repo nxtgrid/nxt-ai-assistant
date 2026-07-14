@@ -188,6 +188,10 @@ class LPPInputs(BaseModel):
 
     site_id: Optional[int] = Field(default=None, description="Site submission ID")
     site_name: Optional[str] = Field(default=None, description="Site name to look up")
+    technology_family: Optional[str] = Field(
+        default=None,
+        description="Power plant technology family/architecture: 'victron' or 'deye'",
+    )
     raw_request: str = Field(default="", description="Original user request")
 
 
@@ -229,6 +233,10 @@ class LPPState(BaseModel):
     )
     site_id: Optional[int] = Field(default=None, description="Resolved site ID")
     site_name: Optional[str] = Field(default=None, description="Resolved site name")
+    technology_family: Optional[str] = Field(
+        default=None,
+        description="Power plant technology family/architecture: 'victron' or 'deye'",
+    )
     tool_calls: List[ToolCallRecord] = Field(default_factory=list)
     accumulated_results: Dict[str, Any] = Field(default_factory=dict)
 

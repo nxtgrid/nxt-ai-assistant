@@ -248,6 +248,10 @@ class CommandParser:
 _NUMBER_RE = r"-?\d+(?:\.\d+)?"
 _BARE_LATLON_RE = _re.compile(rf"^\s*({_NUMBER_RE})\s*,\s*({_NUMBER_RE})\s*$")
 _EMBEDDED_LATLON_RE = _re.compile(rf"(?<![\w.-])({_NUMBER_RE})\s*,\s*({_NUMBER_RE})(?![\w.-])")
+_LPP_TECHNOLOGY_ALIASES = (
+    ("deye", ("deye", "ess", "hybrid ess", "hybrid_ess")),
+    ("victron", ("victron", "quattro")),
+)
 
 
 def _valid_latlon(lat_s: str, lon_s: str) -> bool:
@@ -294,4 +298,29 @@ def parse_lpp_anchor_args(args: str) -> dict | None:
     return None
 
 
-__all__ = ["CommandParser", "UNRECOGNIZED_COMMAND_TEMPLATE"]
+def parse_lpp_technology_family(text: str) -> str | None:
+    """Extract the requested LPP power-plant technology family from text.
+
+    The LPP workflow has downstream support for ``technology_family`` but the
+    natural-language router may reduce the request to a synthetic ``/lpp``
+    command. Keep this parser deterministic so vendor/architecture requests
+    survive packet creation and resume/start-fresh flows.
+    """
+    if not text:
+        return None
+
+    normalized = text.lower().replace("-", " ").replace("_", " ")
+    for family, aliases in _LPP_TECHNOLOGY_ALIASES:
+        for alias in aliases:
+            alias_text = alias.replace("_", " ")
+            if _re.search(rf"(?<!\w){_re.escape(alias_text)}(?!\w)", normalized):
+                return family
+    return None
+
+
+__all__ = [
+    "CommandParser",
+    "UNRECOGNIZED_COMMAND_TEMPLATE",
+    "parse_lpp_anchor_args",
+    "parse_lpp_technology_family",
+]
