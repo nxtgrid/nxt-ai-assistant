@@ -10,7 +10,15 @@ import re
 import time
 from typing import Any, Callable
 
-from shared.llm.types import GenerateResult, GenerationOptions, LLMMessage, ToolSpec, Usage
+from shared.llm.types import (
+    GenerateResult,
+    GenerationOptions,
+    LLMMessage,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+    Usage,
+)
 from shared.utils.langfuse_utils import update_generation
 from shared.utils.logging import get_logger
 
@@ -96,17 +104,14 @@ class GeminiGateway:
         messages: list[LLMMessage],
         options: GenerationOptions,
         tools: list[ToolSpec] | None = None,
+        tool_results: list[ToolResult] | None = None,
     ) -> GenerateResult:
         model = options.model or self._default_model
         try:
-            return await self._generate_for_model(model, messages, options, tools)
+            return await self._generate_for_model(model, messages, options, tools, tool_results)
         except Exception as exc:
             if self._fallback_model and _status_code(exc) == 429:
-                LOGGER.warning(
-                    "Gemini model %s rate-limited; falling back to %s",
-                    model,
-                    self._fallback_model,
-                )
+                LOGGER.warning(f"Gemini model {model} rate-limited; falling back to {self._fallback_model}")
                 fallback_options = GenerationOptions(
                     model=self._fallback_model,
                     temperature=options.temperature,
@@ -119,6 +124,7 @@ class GeminiGateway:
                     messages,
                     fallback_options,
                     tools,
+                    tool_results,
                     retry=False,
                 )
             raise RuntimeError(_sanitize_text(exc, self._api_key)) from exc
@@ -129,6 +135,7 @@ class GeminiGateway:
         messages: list[LLMMessage],
         options: GenerationOptions,
         tools: list[ToolSpec] | None,
+        tool_results: list[ToolResult] | None,
         *,
         retry: bool = True,
     ) -> GenerateResult:
@@ -136,7 +143,7 @@ class GeminiGateway:
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
-                return await self._call_once(model, messages, options, tools)
+                return await self._call_once(model, messages, options, tools, tool_results)
             except Exception as exc:
                 last_exc = exc
                 status = _status_code(exc)
@@ -147,11 +154,8 @@ class GeminiGateway:
                 delay = min(2.0 * (2**attempt), 30.0)
                 delay += random.uniform(0, delay * 0.3)
                 LOGGER.warning(
-                    "Gemini rate limit for %s on attempt %s/%s; retrying in %.1fs",
-                    model,
-                    attempt + 1,
-                    attempts,
-                    delay,
+                    f"Gemini rate limit for {model} on attempt {attempt + 1}/{attempts}; "
+                    f"retrying in {delay:.1f}s"
                 )
                 await self._sleep(delay)
         if last_exc is not None:
@@ -164,8 +168,9 @@ class GeminiGateway:
         messages: list[LLMMessage],
         options: GenerationOptions,
         tools: list[ToolSpec] | None,
+        tool_results: list[ToolResult] | None,
     ) -> GenerateResult:
-        contents, system_instruction = self._convert_messages(messages)
+        contents, system_instruction = self._convert_messages(messages, tool_results)
         config = self._build_config(options, system_instruction, tools)
         t0 = time.monotonic()
         response = await self.client.aio.models.generate_content(
@@ -180,7 +185,10 @@ class GeminiGateway:
         return result
 
     @staticmethod
-    def _convert_messages(messages: list[LLMMessage]) -> tuple[list[dict[str, Any]], str | None]:
+    def _convert_messages(
+        messages: list[LLMMessage],
+        tool_results: list[ToolResult] | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
         contents: list[dict[str, Any]] = []
         system_parts: list[str] = []
         for message in messages:
@@ -190,6 +198,20 @@ class GeminiGateway:
                 continue
             role = "model" if message.role == "assistant" else "user"
             contents.append({"role": role, "parts": [{"text": message.text or ""}]})
+        for tool_result in tool_results or []:
+            contents.append(
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "function_response": {
+                                "name": tool_result.name,
+                                "response": {"result": tool_result.result},
+                            }
+                        }
+                    ],
+                }
+            )
         system_instruction = "\n\n".join(system_parts) if system_parts else None
         return contents, system_instruction
 
@@ -237,6 +259,7 @@ class GeminiGateway:
             finish_reason = str(finish_reason)
         return GenerateResult(
             text=str(_get_value(response, "text", default="") or ""),
+            tool_calls=GeminiGateway._extract_tool_calls(candidates),
             usage=Usage(
                 input_tokens=int(_get_value(usage, "prompt_token_count", "promptTokenCount", default=0) or 0),
                 output_tokens=int(
@@ -261,15 +284,35 @@ class GeminiGateway:
         )
 
     @staticmethod
+    def _extract_tool_calls(candidates: list[Any]) -> list[ToolCall]:
+        tool_calls: list[ToolCall] = []
+        for candidate in candidates:
+            content = _get_value(candidate, "content", default={})
+            parts = _get_value(content, "parts", default=[]) or []
+            for part in parts:
+                function_call = _get_value(part, "function_call", "functionCall")
+                if not function_call:
+                    continue
+                name = str(_get_value(function_call, "name", default="") or "")
+                args = _get_value(function_call, "args", default={}) or {}
+                if not isinstance(args, dict):
+                    args = dict(args)
+                tool_calls.append(
+                    ToolCall(
+                        id=f"{name}:{len(tool_calls)}",
+                        name=name,
+                        args=args,
+                        provider_state={"provider": "gemini"},
+                    )
+                )
+        return tool_calls
+
+    @staticmethod
     def _log_metrics(model: str, duration_ms: int, usage: Usage) -> None:
         LOGGER.info(
-            "Gemini %s: %sms | tokens in=%s out=%s thinking=%s cached=%s",
-            model,
-            duration_ms,
-            usage.input_tokens,
-            usage.output_tokens,
-            usage.thinking_tokens,
-            usage.cached_tokens,
+            f"Gemini {model}: {duration_ms}ms | "
+            f"tokens in={usage.input_tokens} out={usage.output_tokens} "
+            f"thinking={usage.thinking_tokens} cached={usage.cached_tokens}"
         )
 
     @staticmethod

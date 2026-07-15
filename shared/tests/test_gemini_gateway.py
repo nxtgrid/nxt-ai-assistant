@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from shared.llm import GenerationOptions, LLMMessage, Usage
+from shared.llm import GenerationOptions, LLMMessage, ToolResult, ToolSpec, Usage
 from shared.llm.gemini import GeminiGateway
 
 
@@ -120,4 +120,102 @@ async def test_generate_falls_back_after_primary_rate_limit():
     assert [call["model"] for call in client.models.calls] == [
         "primary-model",
         "fallback-model",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_converts_tool_specs_to_function_declarations():
+    client = FakeClient([fake_response(text="")])
+    gateway = GeminiGateway(api_key="test-key", client=client)
+
+    await gateway.generate(
+        [LLMMessage(role="user", text="Check meter M1")],
+        GenerationOptions(model="gemini-tools"),
+        tools=[
+            ToolSpec(
+                name="lookup_meter",
+                description="Look up a meter.",
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {"meter_id": {"type": "string"}},
+                    "required": ["meter_id"],
+                },
+            )
+        ],
+    )
+
+    assert client.models.calls[0]["config"]["tools"] == [
+        {
+            "function_declarations": [
+                {
+                    "name": "lookup_meter",
+                    "description": "Look up a meter.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"meter_id": {"type": "string"}},
+                        "required": ["meter_id"],
+                    },
+                }
+            ]
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_extracts_function_calls_as_neutral_tool_calls():
+    function_call = SimpleNamespace(name="lookup_meter", args={"meter_id": "M1"})
+    response = SimpleNamespace(
+        text="",
+        usage_metadata={},
+        candidates=[
+            SimpleNamespace(
+                finish_reason="STOP",
+                content=SimpleNamespace(parts=[SimpleNamespace(function_call=function_call)]),
+            )
+        ],
+    )
+    client = FakeClient([response])
+    gateway = GeminiGateway(api_key="test-key", client=client)
+
+    result = await gateway.generate(
+        [LLMMessage(role="user", text="Check meter M1")],
+        GenerationOptions(model="gemini-tools"),
+    )
+
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].id == "lookup_meter:0"
+    assert result.tool_calls[0].name == "lookup_meter"
+    assert result.tool_calls[0].args == {"meter_id": "M1"}
+
+
+@pytest.mark.asyncio
+async def test_generate_converts_tool_results_to_function_response_parts():
+    client = FakeClient([fake_response(text="done")])
+    gateway = GeminiGateway(api_key="test-key", client=client)
+
+    await gateway.generate(
+        [LLMMessage(role="user", text="Check meter M1")],
+        GenerationOptions(model="gemini-tools"),
+        tool_results=[
+            ToolResult(
+                call_id="lookup_meter:0",
+                name="lookup_meter",
+                result={"status": "ok"},
+            )
+        ],
+    )
+
+    assert client.models.calls[0]["contents"] == [
+        {"role": "user", "parts": [{"text": "Check meter M1"}]},
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "function_response": {
+                        "name": "lookup_meter",
+                        "response": {"result": {"status": "ok"}},
+                    }
+                }
+            ],
+        },
     ]

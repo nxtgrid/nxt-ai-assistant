@@ -10,6 +10,7 @@ from shared.llm.types import (
     GenerateResult,
     GenerationOptions,
     LLMMessage,
+    ToolResult,
     ToolSpec,
 )
 
@@ -20,6 +21,7 @@ class GenerationGateway(Protocol):
         messages: list[LLMMessage],
         options: GenerationOptions,
         tools: list[ToolSpec] | None = None,
+        tool_results: list[ToolResult] | None = None,
     ) -> GenerateResult:
         """Generate text, JSON, or tool calls from provider-neutral messages."""
 
