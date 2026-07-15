@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import random
@@ -87,19 +88,26 @@ def _to_sdk_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_to_sdk_value(item) for item in value]
     if isinstance(value, dict):
-        return {_SDK_KEY_MAP.get(key, key): _to_sdk_value(item) for key, item in value.items()}
+        converted: dict[str, Any] = {}
+        for key, item in value.items():
+            sdk_key = _SDK_KEY_MAP.get(key, key)
+            if sdk_key == "thought_signature":
+                converted[sdk_key] = _decode_thought_signature(item)
+            else:
+                converted[sdk_key] = _to_sdk_value(item)
+        return converted
     return value
 
 
 def _sdk_response_to_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
-        return value
+        return _sdk_response_value_to_dict(value)
     if hasattr(value, "model_dump"):
-        return value.model_dump(by_alias=True, exclude_none=True)
+        return _sdk_response_value_to_dict(value.model_dump(by_alias=True, exclude_none=True))
     if hasattr(value, "to_json_dict"):
-        return value.to_json_dict()
+        return _sdk_response_value_to_dict(value.to_json_dict())
     if hasattr(value, "to_dict"):
-        return value.to_dict()
+        return _sdk_response_value_to_dict(value.to_dict())
 
     result: dict[str, Any] = {}
     for attr, key in (
@@ -127,6 +135,8 @@ def _sdk_response_to_dict(value: Any) -> dict[str, Any]:
 
 
 def _sdk_response_value_to_dict(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return _encode_thought_signature(value)
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
     if isinstance(value, list):
@@ -172,6 +182,26 @@ def _is_quota_exhausted(error_text: str) -> bool:
             if "tier_requests" in metric and "_per_minute" not in metric:
                 return True
     return False
+
+
+def _encode_thought_signature(value: bytes) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def _decode_thought_signature(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return value
+    if not isinstance(value, str):
+        return _to_sdk_value(value)
+    try:
+        decoded = base64.b64decode(value.encode("ascii"), validate=True)
+    except Exception:
+        return value
+    # Treat canonical base64 strings as SDK byte signatures; leave arbitrary
+    # legacy/test strings untouched.
+    if _encode_thought_signature(decoded) == value:
+        return decoded
+    return value
 
 
 class GeminiGateway:
@@ -568,7 +598,7 @@ class GeminiGateway:
         for state_message in (conversation_state.messages if conversation_state else []):
             gemini_parts = state_message.provider_state.get("gemini_parts")
             if gemini_parts:
-                contents.append({"role": "model", "parts": gemini_parts})
+                contents.append({"role": "model", "parts": _to_sdk_value(gemini_parts)})
             elif state_message.text:
                 contents.append({"role": "model", "parts": [{"text": state_message.text}]})
         for tool_result in tool_results or []:
@@ -762,7 +792,11 @@ class GeminiGateway:
             }
         thought_signature = _get_value(part, "thought_signature", "thoughtSignature")
         if thought_signature:
-            converted["thought_signature"] = str(thought_signature)
+            converted["thought_signature"] = (
+                _encode_thought_signature(thought_signature)
+                if isinstance(thought_signature, bytes)
+                else str(thought_signature)
+            )
         return converted
 
     @staticmethod

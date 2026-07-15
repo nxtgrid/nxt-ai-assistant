@@ -1,3 +1,4 @@
+import base64
 from types import SimpleNamespace
 
 import pytest
@@ -58,6 +59,14 @@ class SyncFakeClient:
 
 class FakeRateLimitError(Exception):
     status_code = 429
+
+
+class ModelDumpResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def model_dump(self, **kwargs):
+        return self.payload
 
 
 def fake_response(text="ok", prompt_tokens=10, output_tokens=4, finish_reason="STOP"):
@@ -269,6 +278,63 @@ def test_raw_payload_conversion_preserves_thought_signatures():
     ]
 
 
+def test_raw_payload_conversion_decodes_base64_thought_signatures_for_sdk():
+    signature = base64.b64encode(b"\x12\x34signature").decode("ascii")
+
+    contents, _ = GeminiGateway._convert_raw_payload(
+        {
+            "contents": [
+                {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {"name": "lookup_meter", "args": {"id": "M1"}},
+                            "thoughtSignature": signature,
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert contents[0]["parts"][0]["thought_signature"] == b"\x12\x34signature"
+
+
+@pytest.mark.asyncio
+async def test_raw_response_conversion_encodes_bytes_thought_signatures():
+    signature = b"\x12\x34signature"
+    client = FakeClient(
+        [
+            ModelDumpResponse(
+                {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [
+                                    {
+                                        "functionCall": {
+                                            "name": "lookup_meter",
+                                            "args": {"id": "M1"},
+                                        },
+                                        "thoughtSignature": signature,
+                                    }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    gateway = GeminiGateway(api_key="test-key", client=client)
+
+    result = await gateway.generate_content({"contents": []}, model="gemini-tools")
+
+    assert result["candidates"][0]["content"]["parts"][0]["thoughtSignature"] == (
+        base64.b64encode(signature).decode("ascii")
+    )
+
+
 @pytest.mark.asyncio
 async def test_generate_converts_tool_specs_to_function_declarations():
     client = FakeClient([fake_response(text="")])
@@ -439,6 +505,58 @@ async def test_generate_preserves_provider_state_for_tool_loop_continuation():
             ],
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_generate_encodes_and_decodes_bytes_thought_signatures_for_continuation():
+    signature = b"\x12\x34signature"
+    function_call = SimpleNamespace(name="lookup_meter", args={"meter_id": "M1"})
+    first_response = SimpleNamespace(
+        text="",
+        usage_metadata={},
+        candidates=[
+            SimpleNamespace(
+                finish_reason="STOP",
+                content=SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(
+                            function_call=function_call,
+                            thought_signature=signature,
+                        )
+                    ]
+                ),
+            )
+        ],
+    )
+    client = FakeClient([first_response, fake_response(text="Meter is OK")])
+    gateway = GeminiGateway(api_key="test-key", client=client)
+
+    first_result = await gateway.generate(
+        [LLMMessage(role="user", text="Check meter M1")],
+        GenerationOptions(model="gemini-tools"),
+    )
+
+    encoded_signature = base64.b64encode(signature).decode("ascii")
+    assert first_result.conversation_state is not None
+    state_message = first_result.conversation_state.messages[0]
+    assert state_message.provider_state["gemini_parts"][0]["thought_signature"] == (
+        encoded_signature
+    )
+
+    await gateway.generate(
+        [LLMMessage(role="user", text="Check meter M1")],
+        GenerationOptions(model="gemini-tools"),
+        conversation_state=first_result.conversation_state,
+        tool_results=[
+            ToolResult(
+                call_id="lookup_meter:0",
+                name="lookup_meter",
+                result={"status": "ok"},
+            )
+        ],
+    )
+
+    assert client.models.calls[1]["contents"][1]["parts"][0]["thought_signature"] == signature
 
 
 @pytest.mark.asyncio
