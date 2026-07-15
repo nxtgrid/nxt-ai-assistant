@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -100,24 +101,19 @@ async def extract_with_gemini(content: str) -> Dict[str, Any]:
     Returns:
         Dict with entities and relationships lists
     """
-    from google import genai
-
-    client = genai.Client(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        http_options={"timeout": 30_000},
-    )
     model = get_settings().gemini.model
+    gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
 
     prompt = EXTRACTION_PROMPT.format(content=content[:8000])
 
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config={
-            "temperature": 0.1,
-            "max_output_tokens": ENTITY_EXTRACTION_MAX_TOKENS,
-            "response_mime_type": "application/json",  # Request JSON output format
-        },
+    response = await gateway.generate(
+        [LLMMessage(role="user", text=prompt)],
+        GenerationOptions(
+            model=model,
+            temperature=0.1,
+            max_output_tokens=ENTITY_EXTRACTION_MAX_TOKENS,
+            response_format="json",
+        ),
     )
 
     # Handle empty response (can happen with safety filters or API issues)

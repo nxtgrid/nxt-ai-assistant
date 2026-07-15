@@ -24,53 +24,13 @@ Usage:
 import os
 from typing import List, Optional
 
-from shared.utils.google_auth import get_service_account_json
+from shared.llm import EmbeddingOptions, get_default_embedding_gateway
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
 # Default embedding model - configurable via environment variable
 DEFAULT_EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "gemini-embedding-001")
-
-# Cache for the initialized google-genai client (Vertex AI backend)
-_client = None
-
-
-def _get_client():
-    """Create (once) a google-genai client on the Vertex AI backend.
-
-    Authenticates with the service-account JSON (GOOGLE_SERVICE_ACCOUNT_JSON) and the
-    project/location from it, matching the previous Vertex AI initialization.
-    """
-    global _client
-    if _client is not None:
-        return _client
-
-    from google import genai
-    from google.oauth2 import service_account
-
-    sa_info = get_service_account_json()
-    project_id = sa_info.get("project_id")
-    if not project_id:
-        raise ValueError("project_id not found in service account JSON")
-
-    credentials = service_account.Credentials.from_service_account_info(
-        sa_info,
-        scopes=["https://www.googleapis.com/auth/cloud-platform"],
-    )
-    location = os.getenv("VERTEX_AI_LOCATION", "us-central1")
-
-    _client = genai.Client(
-        vertexai=True,
-        project=project_id,
-        location=location,
-        credentials=credentials,
-    )
-
-    LOGGER.info(
-        f"google-genai (Vertex AI backend) initialized: project={project_id}, location={location}"
-    )
-    return _client
 
 
 async def get_embeddings(
@@ -95,20 +55,17 @@ async def get_embeddings(
     if not texts:
         return []
 
-    from google.genai import types
-
-    client = _get_client()
-
-    response = await client.aio.models.embed_content(
-        model=model_name or DEFAULT_EMBEDDING_MODEL,
-        contents=list(texts),
-        config=types.EmbedContentConfig(
+    gateway = get_default_embedding_gateway()
+    embeddings = await gateway.embed_texts(
+        list(texts),
+        EmbeddingOptions(
+            model=model_name or DEFAULT_EMBEDDING_MODEL,
             task_type=task_type,
             output_dimensionality=output_dimensionality,
         ),
     )
 
-    return [list(e.values) for e in response.embeddings]
+    return [embedding.values for embedding in embeddings]
 
 
 async def get_embedding(

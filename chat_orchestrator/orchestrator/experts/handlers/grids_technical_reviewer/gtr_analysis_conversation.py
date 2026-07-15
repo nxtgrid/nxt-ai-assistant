@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
+from shared.llm import GeminiGateway
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
 
@@ -205,11 +206,6 @@ async def _run_analysis_turn(
     Returns:
         LLM response text
     """
-    try:
-        from google import genai
-    except ImportError:
-        return "Gemini API not available. Cannot process analysis questions."
-
     historical_md = context.get_state("historical_reviews_md", "")
     timeseries_tools = context.get_state("available_timeseries_tools", [])
     user_question = context.user_input or ""
@@ -284,31 +280,27 @@ async def _run_analysis_turn(
     # Add current user question
     contents.append({"role": "user", "parts": [{"text": user_question}]})
 
-    # Build Gemini request
-    client = genai.Client(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        http_options={"timeout": 30_000},
-    )
     model = get_settings().gemini.model
+    gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
 
     # Build config
-    config: Dict[str, Any] = {
+    generation_config: Dict[str, Any] = {
         "temperature": 0.3,
-        "max_output_tokens": int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
-        "system_instruction": system_prompt,
+        "maxOutputTokens": int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
+    }
+    payload: Dict[str, Any] = {
+        "systemInstruction": {"parts": [{"text": system_prompt}]},
+        "contents": contents,
+        "generationConfig": generation_config,
     }
 
     # Add tool declarations if timeseries tools are available
     tool_declarations = _build_tool_declarations(timeseries_tools)
     if tool_declarations:
-        config["tools"] = [{"function_declarations": tool_declarations}]
+        payload["tools"] = [{"functionDeclarations": tool_declarations}]
 
     try:
-        response = client.models.generate_content(
-            model=model,
-            contents=contents,
-            config=config,
-        )
+        response = await gateway.generate_content(payload, model=model)
 
         # Build whitelist of declared tool names for validation
         declared_tool_names = {t["name"] for t in timeseries_tools}
@@ -316,19 +308,22 @@ async def _run_analysis_turn(
         # Handle function calls (multi-turn tool use)
         max_tool_rounds = 3
         for _ in range(max_tool_rounds):
-            if not response.candidates:
+            candidates = response.get("candidates", [])
+            if not candidates:
                 break
+            candidate_parts = candidates[0].get("content", {}).get("parts", [])
 
             # Check if the response contains function calls
             has_function_call = False
             function_call_results = []
+            function_call_parts = []
 
-            for part in response.candidates[0].content.parts:
-                if hasattr(part, "function_call") and part.function_call:
+            for part in candidate_parts:
+                function_call = part.get("functionCall") or part.get("function_call")
+                if function_call:
                     has_function_call = True
-                    fc = part.function_call
-                    tool_name = fc.name
-                    tool_args = dict(fc.args) if fc.args else {}
+                    tool_name = function_call.get("name", "")
+                    tool_args = dict(function_call.get("args") or {})
 
                     LOGGER.info(f"LLM requested tool call: {tool_name}({tool_args})")
 
@@ -341,12 +336,21 @@ async def _run_analysis_turn(
 
                     function_call_results.append(
                         {
-                            "function_response": {
+                            "functionResponse": {
                                 "name": tool_name,
                                 "response": {"result": tool_result},
                             }
                         }
                     )
+                    function_call_part: Dict[str, Any] = {
+                        "functionCall": {
+                            "name": tool_name,
+                            "args": tool_args,
+                        }
+                    }
+                    if part.get("thoughtSignature"):
+                        function_call_part["thoughtSignature"] = part["thoughtSignature"]
+                    function_call_parts.append(function_call_part)
 
             if not has_function_call:
                 break
@@ -355,34 +359,22 @@ async def _run_analysis_turn(
             contents.append(
                 {
                     "role": "model",
-                    "parts": [
-                        {
-                            "function_call": {
-                                "name": fc.name,
-                                "args": dict(fc.args) if fc.args else {},
-                            }
-                        }
-                        for part in response.candidates[0].content.parts
-                        if hasattr(part, "function_call") and part.function_call
-                        for fc in [part.function_call]
-                    ],
+                    "parts": function_call_parts,
                 }
             )
             contents.append({"role": "user", "parts": function_call_results})
+            payload["contents"] = contents
 
             # Call Gemini again with tool results
-            response = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=config,
-            )
+            response = await gateway.generate_content(payload, model=model)
 
         # Extract final text response
-        if response.text:
-            return str(response.text)
-        elif response.candidates:
-            parts = response.candidates[0].content.parts
-            text_parts = [p.text for p in parts if hasattr(p, "text") and p.text]
+        if response.get("text"):
+            return str(response["text"])
+        candidates = response.get("candidates", [])
+        if candidates:
+            parts = candidates[0].get("content", {}).get("parts", [])
+            text_parts = [str(p.get("text")) for p in parts if p.get("text")]
             if text_parts:
                 return "\n".join(text_parts)
 

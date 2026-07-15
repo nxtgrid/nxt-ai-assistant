@@ -20,16 +20,10 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-import httpx
-
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
-
-# Gemini API endpoint template
-GEMINI_ENDPOINT_TEMPLATE = (
-    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-)
 
 # Prompt for LLM mapping
 MAPPING_PROMPT = """Match spreadsheet input labels to data keys ONLY when there's a clear semantic match.
@@ -81,6 +75,7 @@ class LLMCellMapper:
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
+        gateway: Optional[GeminiGateway] = None,
     ):
         """Initialize the mapper.
 
@@ -90,13 +85,10 @@ class LLMCellMapper:
         """
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
         self._model = model or os.getenv("VERIFICATION_MODEL", "gemini-2.5-flash-lite")
-        self._client: Optional[httpx.AsyncClient] = None
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client."""
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
-        return self._client
+        self._gateway = gateway or GeminiGateway(
+            api_key=self._api_key,
+            default_model=self._model,
+        )
 
     async def map_labels_to_keys(
         self,
@@ -153,47 +145,17 @@ class LLMCellMapper:
 
     async def _call_gemini(self, user_message: str) -> str:
         """Make a Gemini API call for mapping."""
-        endpoint = GEMINI_ENDPOINT_TEMPLATE.format(model=self._model)
-
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": user_message}]}],
-            "generationConfig": {
-                "temperature": 0.1,  # Low temperature for consistent matching
-                "maxOutputTokens": int(os.getenv("GEMINI_LITE_MAX_OUTPUT_TOKENS", "1024")),
-                "candidateCount": 1,
-            },
-        }
-
-        client = await self._get_client()
-
-        LOGGER.debug(f"Calling LLM mapping endpoint: {endpoint}")
-
-        response = await client.post(
-            endpoint,
-            params={"key": self._api_key},
-            json=payload,
-            headers={"Content-Type": "application/json"},
+        LOGGER.debug(f"Calling LLM mapping model: {self._model}")
+        result = await self._gateway.generate(
+            [LLMMessage(role="user", text=user_message)],
+            GenerationOptions(
+                model=self._model,
+                temperature=0.1,
+                max_output_tokens=int(os.getenv("GEMINI_LITE_MAX_OUTPUT_TOKENS", "1024")),
+                response_format="json",
+            ),
         )
-
-        if response.status_code != 200:
-            error_body = response.text
-            LOGGER.error(f"LLM mapping API error {response.status_code}: {error_body}")
-            response.raise_for_status()
-
-        result = response.json()
-
-        # Extract text from Gemini response
-        try:
-            candidates = result.get("candidates", [])
-            if candidates:
-                content = candidates[0].get("content", {})
-                parts = content.get("parts", [])
-                if parts:
-                    return str(parts[0].get("text", ""))
-        except (KeyError, IndexError) as e:
-            LOGGER.error(f"Failed to extract text from Gemini response: {e}")
-
-        return ""
+        return result.text
 
     def _parse_mapping_response(
         self,

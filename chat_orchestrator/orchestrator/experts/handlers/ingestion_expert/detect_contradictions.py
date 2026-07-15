@@ -25,6 +25,7 @@ from typing import Optional
 
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -136,25 +137,18 @@ def _format_contradiction_prompt(contradictions: list) -> str:
 
 async def _run_gemini_contradiction_check(prompt: str) -> Optional[dict]:
     """Call Gemini with JSON output mode. Returns parsed dict or None on failure."""
-    from google import genai
-
-    client = genai.Client(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        http_options={"timeout": 30_000},
-    )
     model = os.getenv("GEMINI_MODEL")
+    gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
 
     try:
-        response = await asyncio.to_thread(
-            lambda: client.models.generate_content(
+        response = await gateway.generate(
+            [LLMMessage(role="user", text=prompt)],
+            GenerationOptions(
                 model=model,
-                contents=prompt,
-                config={
-                    "temperature": 0.1,
-                    "max_output_tokens": int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
-                    "response_mime_type": "application/json",
-                },
-            )
+                temperature=0.1,
+                max_output_tokens=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
+                response_format="json",
+            ),
         )
         if not response.text:
             return None

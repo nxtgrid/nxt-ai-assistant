@@ -20,6 +20,8 @@ from mcp.server import Server
 from mcp.server.models import InitializationOptions
 from mcp.types import ServerCapabilities
 
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+
 # Load environment variables
 load_dotenv()
 
@@ -151,10 +153,8 @@ async def summarize_with_llm(
 ) -> str:
     """Use Gemini to summarize the retrieved knowledge."""
     try:
-        from google import genai
-
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
         model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
 
         # Format chunks for the prompt
         chunks_text = ""
@@ -185,9 +185,9 @@ Instructions:
 
 Format the response with markdown for readability."""
 
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
+        response = await gateway.generate(
+            [LLMMessage(role="user", text=prompt)],
+            GenerationOptions(model=model),
         )
 
         return str(response.text).strip()

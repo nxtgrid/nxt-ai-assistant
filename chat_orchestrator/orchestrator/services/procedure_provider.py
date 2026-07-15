@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from orchestrator.config.settings import get_settings
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -184,13 +185,8 @@ async def generate_suggested_procedure(
     Returns:
         Markdown-formatted suggested procedure text
     """
-    from google import genai
-
-    client = genai.Client(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        http_options={"timeout": 30_000},
-    )
     model = get_settings().gemini.model
+    gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
 
     # Build context about existing procedures
     existing_list = "\n".join(f"- Procedure {p.number}: {p.title}" for p in existing_procedures)
@@ -229,9 +225,9 @@ SUPPORT EXAMPLE CONTENT:
 Generate ONLY the procedure markdown using ## headers. No *asterisk bold*. No explanation."""
 
     try:
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=prompt,
+        response = await gateway.generate(
+            [LLMMessage(role="user", text=prompt)],
+            GenerationOptions(model=model),
         )
 
         if response.text:
@@ -262,13 +258,8 @@ async def match_content_to_procedures(
     if not procedures:
         return None
 
-    from google import genai
-
-    client = genai.Client(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        http_options={"timeout": 30_000},
-    )
     model = get_settings().gemini.model
+    gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
 
     # Build procedure descriptions for matching
     procedure_descriptions = "\n\n".join(
@@ -294,9 +285,9 @@ demonstrates or is directly related to that procedure. If the content doesn't cl
 fit any procedure, output MATCH: NONE."""
 
     try:
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=prompt,
+        response = await gateway.generate(
+            [LLMMessage(role="user", text=prompt)],
+            GenerationOptions(model=model),
         )
 
         if not response.text:

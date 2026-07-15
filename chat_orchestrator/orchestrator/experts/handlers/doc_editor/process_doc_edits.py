@@ -27,13 +27,11 @@ async def _identify_section(markdown: str, instruction: str) -> Dict[str, Any]:
 
     Returns: {"text": "matched section text", "confidence": 0.0-1.0, "reasoning": "..."}
     """
-    from google import genai
-    from google.genai import types
-
     from orchestrator.config.settings import get_settings
+    from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 
     settings = get_settings()
-    client = genai.Client(api_key=settings.google_api_key)
+    gateway = GeminiGateway(api_key=settings.google_api_key, default_model=settings.gemini.model)
 
     prompt = f"""Given this document (in markdown) and an edit instruction, identify the EXACT
 text section that should be edited. Return JSON only.
@@ -57,10 +55,10 @@ Rules:
 - Pick the smallest text range that covers the edit target
 """
 
-    response = await client.aio.models.generate_content(
-        model=settings.gemini.model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
+    response = await gateway.generate(
+        [LLMMessage(role="user", text=prompt)],
+        GenerationOptions(
+            model=settings.gemini.model,
             temperature=0.1,
             max_output_tokens=1000,
         ),
