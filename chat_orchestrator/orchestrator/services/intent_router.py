@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from orchestrator.config.settings import get_settings
 from orchestrator.services.command_registry import get_expert_command_mapping
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -131,17 +132,15 @@ async def route_expert_intent(user_input: str) -> Optional[Dict[str, str]]:
     )
 
     try:
-        from google import genai
-
-        client = genai.Client(api_key=api_key)
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=prompt,
-            config={
-                "temperature": 0.0,
-                "max_output_tokens": 256,
-                "response_mime_type": "application/json",
-            },
+        gateway = GeminiGateway(api_key=api_key, default_model=model)
+        response = await gateway.generate(
+            [LLMMessage(role="user", text=prompt)],
+            GenerationOptions(
+                model=model,
+                temperature=0.0,
+                max_output_tokens=256,
+                response_format="json",
+            ),
         )
         if not response.text:
             return None

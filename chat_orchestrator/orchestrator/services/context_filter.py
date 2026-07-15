@@ -16,16 +16,11 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-import httpx
-
 from orchestrator.models.schemas import ConversationMessage
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
-
-GEMINI_ENDPOINT_TEMPLATE = (
-    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-)
 
 CONTEXT_FILTER_PROMPT = """You are a conversation relevance filter. Given an incoming message and a numbered
 list of prior conversation messages, decide which history messages are relevant
@@ -65,20 +60,17 @@ class ContextFilterService:
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
+        gateway: Optional[GeminiGateway] = None,
     ) -> None:
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
         self._model = model or os.getenv("VERIFICATION_MODEL", "gemini-2.5-flash-lite")
-        self._client: Optional[httpx.AsyncClient] = None
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
-        return self._client
+        self._gateway = gateway or GeminiGateway(
+            api_key=self._api_key,
+            default_model=self._model,
+        )
 
     async def aclose(self) -> None:
-        if self._client:
-            await self._client.aclose()
-            self._client = None
+        return None
 
     async def filter_history(
         self,
@@ -138,36 +130,16 @@ class ContextFilterService:
 
     async def _call_gemini(self, prompt: str) -> str:
         """Make a lightweight Gemini API call."""
-        endpoint = GEMINI_ENDPOINT_TEMPLATE.format(model=self._model)
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": 0.1,
-                "maxOutputTokens": 256,
-                "candidateCount": 1,
-            },
-        }
-
-        client = await self._get_client()
-        response = await client.post(
-            endpoint,
-            params={"key": self._api_key},
-            json=payload,
-            headers={"Content-Type": "application/json"},
+        result = await self._gateway.generate(
+            [LLMMessage(role="user", text=prompt)],
+            GenerationOptions(
+                model=self._model,
+                temperature=0.1,
+                max_output_tokens=256,
+                response_format="json",
+            ),
         )
-
-        if response.status_code != 200:
-            LOGGER.error(f"Context filter API error {response.status_code}: {response.text[:200]}")
-            response.raise_for_status()
-
-        result = response.json()
-        candidates = result.get("candidates", [])
-        if candidates:
-            content = candidates[0].get("content", {})
-            parts = content.get("parts", [])
-            if parts:
-                return str(parts[0].get("text", ""))
-        return ""
+        return result.text
 
     def _parse_result(self, text: str, num_candidates: int) -> ContextFilterResult:
         """Parse JSON response from the LLM."""

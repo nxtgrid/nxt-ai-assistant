@@ -13,24 +13,17 @@ The verification flow:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-import httpx
-
-from shared.utils.langfuse_utils import langfuse_observe, score_trace, update_generation
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+from shared.utils.langfuse_utils import langfuse_observe, score_trace
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
-
-# Endpoint template for Gemini API
-GEMINI_ENDPOINT_TEMPLATE = (
-    "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-)
 
 
 @dataclass
@@ -59,6 +52,7 @@ class ResponseVerificationService:
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
+        gateway: Optional[GeminiGateway] = None,
     ):
         """
         Initialize verification service.
@@ -69,13 +63,10 @@ class ResponseVerificationService:
         """
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
         self._model = model or os.getenv("VERIFICATION_MODEL", "gemini-2.5-flash-lite")
-        self._client: Optional[httpx.AsyncClient] = None
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client."""
-        if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
-        return self._client
+        self._gateway = gateway or GeminiGateway(
+            api_key=self._api_key,
+            default_model=self._model,
+        )
 
     async def verify_response(
         self,
@@ -290,83 +281,22 @@ Respond with a JSON object (and nothing else):
         system_instruction: str,
         user_message: str,
     ) -> str:
-        """Make a Gemini API call for verification.
-
-        Retries once on transient errors (429 rate limit, 5xx, timeouts)
-        since verification is a customer-safety feature.
-        """
-        endpoint = GEMINI_ENDPOINT_TEMPLATE.format(model=self._model)
-
-        payload = {
-            "systemInstruction": {"parts": [{"text": system_instruction}]},
-            "contents": [{"role": "user", "parts": [{"text": user_message}]}],
-            "generationConfig": {
-                "temperature": 0.1,  # Low temperature for consistent judgments
-                "maxOutputTokens": int(os.getenv("GEMINI_LITE_MAX_OUTPUT_TOKENS", "1024")),
-                "candidateCount": 1,
-            },
-        }
-
-        client = await self._get_client()
-
-        LOGGER.debug(f"Calling verification endpoint: {endpoint}")
+        """Make a Gemini API call for verification."""
         LOGGER.debug(f"Verification model: {self._model}")
 
-        max_attempts = 2  # 1 initial + 1 retry for transient errors
-        for attempt in range(max_attempts):
-            response = await client.post(
-                endpoint,
-                params={"key": self._api_key},
-                json=payload,
-                headers={"Content-Type": "application/json"},
-            )
-
-            if response.status_code == 200:
-                break
-
-            # Retry on transient errors (429, 5xx)
-            is_retryable = response.status_code == 429 or response.status_code >= 500
-            if is_retryable and attempt < max_attempts - 1:
-                LOGGER.warning(
-                    f"Verification API transient error {response.status_code} "
-                    f"(attempt {attempt + 1}), retrying in 2s..."
-                )
-                await asyncio.sleep(2)
-                continue
-
-            error_body = response.text
-            LOGGER.error(f"Verification API error {response.status_code}: {error_body}")
-            response.raise_for_status()
-
-        result = response.json()
-
-        # Extract and log token usage (previously ignored)
-        usage = result.get("usageMetadata", {})
-        LOGGER.info(
-            f"Verification tokens: in={usage.get('promptTokenCount', 0)} "
-            f"out={usage.get('candidatesTokenCount', 0)}"
+        result = await self._gateway.generate(
+            [
+                LLMMessage(role="system", text=system_instruction),
+                LLMMessage(role="user", text=user_message),
+            ],
+            GenerationOptions(
+                model=self._model,
+                temperature=0.1,
+                max_output_tokens=int(os.getenv("GEMINI_LITE_MAX_OUTPUT_TOKENS", "1024")),
+                response_format="json",
+            ),
         )
-
-        update_generation(
-            model=self._model,
-            usage_details={
-                "input": usage.get("promptTokenCount", 0),
-                "output": usage.get("candidatesTokenCount", 0),
-            },
-        )
-
-        # Extract text from Gemini response
-        try:
-            candidates = result.get("candidates", [])
-            if candidates:
-                content = candidates[0].get("content", {})
-                parts = content.get("parts", [])
-                if parts:
-                    return str(parts[0].get("text", ""))
-        except (KeyError, IndexError) as e:
-            LOGGER.error(f"Failed to extract text from Gemini response: {e}")
-
-        return ""
+        return result.text
 
     def _parse_verification_response(self, response_text: str) -> VerificationResult:
         """Parse the JSON verification response from Gemini."""

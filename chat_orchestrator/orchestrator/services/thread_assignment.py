@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from orchestrator.models.schemas import ConversationMessage
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -143,17 +144,15 @@ async def classify_issue_type(user_input: str) -> str:
         f'Return JSON: {{"issue_type": "<one of the categories above>"}}'
     )
     try:
-        from google import genai
-
-        client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-        response = await client.aio.models.generate_content(
-            model=model,
-            contents=prompt,
-            config={
-                "temperature": 0.0,
-                "max_output_tokens": 32,
-                "response_mime_type": "application/json",
-            },
+        gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
+        response = await gateway.generate(
+            [LLMMessage(role="user", text=prompt)],
+            GenerationOptions(
+                model=model,
+                temperature=0.0,
+                max_output_tokens=32,
+                response_format="json",
+            ),
         )
         if response.text:
             result = json.loads(response.text.strip())
@@ -293,17 +292,15 @@ Which thread does this message continue, or is it a new topic?
 Return JSON: {{"thread_id": "<thread_id or NEW>", "confidence": 0.0-1.0, "reasoning": "<brief>"}}"""
 
         try:
-            from google import genai
-
-            client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
-            response = await client.aio.models.generate_content(
-                model=model,
-                contents=prompt,
-                config={
-                    "temperature": 0.1,
-                    "max_output_tokens": 128,
-                    "response_mime_type": "application/json",
-                },
+            gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
+            response = await gateway.generate(
+                [LLMMessage(role="user", text=prompt)],
+                GenerationOptions(
+                    model=model,
+                    temperature=0.1,
+                    max_output_tokens=128,
+                    response_format="json",
+                ),
             )
 
             if not response.text:
