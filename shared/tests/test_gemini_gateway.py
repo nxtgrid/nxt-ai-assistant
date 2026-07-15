@@ -219,3 +219,77 @@ async def test_generate_converts_tool_results_to_function_response_parts():
             ],
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_generate_preserves_provider_state_for_tool_loop_continuation():
+    function_call = SimpleNamespace(name="lookup_meter", args={"meter_id": "M1"})
+    first_response = SimpleNamespace(
+        text="",
+        usage_metadata={},
+        candidates=[
+            SimpleNamespace(
+                finish_reason="STOP",
+                content=SimpleNamespace(
+                    parts=[
+                        SimpleNamespace(
+                            function_call=function_call,
+                            thought_signature="opaque-signature",
+                        )
+                    ]
+                ),
+            )
+        ],
+    )
+    client = FakeClient([first_response, fake_response(text="Meter is OK")])
+    gateway = GeminiGateway(api_key="test-key", client=client)
+
+    first_result = await gateway.generate(
+        [LLMMessage(role="user", text="Check meter M1")],
+        GenerationOptions(model="gemini-tools"),
+    )
+    assert first_result.conversation_state is not None
+    state_message = first_result.conversation_state.messages[0]
+    assert state_message.provider_state["gemini_parts"][0]["thought_signature"] == (
+        "opaque-signature"
+    )
+
+    await gateway.generate(
+        [LLMMessage(role="user", text="Check meter M1")],
+        GenerationOptions(model="gemini-tools"),
+        conversation_state=first_result.conversation_state,
+        tool_results=[
+            ToolResult(
+                call_id="lookup_meter:0",
+                name="lookup_meter",
+                result={"status": "ok"},
+            )
+        ],
+    )
+
+    assert client.models.calls[1]["contents"] == [
+        {"role": "user", "parts": [{"text": "Check meter M1"}]},
+        {
+            "role": "model",
+            "parts": [
+                {
+                    "function_call": {
+                        "name": "lookup_meter",
+                        "args": {"meter_id": "M1"},
+                    },
+                    "thought_signature": "opaque-signature",
+                }
+            ],
+        },
+        {
+            "role": "user",
+            "parts": [
+                {
+                    "function_response": {
+                        "name": "lookup_meter",
+                        "response": {"result": {"status": "ok"}},
+                    }
+                }
+            ],
+        },
+    ]

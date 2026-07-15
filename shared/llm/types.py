@@ -19,6 +19,12 @@ class LLMMessage:
 
 
 @dataclass(frozen=True)
+class LLMConversationState:
+    messages: list[LLMMessage] = field(default_factory=list)
+    provider_state: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class ToolSpec:
     name: str
     description: str
@@ -64,6 +70,7 @@ class GenerateResult:
     tool_calls: list[ToolCall] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     finish_reason: str | None = None
+    conversation_state: LLMConversationState | None = None
     raw: Any | None = None
 
 

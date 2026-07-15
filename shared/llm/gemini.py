@@ -13,6 +13,7 @@ from typing import Any, Callable
 from shared.llm.types import (
     GenerateResult,
     GenerationOptions,
+    LLMConversationState,
     LLMMessage,
     ToolCall,
     ToolResult,
@@ -105,10 +106,18 @@ class GeminiGateway:
         options: GenerationOptions,
         tools: list[ToolSpec] | None = None,
         tool_results: list[ToolResult] | None = None,
+        conversation_state: LLMConversationState | None = None,
     ) -> GenerateResult:
         model = options.model or self._default_model
         try:
-            return await self._generate_for_model(model, messages, options, tools, tool_results)
+            return await self._generate_for_model(
+                model,
+                messages,
+                options,
+                tools,
+                tool_results,
+                conversation_state,
+            )
         except Exception as exc:
             if self._fallback_model and _status_code(exc) == 429:
                 LOGGER.warning(f"Gemini model {model} rate-limited; falling back to {self._fallback_model}")
@@ -125,6 +134,7 @@ class GeminiGateway:
                     fallback_options,
                     tools,
                     tool_results,
+                    conversation_state,
                     retry=False,
                 )
             raise RuntimeError(_sanitize_text(exc, self._api_key)) from exc
@@ -136,6 +146,7 @@ class GeminiGateway:
         options: GenerationOptions,
         tools: list[ToolSpec] | None,
         tool_results: list[ToolResult] | None,
+        conversation_state: LLMConversationState | None,
         *,
         retry: bool = True,
     ) -> GenerateResult:
@@ -143,7 +154,14 @@ class GeminiGateway:
         last_exc: Exception | None = None
         for attempt in range(attempts):
             try:
-                return await self._call_once(model, messages, options, tools, tool_results)
+                return await self._call_once(
+                    model,
+                    messages,
+                    options,
+                    tools,
+                    tool_results,
+                    conversation_state,
+                )
             except Exception as exc:
                 last_exc = exc
                 status = _status_code(exc)
@@ -169,8 +187,13 @@ class GeminiGateway:
         options: GenerationOptions,
         tools: list[ToolSpec] | None,
         tool_results: list[ToolResult] | None,
+        conversation_state: LLMConversationState | None,
     ) -> GenerateResult:
-        contents, system_instruction = self._convert_messages(messages, tool_results)
+        contents, system_instruction = self._convert_messages(
+            messages,
+            tool_results,
+            conversation_state,
+        )
         config = self._build_config(options, system_instruction, tools)
         t0 = time.monotonic()
         response = await self.client.aio.models.generate_content(
@@ -188,6 +211,7 @@ class GeminiGateway:
     def _convert_messages(
         messages: list[LLMMessage],
         tool_results: list[ToolResult] | None = None,
+        conversation_state: LLMConversationState | None = None,
     ) -> tuple[list[dict[str, Any]], str | None]:
         contents: list[dict[str, Any]] = []
         system_parts: list[str] = []
@@ -198,6 +222,12 @@ class GeminiGateway:
                 continue
             role = "model" if message.role == "assistant" else "user"
             contents.append({"role": role, "parts": [{"text": message.text or ""}]})
+        for state_message in (conversation_state.messages if conversation_state else []):
+            gemini_parts = state_message.provider_state.get("gemini_parts")
+            if gemini_parts:
+                contents.append({"role": "model", "parts": gemini_parts})
+            elif state_message.text:
+                contents.append({"role": "model", "parts": [{"text": state_message.text}]})
         for tool_result in tool_results or []:
             contents.append(
                 {
@@ -280,6 +310,7 @@ class GeminiGateway:
                 ),
             ),
             finish_reason=finish_reason,
+            conversation_state=GeminiGateway._extract_conversation_state(response),
             raw=response,
         )
 
@@ -306,6 +337,60 @@ class GeminiGateway:
                     )
                 )
         return tool_calls
+
+    @staticmethod
+    def _extract_conversation_state(response: Any) -> LLMConversationState | None:
+        candidates = _get_value(response, "candidates", default=[]) or []
+        if not candidates:
+            return None
+        first_candidate = candidates[0]
+        content = _get_value(first_candidate, "content", default={})
+        parts = _get_value(content, "parts", default=[]) or []
+        gemini_parts: list[dict[str, Any]] = []
+        for part in parts:
+            converted = GeminiGateway._part_to_provider_dict(part)
+            if converted:
+                gemini_parts.append(converted)
+        if not gemini_parts:
+            text = str(_get_value(response, "text", default="") or "")
+            if not text:
+                return None
+            return LLMConversationState(
+                messages=[LLMMessage(role="assistant", text=text)],
+                provider_state={"provider": "gemini"},
+            )
+        return LLMConversationState(
+            messages=[
+                LLMMessage(
+                    role="assistant",
+                    provider_state={"gemini_parts": gemini_parts},
+                )
+            ],
+            provider_state={"provider": "gemini"},
+        )
+
+    @staticmethod
+    def _part_to_provider_dict(part: Any) -> dict[str, Any]:
+        converted: dict[str, Any] = {}
+        text = _get_value(part, "text")
+        if text:
+            converted["text"] = str(text)
+        function_call = _get_value(part, "function_call", "functionCall")
+        if function_call:
+            converted["function_call"] = {
+                "name": str(_get_value(function_call, "name", default="") or ""),
+                "args": _get_value(function_call, "args", default={}) or {},
+            }
+        function_response = _get_value(part, "function_response", "functionResponse")
+        if function_response:
+            converted["function_response"] = {
+                "name": str(_get_value(function_response, "name", default="") or ""),
+                "response": _get_value(function_response, "response", default={}) or {},
+            }
+        thought_signature = _get_value(part, "thought_signature", "thoughtSignature")
+        if thought_signature:
+            converted["thought_signature"] = str(thought_signature)
+        return converted
 
     @staticmethod
     def _log_metrics(model: str, duration_ms: int, usage: Usage) -> None:

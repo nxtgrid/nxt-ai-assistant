@@ -9,6 +9,7 @@ from shared.llm.types import (
     EmbeddingVector,
     GenerateResult,
     GenerationOptions,
+    LLMConversationState,
     LLMMessage,
     ToolResult,
     ToolSpec,
@@ -22,6 +23,7 @@ class GenerationGateway(Protocol):
         options: GenerationOptions,
         tools: list[ToolSpec] | None = None,
         tool_results: list[ToolResult] | None = None,
+        conversation_state: LLMConversationState | None = None,
     ) -> GenerateResult:
         """Generate text, JSON, or tool calls from provider-neutral messages."""
 
