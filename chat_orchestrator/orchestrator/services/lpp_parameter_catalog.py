@@ -45,8 +45,13 @@ def _defs_for_step(step_name: str) -> dict[str, LPPParameterDef]:
     return out
 
 
+_LPP_PARAMETER_CATALOG: Dict[str, Dict[str, LPPParameterDef]] = {
+    step_name: _defs_for_step(step_name) for step_name in LPP_CONFIGURABLE_STEPS
+}
+
+
 def get_lpp_parameter_catalog() -> Dict[str, Dict[str, LPPParameterDef]]:
-    return {step_name: _defs_for_step(step_name) for step_name in LPP_CONFIGURABLE_STEPS}
+    return {step_name: dict(params) for step_name, params in _LPP_PARAMETER_CATALOG.items()}
 
 
 def get_lpp_parameter_names() -> set[str]:
@@ -70,7 +75,7 @@ def format_lpp_supported_parameters(steps: list[str] | None = None) -> str:
     for step_name in LPP_CONFIGURABLE_STEPS:
         if step_name not in selected:
             continue
-        params = _defs_for_step(step_name)
+        params = _LPP_PARAMETER_CATALOG.get(step_name, {})
         if not params:
             continue
         lines.append(f"\n{step_name}:")

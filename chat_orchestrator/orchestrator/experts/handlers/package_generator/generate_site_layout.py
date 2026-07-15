@@ -159,7 +159,11 @@ async def generate_site_layout(context: StepContext) -> StepResult:
     center_lon = center.get("lon")  # None if absent
     latitude = center_lat or 0  # For sun angle calculations (equatorial fallback)
 
-    layout_label = "DEYE/ESS" if site_type == "ess" and str(technology_family).lower() == "deye" else site_type.upper()
+    layout_label = (
+        "DEYE/ESS"
+        if site_type == "ess" and str(technology_family).lower() == "deye"
+        else site_type.upper()
+    )
     await context.send_progress_to_user(
         f"Generating {layout_label} site layout for "
         f"{site_name or f'Site {site_id}'} ({panel_config})..."
@@ -283,7 +287,7 @@ async def generate_site_layout(context: StepContext) -> StepResult:
         )
 
     progress = (
-        f"Site layout generated for {site_name or f'Site {site_id}'}:\n"
+        f"{layout_label} site layout generated for {site_name or f'Site {site_id}'}:\n"
         f"  {layout.total_modules} modules, {layout.achieved_kwp:.1f} kWp\n"
         f"  {len(layout.arrays)} arrays ({panel_config}), "
         f"{len(layout.lightning_positions)} lightning arresters, "

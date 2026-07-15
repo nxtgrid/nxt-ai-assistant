@@ -84,6 +84,9 @@ def _normalize_route(data: Dict[str, Any]) -> Optional[Dict[str, str]]:
     if packet_type == "light_preliminary_package" and not fields["args"]:
         return None
 
+    if not fields["raw_request"]:
+        fields.pop("raw_request")
+
     return fields
 
 

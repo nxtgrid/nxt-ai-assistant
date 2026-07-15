@@ -1,5 +1,4 @@
 import orchestrator.experts.handlers.package_generator  # noqa: F401
-
 from orchestrator.services.lpp_parameter_catalog import (
     format_lpp_supported_parameters,
     get_lpp_parameter_catalog,
