@@ -1,0 +1,33 @@
+"""Provider-neutral gateway protocols for generation and embeddings."""
+
+from __future__ import annotations
+
+from typing import Protocol
+
+from shared.llm.types import (
+    EmbeddingOptions,
+    EmbeddingVector,
+    GenerateResult,
+    GenerationOptions,
+    LLMMessage,
+    ToolSpec,
+)
+
+
+class GenerationGateway(Protocol):
+    async def generate(
+        self,
+        messages: list[LLMMessage],
+        options: GenerationOptions,
+        tools: list[ToolSpec] | None = None,
+    ) -> GenerateResult:
+        """Generate text, JSON, or tool calls from provider-neutral messages."""
+
+
+class EmbeddingGateway(Protocol):
+    async def embed_texts(
+        self,
+        texts: list[str],
+        options: EmbeddingOptions,
+    ) -> list[EmbeddingVector]:
+        """Embed one or more texts."""
