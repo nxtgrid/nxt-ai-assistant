@@ -56,6 +56,107 @@ def _status_code(exc: Exception) -> int | None:
         return None
 
 
+_SDK_KEY_MAP = {
+    "allowedFunctionNames": "allowed_function_names",
+    "cachedContent": "cached_content",
+    "candidateCount": "candidate_count",
+    "fileData": "file_data",
+    "functionCallingConfig": "function_calling_config",
+    "functionCall": "function_call",
+    "functionDeclarations": "function_declarations",
+    "functionResponse": "function_response",
+    "generationConfig": "generation_config",
+    "inlineData": "inline_data",
+    "maxOutputTokens": "max_output_tokens",
+    "responseMimeType": "response_mime_type",
+    "responseSchema": "response_schema",
+    "safetySettings": "safety_settings",
+    "stopSequences": "stop_sequences",
+    "systemInstruction": "system_instruction",
+    "thinkingBudget": "thinking_budget",
+    "thinkingConfig": "thinking_config",
+    "thinkingLevel": "thinking_level",
+    "toolConfig": "tool_config",
+    "topK": "top_k",
+    "topP": "top_p",
+}
+
+
+def _to_sdk_value(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_to_sdk_value(item) for item in value]
+    if isinstance(value, dict):
+        return {_SDK_KEY_MAP.get(key, key): _to_sdk_value(item) for key, item in value.items()}
+    return value
+
+
+def _sdk_response_to_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if hasattr(value, "model_dump"):
+        return value.model_dump(by_alias=True, exclude_none=True)
+    if hasattr(value, "to_json_dict"):
+        return value.to_json_dict()
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+
+    result: dict[str, Any] = {}
+    for attr, key in (
+        ("text", "text"),
+        ("usage_metadata", "usageMetadata"),
+        ("candidates", "candidates"),
+        ("finish_reason", "finishReason"),
+        ("content", "content"),
+        ("parts", "parts"),
+        ("function_call", "functionCall"),
+        ("function_response", "functionResponse"),
+        ("prompt_token_count", "promptTokenCount"),
+        ("candidates_token_count", "candidatesTokenCount"),
+        ("thoughts_token_count", "thoughtsTokenCount"),
+        ("cached_content_token_count", "cachedContentTokenCount"),
+        ("name", "name"),
+        ("args", "args"),
+        ("response", "response"),
+        ("thought_signature", "thoughtSignature"),
+    ):
+        attr_value = getattr(value, attr, None)
+        if attr_value is not None:
+            result[key] = _sdk_response_value_to_dict(attr_value)
+    return result
+
+
+def _sdk_response_value_to_dict(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_sdk_response_value_to_dict(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _sdk_response_value_to_dict(item) for key, item in value.items()}
+    if hasattr(value, "model_dump"):
+        return value.model_dump(by_alias=True, exclude_none=True)
+    if hasattr(value, "to_json_dict"):
+        return value.to_json_dict()
+    if hasattr(value, "to_dict"):
+        return value.to_dict()
+    return _sdk_response_to_dict(value)
+
+
+def _extract_system_instruction(value: Any) -> str | dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    parts = _get_value(value, "parts", default=[]) or []
+    text_parts = [
+        str(_get_value(part, "text", default="") or "")
+        for part in parts
+        if _get_value(part, "text", default="")
+    ]
+    if text_parts:
+        return "\n\n".join(text_parts)
+    return _to_sdk_value(value)
+
+
 def _is_quota_exhausted(error_text: str) -> bool:
     try:
         data = json.loads(error_text)
@@ -146,6 +247,32 @@ class GeminiGateway:
                 )
             raise RuntimeError(_sanitize_text(exc, self._api_key)) from exc
 
+    async def generate_content(
+        self,
+        payload: dict[str, Any],
+        *,
+        model: str | None = None,
+    ) -> dict[str, Any]:
+        """Generate from a legacy Gemini REST-style payload and return a raw dict.
+
+        This method exists to route older callers through the shared GenAI SDK
+        gateway while preserving their existing response parsing contract.
+        """
+        model_name = model or self._default_model
+        try:
+            return await self._generate_content_for_model(model_name, payload)
+        except Exception as exc:
+            if self._fallback_model and _status_code(exc) == 429:
+                LOGGER.warning(
+                    f"Gemini model {model_name} rate-limited; falling back to {self._fallback_model}"
+                )
+                return await self._generate_content_for_model(
+                    self._fallback_model,
+                    payload,
+                    retry=False,
+                )
+            raise RuntimeError(_sanitize_text(exc, self._api_key)) from exc
+
     async def embed_texts(
         self,
         texts: list[str],
@@ -213,6 +340,55 @@ class GeminiGateway:
             raise last_exc
         raise RuntimeError("No response received from Gemini API")
 
+    async def _generate_content_for_model(
+        self,
+        model: str,
+        payload: dict[str, Any],
+        *,
+        retry: bool = True,
+    ) -> dict[str, Any]:
+        attempts = self._max_retries + 1 if retry else 1
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return await self._call_raw_once(model, payload)
+            except Exception as exc:
+                last_exc = exc
+                status = _status_code(exc)
+                if status == 429 and _is_quota_exhausted(str(exc)):
+                    break
+                if status != 429 or attempt >= attempts - 1:
+                    break
+                delay = min(2.0 * (2**attempt), 30.0)
+                delay += random.uniform(0, delay * 0.3)
+                LOGGER.warning(
+                    f"Gemini rate limit for {model} on attempt {attempt + 1}/{attempts}; "
+                    f"retrying in {delay:.1f}s"
+                )
+                await self._sleep(delay)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("No response received from Gemini API")
+
+    async def _call_raw_once(
+        self,
+        model: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        contents, config = self._convert_raw_payload(payload)
+        t0 = time.monotonic()
+        response = await self.client.aio.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config,
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        result = _sdk_response_to_dict(response)
+        usage = self._usage_from_raw(result)
+        self._log_metrics(model, duration_ms, usage)
+        self._update_langfuse(model, usage)
+        return result
+
     async def _call_once(
         self,
         model: str,
@@ -239,6 +415,30 @@ class GeminiGateway:
         self._log_metrics(model, duration_ms, result.usage)
         self._update_langfuse(model, result.usage)
         return result
+
+    @staticmethod
+    def _convert_raw_payload(payload: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+        contents = _to_sdk_value(payload.get("contents", []))
+        config = _to_sdk_value(payload.get("generationConfig", {})) or {}
+        if not isinstance(config, dict):
+            config = {}
+
+        system_instruction = _extract_system_instruction(payload.get("systemInstruction"))
+        if system_instruction:
+            config["system_instruction"] = system_instruction
+
+        for payload_key in (
+            "tools",
+            "toolConfig",
+            "safetySettings",
+            "cachedContent",
+        ):
+            if payload_key in payload and payload[payload_key] is not None:
+                config[_SDK_KEY_MAP.get(payload_key, payload_key)] = _to_sdk_value(
+                    payload[payload_key]
+                )
+
+        return contents, config
 
     @staticmethod
     def _convert_messages(
@@ -345,6 +545,36 @@ class GeminiGateway:
             finish_reason=finish_reason,
             conversation_state=GeminiGateway._extract_conversation_state(response),
             raw=response,
+        )
+
+    @staticmethod
+    def _usage_from_raw(result: dict[str, Any]) -> Usage:
+        usage = result.get("usageMetadata") or result.get("usage_metadata") or {}
+        return Usage(
+            input_tokens=int(
+                _get_value(usage, "promptTokenCount", "prompt_token_count", default=0) or 0
+            ),
+            output_tokens=int(
+                _get_value(
+                    usage,
+                    "candidatesTokenCount",
+                    "candidates_token_count",
+                    default=0,
+                )
+                or 0
+            ),
+            thinking_tokens=int(
+                _get_value(usage, "thoughtsTokenCount", "thoughts_token_count", default=0) or 0
+            ),
+            cached_tokens=int(
+                _get_value(
+                    usage,
+                    "cachedContentTokenCount",
+                    "cached_content_token_count",
+                    default=0,
+                )
+                or 0
+            ),
         )
 
     @staticmethod

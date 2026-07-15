@@ -143,6 +143,60 @@ async def test_generate_falls_back_after_primary_rate_limit():
 
 
 @pytest.mark.asyncio
+async def test_generate_content_accepts_legacy_payload_and_returns_raw_dict():
+    client = FakeClient([fake_response(text='{"ok": true}')])
+    gateway = GeminiGateway(api_key="test-key", client=client)
+
+    result = await gateway.generate_content(
+        {
+            "contents": [{"role": "user", "parts": [{"text": "Classify"}]}],
+            "systemInstruction": {"parts": [{"text": "Return JSON"}]},
+            "generationConfig": {
+                "maxOutputTokens": 128,
+                "responseMimeType": "application/json",
+            },
+            "tools": [
+                {
+                    "functionDeclarations": [
+                        {
+                            "name": "lookup_meter",
+                            "description": "Look up a meter.",
+                            "parameters": {"type": "object"},
+                        }
+                    ]
+                }
+            ],
+        },
+        model="gemini-legacy",
+    )
+
+    assert result["text"] == '{"ok": true}'
+    assert result["usageMetadata"]["promptTokenCount"] == 10
+    assert client.models.calls == [
+        {
+            "model": "gemini-legacy",
+            "contents": [{"role": "user", "parts": [{"text": "Classify"}]}],
+            "config": {
+                "max_output_tokens": 128,
+                "response_mime_type": "application/json",
+                "system_instruction": "Return JSON",
+                "tools": [
+                    {
+                        "function_declarations": [
+                            {
+                                "name": "lookup_meter",
+                                "description": "Look up a meter.",
+                                "parameters": {"type": "object"},
+                            }
+                        ]
+                    }
+                ],
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
 async def test_generate_converts_tool_specs_to_function_declarations():
     client = FakeClient([fake_response(text="")])
     gateway = GeminiGateway(api_key="test-key", client=client)
