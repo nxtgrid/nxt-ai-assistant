@@ -11,6 +11,8 @@ import time
 from typing import Any, Callable
 
 from shared.llm.types import (
+    EmbeddingOptions,
+    EmbeddingVector,
     GenerateResult,
     GenerationOptions,
     LLMConversationState,
@@ -80,6 +82,7 @@ class GeminiGateway:
         client: Any | None = None,
         default_model: str | None = None,
         fallback_model: str | None = None,
+        default_embedding_model: str | None = None,
         max_retries: int = 3,
         sleep: Callable[[float], Any] | None = None,
     ) -> None:
@@ -87,6 +90,10 @@ class GeminiGateway:
         self._client = client
         self._default_model = default_model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         self._fallback_model = fallback_model or os.getenv("GEMINI_FALLBACK_MODEL")
+        self._default_embedding_model = default_embedding_model or os.getenv(
+            "EMBEDDING_MODEL",
+            "gemini-embedding-001",
+        )
         self._max_retries = max_retries
         self._sleep = sleep or asyncio.sleep
 
@@ -138,6 +145,32 @@ class GeminiGateway:
                     retry=False,
                 )
             raise RuntimeError(_sanitize_text(exc, self._api_key)) from exc
+
+    async def embed_texts(
+        self,
+        texts: list[str],
+        options: EmbeddingOptions,
+    ) -> list[EmbeddingVector]:
+        if not texts:
+            return []
+        model = options.model or self._default_embedding_model
+        response = await self.client.aio.models.embed_content(
+            model=model,
+            contents=list(texts),
+            config={
+                "task_type": options.task_type,
+                "output_dimensionality": options.output_dimensionality,
+            },
+        )
+        embeddings = _get_value(response, "embeddings", default=[]) or []
+        return [
+            EmbeddingVector(
+                values=list(_get_value(embedding, "values", default=[]) or []),
+                model=model,
+                task_type=options.task_type,
+            )
+            for embedding in embeddings
+        ]
 
     async def _generate_for_model(
         self,

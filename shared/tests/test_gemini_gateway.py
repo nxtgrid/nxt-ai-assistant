@@ -2,14 +2,23 @@ from types import SimpleNamespace
 
 import pytest
 
-from shared.llm import GenerationOptions, LLMMessage, ToolResult, ToolSpec, Usage
+from shared.llm import (
+    EmbeddingOptions,
+    GenerationOptions,
+    LLMMessage,
+    ToolResult,
+    ToolSpec,
+    Usage,
+)
 from shared.llm.gemini import GeminiGateway
 
 
 class FakeModels:
-    def __init__(self, responses):
+    def __init__(self, responses, embed_responses=None):
         self.responses = list(responses)
+        self.embed_responses = list(embed_responses or [])
         self.calls = []
+        self.embed_calls = []
 
     async def generate_content(self, **kwargs):
         self.calls.append(kwargs)
@@ -18,10 +27,14 @@ class FakeModels:
             raise response
         return response
 
+    async def embed_content(self, **kwargs):
+        self.embed_calls.append(kwargs)
+        return self.embed_responses.pop(0)
+
 
 class FakeClient:
-    def __init__(self, responses):
-        self.models = FakeModels(responses)
+    def __init__(self, responses, embed_responses=None):
+        self.models = FakeModels(responses, embed_responses)
         self.aio = SimpleNamespace(models=self.models)
 
 
@@ -39,6 +52,12 @@ def fake_response(text="ok", prompt_tokens=10, output_tokens=4, finish_reason="S
             cached_content_token_count=1,
         ),
         candidates=[SimpleNamespace(finish_reason=finish_reason)],
+    )
+
+
+def fake_embedding_response(*vectors):
+    return SimpleNamespace(
+        embeddings=[SimpleNamespace(values=vector) for vector in vectors],
     )
 
 
@@ -292,4 +311,42 @@ async def test_generate_preserves_provider_state_for_tool_loop_continuation():
                 }
             ],
         },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_embed_texts_uses_embedding_model_task_type_and_dimensions():
+    client = FakeClient(
+        [],
+        embed_responses=[fake_embedding_response([0.1, 0.2], [0.3, 0.4])],
+    )
+    gateway = GeminiGateway(
+        api_key="test-key",
+        client=client,
+        default_embedding_model="embedding-default",
+    )
+
+    embeddings = await gateway.embed_texts(
+        ["hello", "world"],
+        options=EmbeddingOptions(task_type="RETRIEVAL_DOCUMENT", output_dimensionality=2),
+    )
+
+    assert [embedding.values for embedding in embeddings] == [[0.1, 0.2], [0.3, 0.4]]
+    assert [embedding.model for embedding in embeddings] == [
+        "embedding-default",
+        "embedding-default",
+    ]
+    assert [embedding.task_type for embedding in embeddings] == [
+        "RETRIEVAL_DOCUMENT",
+        "RETRIEVAL_DOCUMENT",
+    ]
+    assert client.models.embed_calls == [
+        {
+            "model": "embedding-default",
+            "contents": ["hello", "world"],
+            "config": {
+                "task_type": "RETRIEVAL_DOCUMENT",
+                "output_dimensionality": 2,
+            },
+        }
     ]
