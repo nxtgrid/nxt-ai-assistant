@@ -14,6 +14,7 @@ from typing import Optional
 
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -90,25 +91,17 @@ async def _call_gemini(
 ) -> Optional[str]:
     """Call Gemini Flash for content improvement tasks."""
     try:
-        from google import genai
-
-        client = genai.Client(
-            api_key=os.getenv("GOOGLE_API_KEY"),
-            http_options={"timeout": 30_000},
-        )
         model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
 
-        config: dict[str, object] = {
-            "temperature": 0.3,
-            "max_output_tokens": max_tokens,
-        }
-        if json_output:
-            config["response_mime_type"] = "application/json"
-
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt,
-            config=config,
+        response = await gateway.generate(
+            [LLMMessage(role="user", text=prompt)],
+            GenerationOptions(
+                model=model,
+                temperature=0.3,
+                max_output_tokens=max_tokens,
+                response_format="json" if json_output else None,
+            ),
         )
 
         if not response.text:
