@@ -70,7 +70,11 @@ def _section_of(name: str) -> str:
         return "🔴 Master Bot Control"
     if name in _MCP_SERVER_KEYS or name == "MCP_DISABLED_TOOLS":
         return "🔌 MCP Servers & Tools"
-    if name.startswith("GEMINI_") or name in ("EMBEDDING_MODEL", "VERIFICATION_MODEL"):
+    if name.startswith("GEMINI_") or name in (
+        "EMBEDDING_MODEL",
+        "VERIFICATION_MODEL",
+        "INTENT_ROUTER_MODEL",
+    ):
         return "🧠 Models"
     if name.startswith("GRAFANA_"):
         return "📊 Grafana"
