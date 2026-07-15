@@ -274,6 +274,47 @@ class GeminiGateway:
                 )
             raise RuntimeError(_sanitize_text(exc, self._api_key)) from exc
 
+    def generate_sync(
+        self,
+        messages: list[LLMMessage],
+        options: GenerationOptions,
+        tools: list[ToolSpec] | None = None,
+        tool_results: list[ToolResult] | None = None,
+        conversation_state: LLMConversationState | None = None,
+    ) -> GenerateResult:
+        model = options.model or self._default_model
+        try:
+            return self._generate_sync_for_model(
+                model,
+                messages,
+                options,
+                tools,
+                tool_results,
+                conversation_state,
+            )
+        except Exception as exc:
+            if self._fallback_model and _status_code(exc) == 429:
+                LOGGER.warning(
+                    f"Gemini model {model} rate-limited; falling back to {self._fallback_model}"
+                )
+                fallback_options = GenerationOptions(
+                    model=self._fallback_model,
+                    temperature=options.temperature,
+                    max_output_tokens=options.max_output_tokens,
+                    response_format=options.response_format,
+                    thinking=options.thinking,
+                )
+                return self._generate_sync_for_model(
+                    self._fallback_model,
+                    messages,
+                    fallback_options,
+                    tools,
+                    tool_results,
+                    conversation_state,
+                    retry=False,
+                )
+            raise RuntimeError(_sanitize_text(exc, self._api_key)) from exc
+
     async def embed_texts(
         self,
         texts: list[str],
@@ -371,6 +412,47 @@ class GeminiGateway:
             raise last_exc
         raise RuntimeError("No response received from Gemini API")
 
+    def _generate_sync_for_model(
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        options: GenerationOptions,
+        tools: list[ToolSpec] | None,
+        tool_results: list[ToolResult] | None,
+        conversation_state: LLMConversationState | None,
+        *,
+        retry: bool = True,
+    ) -> GenerateResult:
+        attempts = self._max_retries + 1 if retry else 1
+        last_exc: Exception | None = None
+        for attempt in range(attempts):
+            try:
+                return self._call_once_sync(
+                    model,
+                    messages,
+                    options,
+                    tools,
+                    tool_results,
+                    conversation_state,
+                )
+            except Exception as exc:
+                last_exc = exc
+                status = _status_code(exc)
+                if status == 429 and _is_quota_exhausted(str(exc)):
+                    break
+                if status != 429 or attempt >= attempts - 1:
+                    break
+                delay = min(2.0 * (2**attempt), 30.0)
+                delay += random.uniform(0, delay * 0.3)
+                LOGGER.warning(
+                    f"Gemini rate limit for {model} on attempt {attempt + 1}/{attempts}; "
+                    f"retrying in {delay:.1f}s"
+                )
+                time.sleep(delay)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("No response received from Gemini API")
+
     async def _call_raw_once(
         self,
         model: str,
@@ -388,6 +470,33 @@ class GeminiGateway:
         usage = self._usage_from_raw(result)
         self._log_metrics(model, duration_ms, usage)
         self._update_langfuse(model, usage)
+        return result
+
+    def _call_once_sync(
+        self,
+        model: str,
+        messages: list[LLMMessage],
+        options: GenerationOptions,
+        tools: list[ToolSpec] | None,
+        tool_results: list[ToolResult] | None,
+        conversation_state: LLMConversationState | None,
+    ) -> GenerateResult:
+        contents, system_instruction = self._convert_messages(
+            messages,
+            tool_results,
+            conversation_state,
+        )
+        config = self._build_config(options, system_instruction, tools)
+        t0 = time.monotonic()
+        response = self.client.models.generate_content(
+            model=model,
+            contents=contents,
+            config=config,
+        )
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        result = self._convert_response(response)
+        self._log_metrics(model, duration_ms, result.usage)
+        self._update_langfuse(model, result.usage)
         return result
 
     async def _call_once(

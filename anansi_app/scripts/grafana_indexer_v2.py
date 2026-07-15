@@ -28,10 +28,11 @@ import json
 import logging
 import os
 import sys
-import time
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 
 
 def compute_variables_hash(variables: List[Dict[str, Any]]) -> str:
@@ -371,10 +372,8 @@ class GeminiDescriptionGenerator:
         self.api_key = api_key
         self.system_prompt = system_prompt
         # Use main GEMINI_MODEL env var for consistency across the app
-        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        self.endpoint = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        )
+        self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        self.gateway = GeminiGateway(api_key=api_key, default_model=self.model)
 
     def generate_description(
         self,
@@ -448,112 +447,34 @@ The tool description should:
 3. Mention that time range can be customized
 4. Be concise (2-3 sentences max)"""
 
-        # Build request payload
-        payload = {
-            "contents": [{"parts": [{"text": self.system_prompt}, {"text": user_prompt}]}],
-            "generationConfig": {
-                "temperature": 0.2,
-                "topK": 1,
-                "topP": 1,
-                "maxOutputTokens": 500,
-            },
-        }
+        try:
+            result = self.gateway.generate_sync(
+                [
+                    LLMMessage(role="system", text=self.system_prompt),
+                    LLMMessage(role="user", text=user_prompt),
+                ],
+                GenerationOptions(
+                    model=self.model,
+                    temperature=0.2,
+                    max_output_tokens=500,
+                ),
+            )
+            text = result.text.strip()
+            if text:
+                return text
+            warning = f"⚠️ Warning: Gemini returned empty text for '{panel_title}'"
+            logger.warning(warning)
+            print(warning, file=sys.stderr)
+            print(warning)
+        except Exception as e:
+            error_line = (
+                f"❌ Unexpected error generating description for '{panel_title}': "
+                f"{type(e).__name__}: {e}"
+            )
+            logger.error(error_line)
+            print(error_line, file=sys.stderr)
+            print(error_line)
 
-        # Retry logic with exponential backoff
-        max_retries = 3
-        retry_delay = 1  # Start with 1 second
-
-        for attempt in range(max_retries):
-            try:
-                with httpx.Client(timeout=30.0) as client:
-                    response = client.post(
-                        self.endpoint,
-                        params={"key": self.api_key},
-                        json=payload,
-                        headers={"Content-Type": "application/json"},
-                    )
-
-                    # Log detailed error for non-2xx responses
-                    if response.status_code != 200:
-                        error_msg = (
-                            f"Gemini API error for '{panel_title}': HTTP {response.status_code}"
-                        )
-                        try:
-                            error_data = response.json()
-                            error_detail = error_data.get("error", {})
-                            error_msg += f" - {error_detail.get('message', response.text[:200])}"
-                            # Check if error is retryable (rate limit, server error)
-                            is_retryable = response.status_code in [429, 500, 502, 503, 504]
-                        except Exception:
-                            error_msg += f" - {response.text[:200]}"
-                            is_retryable = response.status_code >= 500
-
-                        # Print to both stderr and stdout for visibility
-                        error_line = f"❌ {error_msg} (attempt {attempt + 1}/{max_retries})"
-                        logger.error(error_line)
-                        print(error_line, file=sys.stderr)
-                        print(error_line)  # Also print to stdout for Streamlit UI
-
-                        if is_retryable and attempt < max_retries - 1:
-                            time.sleep(retry_delay)
-                            retry_delay *= 2  # Exponential backoff
-                            continue
-                        else:
-                            return f"Tool for viewing {panel_title} panel"
-
-                    result = response.json()
-
-                    # Extract text from response
-                    candidates = result.get("candidates", [])
-                    if candidates:
-                        content = candidates[0].get("content", {})
-                        parts = content.get("parts", [])
-                        if parts:
-                            text: str = parts[0].get("text", "").strip()
-                            if text:
-                                return text
-                            else:
-                                warning = (
-                                    f"⚠️ Warning: Gemini returned empty text for '{panel_title}'"
-                                )
-                                logger.warning(warning)
-                                print(warning, file=sys.stderr)
-                                print(warning)
-                    else:
-                        warning = (
-                            f"⚠️ Warning: Gemini returned no candidates for '{panel_title}'. "
-                            f"Response: {json.dumps(result)[:200]}"
-                        )
-                        logger.warning(warning)
-                        print(warning, file=sys.stderr)
-                        print(warning)
-
-                    return f"Tool for viewing {panel_title} panel"
-
-            except httpx.HTTPError as e:
-                error_line = (
-                    f"❌ HTTP error generating description for '{panel_title}' "
-                    f"(attempt {attempt + 1}/{max_retries}): {type(e).__name__}: {e}"
-                )
-                logger.error(error_line)
-                print(error_line, file=sys.stderr)
-                print(error_line)
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-                    retry_delay *= 2
-                    continue
-                return f"Tool for viewing {panel_title} panel"
-            except Exception as e:
-                error_line = (
-                    f"❌ Unexpected error generating description for '{panel_title}': "
-                    f"{type(e).__name__}: {e}"
-                )
-                logger.error(error_line)
-                print(error_line, file=sys.stderr)
-                print(error_line)
-                return f"Tool for viewing {panel_title} panel"
-
-        # Should never reach here, but just in case
         return f"Tool for viewing {panel_title} panel"
 
 

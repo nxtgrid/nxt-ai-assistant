@@ -38,6 +38,24 @@ class FakeClient:
         self.aio = SimpleNamespace(models=self.models)
 
 
+class SyncFakeModels:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+
+class SyncFakeClient:
+    def __init__(self, responses):
+        self.models = SyncFakeModels(responses)
+
+
 class FakeRateLimitError(Exception):
     status_code = 429
 
@@ -117,6 +135,31 @@ async def test_generate_json_sets_response_mime_type_and_system_instruction():
             "response_mime_type": "application/json",
         },
     }
+
+
+def test_generate_sync_uses_sync_client_and_returns_neutral_result():
+    client = SyncFakeClient([fake_response(text="sync hello")])
+    gateway = GeminiGateway(api_key="test-key", client=client)
+
+    result = gateway.generate_sync(
+        [LLMMessage(role="user", text="Say hello")],
+        GenerationOptions(model="gemini-sync", max_output_tokens=64),
+    )
+
+    assert result.text == "sync hello"
+    assert result.usage == Usage(
+        input_tokens=10,
+        output_tokens=4,
+        thinking_tokens=2,
+        cached_tokens=1,
+    )
+    assert client.models.calls == [
+        {
+            "model": "gemini-sync",
+            "contents": [{"role": "user", "parts": [{"text": "Say hello"}]}],
+            "config": {"max_output_tokens": 64},
+        }
+    ]
 
 
 @pytest.mark.asyncio

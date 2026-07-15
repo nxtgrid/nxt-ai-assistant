@@ -25,6 +25,7 @@ from mcp.server.models import InitializationOptions
 from mcp.types import ServerCapabilities
 from rapidfuzz import fuzz
 
+from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 from shared.utils.response_formatters import compose_error_response, compose_json_response
 
 load_dotenv()
@@ -193,28 +194,20 @@ async def _translate_tariff_query(query: str) -> str:
         f"Item: {query}"
     )
     try:
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {"maxOutputTokens": 32, "thinkingConfig": {"thinkingBudget": 0}},
-        }
         model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, json=payload, timeout=aiohttp.ClientTimeout(total=5)
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    raw_text = (
-                        data.get("candidates", [{}])[0]
-                        .get("content", {})
-                        .get("parts", [{}])[0]
-                        .get("text", "")
-                    )
-                    translated = str(raw_text).strip()
-                    if translated and translated.lower() != query.lower():
-                        logger.info(f"Tariff query translated: {query!r} → {translated!r}")
-                        return translated
+        gateway = GeminiGateway(api_key=api_key, default_model=model)
+        response = await gateway.generate(
+            [LLMMessage(role="user", text=prompt)],
+            GenerationOptions(
+                model=model,
+                max_output_tokens=32,
+                thinking="off",
+            ),
+        )
+        translated = str(response.text).strip()
+        if translated and translated.lower() != query.lower():
+            logger.info(f"Tariff query translated: {query!r} → {translated!r}")
+            return translated
     except Exception as e:
         logger.debug(f"Tariff query translation failed (using original): {e}")
     return query
