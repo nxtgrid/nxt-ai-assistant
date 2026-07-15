@@ -471,7 +471,7 @@ async def prepare_tools(state: ConversationState) -> Dict[str, Any]:
     1. Gets available tools from permissions service
     2. Adds escalation tool (available to all)
     3. Adds training image tool
-    4. Wraps in Gemini format (functionDeclarations)
+    4. Returns provider-neutral function declarations
 
     Args:
         state: Current conversation state
@@ -524,10 +524,9 @@ async def prepare_tools(state: ConversationState) -> Dict[str, Any]:
             "expert_get_packet_state/expert_run_steps)"
         )
 
-    # Wrap in Gemini format (functionDeclarations wrapper)
     tools_payload = None
     if available_tools:
-        tools_payload = [{"functionDeclarations": available_tools}]
+        tools_payload = available_tools
 
     # Google Search grounding cannot be combined with function calling
     # (Gemini API rejects the combination as of March 2026).

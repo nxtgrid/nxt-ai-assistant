@@ -45,7 +45,7 @@ class ConversationState(TypedDict, total=False):
         context_message: Context from artifacts provider (QnA, examples, etc.)
 
         # Tool configuration
-        tools_payload: Tool definitions in Gemini format
+        tools_payload: Provider-neutral tool declarations
         unlocked_tools: Tools unlocked by /command (command-gated tools)
 
         # Execution state
@@ -265,7 +265,7 @@ def create_initial_state(
         metadata: Arbitrary metadata propagated to tool executors
         system_instructions: Dynamic system instructions from Google Docs
         context_message: Context from artifacts provider
-        tools_payload: Tool definitions in Gemini format
+        tools_payload: Provider-neutral tool declarations
         unlocked_tools: Tools unlocked by /command
         max_rounds: Maximum tool rounds allowed
         verification_enabled: Whether to verify responses before sending

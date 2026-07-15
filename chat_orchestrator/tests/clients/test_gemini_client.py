@@ -94,13 +94,9 @@ async def test_gemini_client_generates_from_conversation_messages():
         system_instructions="Answer concisely.",
         tools_payload=[
             {
-                "functionDeclarations": [
-                    {
-                        "name": "lookup_meter",
-                        "description": "Look up a meter",
-                        "parameters": {"type": "OBJECT"},
-                    }
-                ]
+                "name": "lookup_meter",
+                "description": "Look up a meter",
+                "parameters": {"type": "OBJECT"},
             }
         ],
     )

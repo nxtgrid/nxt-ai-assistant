@@ -122,8 +122,21 @@ class GeminiClient:
         if system_instructions:
             payload["systemInstruction"] = {"parts": [{"text": system_instructions}]}
         if tools_payload:
-            payload["tools"] = tools_payload
+            payload["tools"] = self._normalize_tools_payload(tools_payload)
         return payload
+
+    @staticmethod
+    def _normalize_tools_payload(tools_payload: list[Dict[str, Any]]) -> list[Dict[str, Any]]:
+        """Accept legacy Gemini wrappers or plain function declarations.
+
+        Application code should pass plain tool declarations. This compatibility
+        layer keeps legacy callers/tests working while ensuring Gemini-specific
+        wrapping is owned by the client boundary.
+        """
+
+        if any("functionDeclarations" in item or "google_search" in item for item in tools_payload):
+            return tools_payload
+        return [{"functionDeclarations": tools_payload}]
 
     @staticmethod
     def _parse_turn_response(response: Dict[str, Any]) -> GeminiTurnResult:

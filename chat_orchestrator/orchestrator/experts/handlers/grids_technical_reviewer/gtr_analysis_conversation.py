@@ -15,7 +15,13 @@ from typing import Any, Dict, List
 from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
-from shared.llm import GeminiGateway
+from shared.llm import (
+    GenerationOptions,
+    LLMMessage,
+    ToolResult,
+    ToolSpec,
+    get_default_generation_gateway,
+)
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
 
@@ -163,6 +169,19 @@ def _build_tool_declarations(
     return declarations
 
 
+def _build_tool_specs(timeseries_tools: List[Dict[str, str]]) -> List[ToolSpec]:
+    """Build provider-neutral tool specs for available Grafana tools."""
+
+    return [
+        ToolSpec(
+            name=declaration["name"],
+            description=declaration["description"],
+            parameters_json_schema=declaration["parameters"],
+        )
+        for declaration in _build_tool_declarations(timeseries_tools)
+    ]
+
+
 async def _execute_tool_call(
     context: StepContext,
     tool_name: str,
@@ -228,9 +247,6 @@ async def _run_analysis_turn(
         "Format responses clearly using markdown. Include specific numbers and trends."
     )
 
-    # Build conversation contents for Gemini
-    contents = []
-
     # Build context block: historical reviews + recent chat chronology
     context_text = f"Here is the historical review data to analyze:\n\n{historical_md}\n\n"
 
@@ -249,58 +265,40 @@ async def _run_analysis_turn(
         "You can also call Grafana tools for live timeseries deep dives."
     )
 
-    # First message: historical context + chat chronology
-    contents.append(
-        {
-            "role": "user",
-            "parts": [{"text": context_text}],
-        }
-    )
-    contents.append(
-        {
-            "role": "model",
-            "parts": [
-                {
-                    "text": (
-                        "I've loaded the historical review data. I can analyze KPI trends, "
-                        "identify recurring issues, and pull live Grafana charts for deeper analysis. "
-                        "What would you like to explore?"
-                    )
-                }
-            ],
-        }
-    )
+    messages: list[LLMMessage] = [
+        LLMMessage(role="system", text=system_prompt),
+        LLMMessage(role="user", text=context_text),
+        LLMMessage(
+            role="assistant",
+            text=(
+                "I've loaded the historical review data. I can analyze KPI trends, "
+                "identify recurring issues, and pull live Grafana charts for deeper analysis. "
+                "What would you like to explore?"
+            ),
+        ),
+    ]
 
     # Add previous conversation turns (last 10 exchanges = 20 entries)
     recent_turns = conversation_turns[-20:]
     for turn in recent_turns:
-        role = "user" if turn["role"] == "user" else "model"
-        contents.append({"role": role, "parts": [{"text": turn["content"]}]})
+        role = "user" if turn["role"] == "user" else "assistant"
+        messages.append(LLMMessage(role=role, text=turn["content"]))
 
     # Add current user question
-    contents.append({"role": "user", "parts": [{"text": user_question}]})
+    messages.append(LLMMessage(role="user", text=user_question))
 
     model = get_settings().gemini.model
-    gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
-
-    # Build config
-    generation_config: Dict[str, Any] = {
-        "temperature": 0.3,
-        "maxOutputTokens": int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
-    }
-    payload: Dict[str, Any] = {
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "contents": contents,
-        "generationConfig": generation_config,
-    }
-
-    # Add tool declarations if timeseries tools are available
-    tool_declarations = _build_tool_declarations(timeseries_tools)
-    if tool_declarations:
-        payload["tools"] = [{"functionDeclarations": tool_declarations}]
+    gateway = get_default_generation_gateway(default_model=model)
+    options = GenerationOptions(
+        model=model,
+        temperature=0.3,
+        max_output_tokens=int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "8192")),
+    )
+    tool_specs = _build_tool_specs(timeseries_tools)
+    tools = tool_specs or None
 
     try:
-        response = await gateway.generate_content(payload, model=model)
+        response = await gateway.generate(messages, options, tools=tools)
 
         # Build whitelist of declared tool names for validation
         declared_tool_names = {t["name"] for t in timeseries_tools}
@@ -308,80 +306,50 @@ async def _run_analysis_turn(
         # Handle function calls (multi-turn tool use)
         max_tool_rounds = 3
         for _ in range(max_tool_rounds):
-            candidates = response.get("candidates", [])
-            if not candidates:
+            if not response.tool_calls:
                 break
-            candidate_parts = candidates[0].get("content", {}).get("parts", [])
 
-            # Check if the response contains function calls
-            has_function_call = False
-            function_call_results = []
-            function_call_parts = []
+            tool_results: list[ToolResult] = []
+            for tool_call in response.tool_calls:
+                tool_name = tool_call.name
+                tool_args = dict(tool_call.args or {})
 
-            for part in candidate_parts:
-                function_call = part.get("functionCall") or part.get("function_call")
-                if function_call:
-                    has_function_call = True
-                    tool_name = function_call.get("name", "")
-                    tool_args = dict(function_call.get("args") or {})
+                LOGGER.info(f"LLM requested tool call: {tool_name}({tool_args})")
 
-                    LOGGER.info(f"LLM requested tool call: {tool_name}({tool_args})")
+                # Validate tool name against declared whitelist
+                if tool_name not in declared_tool_names:
+                    LOGGER.warning(f"LLM requested undeclared tool: {tool_name}")
+                    tool_result = json.dumps({"error": f"Tool {tool_name} not available"})
+                    is_error = True
+                else:
+                    tool_result = await _execute_tool_call(context, tool_name, tool_args)
+                    is_error = False
 
-                    # Validate tool name against declared whitelist
-                    if tool_name not in declared_tool_names:
-                        LOGGER.warning(f"LLM requested undeclared tool: {tool_name}")
-                        tool_result = json.dumps({"error": f"Tool {tool_name} not available"})
-                    else:
-                        tool_result = await _execute_tool_call(context, tool_name, tool_args)
-
-                    function_call_results.append(
-                        {
-                            "functionResponse": {
-                                "name": tool_name,
-                                "response": {"result": tool_result},
-                            }
-                        }
+                tool_results.append(
+                    ToolResult(
+                        call_id=tool_call.id,
+                        name=tool_name,
+                        result=tool_result,
+                        is_error=is_error,
                     )
-                    function_call_part: Dict[str, Any] = {
-                        "functionCall": {
-                            "name": tool_name,
-                            "args": tool_args,
-                        }
-                    }
-                    if part.get("thoughtSignature"):
-                        function_call_part["thoughtSignature"] = part["thoughtSignature"]
-                    function_call_parts.append(function_call_part)
+                )
 
-            if not has_function_call:
-                break
-
-            # Feed tool results back to Gemini
-            contents.append(
-                {
-                    "role": "model",
-                    "parts": function_call_parts,
-                }
+            response = await gateway.generate(
+                messages,
+                options,
+                tools=tools,
+                tool_results=tool_results,
+                conversation_state=response.conversation_state,
             )
-            contents.append({"role": "user", "parts": function_call_results})
-            payload["contents"] = contents
-
-            # Call Gemini again with tool results
-            response = await gateway.generate_content(payload, model=model)
 
         # Extract final text response
-        if response.get("text"):
-            return str(response["text"])
-        candidates = response.get("candidates", [])
-        if candidates:
-            parts = candidates[0].get("content", {}).get("parts", [])
-            text_parts = [str(p.get("text")) for p in parts if p.get("text")]
-            if text_parts:
-                return "\n".join(text_parts)
+        if response.text:
+            return response.text
 
         return "I couldn't generate a response. Please try rephrasing your question."
 
     except Exception as e:
-        LOGGER.error(f"Gemini call failed in analysis turn: {e}", exc_info=True)
+        LOGGER.error(f"LLM call failed in analysis turn: {e}", exc_info=True)
         return "Sorry, I encountered an error processing your question. Please try again."
 
 

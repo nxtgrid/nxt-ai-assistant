@@ -22,7 +22,13 @@ from langgraph.graph import END, START, StateGraph
 
 from orchestrator.config.settings import get_settings
 from orchestrator.graphs.persistent_agent_state import PersistentAgentState
-from shared.llm import GeminiGateway
+from shared.llm import (
+    GenerationOptions,
+    LLMMessage,
+    ToolResult,
+    ToolSpec,
+    get_default_generation_gateway,
+)
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -743,22 +749,23 @@ async def think_and_act(state: PersistentAgentState) -> Dict[str, Any]:
         )
         tool_definitions = all_tools
 
-    # Convert MCP tool defs to Gemini function declarations
-    genai_tools = None
+    # Convert MCP tool defs to provider-neutral tool specs.
+    tool_specs: list[ToolSpec] | None = None
     if tool_definitions:
-        func_decls = []
+        specs = []
         for td in tool_definitions:
             schema = td.get("inputSchema") or td.get("parameters") or {}
-            # Strip unsupported keys from JSON Schema for Gemini
+            # Keep schema cleanup at the app boundary, but leave provider wrapping
+            # to the shared LLM gateway.
             clean_schema = {k: v for k, v in schema.items() if k != "additionalProperties"}
-            func_decls.append(
-                {
-                    "name": td["name"],
-                    "description": td.get("description", ""),
-                    "parameters": clean_schema if clean_schema.get("properties") else None,
-                }
+            specs.append(
+                ToolSpec(
+                    name=td["name"],
+                    description=td.get("description", ""),
+                    parameters_json_schema=clean_schema if clean_schema.get("properties") else {},
+                )
             )
-        genai_tools = [{"functionDeclarations": func_decls}]
+        tool_specs = specs
 
     # Select model based on agent's model_tier (standard vs pro)
     metadata = state.get("metadata", {})
@@ -768,41 +775,32 @@ async def think_and_act(state: PersistentAgentState) -> Dict[str, Any]:
         LOGGER.info(f"Agent {state.get('thread_id', '?')} using pro model: {model_name}")
     else:
         model_name = settings.gemini.model
-    gateway = GeminiGateway(api_key=settings.google_api_key, default_model=model_name)
+    gateway = get_default_generation_gateway(
+        api_key=settings.google_api_key,
+        default_model=model_name,
+        fallback_model=getattr(settings.gemini, "fallback_model", None),
+    )
 
-    # Cap thinking tokens for agents using the same budget as conversation graph.
-    # Without this, gemini-2.5-flash uses unbounded thinking on every agent wake,
-    # significantly increasing token costs (53 wakes/day × unlimited thinking).
     thinking_budget = settings.gemini.thinking_budget
-    thinking_config = None
-    if thinking_budget == 0:
-        thinking_config = {"thinkingBudget": 0}
-    elif thinking_budget > 0:
-        thinking_config = {"thinkingBudget": thinking_budget}
-    # thinking_budget == -1 → omit (use model default / dynamic)
-
-    generation_config: Dict[str, Any] = {
-        "maxOutputTokens": settings.gemini.max_output_tokens,
-    }
+    thinking_mode = "off" if thinking_budget == 0 else "default"
+    thinking_budget_option = thinking_budget if thinking_budget >= 0 else None
     temperature = settings.gemini.get_effective_temperature()
-    if temperature is not None:
-        generation_config["temperature"] = temperature
-    if thinking_config is not None:
-        generation_config["thinkingConfig"] = thinking_config
 
-    payload: Dict[str, Any] = {
-        "contents": [],
-        "generationConfig": generation_config,
-    }
+    options = GenerationOptions(
+        model=model_name,
+        temperature=temperature,
+        max_output_tokens=settings.gemini.max_output_tokens,
+        thinking=thinking_mode,
+        thinking_budget=thinking_budget_option,
+    )
+    messages: list[LLMMessage] = []
     if system_instructions:
-        payload["systemInstruction"] = {"parts": [{"text": system_instructions}]}
-    if genai_tools:
-        payload["tools"] = genai_tools
+        messages.append(LLMMessage(role="system", text=system_instructions))
+    messages.append(LLMMessage(role="user", text=user_message))
 
-    # Call Gemini with tool calling loop
+    # Call LLM with tool calling loop.
     observations: List[Dict[str, Any]] = []
     actions_taken: List[Dict[str, Any]] = []
-    conversation_history: list = [{"role": "user", "parts": [{"text": user_message}]}]
     max_tool_rounds = int(os.getenv("AGENT_MAX_TOOL_ROUNDS", "5"))
 
     # Pre-create executor (reused across all tool rounds)
@@ -812,38 +810,19 @@ async def think_and_act(state: PersistentAgentState) -> Dict[str, Any]:
     executor = ToolExecutor(registry=registry, settings=settings)
 
     # Initial call
-    payload["contents"] = conversation_history
-    response = await gateway.generate_content(payload, model=model_name)
+    response = await gateway.generate(messages, options, tools=tool_specs)
 
     # Tool calling loop
     for round_num in range(max_tool_rounds):
-        candidates = response.get("candidates", []) if response else []
-        if not candidates:
-            break
-
-        candidate_content = candidates[0].get("content", {})
-        if not candidate_content:
-            break
-        parts = candidate_content.get("parts", [])
-        if not parts:
-            break
-
-        # Check for tool calls
-        tool_calls = []
-        for part in parts:
-            function_call = part.get("functionCall") or part.get("function_call")
-            if function_call:
-                tool_calls.append(function_call)
-
-        if not tool_calls:
+        if not response.tool_calls:
             # No more tool calls — LLM is done
             break
 
         # Execute tool calls
-        tool_results = []
-        for fc in tool_calls:
-            tool_name = fc.get("name", "")
-            tool_args = dict(fc.get("args") or {})
+        tool_results: list[ToolResult] = []
+        for fc in response.tool_calls:
+            tool_name = fc.name
+            tool_args = dict(fc.args or {})
 
             LOGGER.info(f"Agent {state.get('thread_id', '?')} calling tool: {tool_name}")
 
@@ -856,10 +835,12 @@ async def think_and_act(state: PersistentAgentState) -> Dict[str, Any]:
                     f"({MAX_ACTIONS_PER_WAKE}), skipping {tool_name}"
                 )
                 tool_results.append(
-                    {
-                        "name": tool_name,
-                        "result": f"Rate limit: max {MAX_ACTIONS_PER_WAKE} actions per wake",
-                    }
+                    ToolResult(
+                        call_id=fc.id,
+                        name=tool_name,
+                        result=f"Rate limit: max {MAX_ACTIONS_PER_WAKE} actions per wake",
+                        is_error=True,
+                    )
                 )
                 continue
 
@@ -872,10 +853,12 @@ async def think_and_act(state: PersistentAgentState) -> Dict[str, Any]:
                     )
                     if not verified:
                         tool_results.append(
-                            {
-                                "name": tool_name,
-                                "result": "Message blocked by verification — rephrase and retry.",
-                            }
+                            ToolResult(
+                                call_id=fc.id,
+                                name=tool_name,
+                                result="Message blocked by verification — rephrase and retry.",
+                                is_error=True,
+                            )
                         )
                         record = {
                             "tool": tool_name,
@@ -896,7 +879,14 @@ async def think_and_act(state: PersistentAgentState) -> Dict[str, Any]:
                     },
                 )
                 result_text = str(tool_call_result.output or "")[:2000]
-                tool_results.append({"name": tool_name, "result": result_text})
+                tool_results.append(
+                    ToolResult(
+                        call_id=fc.id,
+                        name=tool_name,
+                        result=result_text,
+                        is_error=not tool_call_result.success,
+                    )
+                )
                 record = {
                     "tool": tool_name,
                     "args": tool_args,
@@ -915,7 +905,14 @@ async def think_and_act(state: PersistentAgentState) -> Dict[str, Any]:
                     await _attach_view_state_button(state, tool_args, result_text)
             except Exception as e:
                 LOGGER.error(f"Tool {tool_name} failed: {e}")
-                tool_results.append({"name": tool_name, "result": f"Error: {e}"})
+                tool_results.append(
+                    ToolResult(
+                        call_id=fc.id,
+                        name=tool_name,
+                        result=f"Error: {e}",
+                        is_error=True,
+                    )
+                )
                 record = {
                     "tool": tool_name,
                     "args": tool_args,
@@ -927,32 +924,18 @@ async def think_and_act(state: PersistentAgentState) -> Dict[str, Any]:
                 else:
                     observations.append(record)
 
-        # Build function response parts for next Gemini call
-        candidate_content.setdefault("role", "model")
-        conversation_history.append(candidate_content)
-        function_response_parts = []
-        for tr in tool_results:
-            function_response_parts.append(
-                {
-                    "functionResponse": {
-                        "name": tr["name"],
-                        "response": {"result": tr["result"]},
-                    }
-                }
-            )
-        conversation_history.append({"role": "user", "parts": function_response_parts})
-
-        # Continue conversation with tool results
-        payload["contents"] = conversation_history
-        response = await gateway.generate_content(payload, model=model_name)
+        # Continue conversation with provider-neutral tool results. Provider-specific
+        # function response parts and thought signatures stay inside the gateway.
+        response = await gateway.generate(
+            messages,
+            options,
+            tools=tool_specs,
+            tool_results=tool_results,
+            conversation_state=response.conversation_state,
+        )
 
     # Extract final assessment text
-    assessment = ""
-    candidates = response.get("candidates", []) if response else []
-    if candidates:
-        for part in candidates[0].get("content", {}).get("parts", []):
-            if part.get("text"):
-                assessment += str(part["text"])
+    assessment = response.text if response else ""
 
     LOGGER.info(
         f"Agent {state.get('thread_id', '?')} completed: "

@@ -1,7 +1,7 @@
 """User preferences service for persistent per-user response customization.
 
 Stores and retrieves user preferences that modify how the bot formats responses.
-Preferences are injected into context_message (never systemInstruction) with
+Preferences are injected into context_message (not system instructions) with
 structural isolation framing so they cannot override core system instructions.
 
 Key design decisions:

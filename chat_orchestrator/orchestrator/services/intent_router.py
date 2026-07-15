@@ -9,7 +9,7 @@ from typing import Any, Dict, Optional
 
 from orchestrator.config.settings import get_settings
 from orchestrator.services.command_registry import get_expert_command_mapping
-from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -132,7 +132,7 @@ async def route_expert_intent(user_input: str) -> Optional[Dict[str, str]]:
     )
 
     try:
-        gateway = GeminiGateway(api_key=api_key, default_model=model)
+        gateway = get_default_generation_gateway(api_key=api_key, default_model=model)
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],
             GenerationOptions(

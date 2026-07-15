@@ -28,10 +28,13 @@ async def _identify_section(markdown: str, instruction: str) -> Dict[str, Any]:
     Returns: {"text": "matched section text", "confidence": 0.0-1.0, "reasoning": "..."}
     """
     from orchestrator.config.settings import get_settings
-    from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+    from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
 
     settings = get_settings()
-    gateway = GeminiGateway(api_key=settings.google_api_key, default_model=settings.gemini.model)
+    gateway = get_default_generation_gateway(
+        api_key=settings.google_api_key,
+        default_model=settings.gemini.model,
+    )
 
     prompt = f"""Given this document (in markdown) and an edit instruction, identify the EXACT
 text section that should be edited. Return JSON only.

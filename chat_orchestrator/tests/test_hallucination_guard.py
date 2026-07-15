@@ -209,12 +209,8 @@ async def test_result_ordering_preserved(builder):
 async def test_prepare_node_populates_allowlist(builder):
     """_prepare_node correctly populates allowed_tool_names from tools_payload."""
     tools_payload = [
-        {
-            "functionDeclarations": [
-                {"name": "tool_alpha", "description": "Alpha"},
-                {"name": "tool_beta", "description": "Beta"},
-            ]
-        }
+        {"name": "tool_alpha", "description": "Alpha"},
+        {"name": "tool_beta", "description": "Beta"},
     ]
 
     state = _make_state(
@@ -335,7 +331,7 @@ async def test_call_gemini_node_uses_message_adapter(builder):
         current_round=0,
         max_rounds=3,
         llm_messages=[ConversationMessage(role="user", content="hello")],
-        tools_payload=[{"functionDeclarations": [{"name": "tool_a"}]}],
+        tools_payload=[{"name": "tool_a"}],
         system_instructions="system",
         total_input_tokens=0,
         total_output_tokens=0,
@@ -352,7 +348,7 @@ async def test_call_gemini_node_uses_message_adapter(builder):
     builder._gemini.generate_messages.assert_called_once_with(
         [ConversationMessage(role="user", content="hello")],
         system_instructions="system",
-        tools_payload=[{"functionDeclarations": [{"name": "tool_a"}]}],
+        tools_payload=[{"name": "tool_a"}],
     )
 
 

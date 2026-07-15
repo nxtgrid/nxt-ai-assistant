@@ -266,6 +266,7 @@ class GeminiGateway:
                     max_output_tokens=options.max_output_tokens,
                     response_format=options.response_format,
                     thinking=options.thinking,
+                    thinking_budget=options.thinking_budget,
                 )
                 return await self._generate_for_model(
                     self._fallback_model,
@@ -333,6 +334,7 @@ class GeminiGateway:
                     max_output_tokens=options.max_output_tokens,
                     response_format=options.response_format,
                     thinking=options.thinking,
+                    thinking_budget=options.thinking_budget,
                 )
                 return self._generate_sync_for_model(
                     self._fallback_model,
@@ -633,7 +635,9 @@ class GeminiGateway:
             config["max_output_tokens"] = options.max_output_tokens
         if options.response_format == "json":
             config["response_mime_type"] = "application/json"
-        if options.thinking == "off":
+        if options.thinking_budget is not None:
+            config["thinking_config"] = {"thinking_budget": options.thinking_budget}
+        elif options.thinking == "off":
             config["thinking_config"] = {"thinking_budget": 0}
         elif options.thinking in ("medium", "high"):
             config["thinking_config"] = {"thinking_level": options.thinking}

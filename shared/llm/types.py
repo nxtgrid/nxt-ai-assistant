@@ -54,6 +54,7 @@ class GenerationOptions:
     max_output_tokens: int | None = None
     response_format: ResponseFormat = "text"
     thinking: ThinkingMode = "default"
+    thinking_budget: int | None = None
 
 
 @dataclass(frozen=True)

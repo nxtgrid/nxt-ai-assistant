@@ -299,7 +299,7 @@ class ConversationGraphBuilder:
         LOGGER.info(
             f"_prepare_node: parsed_command={parsed_command}, "
             f"unlocked_tools={unlocked_tools}, "
-            f"tools_payload has {len(tools_payload) if tools_payload else 0} groups"
+            f"tools_payload has {len(tools_payload) if tools_payload else 0} tools"
         )
 
         if tools_payload:
@@ -398,18 +398,9 @@ class ConversationGraphBuilder:
             for message in llm_messages
         )
         system_instruction_chars = len(state.get("system_instructions") or "")
-        # Count actual function declarations, not just wrapper objects
         tools_list = tools_payload or []
-        num_functions = 0
-        tool_names = []
-        for tool_wrapper in tools_list:
-            if "functionDeclarations" in tool_wrapper:
-                for func in tool_wrapper["functionDeclarations"]:
-                    num_functions += 1
-                    tool_names.append(func.get("name", "unknown"))
-            else:
-                num_functions += 1
-                tool_names.append(tool_wrapper.get("name", "unknown"))
+        tool_names = [tool.get("name", "unknown") for tool in tools_list if tool.get("name")]
+        num_functions = len(tool_names)
         LOGGER.info(
             f"Gemini request (round {current_round + 1}/{max_rounds}): "
             f"{len(llm_messages)} messages, "
@@ -1708,23 +1699,18 @@ class ConversationGraphBuilder:
         import copy
 
         modified = []
-        for tool_wrapper in tools_payload:
-            if "functionDeclarations" in tool_wrapper:
-                modified_declarations = []
-                for func in tool_wrapper["functionDeclarations"]:
-                    func_copy = copy.deepcopy(func)
-                    if "parameters" in func_copy:
-                        func_copy["parameters"] = inject_reasoning_param(func_copy["parameters"])
-                    else:
-                        func_copy["parameters"] = inject_reasoning_param(
-                            {"type": "OBJECT", "properties": {}, "required": []}
-                        )
-                    modified_declarations.append(func_copy)
-                modified.append({"functionDeclarations": modified_declarations})
+        for func in tools_payload:
+            if "name" not in func:
+                modified.append(copy.deepcopy(func))
+                continue
+            func_copy = copy.deepcopy(func)
+            if "parameters" in func_copy:
+                func_copy["parameters"] = inject_reasoning_param(func_copy["parameters"])
             else:
-                # Non-functionDeclarations tools (e.g., google_search grounding)
-                # — pass through unchanged, don't inject parameters
-                modified.append(copy.deepcopy(tool_wrapper))
+                func_copy["parameters"] = inject_reasoning_param(
+                    {"type": "OBJECT", "properties": {}, "required": []}
+                )
+            modified.append(func_copy)
 
         return modified
 
@@ -1782,26 +1768,16 @@ class ConversationGraphBuilder:
         included_tools = []
         excluded_tools = []
 
-        for tool_wrapper in tools_payload:
-            if "functionDeclarations" in tool_wrapper:
-                filtered_declarations = []
-                for func in tool_wrapper["functionDeclarations"]:
-                    tool_name = func.get("name", "")
-                    if should_include(tool_name):
-                        filtered_declarations.append(func)
-                        included_tools.append(tool_name)
-                    else:
-                        excluded_tools.append(tool_name)
-
-                if filtered_declarations:
-                    filtered.append({"functionDeclarations": filtered_declarations})
+        for func in tools_payload:
+            tool_name = func.get("name", "")
+            if not tool_name:
+                filtered.append(func)
+                continue
+            if should_include(tool_name):
+                filtered.append(func)
+                included_tools.append(tool_name)
             else:
-                tool_name = tool_wrapper.get("name", "")
-                if should_include(tool_name):
-                    filtered.append(tool_wrapper)
-                    included_tools.append(tool_name)
-                else:
-                    excluded_tools.append(tool_name)
+                excluded_tools.append(tool_name)
 
         if exclusive_mode:
             LOGGER.info(
@@ -1819,22 +1795,16 @@ class ConversationGraphBuilder:
         """Extract all tool names from tools_payload.
 
         Args:
-            tools_payload: Gemini tools format with functionDeclarations
+            tools_payload: Provider-neutral function declarations
 
         Returns:
             Set of tool names currently available
         """
         tool_names: Set[str] = set()
-        for tool_wrapper in tools_payload:
-            if "functionDeclarations" in tool_wrapper:
-                for func in tool_wrapper["functionDeclarations"]:
-                    name = func.get("name", "")
-                    if name:
-                        tool_names.add(name)
-            else:
-                name = tool_wrapper.get("name", "")
-                if name:
-                    tool_names.add(name)
+        for func in tools_payload:
+            name = func.get("name", "")
+            if name:
+                tool_names.add(name)
         return tool_names
 
     @staticmethod

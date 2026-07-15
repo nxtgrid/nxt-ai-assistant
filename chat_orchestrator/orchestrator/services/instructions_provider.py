@@ -271,7 +271,7 @@ Focus areas:
         Get customer-facing system instructions and optional context.
 
         Uses section parsing from Google Docs:
-        - "System Instructions" section → systemInstruction field
+        - "System Instructions" section → system instructions
         - All other sections → initial context message
 
         Priority order:
@@ -281,7 +281,7 @@ Focus areas:
 
         Returns:
             Tuple of (system_instructions, context_message)
-            - system_instructions: Goes to API systemInstruction field
+            - system_instructions: Goes to the provider system-instruction channel
             - context_message: Goes as first user message (or None)
         """
         try:
@@ -417,7 +417,7 @@ Focus areas:
 
         Returns:
             Tuple of (system_instructions, context_message)
-            - system_instructions: Goes to API systemInstruction field
+            - system_instructions: Goes to the provider system-instruction channel
             - context_message: Goes as first user message (or None)
         """
         # Use is_staff flag from user_context (already resolved during auth)
@@ -437,12 +437,12 @@ Focus areas:
         Get staff instructions from Google Doc with section parsing.
 
         Same pattern as customer mode:
-        - "System Instructions" section → systemInstruction field
+        - "System Instructions" section → system instructions
         - All other sections → context message
 
         Returns:
             Tuple of (system_instructions, context_message)
-            - system_instructions: Goes to API systemInstruction field
+            - system_instructions: Goes to the provider system-instruction channel
             - context_message: Goes as first user message (or None)
         """
         try:

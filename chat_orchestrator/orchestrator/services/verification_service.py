@@ -19,7 +19,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+from shared.llm import (
+    GenerationGateway,
+    GenerationOptions,
+    LLMMessage,
+    get_default_generation_gateway,
+)
 from shared.utils.langfuse_utils import langfuse_observe, score_trace
 from shared.utils.logging import get_logger
 
@@ -52,7 +57,7 @@ class ResponseVerificationService:
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
-        gateway: Optional[GeminiGateway] = None,
+        gateway: Optional[GenerationGateway] = None,
     ):
         """
         Initialize verification service.
@@ -63,7 +68,7 @@ class ResponseVerificationService:
         """
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
         self._model = model or os.getenv("VERIFICATION_MODEL", "gemini-2.5-flash-lite")
-        self._gateway = gateway or GeminiGateway(
+        self._gateway = gateway or get_default_generation_gateway(
             api_key=self._api_key,
             default_model=self._model,
         )
@@ -86,7 +91,7 @@ class ResponseVerificationService:
             verification_instructions: Criteria from Google Doc
             conversation_context: Optional additional context from conversation
             available_tools: Optional list of tools available to the generating LLM
-                (in Gemini format with functionDeclarations wrapper)
+                as provider-neutral function declarations
             mode: Verification mode. "reply" (default) verifies a response to a
                 specific customer question. "broadcast" verifies a one-way
                 announcement sent to many recipients — in this mode the judge does
@@ -248,24 +253,16 @@ Respond with a JSON object (and nothing else):
         Format available tools into a readable summary for verification.
 
         Args:
-            available_tools: Tools in Gemini format (may have functionDeclarations wrapper)
+            available_tools: Provider-neutral function declarations
 
         Returns:
             Formatted string with tool names and descriptions
         """
         tool_lines = []
 
-        # Handle Gemini format: [{"functionDeclarations": [...]}]
-        tools_list = []
-        for item in available_tools:
-            if isinstance(item, dict):
-                if "functionDeclarations" in item:
-                    tools_list.extend(item["functionDeclarations"])
-                elif "name" in item:
-                    # Direct tool definition
-                    tools_list.append(item)
-
-        for tool in tools_list:
+        for tool in available_tools:
+            if not isinstance(tool, dict) or "name" not in tool:
+                continue
             name = tool.get("name", "unknown")
             description = tool.get("description", "No description")
             # Truncate long descriptions

@@ -25,7 +25,7 @@ from mcp.server.models import InitializationOptions
 from mcp.types import ServerCapabilities
 from rapidfuzz import fuzz
 
-from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
 from shared.utils.response_formatters import compose_error_response, compose_json_response
 
 load_dotenv()
@@ -195,7 +195,7 @@ async def _translate_tariff_query(query: str) -> str:
     )
     try:
         model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        gateway = GeminiGateway(api_key=api_key, default_model=model)
+        gateway = get_default_generation_gateway(api_key=api_key, default_model=model)
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],
             GenerationOptions(

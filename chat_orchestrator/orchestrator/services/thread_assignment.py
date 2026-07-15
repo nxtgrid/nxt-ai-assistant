@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from orchestrator.models.schemas import ConversationMessage
-from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -144,7 +144,7 @@ async def classify_issue_type(user_input: str) -> str:
         f'Return JSON: {{"issue_type": "<one of the categories above>"}}'
     )
     try:
-        gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
+        gateway = get_default_generation_gateway(default_model=model)
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],
             GenerationOptions(
@@ -292,7 +292,7 @@ Which thread does this message continue, or is it a new topic?
 Return JSON: {{"thread_id": "<thread_id or NEW>", "confidence": 0.0-1.0, "reasoning": "<brief>"}}"""
 
         try:
-            gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
+            gateway = get_default_generation_gateway(default_model=model)
             response = await gateway.generate(
                 [LLMMessage(role="user", text=prompt)],
                 GenerationOptions(

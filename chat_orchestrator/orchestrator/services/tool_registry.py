@@ -34,18 +34,11 @@ class ToolRegistry:
         return self._services[name]
 
     def tools_payload(self) -> List[Dict[str, object]]:
-        """Return tools payload ready for Gemini generateContent."""
+        """Return provider-neutral function declarations for generation."""
 
         if not self._services:
             return []
-        # Gemini expects all function declarations in a single tools object
-        return [
-            {
-                "functionDeclarations": [
-                    svc.as_function_declaration() for svc in self._services.values()
-                ],
-            }
-        ]
+        return [svc.as_function_declaration() for svc in self._services.values()]
 
     def as_declarations(self) -> List[Dict[str, object]]:
         """Return list of function declarations for reuse in documentation/tests."""

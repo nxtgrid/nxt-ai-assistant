@@ -9,12 +9,11 @@ This handler uses Gemini LLM to classify documents into categories:
 """
 
 import json
-import os
 
 from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
-from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -81,7 +80,7 @@ async def classify_document(context: StepContext) -> StepResult:
 
     try:
         model = get_settings().gemini.model
-        gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
+        gateway = get_default_generation_gateway(default_model=model)
 
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],

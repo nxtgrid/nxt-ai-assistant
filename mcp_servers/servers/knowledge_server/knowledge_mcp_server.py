@@ -20,7 +20,7 @@ from mcp.server import Server
 from mcp.server.models import InitializationOptions
 from mcp.types import ServerCapabilities
 
-from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
 
 # Load environment variables
 load_dotenv()
@@ -154,7 +154,10 @@ async def summarize_with_llm(
     """Use Gemini to summarize the retrieved knowledge."""
     try:
         model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        gateway = GeminiGateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
+        gateway = get_default_generation_gateway(
+            api_key=os.getenv("GOOGLE_API_KEY"),
+            default_model=model,
+        )
 
         # Format chunks for the prompt
         chunks_text = ""

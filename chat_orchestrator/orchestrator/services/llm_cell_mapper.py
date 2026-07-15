@@ -20,7 +20,12 @@ import json
 import os
 from typing import Any, Dict, List, Optional
 
-from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+from shared.llm import (
+    GenerationGateway,
+    GenerationOptions,
+    LLMMessage,
+    get_default_generation_gateway,
+)
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -75,7 +80,7 @@ class LLMCellMapper:
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
-        gateway: Optional[GeminiGateway] = None,
+        gateway: Optional[GenerationGateway] = None,
     ):
         """Initialize the mapper.
 
@@ -85,7 +90,7 @@ class LLMCellMapper:
         """
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
         self._model = model or os.getenv("VERIFICATION_MODEL", "gemini-2.5-flash-lite")
-        self._gateway = gateway or GeminiGateway(
+        self._gateway = gateway or get_default_generation_gateway(
             api_key=self._api_key,
             default_model=self._model,
         )

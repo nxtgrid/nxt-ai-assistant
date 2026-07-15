@@ -4,11 +4,23 @@ Tests historical review loading, section parsing, timeseries tool filtering,
 exit detection, max turn enforcement, and conversation flow.
 """
 
+import importlib
+from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from orchestrator.experts.step_context import StepContext
+from shared.llm import (
+    GenerateResult,
+    GenerationOptions,
+    LLMConversationState,
+    LLMMessage,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+)
 
 
 def _make_context(**overrides) -> StepContext:
@@ -427,6 +439,146 @@ class TestBuildToolDeclarations:
 
         declarations = _build_tool_declarations([])
         assert declarations == []
+
+
+# ---------------------------------------------------------------------------
+# Gateway-neutral analysis turn tests
+# ---------------------------------------------------------------------------
+
+
+class FakeGtrGenerationGateway:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def generate(
+        self,
+        messages: list[LLMMessage],
+        options: GenerationOptions,
+        tools: list[ToolSpec] | None = None,
+        tool_results: list[ToolResult] | None = None,
+        conversation_state: LLMConversationState | None = None,
+    ) -> GenerateResult:
+        self.calls.append(
+            {
+                "messages": messages,
+                "options": options,
+                "tools": tools,
+                "tool_results": tool_results,
+                "conversation_state": conversation_state,
+            }
+        )
+        if len(self.calls) == 1:
+            return GenerateResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="call-battery",
+                        name="grafana_battery_usage",
+                        args={
+                            "Grid": "ExampleGrid",
+                            "time_from": "2026-01-01T00:00:00Z",
+                            "time_to": "2026-01-31T23:59:59Z",
+                        },
+                    )
+                ],
+                conversation_state=LLMConversationState(
+                    messages=[LLMMessage(role="assistant", text="Fetching battery usage")]
+                ),
+            )
+        return GenerateResult(text="Battery usage improved in January.")
+
+
+class TestRunAnalysisTurnGateway:
+    @pytest.mark.asyncio
+    async def test_uses_generation_gateway_for_timeseries_tool_loop(self, monkeypatch):
+        gtr = importlib.import_module(
+            "orchestrator.experts.handlers.grids_technical_reviewer.gtr_analysis_conversation"
+        )
+
+        gateway = FakeGtrGenerationGateway()
+
+        class FailingDirectGeminiGateway:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                raise AssertionError("GTR analysis must use the generation gateway factory")
+
+        ctx = _make_context(
+            packet_state={
+                "historical_reviews_md": "# Historical\nJanuary data",
+                "available_timeseries_tools": [
+                    {
+                        "name": "grafana_battery_usage",
+                        "display_name": "Battery Usage",
+                        "dashboard": "Grid KPI",
+                    }
+                ],
+            },
+            user_input="Show battery trend",
+        )
+        ctx.mcp_executor = AsyncMock()
+        ctx.mcp_executor.call_tool.return_value = {"points": [1, 2, 3]}
+
+        monkeypatch.setattr(gtr, "GeminiGateway", FailingDirectGeminiGateway, raising=False)
+        monkeypatch.setattr(
+            gtr,
+            "get_default_generation_gateway",
+            lambda **kwargs: gateway,
+            raising=False,
+        )
+        monkeypatch.setattr(
+            gtr,
+            "get_settings",
+            lambda: SimpleNamespace(gemini=SimpleNamespace(model="gemini-test")),
+        )
+
+        result = await gtr._run_analysis_turn(ctx, [])
+
+        assert result == "Battery usage improved in January."
+        assert len(gateway.calls) == 2
+        assert gateway.calls[0]["messages"][0].role == "system"
+        assert gateway.calls[0]["messages"][-1] == LLMMessage(
+            role="user",
+            text="Show battery trend",
+        )
+        assert gateway.calls[0]["tools"] == [
+            ToolSpec(
+                name="grafana_battery_usage",
+                description="Fetch timeseries data for Battery Usage from Grafana",
+                parameters_json_schema={
+                    "type": "object",
+                    "properties": {
+                        "Grid": {
+                            "type": "string",
+                            "description": "Grid name to query data for",
+                        },
+                        "time_from": {
+                            "type": "string",
+                            "description": "Start time in ISO 8601 (e.g., 2025-07-01T00:00:00Z)",
+                        },
+                        "time_to": {
+                            "type": "string",
+                            "description": "End time in ISO 8601 (e.g., 2025-07-31T23:59:59Z)",
+                        },
+                    },
+                    "required": ["Grid", "time_from", "time_to"],
+                },
+            )
+        ]
+        assert gateway.calls[1]["conversation_state"] is not None
+        assert gateway.calls[1]["tool_results"] == [
+            ToolResult(
+                call_id="call-battery",
+                name="grafana_battery_usage",
+                result='{"points": [1, 2, 3]}',
+            )
+        ]
+        ctx.mcp_executor.call_tool.assert_awaited_once_with(
+            "grafana_battery_usage",
+            {
+                "Grid": "ExampleGrid",
+                "time_from": "2026-01-01T00:00:00Z",
+                "time_to": "2026-01-31T23:59:59Z",
+            },
+        )
 
 
 # ---------------------------------------------------------------------------

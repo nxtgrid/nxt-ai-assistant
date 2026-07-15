@@ -348,10 +348,13 @@ async def generate_replacement_markdown(
         user_email: Requesting user's email (for permission checks on reference docs)
     """
     from orchestrator.config.settings import get_settings
-    from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
+    from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
 
     settings = get_settings()
-    gateway = GeminiGateway(api_key=settings.google_api_key, default_model=settings.gemini.model)
+    gateway = get_default_generation_gateway(
+        api_key=settings.google_api_key,
+        default_model=settings.gemini.model,
+    )
 
     # Fetch any reference documents linked in the instruction (with authz check)
     reference_block = await _fetch_reference_docs(instruction, user_email=user_email)

@@ -46,11 +46,16 @@ def _get_vertex_genai_client() -> Any:
     return _vertex_client
 
 
-def get_default_generation_gateway() -> GeminiGateway:
+def get_default_generation_gateway(
+    *,
+    api_key: str | None = None,
+    default_model: str | None = None,
+    fallback_model: str | None = None,
+) -> GeminiGateway:
     return GeminiGateway(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        default_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-        fallback_model=os.getenv("GEMINI_FALLBACK_MODEL"),
+        api_key=api_key or os.getenv("GOOGLE_API_KEY"),
+        default_model=default_model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+        fallback_model=fallback_model or os.getenv("GEMINI_FALLBACK_MODEL"),
     )
 
 

@@ -281,8 +281,7 @@ class UserPermissionsService:
         3. Customer visibility: Non-staff users only see visible_to_customer tools
 
         Returns:
-            List of individual function declarations in Gemini format.
-            Note: Caller (prepare_tools.py) is responsible for wrapping in functionDeclarations.
+            List of provider-neutral function declarations.
         """
         all_tools: List[Dict[str, Any]] = []
 
