@@ -28,6 +28,8 @@ from mcp.server.models import InitializationOptions
 from shared_code.database.connections import get_supabase_client
 from shared_code.utils.logger import setup_logger
 
+from shared.llm import EmbeddingOptions, OpenAIEmbeddingGateway
+
 # Load environment variables
 load_dotenv()
 
@@ -623,15 +625,16 @@ class VectorCodeSearch:
             }
 
         try:
-            # Generate embedding for the query using OpenAI
-            import openai
-
-            openai_client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-            embedding_response = openai_client.embeddings.create(
-                model="text-embedding-ada-002", input=query
+            embedding_model = os.getenv("CODEBASE_EMBEDDING_MODEL", "text-embedding-ada-002")
+            embedding_gateway = OpenAIEmbeddingGateway(
+                api_key=os.getenv("OPENAI_API_KEY"),
+                default_model=embedding_model,
             )
-            query_embedding = embedding_response.data[0].embedding
+            embeddings = await embedding_gateway.embed_texts(
+                [query],
+                EmbeddingOptions(model=embedding_model, task_type="CODE_SEARCH"),
+            )
+            query_embedding = embeddings[0].values
 
             # Call Supabase RPC function for vector similarity search
             # This requires the search_codebase function to be created in Supabase
