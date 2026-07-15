@@ -13,7 +13,7 @@ Phase 1 + Phase 2 graph flow:
                                                         (after max verification failures)
 
 Nodes:
-    - prepare: Build initial Gemini history and context
+    - prepare: Build initial LLM message history and context
     - call_gemini: Call the Gemini API
     - execute_tools: Execute requested tool calls
     - verify: Verify response using LLM-as-judge (Phase 2)
@@ -46,7 +46,6 @@ from orchestrator.models.schemas import (
 from orchestrator.services.loop_detector import LoopDetectionResult, detect_cross_request_loop
 from orchestrator.services.tool_executor import ToolExecutor
 from orchestrator.services.tool_registry import ToolRegistry
-from orchestrator.utils.response_sanitizer import sanitize_tool_response
 from shared.utils.error_messages import ErrorCategory, get_user_message
 from shared.utils.logging import get_logger
 
@@ -79,31 +78,6 @@ ESCALATION_FINISH_REASONS = frozenset(
         "PROHIBITED_CONTENT",
     }
 )
-
-
-def extract_finish_reason(response: Dict[str, Any]) -> Optional[str]:
-    """Extract finishReason from Gemini response.
-
-    Handles cases where candidates array may be empty or missing.
-
-    Args:
-        response: Raw Gemini API response
-
-    Returns:
-        finishReason string if found, None otherwise
-    """
-    candidates = response.get("candidates", [])
-    if not candidates:
-        # Check promptFeedback for block reason (happens when prompt itself is blocked)
-        prompt_feedback = response.get("promptFeedback", {})
-        block_reason: Optional[str] = prompt_feedback.get("blockReason")
-        if block_reason:
-            LOGGER.warning(f"Prompt blocked with reason: {block_reason}")
-            return block_reason
-        return None
-
-    finish_reason: Optional[str] = candidates[0].get("finishReason")
-    return finish_reason
 
 
 def get_error_for_finish_reason(finish_reason: str) -> Optional[str]:
@@ -223,14 +197,13 @@ class ConversationGraphBuilder:
         """
         LOGGER.debug("Preparing conversation context")
 
-        gemini_history: List[Dict[str, Any]] = []
+        llm_messages: List[ConversationMessage] = []
         history_messages: List[ConversationMessage] = list(state.get("conversation_history", []))
 
         # Add context message as first user message if provided
         context_message = state.get("context_message")
         if context_message:
-            context_payload = {"role": "user", "parts": [{"text": context_message}]}
-            gemini_history.append(context_payload)
+            llm_messages.append(ConversationMessage(role="user", content=context_message))
             LOGGER.info(f"Added context message: {len(context_message)} chars")
 
         # Add verification feedback if this is a regeneration attempt
@@ -242,8 +215,7 @@ class ConversationGraphBuilder:
                 f"{verification_feedback}\n\n"
                 f"Please provide a revised response that addresses these concerns."
             )
-            feedback_payload = {"role": "user", "parts": [{"text": feedback_text}]}
-            gemini_history.append(feedback_payload)
+            llm_messages.append(ConversationMessage(role="user", content=feedback_text))
             LOGGER.info(
                 f"Added verification feedback for regeneration: {len(verification_feedback)} chars"
             )
@@ -303,20 +275,17 @@ class ConversationGraphBuilder:
                     LOGGER.warning(f"Context filter error (fail-open): {e}")
 
             for message in conversation_history:
-                gemini_history.append(self._to_gemini_message(message))
+                llm_messages.append(message)
 
             if loop_result.hint:
-                gemini_history.append({"role": "user", "parts": [{"text": loop_result.hint}]})
+                llm_messages.append(ConversationMessage(role="user", content=loop_result.hint))
 
             if loop_result.should_escalate:
                 await self._escalate_for_loop(state=state, loop_result=loop_result)
 
         # Build and add current user message
-        user_payload = await self._build_user_payload(state)
-        gemini_history.append(user_payload)
-
-        # Validate and clean history
-        gemini_history = self._validate_conversation_structure(gemini_history)
+        current_llm_message = self._build_user_message(state)
+        llm_messages.append(current_llm_message)
 
         # Add current user message to history for database saving
         current_user_message = ConversationMessage(role="user", content=state["user_input"])
@@ -341,8 +310,8 @@ class ConversationGraphBuilder:
             # for tools that aren't currently available (prevents UNEXPECTED_TOOL_CALL errors)
             if unlocked_tools:
                 available_tool_names = self._extract_tool_names(tools_payload)
-                gemini_history = self._filter_history_for_available_tools(
-                    gemini_history, available_tool_names
+                llm_messages = self._filter_messages_for_available_tools(
+                    llm_messages, available_tool_names
                 )
 
         # Compute tool allowlist for hallucination guard
@@ -351,7 +320,7 @@ class ConversationGraphBuilder:
         )
 
         return {
-            "gemini_history": gemini_history,
+            "llm_messages": llm_messages,
             "history_messages": history_messages,
             "tools_payload": tools_payload,
             "allowed_tool_names": allowed_tool_names,
@@ -417,25 +386,20 @@ class ConversationGraphBuilder:
             self._gemini._model_config = copy.copy(self._gemini._model_config)
             self._gemini._model_config.model = command_model
 
-        # Build payload
+        # Build provider-neutral request inputs. Gemini-specific payload construction
+        # and raw response parsing live behind GeminiClient.generate_messages().
         include_tools = bool(state.get("tools_payload"))
-        payload = self._build_payload(
-            state["gemini_history"],
-            state.get("tools_payload") if include_tools else None,
-            state.get("system_instructions"),
-        )
+        tools_payload = state.get("tools_payload") if include_tools else None
+        llm_messages = list(state.get("llm_messages") or state.get("history_messages") or [])
 
-        # Log payload summary
+        # Log request summary without depending on Gemini's raw payload shape.
         total_chars = sum(
-            len(str(part.get("text", "")))
-            for msg in payload.get("contents", [])
-            for part in msg.get("parts", [])
+            len(message.content or "")
+            for message in llm_messages
         )
-        system_instruction_chars = len(
-            payload.get("systemInstruction", {}).get("parts", [{}])[0].get("text", "")
-        )
+        system_instruction_chars = len(state.get("system_instructions") or "")
         # Count actual function declarations, not just wrapper objects
-        tools_list = payload.get("tools", [])
+        tools_list = tools_payload or []
         num_functions = 0
         tool_names = []
         for tool_wrapper in tools_list:
@@ -448,7 +412,7 @@ class ConversationGraphBuilder:
                 tool_names.append(tool_wrapper.get("name", "unknown"))
         LOGGER.info(
             f"Gemini request (round {current_round + 1}/{max_rounds}): "
-            f"{len(payload.get('contents', []))} messages, "
+            f"{len(llm_messages)} messages, "
             f"{total_chars:,} chars in contents, "
             f"{system_instruction_chars:,} chars in system instruction, "
             f"{num_functions} function declarations"
@@ -457,10 +421,15 @@ class ConversationGraphBuilder:
             LOGGER.debug(f"Tools being sent to Gemini: {', '.join(sorted(tool_names))}")
 
         # Call Gemini
-        response = await self._gemini.generate_content(payload)
+        turn = await self._gemini.generate_messages(
+            llm_messages,
+            system_instructions=state.get("system_instructions"),
+            tools_payload=tools_payload,
+        )
+        response = turn.raw_response
 
         # Extract and handle finishReason (important for Gemini 3+ and safety blocks)
-        finish_reason = extract_finish_reason(response)
+        finish_reason = turn.finish_reason
         if finish_reason:
             if finish_reason not in ("STOP", "MAX_TOKENS"):
                 LOGGER.warning(f"Gemini finishReason: {finish_reason}")
@@ -498,13 +467,12 @@ class ConversationGraphBuilder:
         raw_responses.append(response)
 
         # Extract and accumulate token usage
-        usage = response.get("usageMetadata", {})
-        input_tokens = usage.get("promptTokenCount", 0)
-        output_tokens = usage.get("candidatesTokenCount", 0)
+        input_tokens = turn.input_tokens
+        output_tokens = turn.output_tokens
         total_input = state.get("total_input_tokens", 0) + input_tokens
         total_output = state.get("total_output_tokens", 0) + output_tokens
 
-        if usage:
+        if input_tokens or output_tokens:
             LOGGER.info(
                 f"Gemini tokens (round {current_round + 1}): "
                 f"input={input_tokens}, output={output_tokens}, "
@@ -512,7 +480,7 @@ class ConversationGraphBuilder:
             )
 
         # Extract function calls
-        function_calls = self._extract_function_calls(response)
+        function_calls = turn.tool_calls
 
         if function_calls:
             LOGGER.info(f"Gemini requested {len(function_calls)} tool calls")
@@ -533,7 +501,7 @@ class ConversationGraphBuilder:
             }
         else:
             # No function calls - extract final text
-            final_text = self._extract_text(response) or ""
+            final_text = turn.text or ""
 
             # Handle empty response
             if not final_text and not state.get("accumulated_tool_calls"):
@@ -543,11 +511,16 @@ class ConversationGraphBuilder:
                     "Retrying once..."
                 )
                 # Retry the request once
-                response = await self._gemini.generate_content(payload)
+                turn = await self._gemini.generate_messages(
+                    llm_messages,
+                    system_instructions=state.get("system_instructions"),
+                    tools_payload=tools_payload,
+                )
+                response = turn.raw_response
                 raw_responses.append(response)
 
                 # Check if retry was also blocked
-                retry_finish_reason = extract_finish_reason(response)
+                retry_finish_reason = turn.finish_reason
                 if retry_finish_reason and retry_finish_reason in BLOCKED_FINISH_REASONS:
                     blocked_error = get_error_for_finish_reason(retry_finish_reason)
                     LOGGER.warning(
@@ -569,7 +542,7 @@ class ConversationGraphBuilder:
                         "finish_reason": retry_finish_reason,
                     }
 
-                function_calls = self._extract_function_calls(response)
+                function_calls = turn.tool_calls
                 if function_calls:
                     LOGGER.info(f"Retry succeeded with {len(function_calls)} tool calls")
                     for call in function_calls:
@@ -586,10 +559,10 @@ class ConversationGraphBuilder:
                         "should_continue": True,
                     }
 
-                final_text = self._extract_text(response) or ""
+                final_text = turn.text or ""
                 if not final_text:
                     # Check for transient model errors
-                    retry_reason = extract_finish_reason(response)
+                    retry_reason = turn.finish_reason
                     if retry_reason and retry_reason in TRANSIENT_FINISH_REASONS:
                         LOGGER.error(
                             f"Gemini model error (finishReason={retry_reason}). "
@@ -732,7 +705,7 @@ class ConversationGraphBuilder:
         LOGGER.debug(f"Executing {len(function_calls)} tool calls")
 
         # Get current state
-        gemini_history = list(state.get("gemini_history", []))
+        llm_messages = list(state.get("llm_messages") or state.get("history_messages", []))
         history_messages = list(state.get("history_messages", []))
         accumulated_calls = list(state.get("accumulated_tool_calls", []))
         accumulated_results = list(state.get("accumulated_tool_results", []))
@@ -763,20 +736,11 @@ class ConversationGraphBuilder:
         # Accumulate calls
         accumulated_calls.extend(function_calls)
 
-        # Build functionCall parts for Gemini history
-        # thoughtSignature must be a part-level sibling of functionCall, not nested inside it
-        gemini_parts = []
-        for call in function_calls:
-            fc_data: Dict[str, Any] = {"name": call.name, "args": call.arguments}
-            part_data: Dict[str, Any] = {"functionCall": fc_data}
-            if call.thought_signature:
-                part_data["thoughtSignature"] = call.thought_signature
-            gemini_parts.append(part_data)
-
-        gemini_history.append({"role": "model", "parts": gemini_parts})
-        history_messages.extend(
+        call_messages = [
             ConversationMessage(role="model", function_call=call) for call in function_calls
-        )
+        ]
+        history_messages.extend(call_messages)
+        llm_messages.extend(call_messages)
 
         # Hallucination guard: verify each tool was presented to Gemini
         allowed_names = set(state.get("allowed_tool_names", []))
@@ -821,7 +785,7 @@ class ConversationGraphBuilder:
                     f"Blocked: {safe_names}"
                 )
                 return {
-                    "gemini_history": gemini_history,
+                    "llm_messages": llm_messages,
                     "history_messages": history_messages,
                     "accumulated_tool_calls": accumulated_calls,
                     "accumulated_tool_results": accumulated_results,
@@ -847,24 +811,10 @@ class ConversationGraphBuilder:
 
         accumulated_results.extend(results)
 
-        # Build function response parts for Gemini history
-        response_parts = []
         for call, result in zip(function_calls, results):
-            response_output = self._prepare_tool_response(result.output)
-
-            # Build functionResponse with optional thoughtSignature (part-level sibling)
-            func_response: Dict[str, Any] = {
-                "name": call.name,
-                "response": response_output,
-            }
-            resp_part: Dict[str, Any] = {"functionResponse": func_response}
-            if call.thought_signature:
-                resp_part["thoughtSignature"] = call.thought_signature
-
-            response_parts.append(resp_part)
-            history_messages.append(ConversationMessage(role="tool", tool_result=result))
-
-        gemini_history.append({"role": "user", "parts": response_parts})
+            tool_message = ConversationMessage(role="tool", tool_result=result)
+            history_messages.append(tool_message)
+            llm_messages.append(tool_message)
 
         # Check if escalation was triggered AND succeeded
         # Only set escalation_triggered when the tool actually succeeded,
@@ -876,7 +826,7 @@ class ConversationGraphBuilder:
                 break
 
         return {
-            "gemini_history": gemini_history,
+            "llm_messages": llm_messages,
             "history_messages": history_messages,
             "accumulated_tool_calls": accumulated_calls,
             "accumulated_tool_results": accumulated_results,
@@ -893,7 +843,6 @@ class ConversationGraphBuilder:
         2. Prepares the final ChatResponse data
         """
         final_text = state.get("final_response", "")
-        gemini_history = list(state.get("gemini_history", []))
         history_messages = list(state.get("history_messages", []))
 
         # Include token metadata in the final model message
@@ -909,11 +858,9 @@ class ConversationGraphBuilder:
             role="model", content=final_text, metadata=token_metadata
         )
         history_messages.append(final_message)
-        gemini_history.append(self._to_gemini_message(final_message))
 
         return {
             "history_messages": history_messages,
-            "gemini_history": gemini_history,
         }
 
     async def _verify_node(self, state: ConversationState) -> Dict[str, Any]:
@@ -1323,8 +1270,8 @@ class ConversationGraphBuilder:
         LOGGER.warning(f"Verification failed {attempt} times, escalating to support")
         return "escalate"
 
-    async def _build_user_payload(self, state: ConversationState) -> Dict[str, Any]:
-        """Construct user message including optional context and media."""
+    def _build_user_message(self, state: ConversationState) -> ConversationMessage:
+        """Construct provider-neutral user message including optional context and media."""
         context_blocks: List[str] = []
 
         # Add user context
@@ -1345,19 +1292,11 @@ class ConversationGraphBuilder:
         user_input = state["user_input"]
         composed_text = "\n\n".join(context_blocks + [user_input]) if context_blocks else user_input
 
-        # Build parts list (text + media)
-        parts: List[Dict[str, Any]] = [{"text": composed_text}]
-
-        # Add media attachments
-        for media in state.get("media", []):
-            media_part = self._build_media_part(media)
-            if media_part:
-                parts.append(media_part)
-
-        return {
-            "role": "user",
-            "parts": parts,
-        }
+        return ConversationMessage(
+            role="user",
+            content=composed_text,
+            media=list(state.get("media", [])),
+        )
 
     def _format_user_context(self, user_context) -> str:
         """Format user context as system instruction."""
@@ -1397,30 +1336,15 @@ class ConversationGraphBuilder:
             return "[Entity Context]\n" + "\n".join(parts)
         return ""
 
-    def _build_media_part(self, media) -> Optional[Dict[str, Any]]:
-        """Build Gemini media part from MediaAttachment."""
-        if media.type in ("image", "video", "audio"):
-            if media.data:
-                return {
-                    "inline_data": {
-                        "mime_type": media.mime_type or "image/jpeg",
-                        "data": media.data,
-                    }
-                }
-            elif media.url:
-                LOGGER.warning(f"Media URL not yet supported, skipping: {media.url}")
-                return None
-        return None
-
     async def _synthesize_partial_answer(self, state: ConversationState) -> Optional[str]:
         """Ask Gemini to summarize what was gathered when the tool budget is exhausted.
 
         Used for staff sessions when MAX_TOOL_ROUNDS is hit, so the investigation context
-        already in gemini_history isn't discarded. Called WITHOUT tools so Gemini is forced
-        to produce final text instead of requesting more calls.
+        already in the neutral LLM message history isn't discarded. Called WITHOUT tools
+        so Gemini is forced to produce final text instead of requesting more calls.
         """
-        history = list(state.get("gemini_history") or [])
-        if not history:
+        messages = list(state.get("llm_messages") or state.get("history_messages") or [])
+        if not messages:
             return None
 
         synthesis_prompt = (
@@ -1432,65 +1356,14 @@ class ConversationGraphBuilder:
             "• Any tickets, grids, meters, or items that still need follow-up\n\n"
             "Format for Telegram: short, scannable, use bullet points."
         )
-        history.append({"role": "user", "parts": [{"text": synthesis_prompt}]})
+        messages.append(ConversationMessage(role="user", content=synthesis_prompt))
 
-        payload = self._build_payload(
-            history=history,
-            tools_payload=None,
+        turn = await self._gemini.generate_messages(
+            messages,
             system_instructions=state.get("system_instructions"),
+            tools_payload=None,
         )
-
-        response = await self._gemini.generate_content(payload)
-        text = self._extract_text(response)
-        return text or None
-
-    def _build_payload(
-        self,
-        history: List[Dict[str, Any]],
-        tools_payload: Optional[List[Dict[str, Any]]],
-        system_instructions: Optional[str],
-    ) -> Dict[str, Any]:
-        """Create generateContent payload with optional tool definitions."""
-        generation_config: Dict[str, Any] = {
-            "candidateCount": self._settings.gemini.candidate_count,
-            "topK": self._settings.gemini.top_k,
-            "topP": self._settings.gemini.top_p,
-            "maxOutputTokens": self._settings.gemini.max_output_tokens,
-        }
-
-        # Temperature: only include if explicitly set (Gemini 3+ recommends default)
-        effective_temp = self._settings.gemini.get_effective_temperature()
-        if effective_temp is not None:
-            generation_config["temperature"] = effective_temp
-
-        # Thinking config: -1 = dynamic (omit), 0 = off, >0 = cap
-        # Pro/deep-thinking models skip the budget cap (let the model think freely)
-        current_model = self._gemini._model_config.model
-        model_lower = current_model.lower()
-        is_pro_model = model_lower.endswith("-pro") or "-pro-" in model_lower
-        thinking_budget = self._settings.gemini.thinking_budget
-        if is_pro_model:
-            # Pro models: no thinking budget cap — let them think freely
-            pass
-        elif thinking_budget >= 0:
-            if self._settings.gemini._is_gemini_3_or_later(current_model):
-                generation_config["thinkingConfig"] = {"thinkingLevel": "medium"}
-            else:
-                generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
-
-        payload: Dict[str, Any] = {
-            "generationConfig": generation_config,
-        }
-
-        if system_instructions:
-            payload["systemInstruction"] = {"parts": [{"text": system_instructions}]}
-
-        if tools_payload:
-            payload["tools"] = tools_payload
-
-        payload["contents"] = history
-
-        return payload
+        return turn.text or None
 
     async def _handle_preference_call(
         self,
@@ -1827,45 +1700,6 @@ class ConversationGraphBuilder:
 
         return results
 
-    def _prepare_tool_response(self, response_output: Any) -> Dict[str, Any]:
-        """Prepare tool response for Gemini API format."""
-        import json
-
-        # Handle JSON string output
-        if isinstance(response_output, str):
-            try:
-                response_output = json.loads(response_output)
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        # Sanitize sensitive fields
-        response_output = sanitize_tool_response(response_output)
-
-        # Wrap error-only responses
-        if (
-            isinstance(response_output, dict)
-            and "error" in response_output
-            and len(response_output) == 1
-        ):
-            response_output = {
-                "error_occurred": True,
-                "error_message": response_output["error"],
-                "details": "Tool execution failed",
-            }
-
-        # Ensure dict format for Gemini (functionResponse.response must be an object)
-        if isinstance(response_output, str):
-            return {"result": response_output}
-
-        if isinstance(response_output, list):
-            return {"result": response_output}
-
-        if isinstance(response_output, dict):
-            return response_output
-
-        # Fallback for any other type
-        return {"result": str(response_output)}
-
     @staticmethod
     def _inject_reasoning_to_tools(
         tools_payload: List[Dict[str, Any]],
@@ -2004,53 +1838,42 @@ class ConversationGraphBuilder:
         return tool_names
 
     @staticmethod
-    def _filter_history_for_available_tools(
-        history: List[Dict[str, Any]],
+    def _filter_messages_for_available_tools(
+        messages: List[ConversationMessage],
         available_tools: Set[str],
-    ) -> List[Dict[str, Any]]:
-        """Filter conversation history to remove function calls for unavailable tools.
+    ) -> List[ConversationMessage]:
+        """Filter conversation messages to remove calls for unavailable tools.
 
         This prevents UNEXPECTED_TOOL_CALL errors when using exclusive_tools mode.
         When tools are filtered (e.g., /grids only has grid tools), the conversation
         history may contain function calls for tools like JIRA that are no longer
-        available. Gemini sees these in history and tries to continue using them,
+        available. The model sees these in history and tries to continue using them,
         resulting in UNEXPECTED_TOOL_CALL errors.
 
         This method removes function call/response pairs for tools not in available_tools.
-
-        Args:
-            history: Gemini conversation history
-            available_tools: Set of currently available tool names
-
-        Returns:
-            Filtered history with unavailable tool calls removed
         """
         if not available_tools:
-            return history
+            return messages
 
-        filtered: List[Dict[str, Any]] = []
+        filtered: List[ConversationMessage] = []
         i = 0
         removed_count = 0
 
-        while i < len(history):
-            msg = history[i]
-            parts = msg.get("parts", [])
-
-            # Check if this is a function call message
-            if len(parts) == 1 and "functionCall" in parts[0]:
-                func_name = parts[0]["functionCall"].get("name", "")
-
-                # If tool is not available, skip this message and its response
+        while i < len(messages):
+            message = messages[i]
+            if message.function_call is not None:
+                func_name = message.function_call.name
                 if func_name not in available_tools:
                     LOGGER.debug(f"Filtering out function call for unavailable tool: {func_name}")
                     removed_count += 1
                     i += 1
 
-                    # Also skip the matching function response if it exists
-                    if i < len(history):
-                        next_msg = history[i]
-                        next_parts = next_msg.get("parts", [])
-                        if next_parts and "functionResponse" in next_parts[0]:
+                    if i < len(messages):
+                        next_message = messages[i]
+                        if (
+                            next_message.tool_result is not None
+                            and next_message.tool_result.name == func_name
+                        ):
                             LOGGER.debug(
                                 f"Filtering out matching function response for: {func_name}"
                             )
@@ -2058,16 +1881,15 @@ class ConversationGraphBuilder:
                             i += 1
                     continue
 
-            # Check if this is an orphaned function response (shouldn't happen but be safe)
-            if len(parts) == 1 and "functionResponse" in parts[0]:
-                func_name = parts[0]["functionResponse"].get("name", "")
+            if message.tool_result is not None:
+                func_name = message.tool_result.name
                 if func_name not in available_tools:
                     LOGGER.debug(f"Filtering out orphaned function response: {func_name}")
                     removed_count += 1
                     i += 1
                     continue
 
-            filtered.append(msg)
+            filtered.append(message)
             i += 1
 
         if removed_count > 0:
@@ -2129,197 +1951,6 @@ class ConversationGraphBuilder:
                 lines.append(f"- **{author}** ({created_at}): {body_preview}")
 
         return "\n".join(lines)
-
-    @staticmethod
-    def _extract_function_calls(response: Dict[str, Any]) -> List[FunctionCall]:
-        """Parse Gemini response and extract requested tool calls."""
-        calls: List[FunctionCall] = []
-        for candidate in response.get("candidates", []):
-            content = candidate.get("content", {})
-            parts = content.get("parts", [])
-            for part in parts:
-                if "functionCall" in part:
-                    data = part["functionCall"]
-                    # thoughtSignature is a part-level sibling of functionCall, not nested inside it
-                    thought_sig = part.get("thoughtSignature") or data.get("thoughtSignature")
-                    calls.append(
-                        FunctionCall(
-                            name=data.get("name", ""),
-                            arguments=data.get("args", {}),
-                            thought_signature=thought_sig,
-                        )
-                    )
-                elif "functionCalls" in part:
-                    for call in part["functionCalls"]:
-                        thought_sig = call.get("thoughtSignature")
-                        calls.append(
-                            FunctionCall(
-                                name=call.get("name", ""),
-                                arguments=call.get("args", {}),
-                                thought_signature=thought_sig,
-                            )
-                        )
-        return calls
-
-    @staticmethod
-    def _extract_text(response: Dict[str, Any]) -> Optional[str]:
-        """Retrieve the first non-thought text part from the Gemini response.
-
-        When thinking is enabled, Gemini returns thought parts (thought=true)
-        before the actual answer. We must skip those to avoid leaking
-        internal reasoning into user-facing messages.
-        """
-        for candidate in response.get("candidates", []):
-            content = candidate.get("content", {})
-            for part in content.get("parts", []):
-                if "text" in part and not part.get("thought"):
-                    return str(part["text"])
-        return None
-
-    @staticmethod
-    def _validate_conversation_structure(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Validate and clean conversation history to meet Gemini API requirements."""
-        if not history:
-            return history
-
-        cleaned_history: List[Dict[str, Any]] = []
-        i = 0
-        removed_orphans = 0
-        removed_no_signature = 0
-
-        while i < len(history):
-            msg = history[i]
-            parts = msg.get("parts", [])
-            has_function_call = any("functionCall" in part for part in parts)
-
-            if has_function_call:
-                next_msg = history[i + 1] if i + 1 < len(history) else None
-
-                if next_msg:
-                    next_parts = next_msg.get("parts", [])
-                    has_function_response = any("functionResponse" in part for part in next_parts)
-
-                    if has_function_response:
-                        # Gemini 3+ requires thoughtSignature on function call parts.
-                        # Legacy history saved before the fix may be missing signatures.
-                        # Strip these pairs to avoid 400 INVALID_ARGUMENT errors.
-                        missing_sig = any(
-                            "functionCall" in part and "thoughtSignature" not in part
-                            for part in parts
-                        )
-                        if missing_sig:
-                            func_name = parts[0].get("functionCall", {}).get("name", "unknown")
-                            LOGGER.warning(
-                                f"Removing function call+response pair missing thoughtSignature. "
-                                f"Function: {func_name}"
-                            )
-                            i += 2  # Skip both the call and its response
-                            removed_no_signature += 1
-                            continue
-
-                        cleaned_history.append(msg)
-                        i += 1
-                        continue
-                    else:
-                        LOGGER.warning(
-                            f"Removing orphaned function call (no matching function response). "
-                            f"Function: {parts[0].get('functionCall', {}).get('name', 'unknown')}"
-                        )
-                        i += 1
-                        removed_orphans += 1
-                        continue
-                else:
-                    LOGGER.warning(
-                        f"Removing function call at end of history (no response). "
-                        f"Function: {parts[0].get('functionCall', {}).get('name', 'unknown')}"
-                    )
-                    i += 1
-                    removed_orphans += 1
-                    continue
-
-            cleaned_history.append(msg)
-            i += 1
-
-        original_count = len(history)
-        cleaned_count = len(cleaned_history)
-        if original_count != cleaned_count:
-            details = []
-            if removed_orphans:
-                details.append(f"{removed_orphans} orphaned")
-            if removed_no_signature:
-                details.append(f"{removed_no_signature} missing thoughtSignature")
-            LOGGER.info(
-                f"Cleaned conversation history: {original_count} → {cleaned_count} messages "
-                f"({', '.join(details)})"
-            )
-
-        return cleaned_history
-
-    @staticmethod
-    def _to_gemini_message(message: ConversationMessage) -> Dict[str, Any]:
-        """Convert internal message representation to Gemini format."""
-        parts: List[Dict[str, Any]] = []
-
-        if message.content is not None:
-            if message.timestamp and message.role == "user":
-                text = f"[{message.timestamp}] {message.content}"
-            else:
-                text = message.content
-            parts.append({"text": text})
-
-        if message.function_call is not None:
-            fc_data: Dict[str, Any] = {
-                "name": message.function_call.name,
-                "args": message.function_call.arguments,
-            }
-            # thoughtSignature must be a part-level sibling of functionCall
-            part_data: Dict[str, Any] = {"functionCall": fc_data}
-            if message.function_call.thought_signature:
-                part_data["thoughtSignature"] = message.function_call.thought_signature
-            parts.append(part_data)
-
-        if message.tool_result is not None:
-            import json
-
-            response_output = message.tool_result.output
-            if isinstance(response_output, str):
-                try:
-                    response_output = json.loads(response_output)
-                except (json.JSONDecodeError, ValueError):
-                    pass
-
-            response_output = sanitize_tool_response(response_output)
-
-            if (
-                isinstance(response_output, dict)
-                and "error" in response_output
-                and len(response_output) == 1
-            ):
-                response_output = {
-                    "error_occurred": True,
-                    "error_message": response_output["error"],
-                    "details": "Tool execution failed",
-                }
-
-            if isinstance(response_output, str):
-                response_output = {"result": response_output}
-            elif isinstance(response_output, list):
-                # Gemini requires functionResponse.response to be an object, not a list.
-                # Wrap list results (e.g., from scan_doc_comments returning a JSON array).
-                response_output = {"result": response_output}
-
-            parts.append(
-                {
-                    "functionResponse": {
-                        "name": message.tool_result.name,
-                        "response": response_output,
-                    }
-                }
-            )
-
-        gemini_role = "user" if message.role == "tool" else message.role
-        return {"role": gemini_role, "parts": parts}
-
 
 def build_conversation_graph(
     gemini_client: GeminiClient,

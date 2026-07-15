@@ -36,7 +36,8 @@ class ConversationState(TypedDict, total=False):
 
         # Conversation context
         conversation_history: Prior conversation messages
-        gemini_history: Gemini-formatted message history for API calls
+        gemini_history: Legacy Gemini-formatted history retained for old checkpoints
+        llm_messages: Provider-neutral message history for active LLM calls
         history_messages: Messages accumulated during this turn
 
         # Instructions and context
@@ -94,6 +95,7 @@ class ConversationState(TypedDict, total=False):
     # Conversation context
     conversation_history: List[ConversationMessage]
     gemini_history: List[Dict[str, Any]]
+    llm_messages: List[ConversationMessage]
     history_messages: List[ConversationMessage]
 
     # Instructions and context
@@ -283,6 +285,7 @@ def create_initial_state(
         # Conversation context
         conversation_history=conversation_history or [],
         gemini_history=[],
+        llm_messages=[],
         history_messages=[],
         # Instructions and context
         system_instructions=system_instructions,

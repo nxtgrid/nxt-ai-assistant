@@ -61,6 +61,7 @@ from orchestrator.experts.step_registry import (
     get_step_registry,
 )
 from orchestrator.mini_app.schemas import build_mini_app_url, build_view_state_url
+from orchestrator.models.schemas import ConversationMessage
 from shared.grid_design.artifact_log import sweep_state_for_artifacts
 from shared.grid_design.db import Repository
 from shared.utils.error_messages import sanitize_error_for_user
@@ -2360,23 +2361,16 @@ class WorkflowExecutor:
         )
 
         try:
-            # Build payload in Gemini API format
-            payload: Dict[str, Any] = {
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            }
-
-            if expert_config.system_instructions:
-                payload["systemInstruction"] = {
-                    "parts": [{"text": expert_config.system_instructions}]
-                }
-
-            # Note: tools aren't typically needed for LLM-only steps
-            # The expert uses tools via function steps, not LLM steps
-
-            response = await self.gemini.generate_content(payload)
+            # Note: tools aren't typically needed for LLM-only steps.
+            # The expert uses tools via function steps, not LLM steps.
+            response = await self.gemini.generate_messages(
+                [ConversationMessage(role="user", content=prompt)],
+                system_instructions=expert_config.system_instructions,
+                tools_payload=None,
+            )
 
             # Check finishReason for blocked content
-            finish_reason = self._extract_finish_reason(response)
+            finish_reason = response.finish_reason
             if finish_reason and finish_reason in (
                 "SAFETY",
                 "PROHIBITED_CONTENT",
@@ -2390,12 +2384,7 @@ class WorkflowExecutor:
                 return f"I can't help with that request. (blocked: {finish_reason})"
 
             # Extract text from response
-            candidates = response.get("candidates", [])
-            text = ""
-            if candidates:
-                parts = candidates[0].get("content", {}).get("parts", [])
-                if parts:
-                    text = str(parts[0].get("text", "")) if parts[0].get("text") else ""
+            text = response.text
 
             # If parsing step, try to extract structured JSON
             if is_parsing_step and text:

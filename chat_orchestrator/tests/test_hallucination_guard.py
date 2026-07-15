@@ -4,8 +4,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from orchestrator.clients.gemini import GeminiTurnResult
 from orchestrator.graphs.conversation_graph import ConversationGraphBuilder
-from orchestrator.models.schemas import FunctionCall, ToolCallResult
+from orchestrator.models.schemas import ConversationMessage, FunctionCall, ToolCallResult
 
 
 @pytest.fixture
@@ -37,6 +38,7 @@ def _make_state(**overrides):
         "pending_tool_calls": [],
         "gemini_history": [],
         "history_messages": [],
+        "llm_messages": [],
         "accumulated_tool_calls": [],
         "accumulated_tool_results": [],
         "metadata": {},
@@ -107,6 +109,12 @@ async def test_all_tools_allowed_passes_through(builder):
     all_results = result["accumulated_tool_results"]
     assert len(all_results) == 2
     assert all(r.success for r in all_results)
+    assert result["llm_messages"][-4:] == [
+        ConversationMessage(role="model", function_call=call_a),
+        ConversationMessage(role="model", function_call=call_b),
+        ConversationMessage(role="tool", tool_result=result_a),
+        ConversationMessage(role="tool", tool_result=result_b),
+    ]
 
 
 @pytest.mark.asyncio
@@ -236,6 +244,45 @@ async def test_prepare_node_populates_allowlist(builder):
 
 
 @pytest.mark.asyncio
+async def test_prepare_node_populates_neutral_llm_messages(builder):
+    """_prepare_node prepares model-facing messages without Gemini payload shapes."""
+    prior = ConversationMessage(role="user", content="previous question")
+    state = _make_state(
+        user_input="current question",
+        user_context=MagicMock(
+            username="test",
+            user_email="test@example.com",
+            source="telegram",
+            organization_name="TestOrg",
+            is_group=False,
+            roles=[],
+            is_staff=True,
+            chat_id="123",
+            topic_id=None,
+        ),
+        tools_payload=None,
+        unlocked_tools=[],
+        conversation_history=[prior],
+        context_message="retrieved context",
+        verification_feedback=None,
+        parsed_command=None,
+        media=[],
+    )
+
+    builder._registry.tools_payload.return_value = None
+
+    result = await builder._prepare_node(state)
+
+    llm_messages = result["llm_messages"]
+    assert llm_messages[0] == ConversationMessage(role="user", content="retrieved context")
+    assert llm_messages[1] == prior
+    assert llm_messages[-1].role == "user"
+    assert "[User Context]" in llm_messages[-1].content
+    assert "Mode: Staff" in llm_messages[-1].content
+    assert "current question" in llm_messages[-1].content
+
+
+@pytest.mark.asyncio
 async def test_prepare_node_empty_tools_empty_allowlist(builder):
     """_prepare_node sets empty allowlist when no tools are available."""
     state = _make_state(
@@ -265,3 +312,87 @@ async def test_prepare_node_empty_tools_empty_allowlist(builder):
 
     result = await builder._prepare_node(state)
     assert result["allowed_tool_names"] == []
+
+
+@pytest.mark.asyncio
+async def test_call_gemini_node_uses_message_adapter(builder):
+    """The graph delegates Gemini payload construction/parsing to GeminiClient."""
+    result = GeminiTurnResult(
+        text="final answer",
+        tool_calls=[],
+        finish_reason="STOP",
+        input_tokens=13,
+        output_tokens=5,
+        raw_response={"raw": "response"},
+    )
+    builder._gemini.generate_messages = MagicMock()
+    builder._gemini.generate_messages.side_effect = _async_returning(result)
+    builder._gemini.generate_content.side_effect = AssertionError(
+        "graph must not use raw generate_content for the main call path"
+    )
+
+    state = _make_state(
+        current_round=0,
+        max_rounds=3,
+        llm_messages=[ConversationMessage(role="user", content="hello")],
+        tools_payload=[{"functionDeclarations": [{"name": "tool_a"}]}],
+        system_instructions="system",
+        total_input_tokens=0,
+        total_output_tokens=0,
+        raw_gemini_responses=[],
+        accumulated_tool_calls=[],
+    )
+
+    node_result = await builder._call_gemini_node(state)
+
+    assert node_result["final_response"] == "final answer"
+    assert node_result["raw_gemini_responses"] == [{"raw": "response"}]
+    assert node_result["total_input_tokens"] == 13
+    assert node_result["total_output_tokens"] == 5
+    builder._gemini.generate_messages.assert_called_once_with(
+        [ConversationMessage(role="user", content="hello")],
+        system_instructions="system",
+        tools_payload=[{"functionDeclarations": [{"name": "tool_a"}]}],
+    )
+
+
+@pytest.mark.asyncio
+async def test_synthesize_partial_answer_uses_message_adapter(builder):
+    """Partial synthesis also avoids raw Gemini payload calls."""
+    result = GeminiTurnResult(
+        text="partial answer",
+        tool_calls=[],
+        finish_reason="STOP",
+        input_tokens=3,
+        output_tokens=2,
+        raw_response={"raw": "response"},
+    )
+    builder._gemini.generate_messages = MagicMock()
+    builder._gemini.generate_messages.side_effect = _async_returning(result)
+    builder._gemini.generate_content.side_effect = AssertionError(
+        "partial synthesis must not use raw generate_content"
+    )
+
+    answer = await builder._synthesize_partial_answer(
+        {
+            "llm_messages": [ConversationMessage(role="user", content="hello")],
+            "system_instructions": "system",
+        }
+    )
+
+    assert answer == "partial answer"
+    sent_messages = builder._gemini.generate_messages.call_args.args[0]
+    assert sent_messages[0] == ConversationMessage(role="user", content="hello")
+    assert sent_messages[-1].role == "user"
+    assert "tool-call budget" in sent_messages[-1].content
+    assert builder._gemini.generate_messages.call_args.kwargs == {
+        "system_instructions": "system",
+        "tools_payload": None,
+    }
+
+
+def _async_returning(value):
+    async def _inner(*args, **kwargs):
+        return value
+
+    return _inner
