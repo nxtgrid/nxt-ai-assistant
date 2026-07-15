@@ -73,6 +73,7 @@ _SDK_KEY_MAP = {
     "safetySettings": "safety_settings",
     "stopSequences": "stop_sequences",
     "systemInstruction": "system_instruction",
+    "thoughtSignature": "thought_signature",
     "thinkingBudget": "thinking_budget",
     "thinkingConfig": "thinking_config",
     "thinkingLevel": "thinking_level",

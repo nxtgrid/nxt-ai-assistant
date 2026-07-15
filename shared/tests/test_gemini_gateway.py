@@ -196,6 +196,36 @@ async def test_generate_content_accepts_legacy_payload_and_returns_raw_dict():
     ]
 
 
+def test_raw_payload_conversion_preserves_thought_signatures():
+    contents, _ = GeminiGateway._convert_raw_payload(
+        {
+            "contents": [
+                {
+                    "role": "model",
+                    "parts": [
+                        {
+                            "functionCall": {"name": "lookup_meter", "args": {"id": "M1"}},
+                            "thoughtSignature": "opaque-signature",
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+    assert contents == [
+        {
+            "role": "model",
+            "parts": [
+                {
+                    "function_call": {"name": "lookup_meter", "args": {"id": "M1"}},
+                    "thought_signature": "opaque-signature",
+                }
+            ],
+        }
+    ]
+
+
 @pytest.mark.asyncio
 async def test_generate_converts_tool_specs_to_function_declarations():
     client = FakeClient([fake_response(text="")])
