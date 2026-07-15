@@ -347,13 +347,11 @@ async def generate_replacement_markdown(
         expert_context: Workflow state dict — only allowed keys are passed to LLM
         user_email: Requesting user's email (for permission checks on reference docs)
     """
-    from google import genai
-    from google.genai import types
-
     from orchestrator.config.settings import get_settings
+    from shared.llm import GeminiGateway, GenerationOptions, LLMMessage
 
     settings = get_settings()
-    client = genai.Client(api_key=settings.google_api_key)
+    gateway = GeminiGateway(api_key=settings.google_api_key, default_model=settings.gemini.model)
 
     # Fetch any reference documents linked in the instruction (with authz check)
     reference_block = await _fetch_reference_docs(instruction, user_email=user_email)
@@ -397,10 +395,10 @@ Return ONLY the replacement markdown — no explanation, no fences.
 If reference documents were provided, follow their style, structure, and tone closely.
 """
 
-    response = await client.aio.models.generate_content(
-        model=settings.gemini.model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
+    response = await gateway.generate(
+        [LLMMessage(role="user", text=prompt)],
+        GenerationOptions(
+            model=settings.gemini.model,
             temperature=0.3,
             max_output_tokens=2000,
         ),
