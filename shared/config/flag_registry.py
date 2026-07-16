@@ -221,16 +221,20 @@ _FLAGS: List[Flag] = [
     _s("LOG_LEVEL", "INFO", "Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)."),
     # --- AI model settings -------------------------------------------------
     _s(
+        "LLM_PROVIDER",
+        "gemini",
+        "Generation provider: 'gemini' for direct Google Gemini or 'openrouter' for OpenRouter.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
         "GEMINI_MODEL",
         "gemini-2.5-flash",
         "Primary Gemini model id.",
-        editable=False,
     ),
     _s(
         "GEMINI_FALLBACK_MODEL",
         "gemini-2.5-flash",
         "Fallback Gemini model for rate-limit recovery.",
-        editable=False,
     ),
     _s(
         "INTENT_ROUTER_MODEL",
@@ -255,6 +259,24 @@ _FLAGS: List[Flag] = [
         "GEMINI_DEEP_THINKING_MODEL",
         "",
         "Model for deep-thinking tasks (document editing, complex analysis).",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "OPENROUTER_MODEL",
+        "google/gemini-2.5-flash",
+        "OpenRouter model id. OpenRouter uses provider-prefixed slugs such as 'google/gemini-2.5-flash'.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "OPENROUTER_PROVIDER_ORDER",
+        "",
+        "Optional comma-separated OpenRouter provider slugs to try first, e.g. 'google-vertex' for Google Vertex BYOK.",
+        scope=SERVICE_BOT,
+    ),
+    _b(
+        "OPENROUTER_ALLOW_FALLBACKS",
+        True,
+        "Allow OpenRouter to fall back to other endpoints when provider routing is configured.",
         scope=SERVICE_BOT,
     ),
     _s(

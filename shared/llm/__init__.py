@@ -4,6 +4,7 @@ from shared.llm.factory import get_default_embedding_gateway, get_default_genera
 from shared.llm.gateway import EmbeddingGateway, GenerationGateway
 from shared.llm.gemini import GeminiGateway
 from shared.llm.openai import OpenAIEmbeddingGateway
+from shared.llm.openrouter import OpenRouterGateway
 from shared.llm.types import (
     EmbeddingOptions,
     EmbeddingVector,
@@ -28,6 +29,7 @@ __all__ = [
     "LLMConversationState",
     "LLMMessage",
     "OpenAIEmbeddingGateway",
+    "OpenRouterGateway",
     "ToolCall",
     "ToolResult",
     "ToolSpec",

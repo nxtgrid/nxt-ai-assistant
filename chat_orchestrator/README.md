@@ -1,6 +1,6 @@
 # Chat Orchestrator
 
-Gemini-powered conversation orchestrator with role-aware system instructions, bot artifacts, and Google Docs knowledge base integration.
+LLM-powered conversation orchestrator with role-aware system instructions, bot artifacts, and Google Docs knowledge base integration. Gemini is the default provider; OpenRouter compatibility is available through the shared generation gateway for provider-selected generation paths.
 
 ## Quick Start
 
@@ -13,7 +13,7 @@ pip install -e .[dev]
 
 # Configure
 cp .env.example .env
-# Add: GOOGLE_API_KEY, CHAT_DB_URL, CHAT_DB_SERVICE_KEY
+# Add: LLM_PROVIDER=gemini, GOOGLE_API_KEY, CHAT_DB_URL, CHAT_DB_SERVICE_KEY
 
 # Run
 python local_server.py
@@ -25,8 +25,9 @@ Visit `http://localhost:8000/docs` for API documentation.
 
 ## Core Features
 
-### 1. Gemini Function Calling
-- Orchestrates multi-turn conversations with Gemini
+### 1. LLM Tool Calling
+- Orchestrates multi-turn conversations with Gemini by default
+- Supports OpenRouter for shared gateway callers via `LLM_PROVIDER=openrouter`
 - Executes MCP service tools via HTTP
 - Parallel tool execution support
 - Automatic retry and error handling
@@ -93,7 +94,7 @@ Instructions Provider
   → Default
     ↓
 Conversation Orchestrator
-  ↔ Gemini API
+  ↔ Gemini API (default)
   ↔ Tool Executor → Tools Service (MCP)
     ↓
 Response
@@ -106,7 +107,8 @@ Response
 ### Environment Variables
 
 ```bash
-# Required - Google AI Studio
+# Required - provider selection and Google AI Studio default provider
+LLM_PROVIDER=gemini
 GOOGLE_API_KEY=your-gemini-api-key  # Get from: https://aistudio.google.com/app/apikey
 
 # Required - Chat Database (conversation history, bot artifacts, RAG documents)
@@ -132,6 +134,18 @@ GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
 GEMINI_MODEL=gemini-flash-latest
 GEMINI_TEMPERATURE=0.2
 MAX_TOOL_ROUNDS=3
+
+# Optional - OpenRouter shared generation gateway compatibility
+# Keep LLM_PROVIDER=gemini for normal deployments unless intentionally testing OpenRouter.
+# LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=
+# OPEN_ROUTER_BEARER_TOKEN is also accepted as a local alias
+OPENROUTER_MODEL=google/gemini-2.5-flash
+OPENROUTER_PROVIDER_ORDER=google-vertex
+OPENROUTER_ALLOW_FALLBACKS=false
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_HTTP_REFERER=
+OPENROUTER_APP_TITLE=Anansi
 
 # Features
 ALLOW_PARALLEL_CALLS=true
