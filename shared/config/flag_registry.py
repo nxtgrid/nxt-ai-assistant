@@ -229,19 +229,19 @@ _FLAGS: List[Flag] = [
     _s(
         "GEMINI_MODEL",
         "gemini-2.5-flash",
-        "Primary Gemini model id.",
+        "Primary generation model id for the selected provider.",
     ),
     _s(
         "GEMINI_FALLBACK_MODEL",
         "gemini-2.5-flash",
-        "Fallback Gemini model for rate-limit recovery.",
+        "Fallback generation model id for the selected provider.",
     ),
     _s(
         "INTENT_ROUTER_MODEL",
         "gemini-2.5-flash-lite",
         "Lightweight model for structured natural-language expert routing.",
     ),
-    _f("GEMINI_TEMPERATURE", 0.2, "Generation temperature (Gemini 2.x default; 3+ ignore)."),
+    _f("GEMINI_TEMPERATURE", 0.2, "Generation temperature where supported by the selected model."),
     _i(
         "GEMINI_MAX_OUTPUT_TOKENS",
         8192,
@@ -263,8 +263,10 @@ _FLAGS: List[Flag] = [
     _s(
         "OPENROUTER_MODEL",
         "google/gemini-2.5-flash",
-        "OpenRouter model id. OpenRouter uses provider-prefixed slugs such as 'google/gemini-2.5-flash'.",
+        "Legacy OpenRouter default model fallback. Role-specific model flags are used by the orchestrator.",
         scope=SERVICE_BOT,
+        show_in_settings=False,
+        document=False,
     ),
     _s(
         "OPENROUTER_PROVIDER_ORDER",

@@ -226,9 +226,9 @@ All shared modules use the same environment variables. See `.env.example` at the
 
 Key variables:
 - `LLM_PROVIDER`: `gemini` by default, or `openrouter` for shared generation gateway callers
-- `GOOGLE_API_KEY`, `GEMINI_MODEL`: Default Gemini provider settings
-- `OPENROUTER_API_KEY`, `OPEN_ROUTER_BEARER_TOKEN`, `OPENROUTER_MODEL`: Optional OpenRouter provider settings; `OPEN_ROUTER_BEARER_TOKEN` is accepted as a local alias
-- `OPENROUTER_PROVIDER_ORDER`, `OPENROUTER_ALLOW_FALLBACKS`: Optional OpenRouter routing controls; use `google-vertex` and `false` for Google Vertex BYOK-only routing. The admin settings page discovers available provider route slugs from the selected OpenRouter model using the normal OpenRouter access key.
+- `GOOGLE_API_KEY`, `GEMINI_MODEL`: Direct Gemini provider settings
+- `OPENROUTER_API_KEY`, `OPEN_ROUTER_BEARER_TOKEN`: Optional OpenRouter provider settings; role-specific model env vars such as `GEMINI_MODEL` are normalized to OpenRouter slugs when `LLM_PROVIDER=openrouter`
+- `OPENROUTER_PROVIDER_ORDER`, `OPENROUTER_ALLOW_FALLBACKS`: Optional OpenRouter routing controls; use `google-vertex` and `false` for Google Vertex BYOK-only routing. The admin settings page discovers available provider route slugs from the selected main model using the normal OpenRouter access key.
 - `AUTH_DB_DIRECT_CONNECTION`: Use direct PostgreSQL for auth
 - `AUTH_DB_HOST`, `AUTH_DB_USER`, `AUTH_DB_PASSWORD`: Direct connection credentials
 - `AUTH_SUPABASE_URL`, `AUTH_SUPABASE_ANON_KEY`: Auth Supabase connection

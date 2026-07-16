@@ -23,11 +23,11 @@ class GeminiModelConfig(BaseModel):
 
     model: str = Field(
         default_factory=lambda: os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        description="Primary Gemini model (required: set via GEMINI_MODEL env var)",
+        description="Primary model for the selected generation provider.",
     )
     fallback_model: str = Field(
         default_factory=lambda: os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-lite"),
-        description="Fallback model for rate limit recovery (required: set via GEMINI_FALLBACK_MODEL env var)",
+        description="Fallback model for rate limit recovery.",
     )
     agent_pro_model: str = Field(
         default_factory=lambda: os.environ.get("GEMINI_AGENT_PRO_MODEL", "gemini-2.5-pro"),

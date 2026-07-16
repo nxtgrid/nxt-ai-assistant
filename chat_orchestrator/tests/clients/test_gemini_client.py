@@ -327,6 +327,23 @@ async def test_openrouter_client_preserves_tool_call_ids_and_normalizes_finish_r
 
 
 @pytest.mark.asyncio
+async def test_openrouter_client_uses_role_model_not_openrouter_model_env(monkeypatch):
+    from orchestrator.clients.openrouter import OpenRouterClient
+
+    monkeypatch.setenv("OPENROUTER_MODEL", "openai/gpt-4o")
+    gateway = FakeOpenRouterGateway()
+    client = OpenRouterClient(
+        api_key="sk-or-test",
+        model_config=GeminiModelConfig(model="gemini-2.5-flash-lite"),
+        gateway=gateway,
+    )
+
+    await client.generate_messages([ConversationMessage(role="user", content="hi")])
+
+    assert gateway.calls[0]["options"].model == "google/gemini-2.5-flash-lite"
+
+
+@pytest.mark.asyncio
 async def test_openrouter_client_sends_prior_tool_result_with_matching_id():
     from orchestrator.clients.openrouter import OpenRouterClient
 

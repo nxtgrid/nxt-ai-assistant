@@ -137,7 +137,6 @@ class TestSettingsServiceConsistency:
             "GEMINI_FALLBACK_MODEL",
             "INTENT_ROUTER_MODEL",
             "VERIFICATION_MODEL",
-            "OPENROUTER_MODEL",
             "OPENROUTER_PROVIDER_ORDER",
             "OPENROUTER_ALLOW_FALLBACKS",
             "OPENROUTER_REQUIRE_PARAMETERS",
@@ -145,6 +144,8 @@ class TestSettingsServiceConsistency:
             assert k in defaults, f"{k} must be settings-visible"
             assert fr.FLAGS[k].show_in_settings is True
             assert fr.FLAGS[k].editable is True
+        assert "OPENROUTER_MODEL" not in defaults
+        assert fr.FLAGS["OPENROUTER_MODEL"].show_in_settings is False
 
 
 # --------------------------------------------------------------------------- #

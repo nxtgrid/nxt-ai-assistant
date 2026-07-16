@@ -16,11 +16,7 @@ from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gat
 
 async def main() -> int:
     provider = os.getenv("LLM_PROVIDER", "gemini")
-    model = (
-        os.getenv("OPENROUTER_MODEL")
-        if provider.strip().lower() in {"openrouter", "open-router"}
-        else os.getenv("GEMINI_MODEL")
-    )
+    model = os.getenv("GEMINI_MODEL")
     gateway = get_default_generation_gateway(default_model=model)
     result = await gateway.generate(
         [LLMMessage(role="user", text="Reply with exactly: ok")],

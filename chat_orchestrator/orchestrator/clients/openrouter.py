@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any, Dict, Optional
 
 from orchestrator.clients.gemini import GeminiTurnResult
@@ -45,9 +44,7 @@ class OpenRouterClient:
     ) -> None:
         self._api_key = api_key
         self._model_config = model_config
-        self._default_model = normalize_openrouter_model(
-            os.getenv("OPENROUTER_MODEL") or model_config.model
-        )
+        self._default_model = normalize_openrouter_model(model_config.model)
         self._gateway = gateway or OpenRouterGateway(
             api_key=api_key,
             default_model=self._default_model,

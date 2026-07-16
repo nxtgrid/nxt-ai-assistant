@@ -16,9 +16,6 @@ services:
       - key: OPENROUTER_API_KEY
         scope: RUN_TIME
         value: ${OPENROUTER_API_KEY}
-      - key: OPENROUTER_MODEL
-        scope: RUN_TIME
-        value: ${OPENROUTER_MODEL:-google/gemini-2.5-flash}
       - key: OPENROUTER_PROVIDER_ORDER
         scope: RUN_TIME
         value: ${OPENROUTER_PROVIDER_ORDER}

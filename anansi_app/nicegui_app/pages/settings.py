@@ -21,6 +21,7 @@ saves would thrash it. If any changed flag is restart-scoped the button becomes
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Any
 
 from nicegui import run, ui
@@ -102,6 +103,52 @@ _SECTION_ORDER = [
     "🗂️ Other",
 ]
 
+_ROLE_MODEL_KEYS = (
+    "GEMINI_MODEL",
+    "GEMINI_FALLBACK_MODEL",
+    "GEMINI_DEEP_THINKING_MODEL",
+    "INTENT_ROUTER_MODEL",
+    "VERIFICATION_MODEL",
+)
+
+_OPENROUTER_ONLY_KEYS = {
+    "OPENROUTER_MODEL",
+    "OPENROUTER_PROVIDER_ORDER",
+    "OPENROUTER_ALLOW_FALLBACKS",
+    "OPENROUTER_REQUIRE_PARAMETERS",
+}
+
+_MODEL_LABELS = {
+    "GEMINI_MODEL": "MAIN_MODEL",
+    "GEMINI_FALLBACK_MODEL": "FALLBACK_MODEL",
+    "GEMINI_DEEP_THINKING_MODEL": "DEEP_THINKING_MODEL",
+    "GEMINI_TEMPERATURE": "TEMPERATURE",
+    "GEMINI_MAX_OUTPUT_TOKENS": "MAIN_MAX_OUTPUT_TOKENS",
+    "GEMINI_LITE_MAX_OUTPUT_TOKENS": "LITE_MAX_OUTPUT_TOKENS",
+    "INTENT_ROUTER_MODEL": "INTENT_ROUTER_MODEL",
+    "VERIFICATION_MODEL": "VERIFICATION_MODEL",
+    "OPENROUTER_PROVIDER_ORDER": "OPENROUTER_PROVIDER_ORDER",
+    "OPENROUTER_ALLOW_FALLBACKS": "OPENROUTER_ALLOW_FALLBACKS",
+    "OPENROUTER_REQUIRE_PARAMETERS": "OPENROUTER_REQUIRE_PARAMETERS",
+}
+
+_OPENROUTER_ROUTE_FALLBACKS = {
+    "google": {
+        "google-vertex": "Google Vertex",
+        "google-ai-studio": "Google AI Studio",
+    },
+    "openai": {"openai": "OpenAI"},
+    "anthropic": {"anthropic": "Anthropic"},
+    "amazon": {"amazon-bedrock": "Amazon Bedrock"},
+}
+
+
+@dataclass(frozen=True)
+class ModelSectionPlan:
+    primary_keys: list[str]
+    remaining_keys: list[str]
+    show_openrouter_routes: bool
+
 
 def _coerce_for_save(flag, value: Any) -> Any:
     if flag.type is FlagType.BOOL:
@@ -114,23 +161,96 @@ def _coerce_for_save(flag, value: Any) -> Any:
 
 
 def _model_select_options(svc, current: dict[str, Any]) -> dict[str, Any]:
-    """Build provider/model select options without mixing provider-specific ids."""
+    """Build provider/model select options for the active provider."""
+    provider = _selected_provider(current)
     gemini_models = svc.get_gemini_models()
     openrouter_models = svc.get_openrouter_models()
-    selected_openrouter_model = str(
-        current.get("OPENROUTER_MODEL") or (openrouter_models[0] if openrouter_models else "")
+    active_models = openrouter_models if provider == "openrouter" else gemini_models
+    route_model = _to_openrouter_model(
+        str(current.get("GEMINI_MODEL") or (active_models[0] if active_models else ""))
     )
-    provider_routes = svc.get_openrouter_provider_routes(selected_openrouter_model)
+    provider_routes = (
+        svc.get_openrouter_provider_routes(route_model) if provider == "openrouter" else {}
+    )
     return {
+        "__GEMINI_MODELS": gemini_models,
+        "__OPENROUTER_MODELS": openrouter_models,
         "LLM_PROVIDER": svc.get_llm_provider_options(),
-        "GEMINI_MODEL": gemini_models,
-        "GEMINI_FALLBACK_MODEL": gemini_models,
-        "GEMINI_DEEP_THINKING_MODEL": ["", *gemini_models],
-        "INTENT_ROUTER_MODEL": gemini_models,
-        "VERIFICATION_MODEL": gemini_models,
-        "OPENROUTER_MODEL": openrouter_models,
+        "GEMINI_MODEL": active_models,
+        "GEMINI_FALLBACK_MODEL": active_models,
+        "GEMINI_DEEP_THINKING_MODEL": ["", *active_models],
+        "INTENT_ROUTER_MODEL": active_models,
+        "VERIFICATION_MODEL": active_models,
         "OPENROUTER_PROVIDER_ORDER": provider_routes,
     }
+
+
+def _selected_provider(values: dict[str, Any]) -> str:
+    provider = str(values.get("LLM_PROVIDER") or "gemini").strip().lower()
+    return "openrouter" if provider in {"openrouter", "open-router"} else "gemini"
+
+
+def _to_openrouter_model(model: str) -> str:
+    model = str(model or "").strip()
+    if not model:
+        return model
+    if "/" in model:
+        return model
+    if model.startswith("gemini-"):
+        return f"google/{model}"
+    return model
+
+
+def _to_gemini_model(model: str) -> str:
+    model = str(model or "").strip()
+    if model.startswith("google/gemini-"):
+        return model.split("/", 1)[1]
+    return model
+
+
+def _model_for_provider(model: Any, provider: str) -> str:
+    raw = str(model or "").strip()
+    if provider == "openrouter":
+        return _to_openrouter_model(raw)
+    return _to_gemini_model(raw)
+
+
+def _apply_llm_provider_change(pending: dict[str, Any], provider: str) -> set[str]:
+    provider = _selected_provider({"LLM_PROVIDER": provider})
+    changed: set[str] = set()
+    if pending.get("LLM_PROVIDER") != provider:
+        pending["LLM_PROVIDER"] = provider
+        changed.add("LLM_PROVIDER")
+    for key in _ROLE_MODEL_KEYS:
+        if key not in pending:
+            continue
+        old = pending.get(key)
+        new = _model_for_provider(old, provider)
+        if new != old:
+            pending[key] = new
+            changed.add(key)
+    return changed
+
+
+def _model_section_plan(names: list[str], pending: dict[str, Any]) -> ModelSectionPlan:
+    provider = _selected_provider(pending)
+    hidden = {"OPENROUTER_MODEL"}
+    if provider != "openrouter":
+        hidden.update(_OPENROUTER_ONLY_KEYS)
+    primary_order = [
+        "LLM_PROVIDER",
+        *_ROLE_MODEL_KEYS,
+        "OPENROUTER_PROVIDER_ORDER",
+        "OPENROUTER_ALLOW_FALLBACKS",
+        "OPENROUTER_REQUIRE_PARAMETERS",
+    ]
+    primary = [key for key in primary_order if key in names and key not in hidden]
+    remaining = [key for key in names if key not in primary and key not in hidden]
+    return ModelSectionPlan(
+        primary_keys=primary,
+        remaining_keys=remaining,
+        show_openrouter_routes=provider == "openrouter",
+    )
 
 
 def _options_with_current(options: Any, value: Any) -> Any:
@@ -145,6 +265,30 @@ def _options_with_current(options: Any, value: Any) -> Any:
     return values
 
 
+def _flag_label(name: str, disabled: bool = False) -> str:
+    label_name = _MODEL_LABELS.get(name, name)
+    return f"{label_name}" + ("  (read-only)" if disabled else "")
+
+
+def _role_model_options(model_options: dict[str, Any], pending: dict[str, Any]) -> list[str]:
+    if _selected_provider(pending) == "openrouter":
+        return list(
+            model_options.get("__OPENROUTER_MODELS")
+            or model_options.get("GEMINI_MODEL")
+            or []
+        )
+    return list(
+        model_options.get("__GEMINI_MODELS")
+        or model_options.get("GEMINI_MODEL")
+        or []
+    )
+
+
+def _route_fallbacks_for_model(model: Any) -> dict[str, str]:
+    provider_prefix = str(model or "").split("/", 1)[0].lower()
+    return dict(_OPENROUTER_ROUTE_FALLBACKS.get(provider_prefix, {}))
+
+
 async def render(log_levels: list[str] | None = None) -> None:
     ui.label("⚙️ Bot Settings").classes("text-h5")
     ui.label("Configure Anansi bot behavior and features.").classes("text-caption")
@@ -157,6 +301,7 @@ async def render(log_levels: list[str] | None = None) -> None:
 
     pending: dict[str, Any] = dict(current)
     model_options: dict[str, Any] = await run.io_bound(lambda: _model_select_options(svc, current))
+    models_container: Any = None
 
     # Group flag names by section.
     sections: dict[str, list[str]] = {title: [] for title in _SECTION_ORDER}
@@ -228,8 +373,29 @@ async def render(log_levels: list[str] | None = None) -> None:
     def _discard() -> None:
         ui.navigate.reload()
 
+    def _rerender_models_section() -> None:
+        if models_container is None:
+            return
+        models_container.clear()
+        with models_container:
+            _render_models_section(
+                sections.get("🧠 Models") or [],
+                pending,
+                log_levels,
+                model_options,
+                _on_change,
+            )
+
     def _on_change(name: str, value: Any) -> None:
-        pending[name] = value
+        rerender_models = False
+        if name == "LLM_PROVIDER":
+            _apply_llm_provider_change(pending, value)
+            rerender_models = True
+        else:
+            pending[name] = value
+            rerender_models = name in _ROLE_MODEL_KEYS
+        if rerender_models:
+            _rerender_models_section()
         _refresh_bar()
 
     # Grafana dashboard/panel catalogue (from Supabase) powers the chip pickers.
@@ -273,7 +439,9 @@ async def render(log_levels: list[str] | None = None) -> None:
                     grafana_panels,
                 )
             elif title == "🧠 Models":
-                _render_models_section(names, pending, log_levels, model_options, _on_change)
+                models_container = ui.column().classes("w-full")
+                with models_container:
+                    _render_models_section(names, pending, log_levels, model_options, _on_change)
             else:
                 # Two-column grid: most flags are short (toggle/number/one-line
                 # string) and read better side-by-side. JSON textareas opt out
@@ -319,49 +487,40 @@ def _render_models_section(
     model_options: dict[str, Any],
     on_change,
 ) -> None:
-    remaining = list(names)
-
-    def _take(key: str) -> bool:
-        if key in remaining:
-            remaining.remove(key)
-            return True
-        return False
+    plan = _model_section_plan(names, pending)
 
     provider_routes = model_options.get("OPENROUTER_PROVIDER_ORDER") or {}
-    selected_model = pending.get("OPENROUTER_MODEL") or ""
-    with ui.card().classes("w-full q-mb-md").style("grid-column: 1 / -1"):
-        ui.label("OpenRouter provider route").classes("text-subtitle1 text-weight-bold")
-        if provider_routes:
-            ui.label(
-                "Provider endpoint routes available for the selected OpenRouter model. "
-                "If that provider has BYOK configured with “Always use for this provider,” "
-                "OpenRouter will use it for the route."
-            ).classes("text-caption").style("color: #64748b")
-            for provider, label in provider_routes.items():
-                ui.label(f"{provider} · {label}").classes("text-caption")
-        else:
-            ui.label(
-                "No provider routes were discovered for the selected OpenRouter model. "
-                "The picker still accepts the current value if one is configured."
-            ).classes("text-caption").style("color: #64748b")
-        if selected_model:
-            ui.label(f"Routes shown for: {selected_model}").classes("text-caption").style(
-                "color: #64748b"
-            )
+    selected_model = pending.get("GEMINI_MODEL") or ""
+    if plan.show_openrouter_routes and not provider_routes:
+        provider_routes = _route_fallbacks_for_model(selected_model)
+    section_model_options = dict(model_options)
+    section_model_options["OPENROUTER_PROVIDER_ORDER"] = provider_routes
+    if plan.show_openrouter_routes:
+        with ui.card().classes("w-full q-mb-md").style("grid-column: 1 / -1"):
+            ui.label("OpenRouter provider route").classes("text-subtitle1 text-weight-bold")
+            if provider_routes:
+                ui.label(
+                    "Provider endpoint routes available for the selected main model. "
+                    "If that provider has BYOK configured with “Always use for this provider,” "
+                    "OpenRouter will use it for the route."
+                ).classes("text-caption").style("color: #64748b")
+                for provider, label in provider_routes.items():
+                    ui.label(f"{provider} · {label}").classes("text-caption")
+            else:
+                ui.label(
+                    "No provider routes were discovered for the selected main model. "
+                    "The picker still accepts the current value if one is configured."
+                ).classes("text-caption").style("color: #64748b")
+            if selected_model:
+                ui.label(f"Routes shown for: {selected_model}").classes("text-caption").style(
+                    "color: #64748b"
+                )
 
     with ui.grid(columns=2).classes("w-full gap-x-6 gap-y-0"):
-        for key in (
-            "LLM_PROVIDER",
-            "GEMINI_MODEL",
-            "GEMINI_FALLBACK_MODEL",
-            "OPENROUTER_MODEL",
-            "OPENROUTER_PROVIDER_ORDER",
-            "OPENROUTER_ALLOW_FALLBACKS",
-        ):
-            if _take(key):
-                _render_flag(key, pending, log_levels, model_options, on_change)
-        for name in remaining:
-            _render_flag(name, pending, log_levels, model_options, on_change)
+        for key in plan.primary_keys:
+            _render_flag(key, pending, log_levels, section_model_options, on_change)
+        for name in plan.remaining_keys:
+            _render_flag(name, pending, log_levels, section_model_options, on_change)
 
 
 def _render_grafana_section(
@@ -591,7 +750,7 @@ def _render_flag(
     flag = registry.FLAGS[name]
     value = pending.get(name)
     disabled = not flag.editable
-    label = f"{name}" + ("  (read-only)" if disabled else "")
+    label = _flag_label(name, disabled)
 
     def handler(e, n=name) -> None:
         on_change(n, e.value)
@@ -633,6 +792,15 @@ def _render_flag(
                     on_change=lambda e, n=name: on_change(n, ",".join(e.value or [])),
                 )
                 .props("use-chips outlined dense clearable")
+                .classes("w-full")
+            )
+        elif name in _ROLE_MODEL_KEYS:
+            opts = _options_with_current(_role_model_options(model_options, pending), value)
+            if name == "GEMINI_DEEP_THINKING_MODEL" and "" not in opts:
+                opts = ["", *opts]
+            w = (
+                ui.select(opts, value=value, label=label, with_input=True, on_change=handler)
+                .props("outlined dense clearable")
                 .classes("w-full")
             )
         elif name in model_options:
