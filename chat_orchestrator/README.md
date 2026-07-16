@@ -135,14 +135,15 @@ GEMINI_MODEL=gemini-flash-latest
 GEMINI_TEMPERATURE=0.2
 MAX_TOOL_ROUNDS=3
 
-# Optional - OpenRouter shared generation gateway compatibility
-# Keep LLM_PROVIDER=gemini for normal deployments unless intentionally testing OpenRouter.
+# Optional - provider selection for orchestrator generation
+# Use gemini for direct Google Gemini, or openrouter for OpenRouter/BYOK routing.
 # LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY=
 # OPEN_ROUTER_BEARER_TOKEN is also accepted as a local alias
 OPENROUTER_MODEL=google/gemini-2.5-flash
 OPENROUTER_PROVIDER_ORDER=google-vertex
 OPENROUTER_ALLOW_FALLBACKS=false
+OPENROUTER_REQUIRE_PARAMETERS=false
 OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
 OPENROUTER_HTTP_REFERER=
 OPENROUTER_APP_TITLE=Anansi
@@ -154,6 +155,12 @@ ALLOW_PARALLEL_CALLS=true
 VERIFICATION_ENABLED=false
 VERIFICATION_DOC_ID=your-verification-doc-id
 VERIFICATION_MODEL=gemini-2.5-flash-lite
+```
+
+Provider smoke test:
+
+```bash
+python chat_orchestrator/scripts/smoke_llm_provider.py
 ```
 
 ### Google Cloud Setup

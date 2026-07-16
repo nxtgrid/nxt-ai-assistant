@@ -61,6 +61,7 @@ def get_default_generation_gateway(
             base_url=os.getenv("OPENROUTER_BASE_URL"),
             http_referer=os.getenv("OPENROUTER_HTTP_REFERER"),
             app_title=os.getenv("OPENROUTER_APP_TITLE"),
+            require_parameters=_optional_bool_env("OPENROUTER_REQUIRE_PARAMETERS"),
         )
     if provider != "gemini":
         raise ValueError(
@@ -78,3 +79,10 @@ def get_default_embedding_gateway() -> GeminiGateway:
         client=_get_vertex_genai_client(),
         default_embedding_model=os.getenv("EMBEDDING_MODEL", "gemini-embedding-001"),
     )
+
+
+def _optional_bool_env(name: str) -> bool | None:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    return raw.strip().lower() in {"true", "1", "yes", "on"}

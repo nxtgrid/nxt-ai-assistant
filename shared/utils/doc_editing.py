@@ -352,7 +352,6 @@ async def generate_replacement_markdown(
 
     settings = get_settings()
     gateway = get_default_generation_gateway(
-        api_key=settings.google_api_key,
         default_model=settings.gemini.model,
     )
 

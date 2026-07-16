@@ -687,7 +687,7 @@ async def run_steps(
             return {"error": f"Unknown expert_id: {resolved_expert_id!r}"}
 
         # --- Build StepContext/WorkflowExecutor (mirrors expert_tool_runner._execute_headless) --
-        from orchestrator.clients.gemini import GeminiClient
+        from orchestrator.clients.factory import create_chat_llm_client
         from orchestrator.config.settings import GeminiModelConfig, get_settings
         from orchestrator.experts.step_context import StepContext
         from orchestrator.services.tool_executor import ToolExecutor
@@ -714,10 +714,7 @@ async def run_steps(
         mcp_executor = ToolExecutor(registry=registry, settings=settings)
         context.mcp_executor = mcp_executor
 
-        gemini_client = GeminiClient(
-            api_key=settings.google_api_key,
-            model_config=GeminiModelConfig(),
-        )
+        gemini_client = create_chat_llm_client(settings, GeminiModelConfig())
         executor = WorkflowExecutor(
             gemini_client=gemini_client,
             packet_service=packet_service,

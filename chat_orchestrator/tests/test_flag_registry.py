@@ -81,7 +81,6 @@ class TestSettingsServiceConsistency:
     HISTORICAL_DO_NOT_SAVE = {
         "ESCALATION_TELEGRAM_CHAT_ID",
         "DEBUG_TELEGRAM_CHAT_ID",
-        "VERIFICATION_MODEL",
         "EMBEDDING_MODEL",
         "GEMINI_MAX_OUTPUT_TOKENS",
         "GEMINI_LITE_MAX_OUTPUT_TOKENS",
@@ -136,9 +135,12 @@ class TestSettingsServiceConsistency:
             "LLM_PROVIDER",
             "GEMINI_MODEL",
             "GEMINI_FALLBACK_MODEL",
+            "INTENT_ROUTER_MODEL",
+            "VERIFICATION_MODEL",
             "OPENROUTER_MODEL",
             "OPENROUTER_PROVIDER_ORDER",
             "OPENROUTER_ALLOW_FALLBACKS",
+            "OPENROUTER_REQUIRE_PARAMETERS",
         ):
             assert k in defaults, f"{k} must be settings-visible"
             assert fr.FLAGS[k].show_in_settings is True

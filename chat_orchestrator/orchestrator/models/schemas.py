@@ -77,10 +77,14 @@ class EntityContext(BaseModel):
 
 
 class FunctionCall(BaseModel):
-    """Representation of a Gemini tool invocation request."""
+    """Representation of an LLM tool invocation request."""
 
     name: str
     arguments: Dict[str, Any] = Field(default_factory=dict)
+    tool_call_id: Optional[str] = Field(
+        default=None,
+        description="Provider tool-call id required by OpenRouter/OpenAI-style tool loops.",
+    )
     thought_signature: Optional[str] = Field(
         default=None,
         description="Gemini 3 thought signature - must be passed back with function response",
@@ -93,6 +97,10 @@ class ToolCallResult(BaseModel):
     name: str
     success: bool
     output: Any
+    tool_call_id: Optional[str] = Field(
+        default=None,
+        description="Provider tool-call id this result answers, when required.",
+    )
     status_code: Optional[int] = None
     raw_response: Optional[Dict[str, Any]] = None
     error: Optional[str] = None

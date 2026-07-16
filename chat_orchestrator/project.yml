@@ -10,6 +10,33 @@ services:
       - key: GOOGLE_API_KEY
         scope: RUN_TIME
         value: ${GOOGLE_API_KEY}
+      - key: LLM_PROVIDER
+        scope: RUN_TIME
+        value: ${LLM_PROVIDER:-gemini}
+      - key: OPENROUTER_API_KEY
+        scope: RUN_TIME
+        value: ${OPENROUTER_API_KEY}
+      - key: OPENROUTER_MODEL
+        scope: RUN_TIME
+        value: ${OPENROUTER_MODEL:-google/gemini-2.5-flash}
+      - key: OPENROUTER_PROVIDER_ORDER
+        scope: RUN_TIME
+        value: ${OPENROUTER_PROVIDER_ORDER}
+      - key: OPENROUTER_ALLOW_FALLBACKS
+        scope: RUN_TIME
+        value: ${OPENROUTER_ALLOW_FALLBACKS:-true}
+      - key: OPENROUTER_REQUIRE_PARAMETERS
+        scope: RUN_TIME
+        value: ${OPENROUTER_REQUIRE_PARAMETERS:-false}
+      - key: OPENROUTER_BASE_URL
+        scope: RUN_TIME
+        value: ${OPENROUTER_BASE_URL}
+      - key: OPENROUTER_HTTP_REFERER
+        scope: RUN_TIME
+        value: ${OPENROUTER_HTTP_REFERER}
+      - key: OPENROUTER_APP_TITLE
+        scope: RUN_TIME
+        value: ${OPENROUTER_APP_TITLE:-Anansi}
       - key: TOOLS_SERVICE_URL
         scope: RUN_TIME
         value: ${TOOLS_SERVICE_URL}

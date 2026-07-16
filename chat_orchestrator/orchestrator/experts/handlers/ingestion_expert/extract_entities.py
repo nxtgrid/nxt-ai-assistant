@@ -103,7 +103,6 @@ async def extract_with_gemini(content: str) -> Dict[str, Any]:
     """
     model = get_settings().gemini.model
     gateway = get_default_generation_gateway(
-        api_key=os.getenv("GOOGLE_API_KEY"),
         default_model=model,
     )
 

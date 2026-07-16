@@ -69,7 +69,7 @@ from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-from orchestrator.clients.gemini import GeminiClient
+from orchestrator.clients.factory import create_chat_llm_client
 from orchestrator.config.settings import AppSettings, get_settings
 from orchestrator.graphs.conversation_graph import ConversationGraphBuilder
 from orchestrator.graphs.nodes import (
@@ -402,10 +402,7 @@ class FullConversationGraphBuilder:
 
         # Create Gemini client if needed
         if not self._gemini:
-            self._gemini = GeminiClient(
-                api_key=settings.google_api_key,
-                model_config=settings.gemini,
-            )
+            self._gemini = create_chat_llm_client(settings, settings.gemini)
 
         # Create tool registry and executor if needed
         if not self._registry:

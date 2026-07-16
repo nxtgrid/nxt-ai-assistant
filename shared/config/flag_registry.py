@@ -240,7 +240,6 @@ _FLAGS: List[Flag] = [
         "INTENT_ROUTER_MODEL",
         "gemini-2.5-flash-lite",
         "Lightweight model for structured natural-language expert routing.",
-        editable=False,
     ),
     _f("GEMINI_TEMPERATURE", 0.2, "Generation temperature (Gemini 2.x default; 3+ ignore)."),
     _i(
@@ -277,6 +276,12 @@ _FLAGS: List[Flag] = [
         "OPENROUTER_ALLOW_FALLBACKS",
         True,
         "Allow OpenRouter to fall back to other endpoints when provider routing is configured.",
+        scope=SERVICE_BOT,
+    ),
+    _b(
+        "OPENROUTER_REQUIRE_PARAMETERS",
+        False,
+        "Require OpenRouter endpoints that support the requested parameters/tool schema.",
         scope=SERVICE_BOT,
     ),
     _s(
@@ -316,7 +321,6 @@ _FLAGS: List[Flag] = [
         "gemini-2.5-flash-lite",
         "Model used for response verification.",
         scope=SERVICE_BOT,
-        editable=False,
     ),
     # --- External notifications (n8n / VRM / Grafana passthrough) ----------
     _b(

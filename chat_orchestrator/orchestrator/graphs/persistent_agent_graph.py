@@ -776,7 +776,6 @@ async def think_and_act(state: PersistentAgentState) -> Dict[str, Any]:
     else:
         model_name = settings.gemini.model
     gateway = get_default_generation_gateway(
-        api_key=settings.google_api_key,
         default_model=model_name,
         fallback_model=getattr(settings.gemini, "fallback_model", None),
     )

@@ -5140,13 +5140,22 @@ def _get_settings() -> AppSettings:
     # Get tools service URL from environment
     bridge_url = os.getenv("TOOLS_SERVICE_URL", "")
 
-    # Get Google API key and validate
+    # Validate the key for the selected LLM provider.
+    llm_provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
     google_api_key = os.getenv("GOOGLE_API_KEY", "")
-    if not google_api_key:
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY", "")
+    if llm_provider in {"gemini", ""} and not google_api_key:
         LOGGER.error("GOOGLE_API_KEY environment variable is not set!")
         raise ValueError(
             "GOOGLE_API_KEY is required. Please set it in your .env file. "
             "Get your API key from https://makersuite.google.com/app/apikey"
+        )
+    if llm_provider in {"openrouter", "open-router"} and not openrouter_api_key:
+        LOGGER.error("OPENROUTER_API_KEY environment variable is not set!")
+        raise ValueError("OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter.")
+    if llm_provider not in {"gemini", "openrouter", "open-router", ""}:
+        raise ValueError(
+            f"Unsupported LLM_PROVIDER={llm_provider!r}; expected 'gemini' or 'openrouter'"
         )
 
     # Parse optional temperature (None = use model default, recommended for Gemini 3+)
@@ -5156,7 +5165,9 @@ def _get_settings() -> AppSettings:
         temperature = float(temp_str)
 
     settings = AppSettings(  # type: ignore[call-arg]
+        llm_provider=llm_provider or "gemini",
         google_api_key=google_api_key,
+        openrouter_api_key=openrouter_api_key,
         debug=os.getenv("DEBUG", "false").lower() == "true",
         gemini=GeminiModelConfig(
             model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),

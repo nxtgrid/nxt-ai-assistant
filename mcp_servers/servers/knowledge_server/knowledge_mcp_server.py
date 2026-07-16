@@ -155,7 +155,6 @@ async def summarize_with_llm(
     try:
         model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         gateway = get_default_generation_gateway(
-            api_key=os.getenv("GOOGLE_API_KEY"),
             default_model=model,
         )
 

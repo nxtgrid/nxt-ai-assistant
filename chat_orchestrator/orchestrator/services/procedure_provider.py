@@ -186,7 +186,7 @@ async def generate_suggested_procedure(
         Markdown-formatted suggested procedure text
     """
     model = get_settings().gemini.model
-    gateway = get_default_generation_gateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
+    gateway = get_default_generation_gateway(default_model=model)
 
     # Build context about existing procedures
     existing_list = "\n".join(f"- Procedure {p.number}: {p.title}" for p in existing_procedures)
@@ -259,7 +259,7 @@ async def match_content_to_procedures(
         return None
 
     model = get_settings().gemini.model
-    gateway = get_default_generation_gateway(api_key=os.getenv("GOOGLE_API_KEY"), default_model=model)
+    gateway = get_default_generation_gateway(default_model=model)
 
     # Build procedure descriptions for matching
     procedure_descriptions = "\n\n".join(

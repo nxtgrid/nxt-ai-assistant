@@ -139,7 +139,6 @@ async def _run_gemini_contradiction_check(prompt: str) -> Optional[dict]:
     """Call Gemini with JSON output mode. Returns parsed dict or None on failure."""
     model = os.getenv("GEMINI_MODEL")
     gateway = get_default_generation_gateway(
-        api_key=os.getenv("GOOGLE_API_KEY"),
         default_model=model,
     )
 

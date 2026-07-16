@@ -261,6 +261,57 @@ async def test_generate_continues_with_tool_results_and_conversation_state():
     ]
 
 
+@pytest.mark.asyncio
+async def test_generate_preserves_openrouter_provider_state_messages():
+    client = FakeAsyncClient([FakeAsyncResponse(completion_payload(content="done"))])
+    gateway = OpenRouterGateway(
+        api_key="or-key", default_model="gemini-2.5-flash", async_client=client
+    )
+
+    await gateway.generate(
+        [
+            LLMMessage(role="user", text="Check M1"),
+            LLMMessage(
+                role="assistant",
+                provider_state={
+                    "openrouter_message": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call-1",
+                                "type": "function",
+                                "function": {
+                                    "name": "lookup_meter",
+                                    "arguments": '{"meter_id": "M1"}',
+                                },
+                            }
+                        ],
+                    }
+                },
+            ),
+        ],
+        GenerationOptions(),
+        tool_results=[ToolResult(call_id="call-1", name="lookup_meter", result={"status": "ok"})],
+    )
+
+    assert client.calls[0]["json"]["model"] == "google/gemini-2.5-flash"
+    assert client.calls[0]["json"]["messages"][1] == {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "lookup_meter",
+                    "arguments": '{"meter_id": "M1"}',
+                },
+            }
+        ],
+    }
+
+
 def test_generate_sync_uses_sync_client():
     client = FakeSyncClient([FakeAsyncResponse(completion_payload(content="sync ok"))])
     gateway = OpenRouterGateway(api_key="or-key", default_model="openai/gpt-4o", client=client)
@@ -291,6 +342,7 @@ def test_generate_sync_can_add_provider_routing():
         client=client,
         provider_order=["google-vertex"],
         allow_fallbacks=False,
+        require_parameters=True,
     )
 
     result = gateway.generate_sync(
@@ -302,4 +354,5 @@ def test_generate_sync_can_add_provider_routing():
     assert client.calls[0]["json"]["provider"] == {
         "order": ["google-vertex"],
         "allow_fallbacks": False,
+        "require_parameters": True,
     }

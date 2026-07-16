@@ -237,7 +237,9 @@ class AppSettings(BaseSettings):
     """Top-level application settings."""
 
     debug: bool = Field(default=False, alias="DEBUG", description="Enable debug mode")
+    llm_provider: str = Field(default="gemini", alias="LLM_PROVIDER")
     google_api_key: str = Field(default="", alias="GOOGLE_API_KEY")
+    openrouter_api_key: str = Field(default="", alias="OPENROUTER_API_KEY")
     gemini: GeminiModelConfig = Field(default_factory=GeminiModelConfig)
     known_services: List[ToolServiceConfig] = Field(default_factory=list)
     allow_parallel_calls: bool = True
@@ -314,7 +316,12 @@ class AppSettings(BaseSettings):
         description="Langfuse server URL (cloud or self-hosted)",
     )
 
-    model_config = SettingsConfigDict(env_file=".env", env_nested_delimiter="__", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_nested_delimiter="__",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
 
 @lru_cache(maxsize=1)

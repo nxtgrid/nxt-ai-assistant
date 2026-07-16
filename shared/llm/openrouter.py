@@ -39,6 +39,7 @@ class OpenRouterGateway:
         app_title: str | None = None,
         provider_order: list[str] | None = None,
         allow_fallbacks: bool | None = None,
+        require_parameters: bool | None = None,
     ) -> None:
         self._api_key = (
             api_key
@@ -47,8 +48,8 @@ class OpenRouterGateway:
         )
         self._client = client
         self._async_client = async_client
-        self._default_model = default_model or os.getenv(
-            "OPENROUTER_MODEL", "google/gemini-2.5-flash"
+        self._default_model = normalize_openrouter_model(
+            default_model or os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash")
         )
         self._base_url = (
             base_url
@@ -62,6 +63,11 @@ class OpenRouterGateway:
             allow_fallbacks
             if allow_fallbacks is not None
             else _optional_bool_env("OPENROUTER_ALLOW_FALLBACKS")
+        )
+        self._require_parameters = (
+            require_parameters
+            if require_parameters is not None
+            else _optional_bool_env("OPENROUTER_REQUIRE_PARAMETERS")
         )
 
     @property
@@ -144,7 +150,7 @@ class OpenRouterGateway:
         conversation_state: LLMConversationState | None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "model": options.model or self._default_model,
+            "model": normalize_openrouter_model(options.model or self._default_model),
             "messages": self._convert_messages(
                 messages, tool_results, conversation_state
             ),
@@ -168,6 +174,8 @@ class OpenRouterGateway:
             provider["order"] = self._provider_order
         if self._allow_fallbacks is not None:
             provider["allow_fallbacks"] = self._allow_fallbacks
+        if self._require_parameters is not None:
+            provider["require_parameters"] = self._require_parameters
         return provider
 
     @staticmethod
@@ -197,6 +205,9 @@ class OpenRouterGateway:
 
     @staticmethod
     def _convert_message(message: LLMMessage) -> dict[str, Any]:
+        openrouter_message = message.provider_state.get("openrouter_message")
+        if openrouter_message:
+            return openrouter_message
         if message.role == "tool":
             return {
                 "role": "tool",
@@ -324,3 +335,16 @@ def _optional_bool_env(name: str) -> bool | None:
     if raw is None or raw.strip() == "":
         return None
     return raw.strip().lower() in {"true", "1", "yes", "on"}
+
+
+def normalize_openrouter_model(model: str | None) -> str:
+    """Convert native Gemini ids to OpenRouter's Google provider slugs."""
+
+    if not model:
+        return "google/gemini-2.5-flash"
+    model = model.strip()
+    if "/" in model:
+        return model
+    if model.startswith("gemini-"):
+        return f"google/{model}"
+    return model

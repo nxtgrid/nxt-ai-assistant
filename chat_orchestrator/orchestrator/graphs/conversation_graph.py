@@ -758,6 +758,7 @@ class ConversationGraphBuilder:
                                     "Use only the tools provided to you."
                                 )
                             },
+                            tool_call_id=call.tool_call_id,
                         )
                     )
             if blocked_results:
@@ -796,9 +797,12 @@ class ConversationGraphBuilder:
         _fallback = ToolCallResult(name="unknown", success=False, output={"error": "No result"})
         for call in function_calls:
             if allowed_names and call.name not in allowed_names:
-                results.append(next(blocked_iter, _fallback))
+                result = next(blocked_iter, _fallback)
             else:
-                results.append(next(exec_iter, _fallback))
+                result = next(exec_iter, _fallback)
+            if result.tool_call_id is None:
+                result.tool_call_id = call.tool_call_id
+            results.append(result)
 
         accumulated_results.extend(results)
 

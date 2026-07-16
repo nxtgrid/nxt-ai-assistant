@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from orchestrator.clients.gemini import GeminiClient
+from orchestrator.clients.factory import create_chat_llm_client
 from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext
 from orchestrator.experts.workflow_executor import WorkflowExecutor
@@ -579,10 +579,7 @@ async def expert_handler(state: ConversationState) -> Dict[str, Any]:
         else:
             LOGGER.info(f"Expert has no model override, using main bot model: {model_config.model}")
 
-        gemini = GeminiClient(
-            api_key=settings.google_api_key,
-            model_config=model_config,
-        )
+        gemini = create_chat_llm_client(settings, model_config)
     except Exception as e:
         LOGGER.error(f"Failed to create Gemini client: {e}")
         return {
