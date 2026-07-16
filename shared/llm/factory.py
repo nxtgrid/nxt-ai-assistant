@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from shared.llm.gemini import GeminiGateway
+from shared.llm.openrouter import OpenRouterGateway
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -51,7 +52,20 @@ def get_default_generation_gateway(
     api_key: str | None = None,
     default_model: str | None = None,
     fallback_model: str | None = None,
-) -> GeminiGateway:
+) -> GeminiGateway | OpenRouterGateway:
+    provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+    if provider in {"openrouter", "open-router"}:
+        return OpenRouterGateway(
+            api_key=api_key or os.getenv("OPENROUTER_API_KEY"),
+            default_model=default_model or os.getenv("OPENROUTER_MODEL"),
+            base_url=os.getenv("OPENROUTER_BASE_URL"),
+            http_referer=os.getenv("OPENROUTER_HTTP_REFERER"),
+            app_title=os.getenv("OPENROUTER_APP_TITLE"),
+        )
+    if provider != "gemini":
+        raise ValueError(
+            f"Unsupported LLM_PROVIDER={provider!r}; expected 'gemini' or 'openrouter'"
+        )
     return GeminiGateway(
         api_key=api_key or os.getenv("GOOGLE_API_KEY"),
         default_model=default_model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),

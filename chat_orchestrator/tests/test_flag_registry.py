@@ -81,8 +81,6 @@ class TestSettingsServiceConsistency:
     HISTORICAL_DO_NOT_SAVE = {
         "ESCALATION_TELEGRAM_CHAT_ID",
         "DEBUG_TELEGRAM_CHAT_ID",
-        "GEMINI_MODEL",
-        "GEMINI_FALLBACK_MODEL",
         "VERIFICATION_MODEL",
         "EMBEDDING_MODEL",
         "GEMINI_MAX_OUTPUT_TOKENS",
@@ -132,6 +130,20 @@ class TestSettingsServiceConsistency:
             assert fr.FLAGS[k].show_in_settings is True
             assert fr.FLAGS[k].editable is True
 
+    def test_provider_and_model_flags_are_editable_for_picker_guardrails(self):
+        defaults = fr.settings_defaults(env={})
+        for k in (
+            "LLM_PROVIDER",
+            "GEMINI_MODEL",
+            "GEMINI_FALLBACK_MODEL",
+            "OPENROUTER_MODEL",
+            "OPENROUTER_PROVIDER_ORDER",
+            "OPENROUTER_ALLOW_FALLBACKS",
+        ):
+            assert k in defaults, f"{k} must be settings-visible"
+            assert fr.FLAGS[k].show_in_settings is True
+            assert fr.FLAGS[k].editable is True
+
 
 # --------------------------------------------------------------------------- #
 # Backends
@@ -146,12 +158,12 @@ class TestBackends:
         assert "JIRA_ENABLED=false" in contents
         assert "MAX_TOOL_ROUNDS=7" in contents
 
-    def test_envfile_drops_read_only(self, tmp_path):
+    def test_envfile_writes_editable_model_settings(self, tmp_path):
         path = tmp_path / "settings.env"
         backend = EnvFileBackend(path=str(path))
-        backend.update({"GEMINI_MODEL": "evil-model", "JIRA_ENABLED": False})
+        backend.update({"GEMINI_MODEL": "gemini-2.5-flash", "JIRA_ENABLED": False})
         contents = path.read_text(encoding="utf-8")
-        assert "GEMINI_MODEL" not in contents  # read-only, filtered
+        assert "GEMINI_MODEL=gemini-2.5-flash" in contents
         assert "JIRA_ENABLED=false" in contents
 
     def test_envfile_get_all_reads_env(self, monkeypatch, tmp_path):
@@ -188,14 +200,15 @@ class TestBackends:
             {
                 "JIRA_ENABLED": False,  # global
                 "VERIFICATION_ENABLED": True,  # anansi-bot
-                "GEMINI_MODEL": "nope",  # read-only -> dropped
+                "GEMINI_MODEL": "gemini-2.5-flash",  # editable via picker
             },
         )
         global_keys = {e["key"] for e in spec["envs"]}
         bot_keys = {e["key"] for e in spec["services"][0]["envs"]}
         assert "JIRA_ENABLED" in global_keys
         assert "VERIFICATION_ENABLED" in bot_keys
-        assert "GEMINI_MODEL" not in global_keys and "GEMINI_MODEL" not in bot_keys
+        assert "GEMINI_MODEL" in global_keys
+        assert "GEMINI_MODEL" not in bot_keys
 
 
 # --------------------------------------------------------------------------- #

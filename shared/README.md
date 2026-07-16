@@ -23,6 +23,10 @@ shared/
 ├── config/                # Configuration & settings
 │   ├── __init__.py
 │   └── settings.py        # Unified settings for all projects
+├── llm/                   # Provider-neutral LLM gateways
+│   ├── factory.py         # Gemini default, OpenRouter via LLM_PROVIDER
+│   ├── gemini.py          # Default Gemini gateway
+│   └── openrouter.py      # Optional OpenRouter gateway
 ├── utils/                 # Utility functions
 │   ├── __init__.py
 │   ├── logging.py         # Unified logging setup
@@ -125,6 +129,25 @@ print(db_settings.supabase_url)
 print(server_settings.log_level)
 ```
 
+### LLM (`shared.llm`)
+
+Provider-neutral generation types and gateway implementations:
+
+- **GeminiGateway**: Default generation provider and embedding gateway.
+- **OpenRouterGateway**: Optional OpenAI-style chat completions provider.
+- **get_default_generation_gateway**: Returns Gemini unless `LLM_PROVIDER=openrouter`.
+
+Example:
+```python
+from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+
+gateway = get_default_generation_gateway()
+result = gateway.generate_sync(
+    [LLMMessage(role="user", text="Say hello")],
+    GenerationOptions(),
+)
+```
+
 ### Utils (`shared.utils`)
 
 Utility functions:
@@ -202,6 +225,10 @@ After verifying imports work:
 All shared modules use the same environment variables. See `.env.example` at the root level.
 
 Key variables:
+- `LLM_PROVIDER`: `gemini` by default, or `openrouter` for shared generation gateway callers
+- `GOOGLE_API_KEY`, `GEMINI_MODEL`: Default Gemini provider settings
+- `OPENROUTER_API_KEY`, `OPEN_ROUTER_BEARER_TOKEN`, `OPENROUTER_MODEL`: Optional OpenRouter provider settings; `OPEN_ROUTER_BEARER_TOKEN` is accepted as a local alias
+- `OPENROUTER_PROVIDER_ORDER`, `OPENROUTER_ALLOW_FALLBACKS`: Optional OpenRouter routing controls; use `google-vertex` and `false` for Google Vertex BYOK-only routing. The admin settings page discovers available provider route slugs from the selected OpenRouter model using the normal OpenRouter access key.
 - `AUTH_DB_DIRECT_CONNECTION`: Use direct PostgreSQL for auth
 - `AUTH_DB_HOST`, `AUTH_DB_USER`, `AUTH_DB_PASSWORD`: Direct connection credentials
 - `AUTH_SUPABASE_URL`, `AUTH_SUPABASE_ANON_KEY`: Auth Supabase connection

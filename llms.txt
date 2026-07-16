@@ -1,0 +1,45 @@
+# Anansi
+
+> Open-source AI operations assistant for mini-grid operators. Gemini is the default LLM provider; OpenRouter compatibility is available through the shared generation gateway when `LLM_PROVIDER=openrouter` is set.
+
+Anansi combines a chat orchestrator, MCP tool servers, Google Docs system instructions, Supabase-backed conversation storage, RAG ingestion, expert workflows, and operational mini-grid integrations. New adopters should start with the root README and the chat orchestrator environment example.
+
+## Start Here
+
+- [Root README](README.md): Product overview, prerequisites, installation, deployment configuration, and provider selection.
+- [Chat Orchestrator README](chat_orchestrator/README.md): Local service setup, architecture, environment variables, and API behavior.
+- [Chat Orchestrator Env Example](chat_orchestrator/.env.example): Canonical environment variable template, including `LLM_PROVIDER`, Gemini, and OpenRouter settings.
+- [Runtime Flags Registry](shared/config/flag_registry.py): Settings-page source of truth for editable provider/model env vars.
+- [Contributing Guide](CONTRIBUTING.md): Repository contribution workflow.
+
+## Runtime Components
+
+- [Chat Orchestrator](chat_orchestrator/): FastAPI conversation service, role-aware instructions, tool execution, and Telegram-facing chat flow.
+- [MCP Servers](mcp_servers/): Tool servers for operational systems such as Supabase, Timescale, Jira, logs, and codebase access.
+- [RAG Pipeline](rag_pipeline/): Knowledge ingestion from GitHub, Google Drive, Telegram, and related sources.
+- [Shared Library](shared/): Common auth, database, logging, Google Docs, configuration, layout, and provider-neutral LLM gateway code.
+- [Admin App](anansi_app/): Streamlit admin UI for chat history, broadcasts, and settings.
+- [Mini App](mini_app/): Telegram Mini App frontend.
+
+## LLM Provider Code
+
+- [Shared LLM Package](shared/llm/): Provider-neutral message, tool, usage, and gateway abstractions.
+- [Gemini Gateway](shared/llm/gemini.py): Default generation and embedding implementation.
+- [OpenRouter Gateway](shared/llm/openrouter.py): OpenAI-style chat completions implementation for OpenRouter.
+- [LLM Factory](shared/llm/factory.py): Selects Gemini by default and OpenRouter when `LLM_PROVIDER=openrouter`.
+- [Anansi Settings Page](anansi_app/nicegui_app/pages/settings.py): Runtime settings UI with separate live model pickers for direct Gemini ids and OpenRouter provider-prefixed ids, plus provider route discovery for the selected OpenRouter model.
+- [Orchestrator Gemini Client](chat_orchestrator/orchestrator/clients/gemini.py): Existing Gemini-specific orchestrator client retained as the default path.
+
+## Operational Guides
+
+- [MCP Servers Guide](guides/mcp-servers.md): How the tool servers are organized and configured.
+- [Expert Workflows Guide](guides/expert-workflows.md): Domain expert workflows such as site planning and reports.
+- [Shared README](shared/README.md): Shared package details and reusable utilities.
+- [MCP Servers README](mcp_servers/README.md): MCP server setup and service-specific notes.
+- [RAG Pipeline README](rag_pipeline/README.md): Knowledge ingestion and indexing setup.
+
+## Optional
+
+- [Security Policy](SECURITY.md): Security reporting and support policy.
+- [Code of Conduct](CODE_OF_CONDUCT.md): Community expectations.
+- [Changelog](CHANGELOG.md): Release history.

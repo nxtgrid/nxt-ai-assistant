@@ -64,21 +64,23 @@ Conversations that need a human are routed to the right internal Telegram group 
 
 ## Why "general-purpose underneath" matters
 
-Anansi is a general Gemini chat orchestrator at its core — Google Docs system instructions (your ops team edits the prompt in a browser, no redeploy), MCP tools, RAG, expert workflows. The mini-grid focus comes from the *tools and embellishments* layered on top, and from the "messenger-first" assumption that field staff and customers live in chat apps, not dashboards. Telegram is the primary surface today; WhatsApp is on the roadmap but not yet supported.
+Anansi is a provider-aware LLM chat orchestrator at its core — Google Docs system instructions (your ops team edits the prompt in a browser, no redeploy), MCP tools, RAG, expert workflows. Gemini remains the default generation provider, and the shared LLM gateway can also be pointed at OpenRouter for OpenAI-style chat completions. The mini-grid focus comes from the *tools and embellishments* layered on top, and from the "messenger-first" assumption that field staff and customers live in chat apps, not dashboards. Telegram is the primary surface today; WhatsApp is on the roadmap but not yet supported.
 
 **Project structure:**
-- `chat_orchestrator/` - Main Gemini orchestration service with Google Docs instructions
+- `chat_orchestrator/` - Main chat orchestration service with Google Docs instructions; Gemini is the default provider
 - `mcp_servers/` - MCP tool servers (Supabase, Timescale, JIRA, logs, codebase)
 - `rag_pipeline/` - Knowledge ingestion from GitHub, Google Drive, Telegram
-- `shared/` - Common utilities (auth, database, logging, Google Docs fetching)
+- `shared/` - Common utilities (auth, database, logging, Google Docs fetching, provider-neutral LLM gateways)
 - `anansi_app/` - Streamlit admin UI for chat history, broadcasts, and settings
+- `llms.txt` - Short repo map for LLM-assisted setup and onboarding. Keep it in sync when README setup, provider configuration, or major component paths change.
 
 ## Quick Start
 
 ### Prerequisites
 
 - Python 3.11+
-- Google AI Studio or Gemini API key ([Get one](https://aistudio.google.com/apikey))
+- Google AI Studio or Gemini API key for the default provider ([Get one](https://aistudio.google.com/apikey))
+- Optional OpenRouter API key if you want to exercise the shared OpenRouter generation gateway
 - Google Cloud service account with Docs API enabled
 - Supabase account
 
@@ -146,6 +148,7 @@ cp .env.example .env
 **Edit `.env`:**
 ```bash
 # Required
+LLM_PROVIDER=gemini
 GOOGLE_API_KEY=your-gemini-api-key
 GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
 CUSTOMER_SUPPORT_DOC_ID=1abc123xyz456  # From GDoc URL
@@ -167,6 +170,16 @@ AUTH_DB_SSL_MODE=require
 # Gemini Config (optional)
 GEMINI_MODEL=gemini-1.5-flash
 GEMINI_TEMPERATURE=0.7
+
+# OpenRouter compatibility (optional; keep LLM_PROVIDER=gemini unless testing it)
+# LLM_PROVIDER=openrouter
+# OPENROUTER_API_KEY=your-openrouter-api-key
+# OPEN_ROUTER_BEARER_TOKEN is also accepted as a local alias
+# OPENROUTER_MODEL=google/gemini-2.5-flash
+# OPENROUTER_PROVIDER_ORDER=google-vertex
+# OPENROUTER_ALLOW_FALLBACKS=false
+# OPENROUTER_HTTP_REFERER=https://yourapp.example.com
+# OPENROUTER_APP_TITLE=Anansi
 ```
 
 ### 4. Run
@@ -219,6 +232,31 @@ EXPERT_INSTRUCTIONS_DOC_ID=<your-expert-doc-id>
 
 The fallback files are intentionally generic and will not reflect your organization's actual support process.
 
+### LLM provider selection
+
+Gemini is the supported default:
+
+```bash
+LLM_PROVIDER=gemini
+GOOGLE_API_KEY=your-gemini-api-key
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+The shared generation gateway can also call OpenRouter using OpenAI-compatible chat completions:
+
+```bash
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY=your-openrouter-api-key
+# OPEN_ROUTER_BEARER_TOKEN is also accepted as a local alias
+OPENROUTER_MODEL=google/gemini-2.5-flash
+OPENROUTER_PROVIDER_ORDER=google-vertex
+OPENROUTER_ALLOW_FALLBACKS=false
+OPENROUTER_HTTP_REFERER=https://yourapp.example.com
+OPENROUTER_APP_TITLE=Anansi
+```
+
+Keep `LLM_PROVIDER=gemini` for normal deployments until you intentionally test OpenRouter-backed generation paths. For OpenRouter BYOK/BYOL with Google Vertex, set `OPENROUTER_PROVIDER_ORDER=google-vertex` and `OPENROUTER_ALLOW_FALLBACKS=false` so requests do not fall back to other OpenRouter endpoints. The settings page discovers provider routes from the selected OpenRouter model using the normal OpenRouter access key. Gemini-specific orchestrator code remains available as the default backup path.
+
 ### Operator-specific database columns
 
 The `customer_server` and `shared/auth` code reference a column named `is_generation_managed_by_nxt_grid` in the `grids` table. This is an operator-specific column from the reference deployment. If your schema uses a different name (or doesn't have this concept), update the column name in:
@@ -260,7 +298,7 @@ Google Doc (customer or staff)
    - "System Instructions" → systemInstruction field
    - Other sections (QnA, Examples) → First user message
     ↓
-6. Send to Gemini API
+6. Send to Gemini API (default provider)
 
 {
   "systemInstruction": {
@@ -302,7 +340,7 @@ Google Doc (customer or staff)
 sequenceDiagram
     participant U as User (Telegram / API)
     participant O as chat_orchestrator<br/>(FastAPI + LangGraph)
-    participant G as Gemini API
+    participant G as Gemini API<br/>(default provider)
     participant M as mcp_servers<br/>(tool handlers)
     participant DB as Databases<br/>(Supabase / TimescaleDB)
     participant GD as Google Docs<br/>(system instructions)
@@ -332,7 +370,7 @@ Telegram / Web Client
         │
         ▼
 ┌───────────────────────┐
-│   chat_orchestrator   │  FastAPI — main Gemini orchestration
+│   chat_orchestrator   │  FastAPI — main chat orchestration
 │   (port 8000)         │  LangGraph stategraph, expert workflows,
 │                       │  MCP tool execution
 └───────┬───────────────┘
@@ -363,12 +401,12 @@ Telegram / Web Client
 ### Core Components
 
 #### 1. Chat Orchestrator
-**Purpose:** Orchestrate Gemini conversations with dynamic instructions
+**Purpose:** Orchestrate LLM conversations with dynamic instructions; Gemini is the default provider
 
 **Key Features:**
 - Google Docs integration (single source of truth)
 - Section parsing and markdown conversion
-- Proper Gemini API usage (`systemInstruction` field)
+- Proper Gemini API usage for the default path (`systemInstruction` field)
 - Context injection as first user message
 - Multi-turn conversation loops
 - Parallel tool execution
@@ -476,7 +514,7 @@ Conversation Orchestrator
     ├─ Context as first user message
     └─ User request as last message
     ↓
-Gemini API
+Gemini API (default provider)
     ├─ Calls tools if needed (MCP servers)
     └─ Retrieves RAG context if needed
     ↓
@@ -487,7 +525,7 @@ Response
 
 | File | Purpose |
 |------|---------|
-| `orchestrator/services/conversation.py` | Main Gemini orchestration |
+| `orchestrator/services/conversation.py` | Main conversation orchestration |
 | `orchestrator/graphs/conversation_graph.py` | LangGraph stategraph |
 | `orchestrator/services/instructions_provider.py` | Google Doc fetching |
 | `orchestrator/services/tool_executor.py` | MCP tool execution |
@@ -503,6 +541,7 @@ Response
 #### Required (All Components)
 ```bash
 GOOGLE_API_KEY=your-gemini-api-key
+LLM_PROVIDER=gemini
 CHAT_DB_URL=https://your-project.supabase.co
 CHAT_DB_SERVICE_KEY=your-service-role-key
 ```
@@ -688,7 +727,7 @@ RAG is automatically used by the chat orchestrator when `rag.enabled=true` in se
 **Main App (`anansi`)**:
 | Component | Type | Description |
 |-----------|------|-------------|
-| anansi-bot | Service | Gemini orchestration + MCP tools (consolidated) |
+| anansi-bot | Service | Chat orchestration + MCP tools (consolidated; Gemini default) |
 | broadcast-scheduler | Job | Scheduled broadcast processor (8am-7pm UTC) |
 
 **Admin App (`anansi-app`)**:
@@ -887,7 +926,7 @@ anansi/
 │   ├── orchestrator/
 │   │   ├── api/            # FastAPI endpoints
 │   │   ├── services/       # Core logic
-│   │   │   ├── conversation.py        # Gemini orchestration
+│   │   │   ├── conversation.py        # Conversation orchestration
 │   │   │   ├── instructions_provider.py  # Google Docs fetching
 │   │   │   └── artifacts_provider.py     # Section parsing
 │   │   └── clients/        # External API clients
@@ -963,7 +1002,7 @@ python3 -c "from shared.utils.google_auth import verify_credentials; verify_cred
 - ✅ Auto-strips title pages, headers, footers, images
 - ✅ Section parsing by heading styles
 
-### Proper Gemini API Usage
+### Proper Default Gemini API Usage
 - ✅ System instructions in `systemInstruction` field
 - ✅ Context messages as first user message
 - ✅ Token-efficient structure

@@ -70,7 +70,7 @@ def _section_of(name: str) -> str:
         return "🔴 Master Bot Control"
     if name in _MCP_SERVER_KEYS or name == "MCP_DISABLED_TOOLS":
         return "🔌 MCP Servers & Tools"
-    if name.startswith("GEMINI_") or name in (
+    if name == "LLM_PROVIDER" or name.startswith("GEMINI_") or name.startswith("OPENROUTER_") or name in (
         "EMBEDDING_MODEL",
         "VERIFICATION_MODEL",
         "INTENT_ROUTER_MODEL",
@@ -113,6 +113,38 @@ def _coerce_for_save(flag, value: Any) -> Any:
     return "" if value is None else str(value)
 
 
+def _model_select_options(svc, current: dict[str, Any]) -> dict[str, Any]:
+    """Build provider/model select options without mixing provider-specific ids."""
+    gemini_models = svc.get_gemini_models()
+    openrouter_models = svc.get_openrouter_models()
+    selected_openrouter_model = str(
+        current.get("OPENROUTER_MODEL") or (openrouter_models[0] if openrouter_models else "")
+    )
+    provider_routes = svc.get_openrouter_provider_routes(selected_openrouter_model)
+    return {
+        "LLM_PROVIDER": svc.get_llm_provider_options(),
+        "GEMINI_MODEL": gemini_models,
+        "GEMINI_FALLBACK_MODEL": gemini_models,
+        "GEMINI_DEEP_THINKING_MODEL": ["", *gemini_models],
+        "INTENT_ROUTER_MODEL": gemini_models,
+        "VERIFICATION_MODEL": gemini_models,
+        "OPENROUTER_MODEL": openrouter_models,
+        "OPENROUTER_PROVIDER_ORDER": provider_routes,
+    }
+
+
+def _options_with_current(options: Any, value: Any) -> Any:
+    """Preserve the current value even if live model fetching omits it."""
+    if isinstance(options, dict):
+        if value in (None, "") or value in options:
+            return options
+        return {str(value): str(value), **options}
+    values = [str(option) for option in options]
+    if value not in (None, "") and str(value) not in values:
+        values.insert(0, str(value))
+    return values
+
+
 async def render(log_levels: list[str] | None = None) -> None:
     ui.label("⚙️ Bot Settings").classes("text-h5")
     ui.label("Configure Anansi bot behavior and features.").classes("text-caption")
@@ -124,6 +156,7 @@ async def render(log_levels: list[str] | None = None) -> None:
     log_levels = log_levels or svc.get_log_levels()
 
     pending: dict[str, Any] = dict(current)
+    model_options: dict[str, Any] = await run.io_bound(lambda: _model_select_options(svc, current))
 
     # Group flag names by section.
     sections: dict[str, list[str]] = {title: [] for title in _SECTION_ORDER}
@@ -234,17 +267,20 @@ async def render(log_levels: list[str] | None = None) -> None:
                     names,
                     pending,
                     log_levels,
+                    model_options,
                     _on_change,
                     grafana_dashboards,
                     grafana_panels,
                 )
+            elif title == "🧠 Models":
+                _render_models_section(names, pending, log_levels, model_options, _on_change)
             else:
                 # Two-column grid: most flags are short (toggle/number/one-line
                 # string) and read better side-by-side. JSON textareas opt out
                 # of the column span (see _render_flag) since they're long.
                 with ui.grid(columns=2).classes("w-full gap-x-6 gap-y-0"):
                     for name in names:
-                        _render_flag(name, pending, log_levels, _on_change)
+                        _render_flag(name, pending, log_levels, model_options, _on_change)
 
     _refresh_bar()
 
@@ -276,10 +312,63 @@ def _sync_enabled_panels_to_supabase(enabled_panels_str: str) -> None:
         update_enabled_panels(uid, by_dashboard.get(uid, []))
 
 
+def _render_models_section(
+    names: list[str],
+    pending: dict,
+    log_levels: list[str],
+    model_options: dict[str, Any],
+    on_change,
+) -> None:
+    remaining = list(names)
+
+    def _take(key: str) -> bool:
+        if key in remaining:
+            remaining.remove(key)
+            return True
+        return False
+
+    provider_routes = model_options.get("OPENROUTER_PROVIDER_ORDER") or {}
+    selected_model = pending.get("OPENROUTER_MODEL") or ""
+    with ui.card().classes("w-full q-mb-md").style("grid-column: 1 / -1"):
+        ui.label("OpenRouter provider route").classes("text-subtitle1 text-weight-bold")
+        if provider_routes:
+            ui.label(
+                "Provider endpoint routes available for the selected OpenRouter model. "
+                "If that provider has BYOK configured with “Always use for this provider,” "
+                "OpenRouter will use it for the route."
+            ).classes("text-caption").style("color: #64748b")
+            for provider, label in provider_routes.items():
+                ui.label(f"{provider} · {label}").classes("text-caption")
+        else:
+            ui.label(
+                "No provider routes were discovered for the selected OpenRouter model. "
+                "The picker still accepts the current value if one is configured."
+            ).classes("text-caption").style("color: #64748b")
+        if selected_model:
+            ui.label(f"Routes shown for: {selected_model}").classes("text-caption").style(
+                "color: #64748b"
+            )
+
+    with ui.grid(columns=2).classes("w-full gap-x-6 gap-y-0"):
+        for key in (
+            "LLM_PROVIDER",
+            "GEMINI_MODEL",
+            "GEMINI_FALLBACK_MODEL",
+            "OPENROUTER_MODEL",
+            "OPENROUTER_PROVIDER_ORDER",
+            "OPENROUTER_ALLOW_FALLBACKS",
+        ):
+            if _take(key):
+                _render_flag(key, pending, log_levels, model_options, on_change)
+        for name in remaining:
+            _render_flag(name, pending, log_levels, model_options, on_change)
+
+
 def _render_grafana_section(
     names: list[str],
     pending: dict,
     log_levels: list[str],
+    model_options: dict[str, Any],
     on_change,
     available_dashboards: dict[str, str],
     panels_metadata: dict[str, dict],
@@ -306,7 +395,7 @@ def _render_grafana_section(
         "GRAFANA_PANEL_DESCRIPTION_PROMPT",
     ):
         if _take(key):
-            _render_flag(key, pending, log_levels, on_change)
+            _render_flag(key, pending, log_levels, model_options, on_change)
 
     # Machine-managed blobs are surfaced via the pickers below — hide the raw,
     # multi-kilobyte read-only textareas that used to clutter the section.
@@ -327,7 +416,7 @@ def _render_grafana_section(
             ).classes("text-caption").style("color: #64748b")
             for key in ("GRAFANA_ENABLED_DASHBOARDS", "GRAFANA_ENABLED_PANELS"):
                 if _take(key):
-                    _render_flag(key, pending, log_levels, on_change)
+                    _render_flag(key, pending, log_levels, model_options, on_change)
         else:
             _take("GRAFANA_ENABLED_DASHBOARDS")
             _take("GRAFANA_ENABLED_PANELS")
@@ -472,7 +561,7 @@ def _render_grafana_section(
 
     # Any remaining Grafana flags (future additions) render generically.
     for name in remaining:
-        _render_flag(name, pending, log_levels, on_change)
+        _render_flag(name, pending, log_levels, model_options, on_change)
 
 
 def _run_grafana_indexer():
@@ -492,7 +581,13 @@ def _run_grafana_indexer():
     )
 
 
-def _render_flag(name: str, pending: dict, log_levels: list[str], on_change) -> None:
+def _render_flag(
+    name: str,
+    pending: dict,
+    log_levels: list[str],
+    model_options: dict[str, Any],
+    on_change,
+) -> None:
     flag = registry.FLAGS[name]
     value = pending.get(name)
     disabled = not flag.editable
@@ -520,6 +615,33 @@ def _render_flag(name: str, pending: dict, log_levels: list[str], on_change) -> 
         elif name == "LOG_LEVEL":
             opts = log_levels or ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
             w = ui.select(opts, value=value, label=label, on_change=handler).classes("w-full")
+        elif name == "OPENROUTER_PROVIDER_ORDER":
+            opts = _options_with_current(model_options.get(name, {}), value)
+            current = _csv_to_list(value)
+            if isinstance(opts, dict):
+                for provider in current:
+                    opts.setdefault(provider, provider)
+            else:
+                opts = _options_with_current(opts, value)
+            w = (
+                ui.select(
+                    opts,
+                    value=current,
+                    label=label,
+                    multiple=True,
+                    with_input=True,
+                    on_change=lambda e, n=name: on_change(n, ",".join(e.value or [])),
+                )
+                .props("use-chips outlined dense clearable")
+                .classes("w-full")
+            )
+        elif name in model_options:
+            opts = _options_with_current(model_options[name], value)
+            w = (
+                ui.select(opts, value=value, label=label, with_input=True, on_change=handler)
+                .props("outlined dense clearable")
+                .classes("w-full")
+            )
         else:
             w = ui.input(label, value=str(value or ""), on_change=handler).classes("w-full")
 
