@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
-from grid_app.lib.db import Repository
+from shared.grid_design.db import Repository
 
 ENTITIES_PATH = Path(__file__).resolve().parents[2] / "db" / "entities.json"
 

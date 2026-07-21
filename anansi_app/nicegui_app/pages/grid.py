@@ -25,10 +25,10 @@ from urllib.parse import quote, urlencode
 from grid_app.entities import ColumnSpec, EntitySpec, get_entity, reverse_relations
 from grid_app.entities.virtual import VIRTUAL, VirtualCol, make_fetch, preload_for
 from grid_app.lib import perms
-from grid_app.lib import settings as grid_settings
 from nicegui import run, ui
 
 from nicegui_app.pages import grid_actions
+from shared.grid_design import settings as grid_settings
 from shared.grid_design.ids import new_id
 
 _RELATED_LIMIT = 50
@@ -96,8 +96,7 @@ def _vval(vc: VirtualCol, r: dict, fetch) -> str:
 
 
 def _db_configured() -> bool:
-    fn = getattr(grid_settings, "is_db_configured", None)
-    return bool(fn()) if callable(fn) else False
+    return grid_settings.is_db_configured()
 
 
 # ── dispatcher ──────────────────────────────────────────────────────────────────
