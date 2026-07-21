@@ -16,10 +16,6 @@ shared/
 │   ├── __init__.py
 │   ├── auth_service.py    # Main auth service (from borg)
 │   └── auth_context.py    # MCP auth context (from mcp_servers)
-├── database/              # Database connections & clients
-│   ├── __init__.py
-│   ├── connections.py     # Database connection manager
-│   └── supabase_client.py # Enhanced Supabase client
 ├── config/                # Configuration & settings
 │   ├── __init__.py
 │   └── settings.py        # Unified settings for all projects
@@ -31,7 +27,6 @@ shared/
 │   ├── __init__.py
 │   ├── logging.py         # Unified logging setup
 │   ├── date_utils.py      # Date/time utilities
-│   ├── http_client.py     # HTTP client utilities
 │   └── response_formatters.py  # Response formatting
 └── models/                # Shared data models
     └── __init__.py
@@ -68,7 +63,6 @@ from shared.auth import get_auth_context
 ```python
 # New import (no old code to migrate)
 from shared.utils import get_logger
-from shared.database import SupabaseClient
 ```
 
 ## Modules
@@ -92,24 +86,18 @@ auth = AuthService()
 permissions = await auth.get_user_permissions("user@example.com")
 ```
 
-### Database (`shared.database`)
+### Database
 
-Database connection managers and clients:
+There is no `shared.database` package. Database access lives with its owner:
 
-- **DatabaseManager**: Manages connections to multiple databases (Supabase, TimescaleDB)
-- **EnhancedSupabaseClient**: Full-featured Supabase client with conversation history, RAG, etc.
-- **SupabaseClient**: Alias for EnhancedSupabaseClient
+- **Chat DB / Supabase**: `chat_orchestrator/orchestrator/services/supabase_client.py`
+- **MCP server connections**: `mcp_servers/shared_code/database/connections.py`
 
-Example:
-```python
-from shared.database import DatabaseManager, SupabaseClient
-
-db_manager = DatabaseManager()
-await db_manager.initialize_supabase()
-
-# Or use the enhanced client directly
-client = SupabaseClient(url=..., key=...)
-```
+A `shared/database/` package once existed as the intended destination for
+`shared_code.database`, but the migration was never completed and the copy went
+stale — it had no importers and could not even be imported (it needed
+`sqlalchemy`, which no consuming service installs). It was removed rather than
+left as a trap for anyone "finishing" the migration onto the older code.
 
 ### Config (`shared.config`)
 
@@ -156,8 +144,10 @@ Utility functions:
   - `get_logger(module_name, project_name)`: Get a configured logger
   - `setup_logging(...)`: Setup logging with file and console handlers
 - **date_utils**: Date and time utilities
-- **http_client**: HTTP client wrapper
 - **response_formatters**: Response formatting utilities
+
+The HTTP client wrapper (`HTTPClientMixin`, `retry_with_delay`) lives in
+`mcp_servers/shared_code/utils/http_client.py`, which is the maintained copy.
 
 Example:
 ```python
@@ -189,19 +179,24 @@ borg.services.auth_service → shared.auth.auth_service
 ```
 
 **MCP Servers:**
-```bash
-# Find and replace
-shared_code.utils → shared.utils
-shared_code.auth → shared.auth
-shared_code.config → shared.config
-shared_code.database → shared.database
-```
+
+This migration is **incomplete and currently paused**. `mcp_servers/shared_code/`
+is still the live implementation for MCP server code — 21 modules import from it,
+and its copies of `logger`, `http_client`, and `database/connections` are *newer*
+than the versions that were once copied into `shared/`.
+
+Do not "finish" this migration by pointing imports at `shared/`. The stale
+`shared/` copies were deleted precisely because they had drifted behind
+(`shared/utils/http_client.py`, for example, had lost the error-sanitisation that
+keeps internal hostnames out of LLM-visible responses).
+
+If the merge is picked up again, the correct direction is to move
+`shared_code/`'s content **into** `shared/` — not the reverse.
 
 **RAG Pipeline:**
 ```bash
 # Add new imports
 from shared.utils import get_logger
-from shared.database import SupabaseClient
 ```
 
 ### Step 3: Remove Duplicate Code
@@ -209,8 +204,7 @@ from shared.database import SupabaseClient
 After verifying imports work:
 
 1. Delete `borg/borg/utils/logging.py` (replaced by `shared/utils/logging.py`)
-2. Delete `mcp_servers/shared_code/` (replaced by `shared/`)
-3. Keep project-specific code in original locations
+2. Keep project-specific code in original locations
 
 ## Benefits
 
