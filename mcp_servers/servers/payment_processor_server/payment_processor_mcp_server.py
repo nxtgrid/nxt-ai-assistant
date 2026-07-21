@@ -17,8 +17,7 @@ from mcp.types import ServerCapabilities
 # Load environment variables from .env file BEFORE importing shared_code
 load_dotenv()
 
-from shared_code.utils.http_client import HTTPClientMixin
-
+from shared.utils.http_client import HTTPClientMixin
 from shared.utils.response_formatters import compose_error_response, compose_json_response
 
 # Configure logging to stderr for Claude Desktop visibility

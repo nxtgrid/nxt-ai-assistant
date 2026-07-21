@@ -9,9 +9,10 @@ from functools import wraps
 from typing import Callable, Optional, TypeVar
 
 import aiohttp
-from shared_code.utils.logger import setup_logger
 
-logger = setup_logger("http-client")
+from shared.utils.logging import get_logger
+
+logger = get_logger("http-client")
 
 T = TypeVar("T")
 

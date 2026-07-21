@@ -26,14 +26,14 @@ from dotenv import load_dotenv
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
 from shared_code.database.connections import get_supabase_client
-from shared_code.utils.logger import setup_logger
 
 from shared.llm import EmbeddingOptions, OpenAIEmbeddingGateway
+from shared.utils.logging import get_logger
 
 # Load environment variables
 load_dotenv()
 
-logger = setup_logger("codebase-server")
+logger = get_logger("codebase-server")
 
 # Startup message
 print("🚀 Codebase MCP Server starting...", file=sys.stderr)

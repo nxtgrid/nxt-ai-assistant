@@ -612,7 +612,7 @@ class MCPServerManager:
     def _get_mock_user_context(self, user_id: str, actions_enabled: bool):
         """Get mock user context for testing"""
         try:
-            from shared_code.auth.user_context import UserContext, UserRole
+            from shared.auth.user_context import UserContext, UserRole
 
             # Mock user contexts for demonstration
             user_configs = {
@@ -717,7 +717,7 @@ class MCPServerManager:
     def _user_can_access_tool(self, tool_name: str, server_name: str, user_context) -> bool:
         """Check if user can access a specific tool"""
         try:
-            from shared_code.auth.user_context import UserRole
+            from shared.auth.user_context import UserRole
 
             # Admin can access everything
             if user_context.role == UserRole.ADMIN:

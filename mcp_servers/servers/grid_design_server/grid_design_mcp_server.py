@@ -34,12 +34,12 @@ load_dotenv()
 
 from servers.grid_design_server import gd_auth, gd_crud, internal_engine
 from servers.grid_design_server.internal_engine import compute_bom_cost_summary
-from shared_code.utils.http_client import HTTPClientMixin
-from shared_code.utils.logger import setup_logger
 
 from shared.auth.auth_service import STAFF_ORG_ID
+from shared.utils.http_client import HTTPClientMixin
+from shared.utils.logging import get_logger
 
-logger = setup_logger("grid-design-server")
+logger = get_logger("grid-design-server")
 
 # Startup message
 print("🚀 Grid Design MCP Server starting...", file=sys.stderr)

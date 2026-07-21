@@ -25,19 +25,18 @@ load_dotenv()
 _ORG_NAME = os.getenv("ORGANIZATION_NAME", "the operator")
 STAFF_ORG_ID: int = int(os.getenv("STAFF_ORG_ID", "2"))
 
-from shared_code.utils.logger import setup_logger
-
 # Import Supabase client for direct DB queries
 from supabase import Client, create_client  # type: ignore[attr-defined]
 
 from shared.auth import get_auth_service
+from shared.utils.logging import get_logger
 from shared.utils.response_formatters import compose_error_response, compose_json_response
 
 from .analyzers.grid_outage_analyzer import GridOutageAnalyzer, GridOutageEvent
 from .charts.chart_builder import ChartBuilder
 from .platforms.vrm_platform import VRMPlatform
 
-logger = setup_logger("equipment-diagnostics-server")
+logger = get_logger("equipment-diagnostics-server")
 
 # Startup message
 print("Starting Equipment Diagnostics MCP Server...", file=sys.stderr)

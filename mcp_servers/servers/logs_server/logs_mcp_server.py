@@ -32,12 +32,13 @@ import mcp.types as types
 from dotenv import load_dotenv
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
-from shared_code.utils.logger import setup_logger
+
+from shared.utils.logging import get_logger
 
 # Load environment variables
 load_dotenv()
 
-logger = setup_logger("logs-server")
+logger = get_logger("logs-server")
 
 # Startup message
 print("🚀 Logs MCP Server starting...", file=sys.stderr)

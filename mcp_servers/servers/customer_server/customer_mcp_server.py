@@ -21,11 +21,11 @@ load_dotenv()
 
 # Import VRMPlatform for downtime fetching in /grids command
 from servers.equipment_diagnostics_server.platforms.vrm_platform import InverterVoltage, VRMPlatform
-from shared_code.utils.http_client import HTTPClientMixin
 
 from shared.auth import get_auth_service
 from shared.auth.auth_service import MANAGED_GENERATION_COLUMN
 from shared.utils.geo import parse_location_geom
+from shared.utils.http_client import HTTPClientMixin
 from shared.utils.response_formatters import compose_error_response, compose_json_response
 
 # Configure logging to stderr for Claude Desktop visibility
