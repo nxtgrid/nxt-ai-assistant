@@ -109,9 +109,12 @@ output/
 # no-op and the commit will silently omit it. See "Adding a new test file" in
 # CONTRIBUTING.md before broadening this pattern.
 #
-# The entry below names a file that exists upstream but must not be published;
-# it is redundant while tests/ is a blanket ignore, and deliberately kept so the
-# intent survives if that ever changes.
+# The entry below names a file that exists upstream but must not be published.
+# Git does not need it — the blanket tests/ rule already hides it — but
+# .github/scripts/check_test_wiring.py reads these explicit .py entries as the
+# list of tests that are unpublished *on purpose*. Anything else it finds
+# untracked under a tests/ directory fails the commit as a probable silent drop.
+# So: to withhold a test file, name it here.
 tests/
 mcp_servers/tests/test_meter_actions.py
 

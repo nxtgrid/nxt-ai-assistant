@@ -24,10 +24,17 @@ cp .env.example .env
 
 ## Running Tests
 
+There are four suites, all run by CI:
+
 ```bash
-# All orchestrator tests
+# chat_orchestrator + shared (shared has no venv of its own)
 cd chat_orchestrator && source .venv/bin/activate
 pytest tests/
+pytest ../shared
+
+# mcp_servers + anansi_app (from the repo root)
+PYTHONPATH="$PWD:$PWD/mcp_servers" pytest mcp_servers/tests
+PYTHONPATH="$PWD:$PWD/anansi_app" pytest anansi_app/tests
 
 # Specific test file
 pytest -v tests/experts/test_workflow_executor.py
@@ -50,11 +57,21 @@ git add -f chat_orchestrator/tests/experts/test_my_feature.py
 
 **A plain `git add` will silently do nothing.** Git prints a hint, but `git
 commit` afterwards succeeds without the file, so the test never reaches CI and
-nobody finds out. After committing a new test, confirm it landed:
+nobody finds out.
 
-```bash
-git show --stat HEAD | grep test_   # your file should be listed
-```
+The `test-wiring` pre-commit hook (`.github/scripts/check_test_wiring.py`) fails
+the commit rather than letting that happen. It runs on every commit, not just on
+staged files, because the thing it looks for is a file that is *missing* from the
+commit. If a test must stay internal, name it in `.gitignore` next to
+`mcp_servers/tests/test_meter_actions.py` — that list is the hook's record of
+which tests are unpublished on purpose.
+
+The same hook checks that every tracked test file sits under a path CI actually
+runs, and that each of those paths is still present in `.github/workflows/ci.yml`.
+A test that is committed but that no job runs is as invisible as one that was
+never committed: until this was added, everything under `mcp_servers/tests/`
+except `test_grafana_variable_substitution.py` was in exactly that state, and one
+of those suites had been failing since the initial commit.
 
 Two related traps:
 

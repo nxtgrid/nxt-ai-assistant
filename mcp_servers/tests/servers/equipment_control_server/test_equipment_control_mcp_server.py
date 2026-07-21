@@ -19,6 +19,10 @@ _BASE_ENV = {
     "EQUIPMENT_CONTROL_ALLOWED_USERS": "staff@example.com",
     "EQUIPMENT_CONTROL_ACTIONS_ENABLED": "true",
     "VRM_MQTT_USER": "mqtt@example.com",
+    # MQTT auth reads VRM_MQTT_PASSWORD (a VRM personal access token formatted as
+    # "Token <token>"); VRM_TOKEN is the separate REST-API credential used by the
+    # site-online pre-checks. Both are needed — they are not interchangeable.
+    "VRM_MQTT_PASSWORD": "Token test-token",  # pragma: allowlist secret
     "VRM_TOKEN": "test-token",  # pragma: allowlist secret
 }
 
@@ -68,8 +72,10 @@ class TestSendMqttCommand:
 
     def test_raises_on_missing_credentials(self):
         """Raises immediately when VRM credentials are absent."""
-        m = _load({"VRM_TOKEN": "", "VRM_MQTT_USER": ""})
-        with pytest.raises(Exception, match="VRM_MQTT_USER and VRM_MQTT_TOKEN must be configured"):
+        m = _load({"VRM_MQTT_PASSWORD": "", "VRM_MQTT_USER": ""})
+        with pytest.raises(
+            Exception, match="VRM_MQTT_USER and VRM_MQTT_PASSWORD must be configured"
+        ):
             m.send_mqtt_command("gw1", "platform", "0", "Device/Reboot", 1)
 
     def test_unique_client_id_per_call(self, mod):

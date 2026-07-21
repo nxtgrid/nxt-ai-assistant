@@ -44,9 +44,17 @@ jobs:
         run: |
           source .venv/bin/activate
           pytest tests/ -x -q
+      # shared/ has no venv of its own; chat_orchestrator's dependency set covers
+      # it, and chat_orchestrator imports it, so it is tested here rather than in
+      # a job that would install the same packages a second time.
+      - name: Run tests (shared)
+        working-directory: chat_orchestrator
+        run: |
+          source .venv/bin/activate
+          pytest ../shared -q
 
   validate:
-    name: Validate (mcp_servers)
+    name: Validate (mcp_servers, anansi_app)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -56,13 +64,16 @@ jobs:
       - name: Validate tool_definitions.json
         run: python3 -c "import json; json.load(open('mcp_servers/tool_definitions.json')); print('tool_definitions.json OK')"
       - name: Install test dependencies
-        run: pip install pytest httpx "mcp>=1.0.0" vl-convert-python pydantic pydantic-settings python-dotenv loguru
-      - name: Run Grafana variable-substitution tests
+        run: pip install -r mcp_servers/requirements.txt pytest pytest-asyncio
+      - name: Run tests (mcp_servers)
         env:
           GRAFANA_URL: http://localhost
           GRAFANA_API_KEY: test-key  # pragma: allowlist secret
         run: |
-          PYTHONPATH="$PWD:$PWD/mcp_servers" pytest mcp_servers/tests/test_grafana_variable_substitution.py -v
+          PYTHONPATH="$PWD:$PWD/mcp_servers" pytest mcp_servers/tests -q
+      - name: Run tests (anansi_app)
+        run: |
+          PYTHONPATH="$PWD:$PWD/anansi_app" pytest anansi_app/tests -q
 
   audit-orchestrator:
     name: Dependency CVE audit (chat_orchestrator)
