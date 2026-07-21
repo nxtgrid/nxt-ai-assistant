@@ -28,10 +28,10 @@ from mcp.types import (
 load_dotenv()
 
 from shared_code.config.action_flags import ActionFlags
-from shared_code.config.settings import server_settings
 from shared_code.database.connections import db_manager
 
 from shared.auth import get_auth_service
+from shared.config.settings import server_settings
 from shared.utils.email_utils import parse_email_whitelist
 from shared.utils.logging import get_logger
 from shared.utils.response_formatters import compose_error_response, compose_json_response

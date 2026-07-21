@@ -25,8 +25,7 @@ from mcp.types import (
 # Load environment variables from .env file BEFORE importing shared_code
 load_dotenv()
 
-from shared_code.config.settings import server_settings
-
+from shared.config.settings import server_settings
 from shared.utils.logging import get_logger
 from shared.utils.response_formatters import compose_error_response, compose_json_response
 
