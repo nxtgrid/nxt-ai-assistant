@@ -97,7 +97,21 @@ chat_orchestrator/cache/
 output/
 
 # Tests (operator-specific, not for public OSS tree)
-# Exception: equipment_control tests use only generic mocks (no internal data) and are tracked with git add -f
+#
+# Deny-by-default: test files can carry grid names, meter numbers and org IDs,
+# and they also arrive here from upstream syncs, so nothing under a tests/
+# directory is published until it has been checked. Vetted files are tracked
+# individually with `git add -f` — around 100 are, which is why the suites in
+# chat_orchestrator/, shared/, mcp_servers/ and anansi_app/ run in CI.
+#
+# Because gitignore does not apply to already-tracked files, those stay tracked
+# normally; only *new* test files need the -f. A plain `git add` on one is a
+# no-op and the commit will silently omit it. See "Adding a new test file" in
+# CONTRIBUTING.md before broadening this pattern.
+#
+# The entry below names a file that exists upstream but must not be published;
+# it is redundant while tests/ is a blanket ignore, and deliberately kept so the
+# intent survives if that ever changes.
 tests/
 mcp_servers/tests/test_meter_actions.py
 

@@ -36,6 +36,38 @@ pytest -v tests/experts/test_workflow_executor.py
 pre-commit run --all-files
 ```
 
+### Adding a new test file
+
+`.gitignore` ignores `tests/` on purpose. This is the public OSS mirror of an
+internal tree, and tests there can carry operator-specific data (grid names,
+meter numbers, org IDs), so the default is to keep them out. Individual test
+files are published only after they have been checked for that, by force-adding
+them:
+
+```bash
+git add -f chat_orchestrator/tests/experts/test_my_feature.py
+```
+
+**A plain `git add` will silently do nothing.** Git prints a hint, but `git
+commit` afterwards succeeds without the file, so the test never reaches CI and
+nobody finds out. After committing a new test, confirm it landed:
+
+```bash
+git show --stat HEAD | grep test_   # your file should be listed
+```
+
+Two related traps:
+
+- `ruff check .` skips ignored files, so a brand-new test file is not linted
+  locally. `pre-commit run --all-files` operates on tracked files and is what CI
+  runs — use it before pushing.
+- The same applies to `scripts/*.py` and `scripts/*.sh`, which are ignored for
+  the same reason.
+
+Do not "fix" this by broadening `.gitignore`. Files arrive in these directories
+from upstream syncs, and the deny-by-default is what keeps internal ones out of
+a public repository.
+
 ## Code Style
 
 - **Python 3.11+**, formatted with `ruff` (100-char line length)
