@@ -10,9 +10,8 @@ import asyncio
 import json
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
-from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from mcp.server import Server
@@ -29,6 +28,7 @@ STAFF_ORG_ID: int = int(os.getenv("STAFF_ORG_ID", "2"))
 from supabase import Client, create_client  # type: ignore[attr-defined]
 
 from shared.auth import get_auth_service
+from shared.utils.date_utils import to_local_time
 from shared.utils.logging import get_logger
 from shared.utils.response_formatters import compose_error_response, compose_json_response
 
@@ -91,35 +91,6 @@ TIME_RANGES = {
 DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
 
 
-def _to_local_time(
-    utc_dt: Optional[datetime], tz_name: str = DEFAULT_TIMEZONE
-) -> Optional[datetime]:
-    """
-    Convert a UTC datetime to local time in the specified timezone.
-
-    Args:
-        utc_dt: A datetime object in UTC (or naive, assumed UTC)
-        tz_name: IANA timezone name (e.g., 'Africa/Lagos', 'UTC')
-
-    Returns:
-        Datetime in local timezone, or None if input is None
-    """
-    if utc_dt is None:
-        return None
-
-    try:
-        # Ensure the datetime is timezone-aware (assume UTC if naive)
-        if utc_dt.tzinfo is None:
-            utc_dt = utc_dt.replace(tzinfo=timezone.utc)
-
-        # Convert to target timezone
-        local_tz = ZoneInfo(tz_name)
-        return utc_dt.astimezone(local_tz)
-    except Exception as e:
-        logger.warning(f"Failed to convert to timezone {tz_name}: {e}")
-        return utc_dt
-
-
 def _format_local_timestamp(
     utc_dt: Optional[datetime], tz_name: str = DEFAULT_TIMEZONE
 ) -> Optional[str]:
@@ -133,7 +104,7 @@ def _format_local_timestamp(
     Returns:
         ISO formatted string in local time, or None if input is None
     """
-    local_dt = _to_local_time(utc_dt, tz_name)
+    local_dt = to_local_time(utc_dt, tz_name)
     if local_dt is None:
         return None
     return local_dt.isoformat()

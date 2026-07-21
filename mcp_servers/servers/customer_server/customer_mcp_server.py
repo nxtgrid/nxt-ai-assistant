@@ -24,6 +24,7 @@ from servers.equipment_diagnostics_server.platforms.vrm_platform import Inverter
 
 from shared.auth import get_auth_service
 from shared.auth.auth_service import MANAGED_GENERATION_COLUMN
+from shared.utils.date_utils import to_local_time
 from shared.utils.geo import parse_location_geom
 from shared.utils.http_client import HTTPClientMixin
 from shared.utils.response_formatters import compose_error_response, compose_json_response
@@ -134,36 +135,6 @@ def _format_time_12h(hour: int, minute: int) -> str:
         return f"{hour - 12}:{minute:02d} PM"
 
 
-def _to_local_time(
-    utc_dt: Optional[datetime], tz_name: str = DEFAULT_TIMEZONE
-) -> Optional[datetime]:
-    """
-    Convert a UTC datetime to local time in the specified timezone.
-
-    Args:
-        utc_dt: A datetime object in UTC (or naive, assumed UTC)
-        tz_name: IANA timezone name (e.g., 'Africa/Lagos', 'UTC')
-
-    Returns:
-        Datetime in local timezone, or None if input is None
-    """
-    if utc_dt is None:
-        return None
-
-    try:
-        # Ensure the datetime is timezone-aware (assume UTC if naive)
-        if utc_dt.tzinfo is None:
-            utc_dt = utc_dt.replace(tzinfo=timezone.utc)
-
-        # Convert to target timezone
-        local_tz = ZoneInfo(tz_name)
-        return utc_dt.astimezone(local_tz)
-    except Exception as e:
-        logger.warning(f"Failed to convert to timezone {tz_name}: {e}")
-        # Return original datetime on error
-        return utc_dt
-
-
 def _format_local_timestamp(
     utc_dt: Optional[datetime], tz_name: str = DEFAULT_TIMEZONE, include_tz: bool = True
 ) -> Optional[str]:
@@ -178,7 +149,7 @@ def _format_local_timestamp(
     Returns:
         ISO formatted string in local time, or None if input is None
     """
-    local_dt = _to_local_time(utc_dt, tz_name)
+    local_dt = to_local_time(utc_dt, tz_name)
     if local_dt is None:
         return None
 
