@@ -3,3 +3,14 @@ repos:
     rev: v0.15.21
     hooks:
       - id: ruff-check
+
+  - repo: local
+    hooks:
+      # Runs on every commit, not just on the staged files: the failure it exists
+      # to catch is a test file that is *absent* from the commit.
+      - id: test-wiring
+        name: Test files are tracked and wired into CI
+        entry: python3 .github/scripts/check_test_wiring.py
+        language: system
+        pass_filenames: false
+        always_run: true

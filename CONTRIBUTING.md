@@ -24,10 +24,17 @@ cp .env.example .env
 
 ## Running Tests
 
+There are four suites, all run by CI:
+
 ```bash
-# All orchestrator tests
+# chat_orchestrator + shared (shared has no venv of its own)
 cd chat_orchestrator && source .venv/bin/activate
 pytest tests/
+pytest ../shared
+
+# mcp_servers + anansi_app (from the repo root)
+PYTHONPATH="$PWD:$PWD/mcp_servers" pytest mcp_servers/tests
+PYTHONPATH="$PWD:$PWD/anansi_app" pytest anansi_app/tests
 
 # Specific test file
 pytest -v tests/experts/test_workflow_executor.py
@@ -35,6 +42,48 @@ pytest -v tests/experts/test_workflow_executor.py
 # Code quality (run before pushing)
 pre-commit run --all-files
 ```
+
+### Adding a new test file
+
+`.gitignore` ignores `tests/` on purpose. This is the public OSS mirror of an
+internal tree, and tests there can carry operator-specific data (grid names,
+meter numbers, org IDs), so the default is to keep them out. Individual test
+files are published only after they have been checked for that, by force-adding
+them:
+
+```bash
+git add -f chat_orchestrator/tests/experts/test_my_feature.py
+```
+
+**A plain `git add` will silently do nothing.** Git prints a hint, but `git
+commit` afterwards succeeds without the file, so the test never reaches CI and
+nobody finds out.
+
+The `test-wiring` pre-commit hook (`.github/scripts/check_test_wiring.py`) fails
+the commit rather than letting that happen. It runs on every commit, not just on
+staged files, because the thing it looks for is a file that is *missing* from the
+commit. If a test must stay internal, name it in `.gitignore` next to
+`mcp_servers/tests/test_meter_actions.py` — that list is the hook's record of
+which tests are unpublished on purpose.
+
+The same hook checks that every tracked test file sits under a path CI actually
+runs, and that each of those paths is still present in `.github/workflows/ci.yml`.
+A test that is committed but that no job runs is as invisible as one that was
+never committed: until this was added, everything under `mcp_servers/tests/`
+except `test_grafana_variable_substitution.py` was in exactly that state, and one
+of those suites had been failing since the initial commit.
+
+Two related traps:
+
+- `ruff check .` skips ignored files, so a brand-new test file is not linted
+  locally. `pre-commit run --all-files` operates on tracked files and is what CI
+  runs — use it before pushing.
+- The same applies to `scripts/*.py` and `scripts/*.sh`, which are ignored for
+  the same reason.
+
+Do not "fix" this by broadening `.gitignore`. Files arrive in these directories
+from upstream syncs, and the deny-by-default is what keeps internal ones out of
+a public repository.
 
 ## Code Style
 
