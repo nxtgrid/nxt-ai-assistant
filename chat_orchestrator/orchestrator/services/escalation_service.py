@@ -1103,58 +1103,21 @@ class EscalationService:
             reply_markup: Optional inline keyboard markup
 
         Returns:
-            Telegram API response dict
+            Telegram API response dict. Callers inspect ``ok`` and
+            ``description`` directly — routing keys off "message thread not
+            found" to detect a stale topic id — so the raw dict is returned
+            rather than just the message id.
         """
-        from shared.utils.telegram_send import _get_session
+        from shared.utils.telegram_send import send_telegram_message_raw
 
-        url = f"https://api.telegram.org/bot{self._bot_token}/sendMessage"
-
-        payload: Dict[str, Any] = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": parse_mode,
-        }
-
-        # Add topic ID for forum groups
-        if topic_id is not None:
-            payload["message_thread_id"] = topic_id
-
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-
-        try:
-            session = _get_session()
-            async with session.post(
-                url,
-                json=payload,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as response:
-                result: Dict[str, Any] = await response.json()
-
-            # Retry as plain text if the message was rejected for malformed Markdown
-            # (e.g. a lone underscore in a support reply like "CLEAR_TAMPER"). Without
-            # this, the reply is silently dropped instead of reaching the customer.
-            if _is_markdown_parse_error(result) and "parse_mode" in payload:
-                LOGGER.warning(
-                    "Telegram rejected message as malformed Markdown (%s); retrying as plain text",
-                    result.get("description"),
-                )
-                retry_payload = {k: v for k, v in payload.items() if k != "parse_mode"}
-                async with session.post(
-                    url,
-                    json=retry_payload,
-                    timeout=aiohttp.ClientTimeout(total=10),
-                ) as retry_response:
-                    result = await retry_response.json()
-
-            return result
-
-        except Exception as e:
-            LOGGER.exception(f"Error sending Telegram message: {e}")
-            return {
-                "ok": False,
-                "description": str(e),
-            }
+        return await send_telegram_message_raw(
+            self._bot_token,
+            chat_id,
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            topic_id=topic_id,
+        )
 
     async def handle_support_reply(
         self,

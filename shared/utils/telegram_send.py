@@ -92,23 +92,26 @@ def is_markdown_parse_error(result: Dict[str, Any]) -> bool:
     return result.get("error_code") == 400 and "can't parse entities" in description
 
 
-async def send_telegram_message_with_fallback(
+async def send_telegram_message_raw(
     bot_token: str,
     chat_id: str,
     text: str,
     reply_markup: Optional[Dict[str, Any]] = None,
     parse_mode: Optional[str] = "Markdown",
     topic_id: Optional[int | str] = None,
-) -> Optional[int]:
-    """Send a message with an automatic plain-text retry on a Markdown parse error.
+) -> Dict[str, Any]:
+    """Send a message with a plain-text retry, returning Telegram's raw response.
 
-    Sends ``text`` with ``parse_mode`` (default ``"Markdown"``). If Telegram rejects
-    it with a "can't parse entities" 400, the same text is resent without a
-    ``parse_mode`` so the content still reaches the chat as plain text. Any other
-    failure returns ``None`` after a single attempt.
+    Sends ``text`` with ``parse_mode`` (default ``"Markdown"``). If Telegram
+    rejects it with a "can't parse entities" 400, the same text is resent without
+    a ``parse_mode`` so the content still reaches the chat.
 
-    Returns:
-        The message_id of the sent message, or None on failure.
+    Returns the decoded Telegram response dict. Callers that only need the
+    message id should use :func:`send_telegram_message_with_fallback`; this
+    variant exists for callers that must inspect ``ok``/``description`` —
+    escalation routing keys off "message thread not found" to detect a stale
+    topic id. On transport failure a synthetic ``{"ok": False, "description":
+    ...}`` is returned rather than raising, so every caller sees one shape.
     """
     import json
 
@@ -148,15 +151,42 @@ async def send_telegram_message_with_fallback(
             logger.info("Retrying Telegram send as plain text after Markdown parse error")
             payload.pop("parse_mode", None)
             result = await _post(payload)
-
         if not result.get("ok"):
             logger.warning("Failed to send Telegram message: %s", result.get("description"))
-            return None
-        msg_id: Optional[int] = result.get("result", {}).get("message_id")
-        return msg_id
+        return result
     except Exception as e:
-        logger.warning(f"Error sending Telegram message with fallback: {e}")
+        logger.warning(f"Error sending Telegram message: {e}")
+        return {"ok": False, "description": str(e)}
+
+
+async def send_telegram_message_with_fallback(
+    bot_token: str,
+    chat_id: str,
+    text: str,
+    reply_markup: Optional[Dict[str, Any]] = None,
+    parse_mode: Optional[str] = "Markdown",
+    topic_id: Optional[int | str] = None,
+) -> Optional[int]:
+    """Send a message with an automatic plain-text retry on a Markdown parse error.
+
+    Thin wrapper over :func:`send_telegram_message_raw` for callers that only
+    need the message id.
+
+    Returns:
+        The message_id of the sent message, or None on failure.
+    """
+    result = await send_telegram_message_raw(
+        bot_token,
+        chat_id,
+        text,
+        reply_markup=reply_markup,
+        parse_mode=parse_mode,
+        topic_id=topic_id,
+    )
+    if not result.get("ok"):
         return None
+    msg_id: Optional[int] = result.get("result", {}).get("message_id")
+    return msg_id
 
 
 async def create_forum_topic(
@@ -198,6 +228,83 @@ async def create_forum_topic(
     except Exception as e:
         logger.warning("Error creating forum topic: %s", e)
         return None
+
+
+_MAX_TELEGRAM_CAPTION_CHARS = 1024
+
+
+async def send_telegram_photo(
+    bot_token: str,
+    chat_id: str | int,
+    photo_data: str | bytes,
+    caption: Optional[str] = None,
+    topic_id: Optional[int | str] = None,
+    reply_to_message_id: Optional[int] = None,
+    filename: str = "image.png",
+    parse_mode: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Send a photo to a Telegram chat.
+
+    Args:
+        bot_token: Telegram bot token
+        chat_id: Target chat ID
+        photo_data: Raw image bytes, or a base64-encoded string
+        caption: Optional caption; truncated to Telegram's 1024-character limit
+        topic_id: Optional topic/thread ID for forum groups
+        reply_to_message_id: Optional message to reply to
+        filename: Upload filename (only affects how Telegram labels the file)
+        parse_mode: Optional parse mode for the caption
+
+    Returns:
+        Telegram's raw response dict, or a synthetic
+        ``{"ok": False, "description": ...}`` on transport failure.
+    """
+    import base64
+
+    photo_bytes = base64.b64decode(photo_data) if isinstance(photo_data, str) else photo_data
+
+    data = aiohttp.FormData()
+    data.add_field("chat_id", str(chat_id))
+    data.add_field("photo", photo_bytes, filename=filename, content_type="image/png")
+
+    if caption:
+        if len(caption) > _MAX_TELEGRAM_CAPTION_CHARS:
+            caption = caption[: _MAX_TELEGRAM_CAPTION_CHARS - 4] + "..."
+        data.add_field("caption", caption)
+        if parse_mode:
+            data.add_field("parse_mode", parse_mode)
+    if topic_id is not None and str(topic_id).strip() != "":
+        data.add_field("message_thread_id", str(topic_id))
+    if reply_to_message_id is not None:
+        data.add_field("reply_to_message_id", str(reply_to_message_id))
+
+    logger.info(
+        "Sending photo to Telegram: chat_id=%s, topic_id=%s, size=%d bytes",
+        chat_id,
+        topic_id,
+        len(photo_bytes),
+    )
+
+    url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
+    try:
+        session = _get_session()
+        async with session.post(
+            url, data=data, timeout=aiohttp.ClientTimeout(total=30)
+        ) as response:
+            try:
+                result = cast(Dict[str, Any], await response.json())
+            except Exception:
+                result = {
+                    "ok": False,
+                    "error_code": response.status,
+                    "description": await response.text(),
+                }
+        if not result.get("ok"):
+            logger.error("Failed to send photo: %s", result.get("description"))
+        return result
+    except Exception as e:
+        logger.exception("Error sending Telegram photo: %s", e)
+        return {"ok": False, "description": str(e)}
 
 
 async def send_telegram_document(

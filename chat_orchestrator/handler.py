@@ -4776,51 +4776,24 @@ async def _send_telegram_photo(
         photo_data: Base64-encoded photo data
         caption: Optional caption for the photo
         reply_to_message_id: Optional message ID to reply to (tags the original message)
+
+    Delegates to the shared helper in shared/utils/telegram_send.py.
     """
-    import base64
+    from shared.utils.telegram_send import send_telegram_photo
 
-    try:
-        webhook_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-
-        # Decode base64 to bytes
-        photo_bytes = base64.b64decode(photo_data)
-
-        # Build form data payload
-        data = aiohttp.FormData()
-        data.add_field("chat_id", chat_id)
-        data.add_field("photo", photo_bytes, filename="image.png", content_type="image/png")
-
-        if caption:
-            data.add_field("caption", caption)
-
-        if topic_id:
-            data.add_field("message_thread_id", topic_id)
-
-        if reply_to_message_id:
-            data.add_field("reply_to_message_id", str(reply_to_message_id))
-
-        LOGGER.info(
-            f"Sending photo to Telegram: chat_id={chat_id}, "
-            f"topic_id={topic_id}, size={len(photo_bytes)} bytes"
-        )
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                webhook_url,
-                data=data,
-                timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    LOGGER.error(
-                        f"Failed to send photo: status={response.status}, error={error_text}"
-                    )
-                else:
-                    LOGGER.info("Successfully sent photo to Telegram")
-
-    except Exception as e:
-        LOGGER.exception(f"Error sending telegram photo: {e}")
-        raise
+    result = await send_telegram_photo(
+        bot_token,
+        chat_id,
+        photo_data,
+        caption=caption,
+        topic_id=topic_id,
+        reply_to_message_id=reply_to_message_id,
+    )
+    if not result.get("ok"):
+        # The caller logs failures from the exception path, so keep raising
+        # rather than returning quietly as the shared helper does.
+        raise RuntimeError(f"Telegram sendPhoto failed: {result.get('description')}")
+    LOGGER.info("Successfully sent photo to Telegram")
 
 
 async def _store_buttons_message_id(
