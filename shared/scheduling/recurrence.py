@@ -21,12 +21,21 @@ Supported recurrence expressions:
     - "last day of the month at 9am"
     - "weekdays at 8am"
     - "every 3 hours" / "hourly"
-One-time expressions ("tomorrow at 3pm", "in 2 hours", "at 5pm") return
-cron_expression=None and schedule_type="once".
+One-time expressions return cron_expression=None and schedule_type="once":
+    - "tomorrow at 3pm", "at 5pm"
+    - "in 2 hours" / "in 30 minutes" / "in 5 days"
+    - "in 3 months at 10am" / "in 3 months and 19 days at 10am"
+    - "2026-09-16 at 10:00" / "on 2026-09-16 at 10am"          (ISO date)
+    - "September 16th at 10am" / "16th September at 10am"      (named month)
+
+Inputs are passed through :func:`normalize_time_expression` first, so
+period-separated meridiems ("3 p.m."), stray whitespace and mixed case all
+parse.
 """
 
 from __future__ import annotations
 
+import calendar
 import os
 import re
 from datetime import datetime, timedelta
@@ -63,6 +72,83 @@ ORDINAL_WORDS = {
 _DAY_ALT = "monday|tuesday|wednesday|thursday|friday|saturday|sunday"
 _TIME_SUFFIX = r"\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?"
 
+# Month names and abbreviations for one-time "September 16th at 10am" style dates.
+_MONTH_ALT = (
+    "january|february|march|april|may|june|july|august|september|october|november|december"
+    "|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
+)
+MONTH_TO_NUMBER = {
+    "january": 1, "jan": 1,
+    "february": 2, "feb": 2,
+    "march": 3, "mar": 3,
+    "april": 4, "apr": 4,
+    "may": 5,
+    "june": 6, "jun": 6,
+    "july": 7, "jul": 7,
+    "august": 8, "aug": 8,
+    "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10,
+    "november": 11, "nov": 11,
+    "december": 12, "dec": 12,
+}  # fmt: skip
+
+
+def normalize_time_expression(expr: str) -> str:
+    """Normalise common time-format variations before parsing.
+
+    Handles:
+    - stray whitespace: "at  3  pm" -> "at 3 pm"
+    - period-separated meridiems: "3 p.m." -> "3pm", "A.M." -> "am"
+    - 24-hour times carrying a meridiem: "13:02pm" -> "13:02" (meridiem dropped)
+
+    The meridiem patterns are anchored to a preceding digit. An unanchored
+    ``\\ba\\.?\\s*m\\.?`` (as the schedule MCP server originally used) also matches
+    the "a m" in ordinary words, turning "in a moment" into "in amoment" and
+    "send a message" into "send amessage".
+    """
+    # Collapse runs of whitespace.
+    expr = " ".join(expr.split())
+
+    # "9 a.m." / "9 A.M." / "9 am" -> "9am"; same for pm. The leading digit is
+    # captured and re-emitted so the meridiem can only attach to a time.
+    expr = re.sub(r"(\d)\s*a\.?\s*m\.?(?![a-z])", r"\1am", expr, flags=re.IGNORECASE)
+    expr = re.sub(r"(\d)\s*p\.?\s*m\.?(?![a-z])", r"\1pm", expr, flags=re.IGNORECASE)
+
+    def _strip_invalid_meridiem(match: re.Match) -> str:
+        hour = int(match.group(1))
+        minute = match.group(2) or "00"
+        # An hour above 12 is already 24-hour; the meridiem is meaningless.
+        if hour > 12:
+            return f"{hour}:{minute}"
+        return str(match.group(0))
+
+    expr = re.sub(
+        r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)",
+        _strip_invalid_meridiem,
+        expr,
+        flags=re.IGNORECASE,
+    )
+
+    return expr.strip()
+
+
+def _days_until_weekday(
+    cron_weekday: int, now_local: datetime, target_time_today: datetime
+) -> int:
+    """Days from today until the next occurrence of a cron weekday.
+
+    ``DAY_TO_CRON`` uses cron's convention (Sunday=0, Monday=1) while
+    :meth:`datetime.weekday` uses Python's (Monday=0, Sunday=6). Subtracting one
+    from the other directly lands a day late for every weekday -- "every monday"
+    first firing on Tuesday. Only the first ``next_run_at`` was affected, since
+    later runs are derived from the cron expression itself.
+    """
+    python_target = (cron_weekday - 1) % 7
+    days_ahead = python_target - now_local.weekday()
+    if days_ahead < 0 or (days_ahead == 0 and target_time_today <= now_local):
+        days_ahead += 7
+    return days_ahead
+
 
 def parse_time_to_24h(hour: int, minute: int, ampm: Optional[str]) -> Tuple[int, int]:
     """Convert 12-hour time to 24-hour format."""
@@ -91,7 +177,7 @@ def parse_time_expression(
         - next_run_at_utc is the next execution time in UTC
         - schedule_type is 'once', 'recurring', or 'biweekly'
     """
-    expr_lower = expr.lower().strip()
+    expr_lower = normalize_time_expression(expr).lower().strip()
     tz = pytz.timezone(timezone)
     now_local = datetime.now(tz)
     now_utc = datetime.now(pytz.UTC)
@@ -251,9 +337,7 @@ def parse_time_expression(
         target_weekday = DAY_TO_CRON[day_name]
         local_time = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-        days_ahead = target_weekday - now_local.weekday()
-        if days_ahead < 0 or (days_ahead == 0 and local_time <= now_local):
-            days_ahead += 7
+        days_ahead = _days_until_weekday(target_weekday, now_local, local_time)
 
         local_time += timedelta(days=days_ahead)
         utc_time = local_time.astimezone(pytz.UTC)
@@ -289,9 +373,7 @@ def parse_time_expression(
         local_time = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
         # Find next occurrence of this weekday
-        days_ahead = target_weekday - now_local.weekday()
-        if days_ahead < 0 or (days_ahead == 0 and local_time <= now_local):
-            days_ahead += 7
+        days_ahead = _days_until_weekday(target_weekday, now_local, local_time)
 
         local_time += timedelta(days=days_ahead)
         utc_time = local_time.astimezone(pytz.UTC)
@@ -356,6 +438,41 @@ def parse_time_expression(
 
         return None, utc_time, "once"
 
+    # Relative months (one-time) — "in 3 months at 10am",
+    # "in 3 months and 19 days at 10am". Checked before the minute/hour/day
+    # pattern below, which does not accept a months unit.
+    relative_months_match = re.match(
+        r"in\s+(\d+)\s+months?(?:\s+(?:and\s+)?(\d+)\s+days?)?\s+at\s+"
+        r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+        expr_lower,
+        re.IGNORECASE,
+    )
+    if relative_months_match:
+        months = int(relative_months_match.group(1))
+        extra_days = int(relative_months_match.group(2) or 0)
+        hour = int(relative_months_match.group(3))
+        minute = int(relative_months_match.group(4) or 0)
+        ampm = relative_months_match.group(5)
+        hour, minute = parse_time_to_24h(hour, minute, ampm)
+
+        target_month = now_local.month + months
+        target_year = now_local.year + (target_month - 1) // 12
+        target_month = ((target_month - 1) % 12) + 1
+        # Clamp the day so e.g. the 31st rolling into a 30-day month is valid.
+        max_day = calendar.monthrange(target_year, target_month)[1]
+        target_day = min(now_local.day, max_day)
+
+        local_time = now_local.replace(
+            year=target_year,
+            month=target_month,
+            day=target_day,
+            hour=hour,
+            minute=minute,
+            second=0,
+            microsecond=0,
+        ) + timedelta(days=extra_days)
+        return None, local_time.astimezone(pytz.UTC), "once"
+
     # Relative time patterns (one-time)
     relative_match = re.match(r"in\s+(\d+)\s+(minutes?|hours?|days?)", expr_lower, re.IGNORECASE)
     if relative_match:
@@ -372,6 +489,55 @@ def parse_time_expression(
             raise ValueError(f"Unknown time unit: {unit}")
 
         return None, utc_time, "once"
+
+    # ISO date (one-time) — "2026-09-16 at 10:00" / "on 2026-09-16 at 10am"
+    iso_date_match = re.match(
+        r"(?:on\s+)?(\d{4})-(\d{2})-(\d{2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+        expr_lower,
+        re.IGNORECASE,
+    )
+    if iso_date_match:
+        year, month, day = (int(iso_date_match.group(i)) for i in (1, 2, 3))
+        hour = int(iso_date_match.group(4))
+        minute = int(iso_date_match.group(5) or 0)
+        hour, minute = parse_time_to_24h(hour, minute, iso_date_match.group(6))
+
+        local_time = tz.localize(datetime(year, month, day, hour, minute, 0))
+        return None, local_time.astimezone(pytz.UTC), "once"
+
+    # Named month (one-time) — "September 16th at 10am" / "16th September at 10am"
+    month_day_match = re.match(
+        rf"(?:on\s+)?({_MONTH_ALT})\s+(\d{{1,2}})(?:st|nd|rd|th)?\s+at\s+"
+        r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+        expr_lower,
+        re.IGNORECASE,
+    )
+    day_month_match = re.match(
+        rf"(?:on\s+)?(\d{{1,2}})(?:st|nd|rd|th)?\s+({_MONTH_ALT})\s+at\s+"
+        r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?",
+        expr_lower,
+        re.IGNORECASE,
+    )
+    named_date_match = month_day_match or day_month_match
+    if named_date_match:
+        if month_day_match:
+            month_str = named_date_match.group(1).lower()
+            day = int(named_date_match.group(2))
+        else:
+            day = int(named_date_match.group(1))
+            month_str = named_date_match.group(2).lower()
+        hour = int(named_date_match.group(3))
+        minute = int(named_date_match.group(4) or 0)
+        hour, minute = parse_time_to_24h(hour, minute, named_date_match.group(5))
+        month_num = MONTH_TO_NUMBER[month_str]
+
+        # No year given: use this year, rolling to next year if already past.
+        local_time = tz.localize(datetime(now_local.year, month_num, day, hour, minute, 0))
+        if local_time.astimezone(pytz.UTC) <= now_utc:
+            local_time = tz.localize(
+                datetime(now_local.year + 1, month_num, day, hour, minute, 0)
+            )
+        return None, local_time.astimezone(pytz.UTC), "once"
 
     # Try to parse as a specific time today/tomorrow
     time_only_match = re.match(r"at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?", expr_lower, re.IGNORECASE)
@@ -395,7 +561,8 @@ def parse_time_expression(
         "Try formats like: 'daily at 9am', 'every monday at 10am', "
         "'every other monday at 9am', 'monthly on the 1st at 9am', "
         "'first monday of the month at 9am', 'last day of the month at 6pm', "
-        "'tomorrow at 3pm', 'in 2 hours'"
+        "'September 16th at 10am', 'on 2026-09-16 at 10:00', "
+        "'tomorrow at 3pm', 'in 2 hours', 'in 3 months at 10am'"
     )
 
 
