@@ -159,7 +159,9 @@ class TestExpertHandler:
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkPacketService"
             ) as mock_service_class,
-            patch("orchestrator.graphs.nodes.expert_handler.GeminiClient") as mock_gemini_class,
+            patch(
+                "orchestrator.graphs.nodes.expert_handler.create_chat_llm_client"
+            ) as mock_create_llm_client,
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkflowExecutor"
             ) as mock_executor_class,
@@ -178,7 +180,7 @@ class TestExpertHandler:
             mock_service_class.return_value = mock_service
 
             mock_gemini = MagicMock()
-            mock_gemini_class.return_value = mock_gemini
+            mock_create_llm_client.return_value = mock_gemini
 
             mock_executor = MagicMock()
             mock_executor.execute_workflow = AsyncMock(
@@ -219,7 +221,9 @@ class TestExpertHandler:
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkPacketService"
             ) as mock_service_class,
-            patch("orchestrator.graphs.nodes.expert_handler.GeminiClient") as mock_gemini_class,
+            patch(
+                "orchestrator.graphs.nodes.expert_handler.create_chat_llm_client"
+            ) as mock_create_llm_client,
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkflowExecutor"
             ) as mock_executor_class,
@@ -234,7 +238,7 @@ class TestExpertHandler:
             mock_service_class.return_value = mock_service
 
             mock_gemini = MagicMock()
-            mock_gemini_class.return_value = mock_gemini
+            mock_create_llm_client.return_value = mock_gemini
 
             mock_executor = MagicMock()
             mock_executor.execute_workflow = AsyncMock(
@@ -275,7 +279,9 @@ class TestExpertHandler:
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkPacketService"
             ) as mock_service_class,
-            patch("orchestrator.graphs.nodes.expert_handler.GeminiClient") as mock_gemini_class,
+            patch(
+                "orchestrator.graphs.nodes.expert_handler.create_chat_llm_client"
+            ) as mock_create_llm_client,
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkflowExecutor"
             ) as mock_executor_class,
@@ -294,7 +300,7 @@ class TestExpertHandler:
             mock_service_class.return_value = mock_service
 
             mock_gemini = MagicMock()
-            mock_gemini_class.return_value = mock_gemini
+            mock_create_llm_client.return_value = mock_gemini
 
             mock_executor = MagicMock()
             mock_executor.execute_workflow = AsyncMock(
@@ -332,7 +338,9 @@ class TestExpertHandler:
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkPacketService"
             ) as mock_service_class,
-            patch("orchestrator.graphs.nodes.expert_handler.GeminiClient") as mock_gemini_class,
+            patch(
+                "orchestrator.graphs.nodes.expert_handler.create_chat_llm_client"
+            ) as mock_create_llm_client,
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkflowExecutor"
             ) as mock_executor_class,
@@ -348,7 +356,7 @@ class TestExpertHandler:
             mock_service_class.return_value = mock_service
 
             mock_gemini = MagicMock()
-            mock_gemini_class.return_value = mock_gemini
+            mock_create_llm_client.return_value = mock_gemini
 
             mock_executor = MagicMock()
             mock_executor.execute_workflow = AsyncMock(
@@ -391,7 +399,9 @@ class TestExpertHandler:
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkPacketService"
             ) as mock_service_class,
-            patch("orchestrator.graphs.nodes.expert_handler.GeminiClient") as mock_gemini_class,
+            patch(
+                "orchestrator.graphs.nodes.expert_handler.create_chat_llm_client"
+            ) as mock_create_llm_client,
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkflowExecutor"
             ) as mock_executor_class,
@@ -408,7 +418,7 @@ class TestExpertHandler:
             mock_service_class.return_value = mock_service
 
             mock_gemini = MagicMock()
-            mock_gemini_class.return_value = mock_gemini
+            mock_create_llm_client.return_value = mock_gemini
 
             mock_executor = MagicMock()
             mock_executor.execute_workflow = AsyncMock(
@@ -452,7 +462,9 @@ class TestExpertHandler:
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkPacketService"
             ) as mock_service_class,
-            patch("orchestrator.graphs.nodes.expert_handler.GeminiClient") as mock_gemini_class,
+            patch(
+                "orchestrator.graphs.nodes.expert_handler.create_chat_llm_client"
+            ) as mock_create_llm_client,
             patch(
                 "orchestrator.graphs.nodes.expert_handler.WorkflowExecutor"
             ) as mock_executor_class,
@@ -469,7 +481,7 @@ class TestExpertHandler:
             mock_service_class.return_value = mock_service
 
             mock_gemini = MagicMock()
-            mock_gemini_class.return_value = mock_gemini
+            mock_create_llm_client.return_value = mock_gemini
 
             mock_executor = MagicMock()
             mock_executor.execute_workflow = AsyncMock(
