@@ -43,10 +43,6 @@ SERVER_METADATA = {
         "description": "Jira analysis and comment processing",
         "module": "servers.jira_server.jira_mcp_server",
     },
-    "codebase": {
-        "description": "Codebase analysis and PR tracking",
-        "module": "servers.codebase_server.codebase_mcp_server",
-    },
     "logs": {
         "description": "Software/application log analysis (NOT equipment logs) - backend service logs from Loki",
         "module": "servers.logs_server.logs_mcp_server",

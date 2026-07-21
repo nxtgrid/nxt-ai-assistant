@@ -32,10 +32,6 @@ SERVER_CONFIGS = {
         "module": "servers.meters_server.meters_mcp_server",
         "description": "Meters data operations",
     },
-    "codebase": {
-        "module": "servers.codebase_server.codebase_mcp_server",
-        "description": "Codebase analysis and PR tracking",
-    },
     "logs": {
         "module": "servers.logs_server.logs_mcp_server",
         "description": "Intelligent log analysis with Loki and vector search",

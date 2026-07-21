@@ -14,7 +14,6 @@ Available handlers are auto-discovered by importing handler modules.
 
 # Import handler modules to trigger registration
 from orchestrator.experts.handlers import (
-    code_investigator,
     community_detector,
     community_sizing,
     doc_editor,
@@ -26,7 +25,6 @@ from orchestrator.experts.handlers import (
 )
 
 __all__ = [
-    "code_investigator",
     "community_detector",
     "community_sizing",
     "doc_editor",
