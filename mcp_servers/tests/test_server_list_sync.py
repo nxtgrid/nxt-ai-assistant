@@ -19,9 +19,9 @@ if str(_MCP_ROOT) not in sys.path:
     sys.path.insert(0, str(_MCP_ROOT))
 
 from server_registry import SERVER_METADATA  # noqa: E402
+from shared_code.config.action_flags import CONFIGURABLE_SERVERS  # noqa: E402
 
 from shared.config.flag_registry import FLAGS, MCP_SERVER_NAMES  # noqa: E402
-from shared_code.config.action_flags import CONFIGURABLE_SERVERS  # noqa: E402
 
 
 def test_configurable_servers_is_derived_not_copied():
