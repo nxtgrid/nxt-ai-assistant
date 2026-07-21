@@ -20,27 +20,13 @@ from typing import Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
-# Servers that can be disabled entirely via {SERVER_NAME}_ENABLED env var
-# This list should match SERVER_METADATA in server_registry.py
-CONFIGURABLE_SERVERS = [
-    "equipment_diagnostics",
-    "vrm",
-    "jira",
-    "codebase",
-    "logs",
-    "meters",
-    "equipment_control",
-    "payment_processor",
-    "customer",
-    "grafana",
-    "schedule",
-    "meta",
-    "grid_design",
-    "solar",
-    "knowledge",
-    "messaging",
-    "reference",  # Nigerian import regulatory data (staff only)
-]
+from shared.config.flag_registry import MCP_SERVER_NAMES
+
+# Servers that can be disabled entirely via {SERVER_NAME}_ENABLED env var.
+# Defined once in shared/config/flag_registry.py, which also generates the
+# matching *_ENABLED flag metadata; kept under the original name here for the
+# six modules that import it.
+CONFIGURABLE_SERVERS = list(MCP_SERVER_NAMES)
 
 
 class ServerName(Enum):
