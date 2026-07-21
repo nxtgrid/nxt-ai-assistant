@@ -6,12 +6,13 @@ Provides reusable HTTP session management and retry logic.
 
 import asyncio
 from functools import wraps
-from typing import Any, Callable, Optional, TypeVar
+from typing import Callable, Optional, TypeVar
 
 import aiohttp
-from shared_code.utils.logger import setup_logger
 
-logger = setup_logger("http-client")
+from shared.utils.logging import get_logger
+
+logger = get_logger("http-client")
 
 T = TypeVar("T")
 
@@ -23,9 +24,10 @@ class HTTPClientMixin:
         self.session: Optional[aiohttp.ClientSession] = None
 
     async def get_session(self) -> aiohttp.ClientSession:
-        """Get or create HTTP session."""
-        if self.session is None:
-            self.session = aiohttp.ClientSession()
+        """Get or create HTTP session, recreating if closed."""
+        if self.session is None or self.session.closed:
+            timeout = aiohttp.ClientTimeout(total=120)
+            self.session = aiohttp.ClientSession(timeout=timeout)
         return self.session
 
     async def close_session(self):
@@ -49,31 +51,39 @@ def retry_with_delay(delay_seconds: int = 5, api_name: str = "API") -> Callable:
         Decorated function with retry capability
     """
 
-    def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
         @wraps(func)
-        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        async def wrapper(*args, **kwargs) -> T:
             try:
-                return await func(*args, **kwargs)
+                # First attempt
+                return await func(*args, **kwargs)  # type: ignore[return-value,misc,no-any-return]
             except Exception as e:
-                logger.debug(f"{api_name} call failed, retrying in {delay_seconds}s: {e}")
+                if logger:
+                    logger.debug(f"{api_name} call failed, retrying in {delay_seconds}s: {e}")
+                # Wait before retry
                 await asyncio.sleep(delay_seconds)
                 try:
-                    return await func(*args, **kwargs)
+                    # Second attempt
+                    return await func(*args, **kwargs)  # type: ignore[return-value,misc,no-any-return]
                 except Exception as retry_error:
-                    return {
-                        "error": str(retry_error),
+                    # Log the real error internally; return a sanitized message to callers
+                    # so internal hostnames/paths are not exposed to the LLM or users.
+                    if logger:
+                        logger.error(f"{api_name} retry failed: {retry_error}")
+                    return {  # type: ignore[return-value]
+                        "error": f"{api_name} is temporarily unavailable.",
                         "availability_note": f"{api_name} was not available at the moment. The API may be experiencing transient downtime. Please try again later.",
                         "api_available": False,
                     }
 
-        return wrapper
+        return wrapper  # type: ignore[return-value]
 
     return decorator
 
 
 def compose_retry_handler(
-    api_func: Callable[..., Any], api_version: str, delay_seconds: int = 5
-) -> Callable[..., Any]:
+    api_func: Callable[..., T], api_version: str, delay_seconds: int = 5
+) -> Callable[..., T]:
     """
     Compose a retry handler around an API function.
 
@@ -88,18 +98,21 @@ def compose_retry_handler(
         Composed function with retry logic
     """
 
-    async def composed(*args: Any, **kwargs: Any) -> Any:
+    async def composed(*args, **kwargs) -> T:
         try:
-            return await api_func(*args, **kwargs)
+            return await api_func(*args, **kwargs)  # type: ignore[return-value,misc,no-any-return]
         except Exception:
             await asyncio.sleep(delay_seconds)
             try:
-                return await api_func(*args, **kwargs)
+                return await api_func(*args, **kwargs)  # type: ignore[return-value,misc,no-any-return]
             except Exception as retry_error:
-                return {
-                    "error": str(retry_error),
+                # Log the real error internally; return a sanitized message so internal
+                # hostnames/paths are not exposed to the LLM or users.
+                logger.error(f"{api_version} API retry failed: {retry_error}")
+                return {  # type: ignore[return-value]
+                    "error": f"{api_version} API is temporarily unavailable.",
                     "availability_note": f"{api_version} API was not available at the moment. The API may be experiencing transient downtime. Please try again later.",
                     "api_available": False,
                 }
 
-    return composed
+    return composed  # type: ignore[return-value]

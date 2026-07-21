@@ -1,81 +1,91 @@
-"""Unified configuration settings for all Anansi projects."""
+"""Runtime settings for MCP servers and the services that share their config.
+
+Moved here from ``mcp_servers/shared_code/config/settings.py``. A parallel
+``shared/config/settings.py`` used to exist defining ``SharedDatabaseSettings``
+and ``SharedServerSettings``, but nothing ever imported it -- only its own
+``__init__``. This file is the implementation services actually run on.
+
+Secrets and connection strings come from the environment (see each service's
+``.env.example``). Operator-tunable feature flags are declared separately in
+:mod:`shared.config.flag_registry`, which drives the settings UI; this module is
+only the typed read side.
+"""
 
 from typing import Optional
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Every settings class reads the same .env with no prefix and ignores unknown
+# keys, since one .env serves several services. Expressed as SettingsConfigDict
+# rather than the pydantic-v1 `class Config` the original used -- equivalent,
+# minus the PydanticDeprecatedSince20 warning on every import.
+_CONFIG = SettingsConfigDict(env_file=".env", env_prefix="", extra="ignore")
 
-class SharedDatabaseSettings(BaseSettings):
-    """Shared database configuration."""
 
-    # Auth Database - Direct PostgreSQL Connection (Read-Only)
-    auth_db_host: Optional[str] = None
-    auth_db_port: int = 6543  # Default to pooler port
-    auth_db_name: str = "postgres"
-    auth_db_user: Optional[str] = None
-    auth_db_password: Optional[str] = None
+class DatabaseSettings(BaseSettings):
+    """Database configuration settings."""
 
-    # Chat Database - Supabase (Service Role Key)
+    # Chat Database (Supabase) - REST API access
     chat_db_url: Optional[str] = None
     chat_db_service_key: Optional[str] = None
+    # For direct PostgreSQL access (optional)
+    chat_db_user: Optional[str] = None
+    chat_db_password: Optional[str] = None
 
-    # TimescaleDB
-    timescale_host: Optional[str] = None
+    # TimescaleDB settings - Username/Password authentication
+    timescale_host: str = "localhost"
     timescale_port: int = 5432
-    timescale_database: Optional[str] = None
+    timescale_database: str = "tsdb"
     timescale_user: Optional[str] = None
     timescale_password: Optional[str] = None
 
-    @property
-    def timescale_url(self) -> Optional[str]:
-        """Build TimescaleDB connection URL."""
-        if all(
-            [
-                self.timescale_host,
-                self.timescale_user,
-                self.timescale_password,
-                self.timescale_database,
-            ]
-        ):
-            return f"postgresql://{self.timescale_user}:{self.timescale_password}@{self.timescale_host}:{self.timescale_port}/{self.timescale_database}"
-        return None
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="allow",
-    )
+    model_config = _CONFIG
 
 
-class SharedServerSettings(BaseSettings):
-    """Shared server/application settings."""
+class APISettings(BaseSettings):
+    """External API configuration settings."""
 
-    # Logging
+    # Common API settings
+    timeout: int = 30
+    max_retries: int = 3
+    retry_delay: float = 1.0
+
+    # Add your external API keys here
+    openai_api_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None
+
+    model_config = _CONFIG
+
+
+class ServerSettings(BaseSettings):
+    """MCP server configuration settings."""
+
+    # Server settings
+    host: str = "0.0.0.0"
+    port: int = 8000
+    debug: bool = False
     log_level: str = "INFO"
 
-    # Environment
-    environment: str = "development"
-    debug: bool = False
+    # MCP settings
+    server_name: str = "mcp-server"
+    server_version: str = "1.0.0"
 
-    # API Keys
-    google_api_key: Optional[str] = None
-    openai_api_key: Optional[str] = None
+    # Operator identity — shown in chart watermarks and equipment error messages
+    organization_name: str = "the operator"
 
-    # Bridge/Service URLs
-    bridge_url: Optional[str] = None
-
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="allow",
-    )
+    model_config = _CONFIG
 
 
-# Global instances
-db_settings = SharedDatabaseSettings()
-server_settings = SharedServerSettings()
+# Global settings instances
+db_settings = DatabaseSettings()
+api_settings = APISettings()
+server_settings = ServerSettings()
 
-
-__all__ = ["SharedDatabaseSettings", "SharedServerSettings", "db_settings", "server_settings"]
+__all__ = [
+    "APISettings",
+    "DatabaseSettings",
+    "ServerSettings",
+    "api_settings",
+    "db_settings",
+    "server_settings",
+]

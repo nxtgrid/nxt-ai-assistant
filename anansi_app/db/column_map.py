@@ -8,7 +8,7 @@ never drift.
 Conventions
 -----------
 * ``bare`` is the table name without the ``gd_`` prefix (the prefix is applied by
-  the generator and by ``grid_app.lib.db.Repository``).
+  the generator and by ``shared.grid_design.db.Repository``).
 * ``refs``/``numeric``/``boolean`` are keyed by the *normalised* (snake_case)
   column name — i.e. the output of ``normalize.to_snake_case`` after
   ``header_overrides`` are applied.
@@ -37,7 +37,7 @@ SPURIOUS_TABS = {
 VIRTUAL_COLUMNS = {
     "components": {
         # Sourced from the BoS Purchases ledger via the cost-projection engine
-        # (see grid_app/services/cost_projection.py). ddp_cost = weighted average
+        # (see shared/grid_design/cost_projection.py). ddp_cost = weighted average
         # actual landed cost; projected_cost = time-decay inflation projection.
         "ddp_cost": "numeric",
         "projected_cost": "numeric",

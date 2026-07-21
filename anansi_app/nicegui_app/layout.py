@@ -61,13 +61,11 @@ def _render_bot_admin_nav(current_path: str, expanded: bool) -> None:
 
 def _render_grid_nav(current_path: str, expanded: bool) -> None:
     from grid_app.entities import grouped_entities
-    from grid_app.lib import settings as grid_settings
     from nicegui import app
 
-    # grid_settings is a star-import shim over shared.grid_design.settings, so the
-    # attribute is invisible to mypy — read it defensively.
-    default_show_field_ops = getattr(grid_settings, "SHOW_FIELD_OPS", False)
-    show_field_ops = app.storage.user.get("show_field_ops", default_show_field_ops)
+    from shared.grid_design import settings as grid_settings
+
+    show_field_ops = app.storage.user.get("show_field_ops", grid_settings.SHOW_FIELD_OPS)
 
     with ui.expansion("⚡ Grid Design", value=expanded).classes("w-full").style("color: #e2e8f0"):
         groups = grouped_entities()

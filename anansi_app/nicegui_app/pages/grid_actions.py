@@ -1,9 +1,8 @@
 """Framework-agnostic grid detail actions for the NiceGUI UI.
 
-Mirrors the registry in ``grid_app/actions.py`` (which calls ``st.*`` directly)
-but returns a ``(ok, message)`` tuple so the NiceGUI page can surface it via
-``ui.notify``. The heavy lifting lives in the ``grid_app.services.*`` compute
-engines, called identically to the Streamlit path.
+Each action returns a ``(ok, message)`` tuple so the NiceGUI page can surface it
+via ``ui.notify``. The heavy lifting lives in the ``shared.grid_design.*``
+compute engines, which are shared with the grid_design MCP server.
 """
 
 from __future__ import annotations

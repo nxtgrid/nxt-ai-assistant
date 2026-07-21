@@ -70,6 +70,8 @@ from shared.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 from orchestrator.clients.factory import create_chat_llm_client
+from orchestrator.clients.gemini import GeminiClient
+from orchestrator.clients.openrouter import OpenRouterClient
 from orchestrator.config.settings import AppSettings, get_settings
 from orchestrator.graphs.conversation_graph import ConversationGraphBuilder
 from orchestrator.graphs.nodes import (
@@ -123,7 +125,7 @@ class FullConversationGraphBuilder:
         self._training_image_handler = training_image_handler
 
         # These will be created lazily in prepare node
-        self._gemini: Optional[GeminiClient] = None
+        self._gemini: Optional[GeminiClient | OpenRouterClient] = None
         self._registry: Optional[ToolRegistry] = None
         self._executor: Optional[ToolExecutor] = None
         # Cached inner builder — reused across all node invocations to avoid

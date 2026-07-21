@@ -16,6 +16,7 @@ import pytest
 # contracts.py) so the real, production StepContracts for generate_distribution_map
 # et al. are available below -- not synthetic/mock contracts.
 import orchestrator.experts.handlers.package_generator  # noqa: F401  (registration side effect)
+from orchestrator.clients.gemini import GeminiTurnResult
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_contracts import ParamSpec, StepContract
 from orchestrator.experts.step_registry import get_step_registry
@@ -46,6 +47,24 @@ _REAL_PACKAGE_GENERATOR_STEPS = {
     _name: (get_step_registry().get_handler(_name), get_step_registry().get_contract(_name))
     for _name in _REAL_PACKAGE_GENERATOR_STEP_NAMES
 }
+
+
+def _turn(text: str = "LLM response text") -> GeminiTurnResult:
+    """Build the real turn object ``generate_messages`` returns.
+
+    Uses the production dataclass rather than a dict or MagicMock so these
+    tests fail loudly if the client contract changes again -- which is exactly
+    what did not happen when the executor moved from ``generate_content`` to
+    ``generate_messages`` and these mocks silently stopped matching.
+    """
+    return GeminiTurnResult(
+        text=text,
+        tool_calls=[],
+        finish_reason="STOP",
+        input_tokens=0,
+        output_tokens=0,
+        raw_response={},
+    )
 
 
 @dataclass
@@ -142,12 +161,9 @@ class TestWorkflowExecution:
 
     @pytest.fixture
     def mock_gemini(self):
-        """Create mock Gemini client."""
+        """Create mock chat LLM client (GeminiClient or OpenRouterClient)."""
         mock = MagicMock()
-        # Return proper Gemini API response format
-        mock.generate_content = AsyncMock(
-            return_value={"candidates": [{"content": {"parts": [{"text": "LLM response text"}]}}]}
-        )
+        mock.generate_messages = AsyncMock(return_value=_turn())
         return mock
 
     @pytest.fixture
@@ -232,8 +248,8 @@ class TestWorkflowExecution:
             context=base_context,
         )
 
-        # Should have called generate_content twice
-        assert mock_gemini.generate_content.call_count == 2
+        # Should have called generate_messages twice
+        assert mock_gemini.generate_messages.call_count == 2
         # Should have called complete_step twice
         assert mock_packet_service.complete_step.call_count == 2
 
@@ -363,8 +379,8 @@ class TestWorkflowExecution:
             context=base_context,
         )
 
-        # Should only call generate_content once (for step2)
-        assert mock_gemini.generate_content.call_count == 1
+        # Should only call generate_messages once (for step2)
+        assert mock_gemini.generate_messages.call_count == 1
 
     @pytest.mark.asyncio
     async def test_accumulated_results_passed_to_llm(
@@ -396,14 +412,11 @@ class TestWorkflowExecution:
                 context=base_context,
             )
 
-            # LLM should have been called with accumulated results in prompt
-            call_args = mock_gemini.generate_content.call_args
-            # Handle both positional and keyword args
-            if call_args[0]:
-                payload = call_args[0][0]
-            else:
-                payload = call_args[1]
-            prompt = payload["contents"][0]["parts"][0]["text"]
+            # LLM should have been called with accumulated results in prompt.
+            # generate_messages takes the messages list positionally; the client
+            # owns the Gemini contents/parts payload shape from there on.
+            messages = mock_gemini.generate_messages.call_args.args[0]
+            prompt = messages[0].content
             assert "fetch_data" in prompt or "important_data" in prompt
         finally:
             global_registry.unregister("fetch_data")
@@ -501,9 +514,7 @@ class TestExecuteOneStepSignal:
         `final_response = result` right before falling through to "advance".
         """
         mock_gemini = MagicMock()
-        mock_gemini.generate_content = AsyncMock(
-            return_value={"candidates": [{"content": {"parts": [{"text": "hello there"}]}}]}
-        )
+        mock_gemini.generate_messages = AsyncMock(return_value=_turn("hello there"))
         executor = WorkflowExecutor(mock_gemini, mock_packet_service, None)
         step = ParsedStep(index=0, step_type="llm", name="respond", description="d")
         summary = ExecutionSummary(packet_id="test_123", packet_type="grid_analysis")
@@ -1016,9 +1027,7 @@ class TestArtifactSweepOnStateUpdate:
     @pytest.fixture
     def mock_gemini(self):
         mock = MagicMock()
-        mock.generate_content = AsyncMock(
-            return_value={"candidates": [{"content": {"parts": [{"text": "LLM response text"}]}}]}
-        )
+        mock.generate_messages = AsyncMock(return_value=_turn())
         return mock
 
     @pytest.fixture

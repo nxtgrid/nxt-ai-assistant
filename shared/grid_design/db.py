@@ -1,9 +1,9 @@
 """Thin generic data-access layer over supabase-py.
 
 Mirrors anansi's connection approach (``CHAT_DB_SERVICE_KEY`` / ``CHAT_DB_URL``,
-see ``anansi/shared/database/connections.py``) but synchronous, since Streamlit
-runs synchronously. A single client is cached for the Streamlit session via
-``@st.cache_resource``.
+see ``mcp_servers/shared_code/database/connections.py``) but synchronous, since
+Streamlit runs synchronously. A single client is cached for the Streamlit session
+via ``@st.cache_resource``.
 
 Tables are addressed by their *bare* name (e.g. ``"grids"``); the ``gd_`` prefix
 is applied here so callers and EntitySpecs stay prefix-agnostic.

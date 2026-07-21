@@ -3,14 +3,15 @@
 from typing import Optional
 
 import asyncpg
-from shared_code.config.settings import db_settings
-from shared_code.utils.logger import setup_logger
 from sqlalchemy import create_engine
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from supabase import Client
 
-logger = setup_logger("database")
+from shared.config.settings import db_settings
+from shared.utils.logging import get_logger
+
+logger = get_logger("database")
 
 
 class DatabaseManager:

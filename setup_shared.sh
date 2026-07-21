@@ -42,13 +42,6 @@ except Exception as e:
     print(f"   ❌ shared.config import failed: {e}")
     sys.exit(1)
 
-try:
-    from shared.database import DatabaseManager
-    print("   ✅ shared.database imported successfully")
-except Exception as e:
-    print(f"   ❌ shared.database import failed: {e}")
-    sys.exit(1)
-
 print("")
 print("🎉 All shared module imports successful!")
 EOF

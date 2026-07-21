@@ -26,13 +26,13 @@ import mcp.types as types
 import vl_convert as vlc
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
-from shared_code.utils.logger import setup_logger
 from supabase import Client, create_client
 
 from shared.charts import apply_theme
 from shared.utils.date_utils import parse_iso_with_timezone
+from shared.utils.logging import get_logger
 
-logger = setup_logger("meta-server")
+logger = get_logger("meta-server")
 
 # Startup message
 print("🚀 Meta MCP Server starting...", file=sys.stderr)

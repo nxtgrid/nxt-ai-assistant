@@ -8,12 +8,11 @@ import base64
 import os
 from typing import Any, Dict
 
-import aiohttp
-
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
+from shared.utils.telegram_send import send_telegram_photo
 
 LOGGER = get_logger(__name__)
 
@@ -37,47 +36,23 @@ async def _send_telegram_photo(
     Returns:
         Dict with success status and message_id if successful
     """
-    webhook_url = f"https://api.telegram.org/bot{bot_token}/sendPhoto"
-
-    # Decode base64 to bytes
-    photo_bytes = base64.b64decode(photo_data)
-
-    # Build form data
-    data = aiohttp.FormData()
-    data.add_field("chat_id", str(chat_id))
-    data.add_field("photo", photo_bytes, filename="map.png", content_type="image/png")
-
-    if caption:
-        # Telegram caption limit is 1024 characters
-        if len(caption) > 1024:
-            caption = caption[:1020] + "..."
-        data.add_field("caption", caption)
-        data.add_field("parse_mode", "Markdown")
-
-    if topic_id:
-        data.add_field("message_thread_id", str(topic_id))
-
-    LOGGER.info(
-        f"Sending map photo to Telegram: chat_id={chat_id}, "
-        f"topic_id={topic_id}, size={len(photo_bytes)} bytes"
+    result = await send_telegram_photo(
+        bot_token,
+        chat_id,
+        photo_data,
+        caption=caption,
+        topic_id=topic_id,
+        filename="map.png",
+        parse_mode="Markdown",
     )
 
-    async with aiohttp.ClientSession() as session:
-        async with session.post(webhook_url, data=data) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                LOGGER.error(f"Failed to send photo: status={response.status}, error={error_text}")
-                return {"success": False, "error": error_text}
+    if result.get("ok"):
+        message_id = result.get("result", {}).get("message_id")
+        LOGGER.info(f"Successfully sent map photo to Telegram, message_id={message_id}")
+        return {"success": True, "message_id": message_id}
 
-            result = await response.json()
-            if result.get("ok"):
-                message_id = result.get("result", {}).get("message_id")
-                LOGGER.info(f"Successfully sent map photo to Telegram, message_id={message_id}")
-                return {"success": True, "message_id": message_id}
-            else:
-                error = result.get("description", "Unknown error")
-                LOGGER.error(f"Telegram API error: {error}")
-                return {"success": False, "error": error}
+    error = result.get("description", "Unknown error")
+    return {"success": False, "error": error}
 
 
 @register_step(

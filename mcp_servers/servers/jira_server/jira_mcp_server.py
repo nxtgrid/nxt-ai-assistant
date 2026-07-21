@@ -28,12 +28,12 @@ from mcp.types import ServerCapabilities
 load_dotenv()
 
 from shared_code.config.action_flags import ActionFlags
-from shared_code.utils.http_client import HTTPClientMixin
 
 from shared.utils.date_utils import (
     compose_date_range_query,
     filter_by_date_range,
 )
+from shared.utils.http_client import HTTPClientMixin
 from shared.utils.response_formatters import compose_error_response, compose_json_response
 
 # Configure logging to stderr for Claude Desktop visibility

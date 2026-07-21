@@ -138,44 +138,46 @@ def _j(name: str, default: str, description: str, **kw: Any) -> Flag:
     return Flag(name, FlagType.JSON, default, description, **kw)
 
 
-# MCP server enable flags share an identical shape; generate them from the names.
-# Mirrors CONFIGURABLE_SERVERS in mcp_servers/shared_code/config/action_flags.py.
-_MCP_SERVERS = [
-    "EQUIPMENT_DIAGNOSTICS",
-    "VRM",
-    "JIRA",
-    "CODEBASE",
-    "LOGS",
-    "METERS",
-    "EQUIPMENT_CONTROL",
-    "PAYMENT_PROCESSOR",
-    "CUSTOMER",
-    "GRAFANA",
-    "SCHEDULE",
-    "META",
-    "GRID_DESIGN",
-    "SOLAR",
-    "KNOWLEDGE",
-    "MESSAGING",
-    "REFERENCE",
+# Canonical list of MCP servers that can be toggled with {NAME}_ENABLED.
+#
+# This is the single source of truth for the set. It used to be written out
+# three times -- here, in mcp_servers/shared_code/config/action_flags.py as
+# CONFIGURABLE_SERVERS, and implicitly in server_registry.SERVER_METADATA --
+# and they drifted: all three still listed "codebase" after that server was
+# deleted. action_flags now imports this list, and
+# mcp_servers/tests/test_server_list_sync.py asserts SERVER_METADATA matches.
+#
+# Names are lowercase to match server_registry keys; the env var name is the
+# uppercase form (grid_design -> GRID_DESIGN_ENABLED).
+MCP_SERVER_NAMES: List[str] = [
+    "equipment_diagnostics",
+    "vrm",
+    "jira",
+    "logs",
+    "meters",
+    "equipment_control",
+    "payment_processor",
+    "customer",
+    "grafana",
+    "schedule",
+    "meta",
+    "grid_design",
+    "solar",
+    "knowledge",
+    "messaging",
+    "reference",
 ]
 
 
 def _mcp_enable_flags() -> List[Flag]:
-    pretty = {
-        "EQUIPMENT_DIAGNOSTICS": "equipment diagnostics",
-        "EQUIPMENT_CONTROL": "equipment control",
-        "PAYMENT_PROCESSOR": "payment processor",
-        "GRID_DESIGN": "grid design",
-    }
     return [
         _b(
-            f"{srv}_ENABLED",
+            f"{srv.upper()}_ENABLED",
             True,
-            f"Enable the {pretty.get(srv, srv.lower().replace('_', ' '))} MCP server "
+            f"Enable the {srv.replace('_', ' ')} MCP server "
             "(disabling hides all of its tools).",
         )
-        for srv in _MCP_SERVERS
+        for srv in MCP_SERVER_NAMES
     ]
 
 

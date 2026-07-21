@@ -30,11 +30,11 @@ import mcp.types as types
 import vl_convert as vlc
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
-from shared_code.utils.logger import setup_logger
 
 from shared.charts import apply_theme
+from shared.utils.logging import get_logger
 
-logger = setup_logger("grafana-server")
+logger = get_logger("grafana-server")
 
 # Startup message
 print("🚀 Grafana MCP Server starting...", file=sys.stderr)

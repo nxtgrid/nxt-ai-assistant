@@ -14,6 +14,7 @@ from shared.scheduling.recurrence import (
     calculate_next_run,
     format_schedule_display,
     generate_friendly_name,
+    normalize_time_expression,
     parse_time_expression,
     parse_time_to_24h,
 )
@@ -24,6 +25,7 @@ __all__ = [
     "calculate_next_run",
     "format_schedule_display",
     "generate_friendly_name",
+    "normalize_time_expression",
     "parse_time_expression",
     "parse_time_to_24h",
 ]
