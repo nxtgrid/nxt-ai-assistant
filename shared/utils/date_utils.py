@@ -4,8 +4,41 @@ Shared date/time utilities with function composition.
 Provides reusable date parsing, filtering, and formatting functions.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
+from zoneinfo import ZoneInfo
+
+from shared.utils.logging import get_logger
+
+logger = get_logger(__name__)
+
+
+def to_local_time(utc_dt: Optional[datetime], tz_name: str) -> Optional[datetime]:
+    """Convert a UTC datetime to local time in the given timezone.
+
+    Args:
+        utc_dt: A datetime in UTC, or naive (assumed UTC). None passes through.
+        tz_name: IANA timezone name (e.g. 'Africa/Lagos', 'UTC')
+
+    Returns:
+        The datetime in the target timezone, or None if the input was None.
+
+    An unresolvable ``tz_name`` is logged and the datetime is returned
+    unconverted rather than raising — a bad timezone should degrade a displayed
+    timestamp, not fail the tool call it is part of. Note that a naive input is
+    made UTC-aware *before* the lookup, so it keeps that tzinfo on the way back
+    out.
+    """
+    if utc_dt is None:
+        return None
+
+    try:
+        if utc_dt.tzinfo is None:
+            utc_dt = utc_dt.replace(tzinfo=timezone.utc)
+        return utc_dt.astimezone(ZoneInfo(tz_name))
+    except Exception as e:
+        logger.warning(f"Failed to convert to timezone {tz_name}: {e}")
+        return utc_dt
 
 
 def parse_iso_with_timezone(date_string: str) -> datetime:
