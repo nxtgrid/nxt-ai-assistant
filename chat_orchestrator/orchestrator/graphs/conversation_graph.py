@@ -1,44 +1,28 @@
-"""LangGraph-based conversation orchestration.
+"""Core conversation nodes: prepare, call the LLM, run tools, verify, escalate.
 
-This module provides a StateGraph implementation of the conversation flow,
-replacing the imperative loop in ConversationOrchestrator.handle_chat().
+This module used to assemble its own StateGraph. full_conversation_graph.py now
+owns graph construction and routing — it wires the webhook-to-response flow and
+delegates these five node bodies to ConversationGraphBuilder, so the logic lives
+here while the topology lives there. Nothing here imports langgraph any more.
 
-Phase 1 + Phase 2 graph flow:
-
-    [START] → [prepare] → [call_gemini] → [execute_tools]? → [verify]? → [respond] → [END]
-                  ↑__________________|                          |
-                  ↑_____________________________________________|  (regenerate on fail)
-                                                                ↓
-                                                        [escalate] → [respond] → [END]
-                                                        (after max verification failures)
-
-Nodes:
-    - prepare: Build initial LLM message history and context
-    - call_gemini: Call the Gemini API
-    - execute_tools: Execute requested tool calls
-    - verify: Verify response using LLM-as-judge (Phase 2)
-    - escalate: Escalate to support after verification failures (Phase 2)
-    - respond: Finalize and return response
-
-Conditional routing:
-    - After call_gemini: route to execute_tools if tool calls, else verify (or respond)
-    - After execute_tools: loop back to call_gemini
-    - After verify: respond if passed, regenerate if failed (up to max attempts), then escalate
+Nodes, in the order the full graph reaches them:
+    - _prepare_node: build the initial LLM message history and context
+    - _call_gemini_node: call the configured chat model
+    - _execute_tools_node: execute requested tool calls, then loop back
+    - _verify_node: LLM-as-judge check on the drafted response
+    - _escalate_node: hand off to support after repeated verification failures
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any, Callable, Dict, List, Literal, Optional, Set
-
-from langgraph.graph import END, START, StateGraph
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from orchestrator.clients.gemini import GeminiClient
 from orchestrator.config.settings import AppSettings, get_settings, inject_reasoning_param
 from orchestrator.graphs.state import ConversationState
 from orchestrator.models.schemas import (
-    ChatResponse,
     ConversationMessage,
     FunctionCall,
     ToolCallResult,
@@ -105,10 +89,15 @@ EscalationHandler = Callable[[FunctionCall, Dict[str, Any]], ToolCallResult]
 
 
 class ConversationGraphBuilder:
-    """Builder for creating the conversation StateGraph.
+    """Implementations of the core conversation nodes.
 
-    This class encapsulates the graph construction and provides methods for
-    injecting dependencies (Gemini client, tool executor, etc.).
+    Despite the name, this no longer builds a graph. It assembled its own
+    StateGraph until FullConversationGraphBuilder took that over; what remains
+    is the node bodies that graph delegates to — ``_prepare_node``,
+    ``_call_gemini_node``, ``_execute_tools_node``, ``_verify_node`` and
+    ``_escalate_node`` — plus the dependency wiring they share. It is
+    instantiated once per run and cached, via
+    ``FullConversationGraphBuilder._get_inner_builder``.
     """
 
     def __init__(
@@ -136,56 +125,6 @@ class ConversationGraphBuilder:
         self._gemini = gemini_client
         self._escalation_handler = escalation_handler
         self._training_image_handler = training_image_handler
-
-    def build(self) -> StateGraph:
-        """Build and return the compiled conversation graph.
-
-        Returns:
-            A compiled StateGraph ready for invocation
-        """
-        builder = StateGraph(ConversationState)
-
-        # Add nodes (Phase 1)
-        builder.add_node("prepare", self._prepare_node)
-        builder.add_node("call_gemini", self._call_gemini_node)
-        builder.add_node("execute_tools", self._execute_tools_node)
-        builder.add_node("respond", self._respond_node)
-
-        # Add nodes (Phase 2 - verification and escalation)
-        builder.add_node("verify", self._verify_node)
-        builder.add_node("escalate", self._escalate_node)
-
-        # Add edges
-        builder.add_edge(START, "prepare")
-        builder.add_edge("prepare", "call_gemini")
-        builder.add_conditional_edges(
-            "call_gemini",
-            self._route_after_gemini,
-            {
-                "execute_tools": "execute_tools",
-                "verify": "verify",
-                "respond": "respond",
-            },
-        )
-        builder.add_edge("execute_tools", "call_gemini")
-
-        # Phase 2: Verification routing
-        builder.add_conditional_edges(
-            "verify",
-            self._route_after_verify,
-            {
-                "respond": "respond",
-                "regenerate": "prepare",  # Loop back to prepare with feedback
-                "escalate": "escalate",
-            },
-        )
-
-        # Phase 2: Escalation always leads to respond
-        builder.add_edge("escalate", "respond")
-
-        builder.add_edge("respond", END)
-
-        return builder.compile()
 
     async def _prepare_node(self, state: ConversationState) -> Dict[str, Any]:
         """Prepare initial context and Gemini history.
@@ -830,34 +769,6 @@ class ConversationGraphBuilder:
             or state.get("escalation_triggered", False),
         }
 
-    async def _respond_node(self, state: ConversationState) -> Dict[str, Any]:
-        """Finalize the response.
-
-        This node:
-        1. Adds the final model message to history
-        2. Prepares the final ChatResponse data
-        """
-        final_text = state.get("final_response", "")
-        history_messages = list(state.get("history_messages", []))
-
-        # Include token metadata in the final model message
-        token_metadata = {
-            "input_tokens": state.get("total_input_tokens", 0),
-            "output_tokens": state.get("total_output_tokens", 0),
-            "total_tokens": state.get("total_input_tokens", 0)
-            + state.get("total_output_tokens", 0),
-            "gemini_rounds": state.get("current_round", 0),
-        }
-
-        final_message = ConversationMessage(
-            role="model", content=final_text, metadata=token_metadata
-        )
-        history_messages.append(final_message)
-
-        return {
-            "history_messages": history_messages,
-        }
-
     async def _verify_node(self, state: ConversationState) -> Dict[str, Any]:
         """Verify response using LLM-as-judge pattern (Phase 2).
 
@@ -1211,59 +1122,6 @@ class ConversationGraphBuilder:
 
         except Exception as e:
             LOGGER.exception(f"Error escalating loop: {e}")
-
-    def _route_after_gemini(
-        self, state: ConversationState
-    ) -> Literal["execute_tools", "verify", "respond"]:
-        """Route after Gemini call based on state.
-
-        Routes to:
-        - execute_tools: if there are pending tool calls
-        - verify: if verification is enabled and we have a final response
-        - respond: if verification is disabled or skipped
-        """
-        if state.get("pending_tool_calls"):
-            return "execute_tools"
-
-        # Check if verification is enabled and should run
-        verification_enabled = state.get("verification_enabled", False)
-        user_context = state.get("user_context")
-        is_staff = user_context.is_staff if user_context else False
-
-        # Skip verification for staff users
-        if verification_enabled and not is_staff and state.get("final_response"):
-            return "verify"
-
-        return "respond"
-
-    def _route_after_verify(
-        self, state: ConversationState
-    ) -> Literal["respond", "regenerate", "escalate"]:
-        """Route after verification based on result.
-
-        Routes to:
-        - respond: if verification passed
-        - regenerate: if verification failed and we can retry
-        - escalate: if verification failed max times
-        """
-        verification_passed = state.get("verification_passed")
-
-        if verification_passed:
-            return "respond"
-
-        # Check if we can retry
-        attempt = state.get("verification_attempt", 0)
-        max_attempts = state.get("max_verification_attempts", 2)
-
-        if attempt < max_attempts:
-            LOGGER.info(
-                f"Verification failed (attempt {attempt}/{max_attempts}), regenerating response"
-            )
-            return "regenerate"
-
-        # Max attempts reached, escalate
-        LOGGER.warning(f"Verification failed {attempt} times, escalating to support")
-        return "escalate"
 
     def _build_user_message(self, state: ConversationState) -> ConversationMessage:
         """Construct provider-neutral user message including optional context and media."""
@@ -1926,58 +1784,5 @@ class ConversationGraphBuilder:
 
         return "\n".join(lines)
 
-def build_conversation_graph(
-    gemini_client: GeminiClient,
-    registry: Optional[ToolRegistry] = None,
-    executor: Optional[ToolExecutor] = None,
-    settings: Optional[AppSettings] = None,
-    escalation_handler: Optional[EscalationHandler] = None,
-    training_image_handler: Optional[EscalationHandler] = None,
-) -> StateGraph:
-    """Factory function to build a conversation graph.
 
-    Args:
-        gemini_client: Client for Gemini API calls
-        registry: Tool registry for available tools
-        executor: Tool executor for running tool calls
-        settings: Application settings
-        escalation_handler: Handler for escalation tool calls
-        training_image_handler: Handler for training image tool calls
-
-    Returns:
-        A compiled StateGraph ready for invocation
-    """
-    builder = ConversationGraphBuilder(
-        gemini_client=gemini_client,
-        registry=registry,
-        executor=executor,
-        settings=settings,
-        escalation_handler=escalation_handler,
-        training_image_handler=training_image_handler,
-    )
-    return builder.build()
-
-
-def state_to_chat_response(state: ConversationState) -> ChatResponse:
-    """Convert final graph state to ChatResponse.
-
-    Args:
-        state: The final state after graph execution
-
-    Returns:
-        A ChatResponse with the conversation results
-    """
-    return ChatResponse(
-        final_text=state.get("final_response", ""),
-        tool_calls=state.get("accumulated_tool_calls", []),
-        tool_results=state.get("accumulated_tool_results", []),
-        raw_responses=state.get("raw_gemini_responses", []),
-        history=state.get("history_messages", []),
-    )
-
-
-__all__ = [
-    "ConversationGraphBuilder",
-    "build_conversation_graph",
-    "state_to_chat_response",
-]
+__all__ = ["ConversationGraphBuilder"]
