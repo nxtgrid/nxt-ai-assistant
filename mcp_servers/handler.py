@@ -24,10 +24,6 @@ SERVER_CONFIGS = {
         "module": "servers.jira_server.jira_mcp_server",
         "description": "Jira analysis, comment processing, and JSM Ops on-call schedule management (get on-call info for any date, create on-call overrides)",
     },
-    "vrm": {
-        "module": "servers.vrm_server.vrm_mcp_server",
-        "description": "Victron VRM monitoring and control",
-    },
     "meters": {
         "module": "servers.meters_server.meters_mcp_server",
         "description": "Meters data operations",

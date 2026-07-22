@@ -151,7 +151,6 @@ def _j(name: str, default: str, description: str, **kw: Any) -> Flag:
 # uppercase form (grid_design -> GRID_DESIGN_ENABLED).
 MCP_SERVER_NAMES: List[str] = [
     "equipment_diagnostics",
-    "vrm",
     "jira",
     "meters",
     "equipment_control",

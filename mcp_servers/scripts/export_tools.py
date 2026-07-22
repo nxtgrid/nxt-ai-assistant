@@ -34,13 +34,6 @@ from server_registry import SERVER_METADATA, _load_server
 #   - grafana builds its tools from dashboard metadata in the DB (hot-reloaded)
 DYNAMIC_MANIFEST_SERVERS = {"grafana"}
 
-# Servers confirmed dead and pending full deletion (server directory, registry
-# entry, everything) - never newly advertised in the meantime. Remove from
-# this set only alongside deleting the server itself.
-#   - vrm: superseded by equipment_diagnostics_server/platforms/vrm_platform.py
-DEAD_SERVERS_PENDING_DELETION = {"vrm"}
-
-
 def _force_full_manifests() -> None:
     """Make flag-gated tool lists export completely.
 
@@ -65,9 +58,6 @@ async def export_all_tools() -> dict:
     for server_name in SERVER_METADATA.keys():
         if server_name in DYNAMIC_MANIFEST_SERVERS:
             print(f"Skipping {server_name} (runtime-computed manifest)")
-            continue
-        if server_name in DEAD_SERVERS_PENDING_DELETION:
-            print(f"Skipping {server_name} (dead, pending deletion)")
             continue
         print(f"Exporting {server_name}...", end=" ")
         try:

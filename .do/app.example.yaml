@@ -421,9 +421,6 @@ services:
 
     envs:
       # Service-specific Feature Flags
-      - key: VRM_ACTIONS_ENABLED
-        value: "true"
-        scope: RUN_TIME
       - key: EQUIPMENT_CONTROL_ACTIONS_ENABLED
         value: "true"
         scope: RUN_TIME

@@ -70,7 +70,6 @@ When NOT to use buttons:
 * When an issue is resolved (don’t ask for next actions)
 Tools
 * grafana_query
-* vrm_status
 * jira_search
 * google_docs_create
 Packet Types
