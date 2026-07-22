@@ -17,16 +17,14 @@ import sys
 from typing import Any, Dict, List, Optional
 
 import httpx
-import mcp.server.stdio
 import mcp.types as types
 import numpy as np
 import rasterio
 import rasterio.errors
 from dotenv import load_dotenv
 from mcp.server import Server
-from mcp.server.models import InitializationOptions
-from mcp.types import ServerCapabilities
 from rasterio.mask import mask as rasterio_mask
+from shared_code.stdio_runner import run_stdio_server
 from shared_code.tool_registry import ToolRegistry
 
 from shared.utils.response_formatters import compose_error_response, compose_json_response
@@ -586,29 +584,13 @@ async def handle_read_resource(uri: str) -> str:
 
 async def main():
     """Main entry point."""
-    try:
-        logger.info("Starting Solar MCP Server...")
-        print("✅ Solar server initialized successfully", file=sys.stderr)
-
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            print("🔌 Connected to stdio streams", file=sys.stderr)
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="solar-server",
-                    server_version="1.0.0",
-                    capabilities=ServerCapabilities(),
-                ),
-            )
-    except Exception as e:
-        print(f"❌ Fatal error in solar server: {e}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc(file=sys.stderr)
-        raise
-    finally:
-        await _close_http_client()
+    logger.info("Starting Solar MCP Server...")
+    await run_stdio_server(
+        server,
+        name="solar-server",
+        label="Solar",
+        on_cleanup=_close_http_client,
+    )
 
 
 if __name__ == "__main__":

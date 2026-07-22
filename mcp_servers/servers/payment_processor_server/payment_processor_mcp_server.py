@@ -7,16 +7,14 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-import mcp.server.stdio
 import mcp.types as types
 from dotenv import load_dotenv
 from mcp.server import Server
-from mcp.server.models import InitializationOptions
-from mcp.types import ServerCapabilities
 
 # Load environment variables from .env file BEFORE importing shared_code
 load_dotenv()
 
+from shared_code.stdio_runner import run_stdio_server
 from shared_code.tool_registry import ToolRegistry
 
 from shared.utils.http_client import HTTPClientMixin
@@ -268,30 +266,13 @@ async def handle_read_resource(uri: str) -> str:
 
 async def main():
     """Main entry point."""
-    try:
-        logger.info("Starting Payment Processor MCP Server...")
-        print("✅ Payment processor server initialized successfully", file=sys.stderr)
-
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            print("🔌 Connected to stdio streams", file=sys.stderr)
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="payment-processor-server",
-                    server_version="1.0.0",
-                    capabilities=ServerCapabilities(),
-                ),
-            )
-    except Exception as e:
-        print(f"❌ Fatal error in payment processor server: {e}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc(file=sys.stderr)
-        raise
-    finally:
-        # Clean up client
-        await payment_processor_client.close()
+    logger.info("Starting Payment Processor MCP Server...")
+    await run_stdio_server(
+        server,
+        name="payment-processor-server",
+        label="Payment processor",
+        on_cleanup=payment_processor_client.close,
+    )
 
 
 if __name__ == "__main__":

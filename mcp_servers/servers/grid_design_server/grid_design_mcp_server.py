@@ -22,11 +22,9 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-import mcp.server.stdio
 import mcp.types as types
 from dotenv import load_dotenv
 from mcp.server import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
 from supabase import Client, create_client
 
 # Load environment variables BEFORE importing shared_code
@@ -35,6 +33,7 @@ load_dotenv()
 from servers.grid_design_server import gd_auth, gd_crud, internal_engine
 from servers.grid_design_server.internal_engine import compute_bom_cost_summary
 from servers.grid_design_server.tool_schemas import TOOL_SCHEMAS
+from shared_code.stdio_runner import run_stdio_server
 from shared_code.tool_registry import ToolRegistry
 
 from shared.auth.auth_service import STAFF_ORG_ID
@@ -1540,31 +1539,17 @@ handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 async def main():
     """Main entry point"""
-    try:
-        logger.info("Starting Grid Design MCP Server...")
-        logger.info(f"App ID configured: {'Yes' if GRID_DESIGN_APP_ID else 'No'}")
-        logger.info(f"Actions enabled: {GRID_DESIGN_ACTIONS_ENABLED}")
-        print("✅ Grid Design server initialized successfully", file=sys.stderr)
-
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            print("🔌 Connected to stdio streams", file=sys.stderr)
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="grid-design-server",
-                    server_version="1.0.0",
-                    capabilities=server.get_capabilities(
-                        notification_options=NotificationOptions(), experimental_capabilities={}
-                    ),
-                ),
-            )
-    except Exception as e:
-        print(f"❌ Fatal error in Grid Design server: {e}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc(file=sys.stderr)
-        raise
+    logger.info("Starting Grid Design MCP Server...")
+    logger.info(f"App ID configured: {'Yes' if GRID_DESIGN_APP_ID else 'No'}")
+    logger.info(f"Actions enabled: {GRID_DESIGN_ACTIONS_ENABLED}")
+    await run_stdio_server(
+        server,
+        name="grid-design-server",
+        label="Grid Design",
+        capabilities=server.get_capabilities(
+            notification_options=NotificationOptions(), experimental_capabilities={}
+        ),
+    )
 
 
 if __name__ == "__main__":

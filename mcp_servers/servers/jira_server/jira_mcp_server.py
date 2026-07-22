@@ -16,12 +16,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
-import mcp.server.stdio
 import mcp.types as types
 from dotenv import load_dotenv
 from mcp.server import Server
-from mcp.server.models import InitializationOptions
-from mcp.types import ServerCapabilities
 
 # Load environment variables from .env file BEFORE importing shared_code
 # This ensures db_settings picks up the correct values
@@ -29,6 +26,7 @@ load_dotenv()
 
 from servers.jira_server.tool_schemas import ACTION_TOOL_SCHEMAS, READ_ONLY_TOOL_SCHEMAS
 from shared_code.config.action_flags import ActionFlags
+from shared_code.stdio_runner import run_stdio_server
 from shared_code.tool_registry import ToolRegistry
 
 from shared.utils.date_utils import (
@@ -2758,25 +2756,7 @@ handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 async def main():
     """Main entry point"""
-    try:
-        print("✅ Jira server initialized successfully", file=sys.stderr)
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            print("🔌 Connected to stdio streams", file=sys.stderr)
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="jira-analysis",
-                    server_version="1.0.0",
-                    capabilities=ServerCapabilities(),
-                ),
-            )
-    except Exception as e:
-        print(f"❌ Fatal error in Jira server: {e}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc(file=sys.stderr)
-        raise
+    await run_stdio_server(server, name="jira-analysis", label="Jira")
 
 
 if __name__ == "__main__":
