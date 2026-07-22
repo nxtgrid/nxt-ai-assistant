@@ -34,6 +34,8 @@ from supabase import Client, create_client  # type: ignore[attr-defined]
 # Load environment variables
 load_dotenv()
 
+from shared_code.tool_registry import ToolRegistry  # noqa: E402
+
 from shared.scheduling.recurrence import (  # noqa: E402  (must follow load_dotenv)
     format_schedule_display,
     parse_time_expression,
@@ -52,6 +54,8 @@ logger = logging.getLogger("schedule-mcp-server")
 print("📅 Schedule MCP Server starting...", file=sys.stderr)
 
 server = Server("schedule-server")
+registry = ToolRegistry("schedule")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 # Staff organization ID (controls staff-only schedule features)
 STAFF_ORG_ID: int = int(os.getenv("STAFF_ORG_ID", "2"))
@@ -79,362 +83,374 @@ DEFAULT_TIMEZONE = os.getenv("DEFAULT_TIMEZONE", "UTC")
 MAX_SCHEDULES_PER_CHAT = 20
 
 
-@server.list_tools()
-async def handle_list_tools() -> List[types.Tool]:
-    """List available scheduling tools."""
-    # Fresh Tool objects per call — see tool_schemas module docstring.
-    tools = [types.Tool(**schema) for schema in TOOL_SCHEMAS]
+@registry.pre_dispatch
+async def _inject_context(name: str, arguments: Dict[str, Any]) -> Optional[List[types.TextContent]]:
+    """Build chat_id/topic_id/user_context/supabase from tool_executor-injected
+    fields and stash them on `arguments` for handlers to read.
 
-    logger.info(f"Returning {len(tools)} scheduling tools")
-    return tools
+    SECURITY: these fields are injected by the tool_executor from webhook
+    request metadata — NOT visible to or controllable by the LLM. Every
+    schedule tool requires them, so this ran unconditionally before every
+    dispatch even when the migration to ToolRegistry moved the branches
+    into separate functions; preserved here verbatim as a pre_dispatch hook.
+    """
+    chat_id = arguments.get("chat_id", "")  # Injected by tool_executor
+    topic_id = arguments.get("topic_id")  # Injected by tool_executor
+    user_email = arguments.get("user_email", "")  # Injected by tool_executor
+    organization_id = arguments.get("organization_id")  # Injected by tool_executor
+    session_id = arguments.get("session_id", "")  # Injected by tool_executor
 
-
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
-    """Handle tool calls."""
-    # Normalize tool name - accept both "user_command" and "schedule_user_command"
-    # This handles the case where the orchestrator strips the prefix when routing via bridge
-    tool_name_map = {
-        "user_command": "schedule_user_command",
-        "user_schedules": "list_user_schedules",
-        "user_schedule": "cancel_user_schedule",  # For cancel/pause/resume
+    # Build user context from injected values (not from LLM-provided data)
+    user_context = {
+        "user_id": user_email or session_id,  # Use email as user_id, fallback to session
+        "user_email": user_email,
+        "organization_ids": [str(organization_id)] if organization_id else [],
+        "is_staff": True,  # Schedule command is staff-only
+        "source": "telegram",
     }
-    if name in tool_name_map:
-        name = tool_name_map[name]
-    elif not name.startswith(("schedule_", "list_", "cancel_", "pause_", "resume_")):
-        # Try adding schedule_ prefix as fallback
-        name = f"schedule_{name}"
 
-    try:
-        # SECURITY: Build user context entirely from server-injected arguments
-        # The tool executor injects these fields - they are NOT visible to the LLM
-        # and cannot be manipulated by the LLM
-        chat_id = arguments.get("chat_id", "")  # Injected by tool_executor
-        topic_id = arguments.get("topic_id")  # Injected by tool_executor
-        user_email = arguments.get("user_email", "")  # Injected by tool_executor
-        organization_id = arguments.get("organization_id")  # Injected by tool_executor
-        session_id = arguments.get("session_id", "")  # Injected by tool_executor
-
-        # Build user context from injected values (not from LLM-provided data)
-        user_context = {
-            "user_id": user_email or session_id,  # Use email as user_id, fallback to session
-            "user_email": user_email,
-            "organization_ids": [str(organization_id)] if organization_id else [],
-            "is_staff": True,  # Schedule command is staff-only
-            "source": "telegram",
-        }
-
-        if not chat_id:
-            return [
-                types.TextContent(
-                    type="text",
-                    text="Error: Could not determine chat ID. This tool must be called from a chat context.",
-                )
-            ]
-
-        supabase = get_supabase()
-        if not supabase:
-            return [
-                types.TextContent(
-                    type="text",
-                    text="Error: Database not configured",
-                )
-            ]
-
-        if name == "schedule_user_command":
-            return await handle_schedule_command(
-                supabase, arguments, user_context, chat_id, topic_id
-            )
-
-        elif name == "list_user_schedules":
-            return await handle_list_schedules(supabase, arguments, chat_id, topic_id)
-
-        elif name == "cancel_user_schedule":
-            return await handle_cancel_schedule(supabase, arguments, chat_id)
-
-        elif name == "pause_user_schedule":
-            return await handle_pause_schedule(supabase, arguments, chat_id)
-
-        elif name == "resume_user_schedule":
-            return await handle_resume_schedule(supabase, arguments, chat_id)
-
-        elif name == "create_user_agent":
-            # Import here to avoid circular imports at module level
-            import sys
-
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-            from orchestrator.services.user_agent_service import (
-                UserAgentService,
-                _paraphrase_to_check,
-            )
-
-            raw_check = arguments["check_prompt"]
-            raw_response = arguments["response_prompt"]
-            check_prompt = _paraphrase_to_check(
-                original_request=raw_check, llm_paraphrase=raw_check
-            )
-            response_prompt = _paraphrase_to_check(
-                original_request=raw_response, llm_paraphrase=raw_response
-            )
-
-            # Resolve anchor entity (grid/org) for context enrichment
-            anchor_entity_name = arguments.get("anchor_entity", "")
-            anchor_metadata: dict = {}
-            anchor_entity_type = "user_monitor"
-            anchor_entity_id = None
-
-            if anchor_entity_name:
-                try:
-                    from shared.auth import get_auth_service
-
-                    auth_svc = get_auth_service()
-                    pool = await auth_svc._get_db_pool()
-                    async with pool.acquire() as conn:
-                        # Try grid first (fuzzy match)
-                        grid_rows = await conn.fetch(
-                            "SELECT name FROM grids "
-                            "WHERE is_hidden_from_reporting IS NOT TRUE "
-                            "AND deleted_at IS NULL"
-                        )
-                        grid_names = [r["name"] for r in grid_rows]
-
-                        from shared.utils.grid_matcher import find_best_grid_match
-
-                        matched_grid, _, _ = find_best_grid_match(
-                            anchor_entity_name, grid_names, threshold=80
-                        )
-
-                        if matched_grid:
-                            grid_row = await conn.fetchrow(
-                                "SELECT id, name, organization_id, "
-                                "internal_telegram_group_chat_id, "
-                                "internal_telegram_group_thread_id "
-                                "FROM grids WHERE name = $1 AND deleted_at IS NULL",
-                                matched_grid,
-                            )
-                            if grid_row:
-                                anchor_entity_type = "grid"
-                                anchor_entity_id = str(grid_row["id"])
-                                org_row = await conn.fetchrow(
-                                    "SELECT name, formal_name FROM organizations WHERE id = $1",
-                                    grid_row["organization_id"],
-                                )
-                                anchor_metadata = {
-                                    "grid_name": grid_row["name"],
-                                    "grid_id": str(grid_row["id"]),
-                                    "organization_id": grid_row["organization_id"],
-                                    "organization_name": (
-                                        (org_row["formal_name"] or org_row["name"])
-                                        if org_row
-                                        else ""
-                                    ),
-                                    "telegram_chat_id": str(
-                                        grid_row["internal_telegram_group_chat_id"] or ""
-                                    ),
-                                    "telegram_topic_id": str(
-                                        grid_row["internal_telegram_group_thread_id"] or ""
-                                    ),
-                                }
-                        else:
-                            # Try org name match
-                            org_rows = await conn.fetch(
-                                "SELECT id, name, formal_name "
-                                "FROM organizations WHERE deleted_at IS NULL"
-                            )
-                            org_names = [r["name"] for r in org_rows]
-                            matched_org, _, _ = find_best_grid_match(
-                                anchor_entity_name, org_names, threshold=80
-                            )
-                            if matched_org:
-                                org = next(r for r in org_rows if r["name"] == matched_org)
-                                anchor_entity_type = "organization"
-                                anchor_entity_id = str(org["id"])
-                                anchor_metadata = {
-                                    "organization_id": org["id"],
-                                    "organization_name": (org["formal_name"] or org["name"]),
-                                }
-                except Exception as e:
-                    logger.warning(f"Could not resolve anchor entity '{anchor_entity_name}': {e}")
-
-            svc = UserAgentService()
-            result = await svc.create_agent(
-                instance_name=arguments["instance_name"],
-                check_prompt=check_prompt,
-                response_prompt=response_prompt,
-                wake_schedule=arguments.get("wake_schedule", "0 8-18 * * 1-5"),
-                auto_complete=arguments.get("auto_complete", True),
-                model_tier=arguments.get("model_tier", "standard"),
-                agent_type=arguments.get("agent_type", "condition_monitor"),
-                user_id=arguments.get("user_id", ""),
-                user_email=arguments.get("user_email", ""),
-                organization_id=arguments.get("organization_id", 0),
-                chat_id=arguments.get("chat_id", ""),
-                topic_id=arguments.get("topic_id"),
-                anchor_entity_type=anchor_entity_type,
-                anchor_entity_id=anchor_entity_id,
-                anchor_metadata=anchor_metadata,
-            )
-
-            if result.get("success"):
-                view_url = ""
-                try:
-                    from orchestrator.mini_app.schemas import build_agent_state_url
-
-                    url = build_agent_state_url(result["instance_id"])
-                    if url:
-                        view_url = f"\nView State: {url}"
-                except Exception:
-                    pass
-
-                text = (
-                    f"Agent created successfully!\n\n"
-                    f"ID: {result['instance_id']}\n"
-                    f"Name: {result['instance_name']}\n"
-                    f"Check: {result['check_prompt']}\n"
-                    f"Response: {result['response_prompt']}\n"
-                    f"Schedule: {result['wake_schedule']}\n"
-                    f"Auto-complete: {'Yes' if arguments.get('auto_complete', True) else 'No'}"
-                    f"{view_url}"
-                )
-            else:
-                text = f"Failed to create agent: {result.get('error', 'Unknown error')}"
-
-            return [types.TextContent(type="text", text=text)]
-
-        elif name == "list_user_agents":
-            import sys
-
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-            from orchestrator.services.user_agent_service import UserAgentService
-
-            svc = UserAgentService()
-            agents = await svc.list_agents(
-                user_email=arguments.get("user_email", ""),
-                chat_id=arguments.get("chat_id", ""),
-                include_terminated=arguments.get("include_terminated", False),
-            )
-
-            if not agents:
-                text = "You have no active monitoring agents."
-            else:
-                lines = [f"Your monitoring agents ({len(agents)}):"]
-                for i, a in enumerate(agents, 1):
-                    status_icon = {
-                        "active": "\U0001f7e2",
-                        "paused": "\u23f8\ufe0f",
-                        "executing": "\u26a1",
-                        "error": "\U0001f534",
-                        "terminated": "\u2b1b",
-                    }.get(a["status"], "\u2753")
-                    wakes = a.get("wake_count", 0)
-                    last = a.get("last_woke_at", "never")
-                    if isinstance(last, str) and last != "never":
-                        last = last[:16].replace("T", " ")
-                    creator = a.get("created_by", "")
-                    creator_suffix = f" | By: {creator}" if creator else ""
-                    lines.append(
-                        f"\n{i}. {status_icon} **{a['instance_name']}** (`{a['id'][:8]}...`)\n"
-                        f"   Check: {a.get('check_prompt', '?')}\n"
-                        f"   Response: {(a.get('response_prompt') or '?')[:80]}\n"
-                        f"   Status: {a['status']} | Wakes: {wakes} | Last: {last}{creator_suffix}"
-                    )
-                text = "\n".join(lines)
-
-            return [types.TextContent(type="text", text=text)]
-
-        elif name == "cancel_user_agent":
-            import sys
-
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-            from orchestrator.services.user_agent_service import UserAgentService
-
-            svc = UserAgentService()
-            result = await svc.cancel_agent(
-                instance_id=arguments["instance_id"],
-                user_email=arguments.get("user_email", ""),
-                chat_id=arguments.get("chat_id", ""),
-                organization_id=arguments.get("organization_id", 0),
-            )
-            text = result.get("message") or result.get("error", "Unknown error")
-            return [types.TextContent(type="text", text=text)]
-
-        elif name == "start_expert_workflow":
-            import sys
-
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-            from orchestrator.services.expert_tool_runner import start_expert_workflow
-
-            result = await start_expert_workflow(
-                expert_id=arguments["expert_id"],
-                packet_type=arguments["packet_type"],
-                inputs=arguments.get("inputs", {}),
-                agent_instance_id=arguments.get("agent_instance_id", ""),
-                agent_thread_id=arguments.get("agent_thread_id", ""),
-                organization_id=arguments.get("organization_id", STAFF_ORG_ID),
-                user_email=arguments.get("user_email", "agent@system"),
-                prefilled_inputs=arguments.get("prefilled_inputs"),
-            )
-
-            if result.get("success"):
-                text = (
-                    f"Expert workflow started.\n\n"
-                    f"Packet ID: {result['packet_id']}\n"
-                    f"Status: {result['status']}\n\n"
-                    f"{result.get('message', '')}"
-                )
-            else:
-                text = f"Failed to start workflow: {result.get('error', 'Unknown error')}"
-
-            return [types.TextContent(type="text", text=text)]
-
-        elif name == "check_workflow_result":
-            import sys
-
-            sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-            from orchestrator.services.expert_tool_runner import check_workflow_result
-
-            result = await check_workflow_result(
-                packet_id=arguments["packet_id"],
-            )
-
-            if not result.get("success"):
-                text = f"Error: {result.get('error', 'Unknown error')}"
-            else:
-                status = result.get("status", "unknown")
-                lines = [
-                    f"Workflow Status: {status}",
-                    f"Expert: {result.get('expert_id', '?')}",
-                    f"Type: {result.get('packet_type', '?')}",
-                ]
-                if status == "completed":
-                    outputs = result.get("outputs", {})
-                    lines.append(f"Completed at: {result.get('completed_at', '?')}")
-                    lines.append(f"Outputs: {json.dumps(outputs, indent=2, default=str)[:2000]}")
-                elif status == "failed":
-                    lines.append(f"Error: {result.get('error', '?')}")
-                elif status in ("pending", "in_progress"):
-                    lines.append(f"Current step: {result.get('current_step', '?')}")
-                    lines.append(f"Steps completed: {result.get('steps_completed', [])}")
-                text = "\n".join(lines)
-
-            return [types.TextContent(type="text", text=text)]
-
-        else:
-            return [
-                types.TextContent(
-                    type="text",
-                    text=f"Unknown tool: {name}",
-                )
-            ]
-
-    except Exception as e:
-        logger.error(f"Error in {name}: {e}", exc_info=True)
+    if not chat_id:
         return [
             types.TextContent(
                 type="text",
-                text=f"Error: {str(e)}",
+                text="Error: Could not determine chat ID. This tool must be called from a chat context.",
             )
         ]
+
+    supabase = get_supabase()
+    if not supabase:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: Database not configured",
+            )
+        ]
+
+    arguments["_chat_id"] = chat_id
+    arguments["_topic_id"] = topic_id
+    arguments["_user_context"] = user_context
+    arguments["_supabase"] = supabase
+    return None
+
+
+@registry.tool(
+    "schedule_user_command",
+    _SCHEMAS_BY_NAME["schedule_user_command"],
+    aliases=("user_command",),
+)
+async def _tool_schedule_user_command(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    return await handle_schedule_command(
+        arguments["_supabase"],
+        arguments,
+        arguments["_user_context"],
+        arguments["_chat_id"],
+        arguments["_topic_id"],
+    )
+
+
+@registry.tool(
+    "list_user_schedules",
+    _SCHEMAS_BY_NAME["list_user_schedules"],
+    aliases=("user_schedules",),
+)
+async def _tool_list_user_schedules(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    return await handle_list_schedules(
+        arguments["_supabase"], arguments, arguments["_chat_id"], arguments["_topic_id"]
+    )
+
+
+@registry.tool(
+    "cancel_user_schedule",
+    _SCHEMAS_BY_NAME["cancel_user_schedule"],
+    aliases=("user_schedule",),
+)
+async def _tool_cancel_user_schedule(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    return await handle_cancel_schedule(arguments["_supabase"], arguments, arguments["_chat_id"])
+
+
+@registry.tool("pause_user_schedule", _SCHEMAS_BY_NAME["pause_user_schedule"])
+async def _tool_pause_user_schedule(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    return await handle_pause_schedule(arguments["_supabase"], arguments, arguments["_chat_id"])
+
+
+@registry.tool("resume_user_schedule", _SCHEMAS_BY_NAME["resume_user_schedule"])
+async def _tool_resume_user_schedule(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    return await handle_resume_schedule(arguments["_supabase"], arguments, arguments["_chat_id"])
+
+
+@registry.tool("create_user_agent", _SCHEMAS_BY_NAME["create_user_agent"])
+async def _tool_create_user_agent(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    # Import here to avoid circular imports at module level
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    from orchestrator.services.user_agent_service import (
+        UserAgentService,
+        _paraphrase_to_check,
+    )
+
+    raw_check = arguments["check_prompt"]
+    raw_response = arguments["response_prompt"]
+    check_prompt = _paraphrase_to_check(
+        original_request=raw_check, llm_paraphrase=raw_check
+    )
+    response_prompt = _paraphrase_to_check(
+        original_request=raw_response, llm_paraphrase=raw_response
+    )
+
+    # Resolve anchor entity (grid/org) for context enrichment
+    anchor_entity_name = arguments.get("anchor_entity", "")
+    anchor_metadata: dict = {}
+    anchor_entity_type = "user_monitor"
+    anchor_entity_id = None
+
+    if anchor_entity_name:
+        try:
+            from shared.auth import get_auth_service
+
+            auth_svc = get_auth_service()
+            pool = await auth_svc._get_db_pool()
+            async with pool.acquire() as conn:
+                # Try grid first (fuzzy match)
+                grid_rows = await conn.fetch(
+                    "SELECT name FROM grids "
+                    "WHERE is_hidden_from_reporting IS NOT TRUE "
+                    "AND deleted_at IS NULL"
+                )
+                grid_names = [r["name"] for r in grid_rows]
+
+                from shared.utils.grid_matcher import find_best_grid_match
+
+                matched_grid, _, _ = find_best_grid_match(
+                    anchor_entity_name, grid_names, threshold=80
+                )
+
+                if matched_grid:
+                    grid_row = await conn.fetchrow(
+                        "SELECT id, name, organization_id, "
+                        "internal_telegram_group_chat_id, "
+                        "internal_telegram_group_thread_id "
+                        "FROM grids WHERE name = $1 AND deleted_at IS NULL",
+                        matched_grid,
+                    )
+                    if grid_row:
+                        anchor_entity_type = "grid"
+                        anchor_entity_id = str(grid_row["id"])
+                        org_row = await conn.fetchrow(
+                            "SELECT name, formal_name FROM organizations WHERE id = $1",
+                            grid_row["organization_id"],
+                        )
+                        anchor_metadata = {
+                            "grid_name": grid_row["name"],
+                            "grid_id": str(grid_row["id"]),
+                            "organization_id": grid_row["organization_id"],
+                            "organization_name": (
+                                (org_row["formal_name"] or org_row["name"])
+                                if org_row
+                                else ""
+                            ),
+                            "telegram_chat_id": str(
+                                grid_row["internal_telegram_group_chat_id"] or ""
+                            ),
+                            "telegram_topic_id": str(
+                                grid_row["internal_telegram_group_thread_id"] or ""
+                            ),
+                        }
+                else:
+                    # Try org name match
+                    org_rows = await conn.fetch(
+                        "SELECT id, name, formal_name "
+                        "FROM organizations WHERE deleted_at IS NULL"
+                    )
+                    org_names = [r["name"] for r in org_rows]
+                    matched_org, _, _ = find_best_grid_match(
+                        anchor_entity_name, org_names, threshold=80
+                    )
+                    if matched_org:
+                        org = next(r for r in org_rows if r["name"] == matched_org)
+                        anchor_entity_type = "organization"
+                        anchor_entity_id = str(org["id"])
+                        anchor_metadata = {
+                            "organization_id": org["id"],
+                            "organization_name": (org["formal_name"] or org["name"]),
+                        }
+        except Exception as e:
+            logger.warning(f"Could not resolve anchor entity '{anchor_entity_name}': {e}")
+
+    svc = UserAgentService()
+    result = await svc.create_agent(
+        instance_name=arguments["instance_name"],
+        check_prompt=check_prompt,
+        response_prompt=response_prompt,
+        wake_schedule=arguments.get("wake_schedule", "0 8-18 * * 1-5"),
+        auto_complete=arguments.get("auto_complete", True),
+        model_tier=arguments.get("model_tier", "standard"),
+        agent_type=arguments.get("agent_type", "condition_monitor"),
+        user_id=arguments.get("user_id", ""),
+        user_email=arguments.get("user_email", ""),
+        organization_id=arguments.get("organization_id", 0),
+        chat_id=arguments.get("chat_id", ""),
+        topic_id=arguments.get("topic_id"),
+        anchor_entity_type=anchor_entity_type,
+        anchor_entity_id=anchor_entity_id,
+        anchor_metadata=anchor_metadata,
+    )
+
+    if result.get("success"):
+        view_url = ""
+        try:
+            from orchestrator.mini_app.schemas import build_agent_state_url
+
+            url = build_agent_state_url(result["instance_id"])
+            if url:
+                view_url = f"\nView State: {url}"
+        except Exception:
+            pass
+
+        text = (
+            f"Agent created successfully!\n\n"
+            f"ID: {result['instance_id']}\n"
+            f"Name: {result['instance_name']}\n"
+            f"Check: {result['check_prompt']}\n"
+            f"Response: {result['response_prompt']}\n"
+            f"Schedule: {result['wake_schedule']}\n"
+            f"Auto-complete: {'Yes' if arguments.get('auto_complete', True) else 'No'}"
+            f"{view_url}"
+        )
+    else:
+        text = f"Failed to create agent: {result.get('error', 'Unknown error')}"
+
+    return [types.TextContent(type="text", text=text)]
+
+
+@registry.tool("list_user_agents", _SCHEMAS_BY_NAME["list_user_agents"])
+async def _tool_list_user_agents(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    from orchestrator.services.user_agent_service import UserAgentService
+
+    svc = UserAgentService()
+    agents = await svc.list_agents(
+        user_email=arguments.get("user_email", ""),
+        chat_id=arguments.get("chat_id", ""),
+        include_terminated=arguments.get("include_terminated", False),
+    )
+
+    if not agents:
+        text = "You have no active monitoring agents."
+    else:
+        lines = [f"Your monitoring agents ({len(agents)}):"]
+        for i, a in enumerate(agents, 1):
+            status_icon = {
+                "active": "\U0001f7e2",
+                "paused": "\u23f8\ufe0f",
+                "executing": "\u26a1",
+                "error": "\U0001f534",
+                "terminated": "\u2b1b",
+            }.get(a["status"], "\u2753")
+            wakes = a.get("wake_count", 0)
+            last = a.get("last_woke_at", "never")
+            if isinstance(last, str) and last != "never":
+                last = last[:16].replace("T", " ")
+            creator = a.get("created_by", "")
+            creator_suffix = f" | By: {creator}" if creator else ""
+            lines.append(
+                f"\n{i}. {status_icon} **{a['instance_name']}** (`{a['id'][:8]}...`)\n"
+                f"   Check: {a.get('check_prompt', '?')}\n"
+                f"   Response: {(a.get('response_prompt') or '?')[:80]}\n"
+                f"   Status: {a['status']} | Wakes: {wakes} | Last: {last}{creator_suffix}"
+            )
+        text = "\n".join(lines)
+
+    return [types.TextContent(type="text", text=text)]
+
+
+@registry.tool("cancel_user_agent", _SCHEMAS_BY_NAME["cancel_user_agent"])
+async def _tool_cancel_user_agent(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    from orchestrator.services.user_agent_service import UserAgentService
+
+    svc = UserAgentService()
+    result = await svc.cancel_agent(
+        instance_id=arguments["instance_id"],
+        user_email=arguments.get("user_email", ""),
+        chat_id=arguments.get("chat_id", ""),
+        organization_id=arguments.get("organization_id", 0),
+    )
+    text = result.get("message") or result.get("error", "Unknown error")
+    return [types.TextContent(type="text", text=text)]
+
+
+@registry.tool("start_expert_workflow", _SCHEMAS_BY_NAME["start_expert_workflow"])
+async def _tool_start_expert_workflow(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    from orchestrator.services.expert_tool_runner import start_expert_workflow
+
+    result = await start_expert_workflow(
+        expert_id=arguments["expert_id"],
+        packet_type=arguments["packet_type"],
+        inputs=arguments.get("inputs", {}),
+        agent_instance_id=arguments.get("agent_instance_id", ""),
+        agent_thread_id=arguments.get("agent_thread_id", ""),
+        organization_id=arguments.get("organization_id", STAFF_ORG_ID),
+        user_email=arguments.get("user_email", "agent@system"),
+        prefilled_inputs=arguments.get("prefilled_inputs"),
+    )
+
+    if result.get("success"):
+        text = (
+            f"Expert workflow started.\n\n"
+            f"Packet ID: {result['packet_id']}\n"
+            f"Status: {result['status']}\n\n"
+            f"{result.get('message', '')}"
+        )
+    else:
+        text = f"Failed to start workflow: {result.get('error', 'Unknown error')}"
+
+    return [types.TextContent(type="text", text=text)]
+
+
+@registry.tool("check_workflow_result", _SCHEMAS_BY_NAME["check_workflow_result"])
+async def _tool_check_workflow_result(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    from orchestrator.services.expert_tool_runner import check_workflow_result
+
+    result = await check_workflow_result(
+        packet_id=arguments["packet_id"],
+    )
+
+    if not result.get("success"):
+        text = f"Error: {result.get('error', 'Unknown error')}"
+    else:
+        status = result.get("status", "unknown")
+        lines = [
+            f"Workflow Status: {status}",
+            f"Expert: {result.get('expert_id', '?')}",
+            f"Type: {result.get('packet_type', '?')}",
+        ]
+        if status == "completed":
+            outputs = result.get("outputs", {})
+            lines.append(f"Completed at: {result.get('completed_at', '?')}")
+            lines.append(f"Outputs: {json.dumps(outputs, indent=2, default=str)[:2000]}")
+        elif status == "failed":
+            lines.append(f"Error: {result.get('error', '?')}")
+        elif status in ("pending", "in_progress"):
+            lines.append(f"Current step: {result.get('current_step', '?')}")
+            lines.append(f"Steps completed: {result.get('steps_completed', [])}")
+        text = "\n".join(lines)
+
+    return [types.TextContent(type="text", text=text)]
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 async def handle_schedule_command(
