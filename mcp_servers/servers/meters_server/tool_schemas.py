@@ -180,16 +180,4 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         },
         "visible_to_customer": False,
     },
-    {
-        "name": "meters_debug_info",
-        "description": (
-            "[READ-ONLY] Get debug information about the meters server configuration and OAuth "
-            "token cache status. Shows which APIs are configured (Calin V1, V2, Chirpstack, "
-            "Supabase) and lists active/expired OAuth tokens for Calin V2. This tool ONLY "
-            "retrieves diagnostic information - it does NOT modify configuration or take "
-            "actions."
-        ),
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
-        "visible_to_customer": False,
-    },
 ]

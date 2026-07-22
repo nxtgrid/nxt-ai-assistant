@@ -2219,40 +2219,6 @@ async def _tool_get_meter_reading_task_status(
     return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
 
-@registry.tool("meters_debug_info", _SCHEMAS_BY_NAME["meters_debug_info"])
-async def _tool_meters_debug_info(arguments: Dict[str, Any]) -> List[types.TextContent]:
-    # Get Supabase authentication status
-    supabase_auth_status = {
-        "authenticated": bool(getattr(client, "supabase_access_token", None)),
-        "user_email": (
-            SUPABASE_USER_EMAIL if getattr(client, "supabase_access_token", None) else None
-        ),
-        "token_valid": False,
-    }
-    if getattr(client, "supabase_access_token", None) and getattr(
-        client, "supabase_token_expiry", None
-    ):
-        current_time = datetime.now().timestamp() * 1000
-        token_expiry = getattr(client, "supabase_token_expiry", 0)
-        supabase_auth_status["token_valid"] = token_expiry > current_time
-        supabase_auth_status["token_expires_at"] = datetime.fromtimestamp(
-            token_expiry / 1000
-        ).isoformat()
-
-    result = {
-        "token_cache": client.get_token_cache_status(),
-        "supabase_auth": supabase_auth_status,
-        "config": {
-            "calin_v1_configured": bool(CALIN_V1_BASE_URL),
-            "calin_v2_configured": bool(CALIN_V2_BASE_URL),
-            "chirpstack_configured": bool(CHIRPSTACK_BASE_URL),
-            "supabase_configured": bool(SUPABASE_URL and SUPABASE_ANON_KEY),
-            "supabase_rls_enabled": bool(SUPABASE_USER_EMAIL and SUPABASE_USER_PASSWORD),
-        },
-    }
-    return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
-
-
 handle_list_tools = server.list_tools()(registry.handle_list_tools)
 handle_call_tool = server.call_tool()(registry.handle_call_tool)
 

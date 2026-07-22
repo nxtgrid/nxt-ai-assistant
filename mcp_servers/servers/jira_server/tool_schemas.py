@@ -6,11 +6,9 @@ serves in production): tool names are unprefixed (``get_issue``, not
 ``jira_get_issue``) to match the manifest — the orchestrator adds the
 ``jira_`` server prefix when advertising, and ``handle_call_tool`` normalizes
 it back on dispatch, so both naming layers keep working. For tools present in
-both places, the JSON descriptions won; tools only defined here (analysis and
-categorization helpers) keep their original text and are simply not yet in the
-JSON manifest. ``mcp_servers/tests/test_tool_manifest_sync.py`` enforces that
-the JSON stays a subset of this file, so regenerating the manifest with
-``scripts/export_tools.py`` can only add tools, never drop them.
+both places, the JSON descriptions won. ``mcp_servers/tests/test_tool_manifest_sync.py``
+enforces that the JSON stays a subset of this file, so regenerating the manifest
+with ``scripts/export_tools.py`` can only add tools, never drop them.
 
 Split in two because the server always exposed them that way:
 ``READ_ONLY_TOOL_SCHEMAS`` are always listed, ``ACTION_TOOL_SCHEMAS`` only when
@@ -95,129 +93,6 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'search_issues_with_com
                                           'description': 'Number of days to look back. Default: '
                                                          '30'}}},
   'visible_to_customer': False},
- {'name': 'analyze_comments',
-  'description': 'Analyze and summarize comments from Jira issues with date filtering',
-  'inputSchema': {'type': 'object',
-                  'properties': {'issue_keys': {'type': 'array',
-                                                'items': {'type': 'string'},
-                                                'description': 'List of issue keys to analyze'},
-                                 'comment_start_date': {'type': 'string',
-                                                        'description': 'Filter comments after this '
-                                                                       'date (ISO format)'},
-                                 'comment_end_date': {'type': 'string',
-                                                      'description': 'Filter comments before this '
-                                                                     'date (ISO format)'},
-                                 'include_sentiment': {'type': 'boolean',
-                                                       'default': True,
-                                                       'description': 'Include sentiment analysis'},
-                                 'include_themes': {'type': 'boolean',
-                                                    'default': True,
-                                                    'description': 'Include theme extraction'},
-                                 'include_action_items': {'type': 'boolean',
-                                                          'default': True,
-                                                          'description': 'Include action item '
-                                                                         'extraction'}},
-                  'required': ['issue_keys']},
-  'visible_to_customer': False},
- {'name': 'prepare_llm_categorization',
-  'description': 'Prepare filtered Jira issues and comment analysis for LLM-based categorization',
-  'inputSchema': {'type': 'object',
-                  'properties': {'project': {'type': 'string',
-                                             'description': 'Project key or name'},
-                                 'issue_types': {'type': 'array',
-                                                 'items': {'type': 'string'},
-                                                 'description': 'Issue types to include'},
-                                 'statuses': {'type': 'array',
-                                              'items': {'type': 'string'},
-                                              'description': 'Issue statuses to include'},
-                                 'created_after': {'type': 'string',
-                                                   'description': 'Include issues created after '
-                                                                  'this date (YYYY-MM-DD)'},
-                                 'created_before': {'type': 'string',
-                                                    'description': 'Include issues created before '
-                                                                   'this date (YYYY-MM-DD)'},
-                                 'updated_after': {'type': 'string',
-                                                   'description': 'Include issues updated after '
-                                                                  'this date (YYYY-MM-DD)'},
-                                 'updated_before': {'type': 'string',
-                                                    'description': 'Include issues updated before '
-                                                                   'this date (YYYY-MM-DD)'},
-                                 'custom_field_filters': {'type': 'object',
-                                                          'description': 'Custom field filters '
-                                                                         '(field_id: value)'},
-                                 'comment_start_date': {'type': 'string',
-                                                        'description': 'Include comments after '
-                                                                       'this date (ISO format)'},
-                                 'comment_end_date': {'type': 'string',
-                                                      'description': 'Include comments before this '
-                                                                     'date (ISO format)'},
-                                 'max_results': {'type': 'integer',
-                                                 'default': 100,
-                                                 'description': 'Maximum number of issues to '
-                                                                'analyze'},
-                                 'include_descriptions': {'type': 'boolean',
-                                                          'default': True,
-                                                          'description': 'Include issue '
-                                                                         'descriptions'},
-                                 'include_comments': {'type': 'boolean',
-                                                      'default': True,
-                                                      'description': 'Include comment analysis'},
-                                 'max_description_length': {'type': 'integer',
-                                                            'default': 500,
-                                                            'description': 'Maximum description '
-                                                                           'length'},
-                                 'max_comment_length': {'type': 'integer',
-                                                        'default': 300,
-                                                        'description': 'Maximum comment preview '
-                                                                       'length'}},
-                  'required': []},
-  'visible_to_customer': False},
- {'name': 'get_fields',
-  'description': 'Get all available Jira fields including custom fields',
-  'inputSchema': {'type': 'object', 'properties': {}, 'required': []},
-  'visible_to_customer': False},
- {'name': 'generate_categorization_prompt',
-  'description': 'Generate a structured prompt for LLM categorization based on Jira data',
-  'inputSchema': {'type': 'object',
-                  'properties': {'categorization_type': {'type': 'string',
-                                                         'enum': ['priority',
-                                                                  'theme',
-                                                                  'sentiment',
-                                                                  'workload',
-                                                                  'custom'],
-                                                         'description': 'Type of categorization to '
-                                                                        'perform'},
-                                 'custom_categories': {'type': 'array',
-                                                       'items': {'type': 'string'},
-                                                       'description': 'Custom categories for '
-                                                                      'classification'},
-                                 'analysis_focus': {'type': 'string',
-                                                    'enum': ['issues_only',
-                                                             'comments_only',
-                                                             'both'],
-                                                    'default': 'both',
-                                                    'description': 'Focus analysis on issues, '
-                                                                   'comments, or both'},
-                                 'output_format': {'type': 'string',
-                                                   'enum': ['json', 'csv', 'summary'],
-                                                   'default': 'json',
-                                                   'description': 'Desired output format'}},
-                  'required': ['categorization_type']},
-  'visible_to_customer': False},
- {'name': 'check_mentions',
-  'description': 'Check if the current user (or specified user) is mentioned in Jira issues or '
-                 'comments',
-  'inputSchema': {'type': 'object',
-                  'properties': {'issue_keys': {'type': 'array',
-                                                'items': {'type': 'string'},
-                                                'description': 'List of issue keys to check for '
-                                                               'mentions'},
-                                 'user_email': {'type': 'string',
-                                                'description': 'User email to check (optional, '
-                                                               'defaults to current authenticated '
-                                                               'user)'}},
-                  'required': ['issue_keys']},
-  'visible_to_customer': False},
  {'name': 'get_on_call',
   'description': 'Get the JSM on-call schedule for a date range — use for any question about who '
                  "was, is, or will be on call. Works for past dates (e.g. 'last weekend'), "
@@ -230,18 +105,6 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'search_issues_with_com
                                               'description': 'End date (inclusive). Defaults to '
                                                              'start_date if omitted.'}},
                   'required': ['start_date']},
-  'visible_to_customer': False},
- {'name': 'get_schedule_participants',
-  'description': 'Get all team members from the on-call schedule rotations. Returns all users who '
-                 'are part of any rotation in the schedule, not just who is currently on-call. '
-                 'Useful for getting the full list of people who can be assigned to on-call '
-                 'duties.',
-  'inputSchema': {'type': 'object', 'properties': {}, 'required': []},
-  'visible_to_customer': False},
- {'name': 'get_organization_options',
-  'description': 'Get all available organization options for JIRA tickets in the OPS project. '
-                 'Returns the list of organizations that can be assigned to tickets.',
-  'inputSchema': {'type': 'object', 'properties': {}, 'required': []},
   'visible_to_customer': False}]
 
 ACTION_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'add_comment',

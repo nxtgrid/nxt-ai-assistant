@@ -99,6 +99,20 @@ class TestCallTool:
         assert result[0].text == "echoed"
 
     @pytest.mark.asyncio
+    async def test_internal_only_schema_flag_does_not_block_dispatch(self):
+        """internal_only only hides a tool from the LLM's tool list
+        (chat_orchestrator's UserPermissionsService filter) - it must have no
+        effect on ToolRegistry/server_registry.call_tool dispatch."""
+        registry = ToolRegistry("demo")
+
+        @registry.tool("hidden_tool", {**SCHEMA, "name": "hidden_tool", "internal_only": True})
+        async def _hidden(arguments):
+            return [TextContent(type="text", text="ran anyway")]
+
+        result = await registry.handle_call_tool("hidden_tool", {})
+        assert result[0].text == "ran anyway"
+
+    @pytest.mark.asyncio
     async def test_resolves_server_prefixed_name(self):
         registry = _registry_with_echo()
         result = await registry.handle_call_tool("demo_echo", {})
