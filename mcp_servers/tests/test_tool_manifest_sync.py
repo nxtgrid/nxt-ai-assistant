@@ -25,6 +25,15 @@ Extraction is static (AST) so the tests run without the servers' runtime
 dependencies. Tool names must therefore be string literals — which they are,
 and should stay: a dynamically-computed tool name in a schema or dispatch
 belongs in DYNAMIC_MANIFEST_SERVERS.
+
+Dispatch evidence comes in two shapes, checked in union so a server may be in
+either style (or transitioning between them) without failing: the legacy
+if/elif chain (`name == "x"` comparisons, or a `match name: case "x":`), and
+the declarative ``shared_code.tool_registry.ToolRegistry`` decorator
+(``@registry.tool("x", SCHEMA)``) that is replacing it — there,
+``ToolRegistry.tool()`` asserts ``schema["name"] == name`` at import time, so
+the string literal passed to the decorator is a reliable dispatch proof even
+though the schema itself is an imported object, not a literal.
 """
 
 import ast
@@ -85,10 +94,10 @@ def _advertised_names(server_name: str) -> set:
     return names
 
 
-def _dispatched_names(server_name: str) -> set:
-    """Tool names compared against the dispatch parameter in handle_call_tool
-    (and the helpers it delegates to)."""
-    tree = ast.parse(_server_file(server_name).read_text())
+def _dispatched_names_from_if_elif(tree: ast.AST) -> set:
+    """Legacy dispatch evidence: `name == "x"` comparisons and
+    `match name: case "x":` inside handle_call_tool (and helpers it delegates
+    to, e.g. grid_design's _handle_internal_tool)."""
     names = set()
     for node in ast.walk(tree):
         if (
@@ -117,6 +126,36 @@ def _dispatched_names(server_name: str) -> set:
                         ):
                             names.add(case.pattern.value.value)
     return names
+
+
+def _dispatched_names_from_registry(tree: ast.AST) -> set:
+    """ToolRegistry dispatch evidence: `@registry.tool("x", SCHEMA, ...)` (or
+    `.register(`) calls anywhere in the module — including inside a decorator
+    list, which `ast.walk` traverses like any other expression."""
+    names = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Attribute) and func.attr in ("tool", "register")):
+            continue
+        if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+            names.add(node.args[0].value)
+        for kw in node.keywords:
+            if kw.arg == "name" and isinstance(kw.value, ast.Constant):
+                names.add(kw.value.value)
+            if kw.arg == "aliases" and isinstance(kw.value, (ast.Tuple, ast.List, ast.Set)):
+                for elt in kw.value.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                        names.add(elt.value)
+    return names
+
+
+def _dispatched_names(server_name: str) -> set:
+    """Tool names with dispatch evidence, from either dispatch style (union —
+    see module docstring)."""
+    tree = ast.parse(_server_file(server_name).read_text())
+    return _dispatched_names_from_if_elif(tree) | _dispatched_names_from_registry(tree)
 
 
 def _normalize(server_name: str, names: set) -> set:
