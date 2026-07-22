@@ -77,8 +77,6 @@ class TestRunStdioServer:
         async def _startup():
             calls.append("startup")
 
-        server = _FakeServer()
-
         class _TrackedServer(_FakeServer):
             async def run(self, *a, **k):
                 calls.append("run")
