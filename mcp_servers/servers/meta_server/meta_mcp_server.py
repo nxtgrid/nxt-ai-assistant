@@ -26,11 +26,14 @@ import mcp.types as types
 import vl_convert as vlc
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
+from shared_code.tool_registry import ToolRegistry
 from supabase import Client, create_client
 
 from shared.charts import apply_theme
 from shared.utils.date_utils import parse_iso_with_timezone
 from shared.utils.logging import get_logger
+
+from .tool_schemas import TOOL_SCHEMAS
 
 logger = get_logger("meta-server")
 
@@ -39,6 +42,8 @@ print("🚀 Meta MCP Server starting...", file=sys.stderr)
 
 # Initialize MCP server
 server = Server("meta-server")
+registry = ToolRegistry("meta")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 # Configuration
 # Chat database credentials (with legacy fallback)
@@ -664,288 +669,150 @@ async def _lookup_organization(org_name: str) -> Optional[Dict[str, Any]]:
         return None
 
 
-@server.list_tools()
-async def handle_list_tools() -> List[types.Tool]:
-    """List available meta analytics tools."""
-    if not META_ACTIONS_ENABLED:
-        logger.info("Meta actions disabled - no tools listed")
-        return []
-
-    tools = [
-        types.Tool(
-            name="get_performance_report",
-            description=(
-                "Get comprehensive bot performance report. "
-                "Returns response distribution, escalation breakdown "
-                "(including avg_time_to_close_minutes for resolved escalations, null if none), "
-                "and feedback stats. "
-                "Default: past 7 days, all organizations."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Number of days to include (default: 7)",
-                        "default": 7,
-                    },
-                    "organization": {
-                        "type": "string",
-                        "description": "Filter by organization name (short or formal name)",
-                    },
-                },
-                "required": [],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="response_distribution_chart",
-            description=(
-                "Generate pie chart showing bot responses vs escalations. Returns PNG image."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Number of days to include (default: 7)",
-                        "default": 7,
-                    },
-                    "organization": {
-                        "type": "string",
-                        "description": "Filter by organization name",
-                    },
-                },
-                "required": [],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="escalation_types_chart",
-            description=(
-                "Generate pie chart showing escalation reasons breakdown. Returns PNG image."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Number of days to include (default: 7)",
-                        "default": 7,
-                    },
-                    "organization": {
-                        "type": "string",
-                        "description": "Filter by organization name",
-                    },
-                },
-                "required": [],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="action_types_chart",
-            description=(
-                "Generate pie chart showing action types for staff_action_required escalations. "
-                "Returns PNG image."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Number of days to include (default: 7)",
-                        "default": 7,
-                    },
-                    "organization": {
-                        "type": "string",
-                        "description": "Filter by organization name",
-                    },
-                },
-                "required": [],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="list_escalated_messages",
-            description=(
-                "Get list of recently escalated messages with context. "
-                "Includes user message preview, reason, and timestamp."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Number of days to include (default: 7)",
-                        "default": 7,
-                    },
-                    "organization": {
-                        "type": "string",
-                        "description": "Filter by organization name",
-                    },
-                },
-                "required": [],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="list_negative_feedback",
-            description=(
-                "Get list of bot messages that received negative feedback (thumbs down). "
-                "Includes response preview and timestamp."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Number of days to include (default: 7)",
-                        "default": 7,
-                    },
-                    "organization": {
-                        "type": "string",
-                        "description": "Filter by organization name",
-                    },
-                },
-                "required": [],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="issue_type_breakdown_chart",
-            description=(
-                "Generate pie chart showing new conversation threads broken down by issue type "
-                "(token, hps, meter, transaction, commissioning, other). Returns PNG image."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "days": {
-                        "type": "integer",
-                        "description": "Number of days to include (default: 7)",
-                        "default": 7,
-                    },
-                    "organization": {
-                        "type": "string",
-                        "description": "Filter by organization name",
-                    },
-                },
-                "required": [],
-            },
-            visible_to_customer=False,
-        ),
-    ]
-
-    logger.info(f"Meta server: {len(tools)} tools available")
-    return tools
-
-
-@server.call_tool()
-async def handle_call_tool(
+@registry.pre_dispatch
+async def _prepare_common_args(
     name: str, arguments: Dict[str, Any]
-) -> List[types.TextContent | types.ImageContent]:
-    """Handle tool calls."""
-    try:
-        if not META_ACTIONS_ENABLED:
+) -> Optional[List[types.TextContent]]:
+    """Shared preamble every meta tool went through before dispatch: the
+    disabled-state gate (exact original message, kept here rather than the
+    registry's generic gated-refusal text), and parsing/resolving the
+    days/organization filter every _handle_* function takes as params.
+    Preserved verbatim as a pre_dispatch hook; resolved values are stashed
+    on `arguments` for the tool handlers.
+    """
+    if not META_ACTIONS_ENABLED:
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "success": False,
+                        "error": "Meta analytics actions are disabled.",
+                    }
+                ),
+            )
+        ]
+
+    client = _get_supabase_client()
+
+    # Parse common arguments
+    days = arguments.get("days", 7)
+    org_name = arguments.get("organization")
+
+    # Calculate date range
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=days)
+
+    # Lookup organization if specified
+    organization_id: Optional[int] = None
+    org_hashtag: Optional[str] = None
+
+    if org_name:
+        org_info = await _lookup_organization(org_name)
+        if org_info:
+            organization_id = org_info["org_id"]
+            org_hashtag = f"#{org_info['name'].lower()}"
+            logger.info(
+                f"Resolved org '{org_name}' to id={organization_id}, hashtag={org_hashtag}"
+            )
+        else:
             return [
                 types.TextContent(
                     type="text",
                     text=json.dumps(
                         {
                             "success": False,
-                            "error": "Meta analytics actions are disabled.",
+                            "error": f"Organization '{org_name}' not found",
                         }
                     ),
                 )
             ]
 
-        client = _get_supabase_client()
+    arguments["_client"] = client
+    arguments["_start_date"] = start_date
+    arguments["_end_date"] = end_date
+    arguments["_organization_id"] = organization_id
+    arguments["_days"] = days
+    arguments["_org_name"] = org_name
+    return None
 
-        # Parse common arguments
-        days = arguments.get("days", 7)
-        org_name = arguments.get("organization")
 
-        # Calculate date range
-        end_date = datetime.now(timezone.utc)
-        start_date = end_date - timedelta(days=days)
+def _common_args(arguments: Dict[str, Any]) -> tuple:
+    return (
+        arguments["_client"],
+        arguments["_start_date"],
+        arguments["_end_date"],
+        arguments["_organization_id"],
+        arguments["_days"],
+        arguments["_org_name"],
+    )
 
-        # Lookup organization if specified
-        organization_id: Optional[int] = None
-        org_hashtag: Optional[str] = None
 
-        if org_name:
-            org_info = await _lookup_organization(org_name)
-            if org_info:
-                organization_id = org_info["org_id"]
-                org_hashtag = f"#{org_info['name'].lower()}"
-                logger.info(
-                    f"Resolved org '{org_name}' to id={organization_id}, hashtag={org_hashtag}"
-                )
-            else:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text=json.dumps(
-                            {
-                                "success": False,
-                                "error": f"Organization '{org_name}' not found",
-                            }
-                        ),
-                    )
-                ]
+@registry.tool("get_performance_report", _SCHEMAS_BY_NAME["get_performance_report"], gated=True, refuse_when_disabled=False)
+async def _tool_get_performance_report(
+    arguments: Dict[str, Any],
+) -> List[types.TextContent]:
+    return await _handle_performance_report(*_common_args(arguments))
 
-        # Route to appropriate handler
-        if name == "get_performance_report":
-            return await _handle_performance_report(
-                client, start_date, end_date, organization_id, days, org_name
-            )
 
-        elif name == "response_distribution_chart":
-            return await _handle_response_distribution_chart(
-                client, start_date, end_date, organization_id, days, org_name
-            )
+@registry.tool(
+    "response_distribution_chart",
+    _SCHEMAS_BY_NAME["response_distribution_chart"],
+    gated=True, refuse_when_disabled=False,
+)
+async def _tool_response_distribution_chart(
+    arguments: Dict[str, Any],
+) -> List[types.TextContent | types.ImageContent]:
+    return await _handle_response_distribution_chart(*_common_args(arguments))
 
-        elif name == "escalation_types_chart":
-            return await _handle_escalation_types_chart(
-                client, start_date, end_date, organization_id, days, org_name
-            )
 
-        elif name == "action_types_chart":
-            return await _handle_action_types_chart(
-                client, start_date, end_date, organization_id, days, org_name
-            )
+@registry.tool(
+    "escalation_types_chart", _SCHEMAS_BY_NAME["escalation_types_chart"], gated=True, refuse_when_disabled=False
+)
+async def _tool_escalation_types_chart(
+    arguments: Dict[str, Any],
+) -> List[types.TextContent | types.ImageContent]:
+    return await _handle_escalation_types_chart(*_common_args(arguments))
 
-        elif name == "list_escalated_messages":
-            return await _handle_list_escalated_messages(
-                client, start_date, end_date, organization_id, days, org_name
-            )
 
-        elif name == "list_negative_feedback":
-            return await _handle_list_negative_feedback(
-                client, start_date, end_date, organization_id, days, org_name
-            )
+@registry.tool("action_types_chart", _SCHEMAS_BY_NAME["action_types_chart"], gated=True, refuse_when_disabled=False)
+async def _tool_action_types_chart(
+    arguments: Dict[str, Any],
+) -> List[types.TextContent | types.ImageContent]:
+    return await _handle_action_types_chart(*_common_args(arguments))
 
-        elif name == "issue_type_breakdown_chart":
-            return await _handle_issue_type_chart(
-                client, start_date, end_date, organization_id, days, org_name
-            )
 
-        else:
-            return [
-                types.TextContent(
-                    type="text",
-                    text=json.dumps({"success": False, "error": f"Unknown tool: {name}"}),
-                )
-            ]
+@registry.tool(
+    "list_escalated_messages", _SCHEMAS_BY_NAME["list_escalated_messages"], gated=True, refuse_when_disabled=False
+)
+async def _tool_list_escalated_messages(
+    arguments: Dict[str, Any],
+) -> List[types.TextContent]:
+    return await _handle_list_escalated_messages(*_common_args(arguments))
 
-    except Exception as e:
-        logger.exception(f"Error in tool {name}: {e}")
-        return [
-            types.TextContent(
-                type="text",
-                text=json.dumps({"success": False, "error": str(e)}),
-            )
-        ]
+
+@registry.tool(
+    "list_negative_feedback", _SCHEMAS_BY_NAME["list_negative_feedback"], gated=True, refuse_when_disabled=False
+)
+async def _tool_list_negative_feedback(
+    arguments: Dict[str, Any],
+) -> List[types.TextContent]:
+    return await _handle_list_negative_feedback(*_common_args(arguments))
+
+
+@registry.tool(
+    "issue_type_breakdown_chart",
+    _SCHEMAS_BY_NAME["issue_type_breakdown_chart"],
+    gated=True, refuse_when_disabled=False,
+)
+async def _tool_issue_type_breakdown_chart(
+    arguments: Dict[str, Any],
+) -> List[types.TextContent | types.ImageContent]:
+    return await _handle_issue_type_chart(*_common_args(arguments))
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 async def _handle_performance_report(

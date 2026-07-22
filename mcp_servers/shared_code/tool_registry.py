@@ -161,29 +161,29 @@ class ToolRegistry:
         return None
 
     async def handle_call_tool(self, name: str, arguments: Dict[str, Any]) -> List[Any]:
-        if self._pre_dispatch is not None:
-            hook_result = await self._pre_dispatch(name, arguments)
-            if hook_result is not None:
-                return hook_result
-
-        reg = self._resolve(name)
-        if reg is None:
-            return list(
-                compose_json_response({"success": False, "error": f"Unknown tool: {name}"})
-            )
-
-        if reg.gated and reg.refuse_when_disabled and not self._actions_enabled():
-            env_var = ActionFlags.get_env_var_name(self.server_name)
-            return list(
-                compose_json_response(
-                    {
-                        "success": False,
-                        "error": f"{self.server_name} actions are disabled. Set {env_var}=true to enable.",
-                    }
-                )
-            )
-
         try:
+            if self._pre_dispatch is not None:
+                hook_result = await self._pre_dispatch(name, arguments)
+                if hook_result is not None:
+                    return hook_result
+
+            reg = self._resolve(name)
+            if reg is None:
+                return list(
+                    compose_json_response({"success": False, "error": f"Unknown tool: {name}"})
+                )
+
+            if reg.gated and reg.refuse_when_disabled and not self._actions_enabled():
+                env_var = ActionFlags.get_env_var_name(self.server_name)
+                return list(
+                    compose_json_response(
+                        {
+                            "success": False,
+                            "error": f"{self.server_name} actions are disabled. Set {env_var}=true to enable.",
+                        }
+                    )
+                )
+
             return await reg.handler(arguments)
         except Exception as e:
             self._logger.error(f"Error in tool {name}: {e}", exc_info=True)

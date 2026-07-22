@@ -169,3 +169,18 @@ class TestCallTool:
 
         result = await registry.handle_call_tool("echo", {})
         assert result[0].text == "echoed"
+
+    @pytest.mark.asyncio
+    async def test_pre_dispatch_hook_exception_becomes_compose_error_response(self):
+        """A pre_dispatch hook doing real work (DB lookups, external calls) can
+        raise — this must be caught the same way a handler exception is, not
+        propagate and crash the caller."""
+        registry = _registry_with_echo()
+
+        @registry.pre_dispatch
+        async def _gate(name, arguments):
+            raise ValueError("boom")
+
+        result = await registry.handle_call_tool("echo", {})
+        assert len(result) == 1
+        assert result[0].text == "Error: boom"
