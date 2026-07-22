@@ -1,24 +1,25 @@
 {
   "$schema": "tool_definitions_schema.json",
   "version": "1.0.0",
-  "exported_at": "2026-01-28T13:33:54.274176Z",
+  "exported_at": "2026-07-22T14:47:03.495659Z",
   "tools": {
     "equipment_diagnostics": [
       {
         "name": "get_equipment_status",
-        "description": "Get current real-time metrics (inverter power, battery SOC, grid state, alarms) for a specific site.",
+        "description": "Get current real-time status of equipment at a grid site. Returns inverter power per phase, battery state of charge, grid connection status, PV power, and any active alarms.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "grid_name": {
               "type": "string",
-              "description": "Name of the grid site"
+              "description": "Name of the grid site (fuzzy matching supported)"
             },
             "metrics": {
               "type": "array",
               "items": {
                 "type": "string"
               },
+              "description": "Specific metrics to retrieve: 'inverter', 'battery', 'grid', 'pv', 'alarms'. Defaults to all.",
               "default": [
                 "inverter",
                 "battery",
@@ -32,16 +33,34 @@
             "grid_name"
           ]
         },
-        "visible_to_customer": true
+        "visible_to_customer": false
       },
       {
         "name": "get_site_info",
-        "description": "Retrieve high-level site metadata: online/offline status, phase configuration, and location.",
+        "description": "Get general site information including online/offline status, phase configuration, equipment counts, and location.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "grid_name": {
-              "type": "string"
+              "type": "string",
+              "description": "Name of the grid site"
+            }
+          },
+          "required": [
+            "grid_name"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "get_equipment_details",
+        "description": "Get detailed equipment inventory including inverters, batteries, and MPPTs with serial numbers and model information.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid site"
             }
           },
           "required": [
@@ -52,12 +71,13 @@
       },
       {
         "name": "get_historical_power_data",
-        "description": "Analyze historical power trends, peak loads, or outage patterns (up to 90 days).",
+        "description": "Get historical power data for analysis. Can detect grid outages, find peak loads, and analyze power patterns. Supports up to 90 days of historical data.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "grid_name": {
-              "type": "string"
+              "type": "string",
+              "description": "Name of the grid site"
             },
             "time_range": {
               "type": "string",
@@ -70,13 +90,23 @@
                 "last_90d",
                 "custom"
               ],
+              "description": "Time range for data retrieval",
               "default": "last_24h"
+            },
+            "start_time": {
+              "type": "string",
+              "description": "ISO datetime for custom range start"
+            },
+            "end_time": {
+              "type": "string",
+              "description": "ISO datetime for custom range end"
             },
             "metrics": {
               "type": "array",
               "items": {
                 "type": "string"
               },
+              "description": "Metrics to include: 'grid_consumption' (o1-o3, total load-side consumption), 'grid_power', 'battery_soc', 'battery_power', 'pv_power'",
               "default": [
                 "grid_power",
                 "grid_consumption",
@@ -86,13 +116,9 @@
             "analysis": {
               "type": "array",
               "items": {
-                "type": "string",
-                "enum": [
-                  "outages",
-                  "peak_load",
-                  "summary_stats"
-                ]
+                "type": "string"
               },
+              "description": "Analysis to perform: 'outages', 'peak_load', 'phase_analysis', 'summary_stats'",
               "default": []
             }
           },
@@ -103,31 +129,54 @@
         "visible_to_customer": false
       },
       {
-        "name": "get_batch_downtime_summary",
-        "description": "Efficiently check 24-hour downtime stats for multiple grids in a single parallel call.",
+        "name": "get_historical_mppt_performance",
+        "description": "Get historical performance data for one or more specific MPPTs. Provides a time-series of estimated vs. actual power generation, which is essential for diagnosing underperformance of a specific solar charger.",
         "inputSchema": {
           "type": "object",
           "properties": {
-            "grid_names": {
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid site where the MPPTs are located"
+            },
+            "time_range": {
+              "type": "string",
+              "enum": [
+                "last_hour",
+                "last_6h",
+                "last_24h",
+                "last_7d",
+                "last_30d",
+                "last_90d",
+                "custom"
+              ],
+              "description": "Time range for data retrieval",
+              "default": "last_24h"
+            },
+            "start_time": {
+              "type": "string",
+              "description": "ISO datetime for custom range start"
+            },
+            "end_time": {
+              "type": "string",
+              "description": "ISO datetime for custom range end"
+            },
+            "mppt_serial_numbers": {
               "type": "array",
               "items": {
                 "type": "string"
-              }
-            },
-            "hours": {
-              "type": "integer",
-              "default": 24
+              },
+              "description": "Optional list of MPPT serial numbers to query. If omitted, returns data for all MPPTs on the grid."
             }
           },
           "required": [
-            "grid_names"
+            "grid_name"
           ]
         },
         "visible_to_customer": false
       },
       {
         "name": "analyze_grid_outage",
-        "description": "Analyze a specific grid outage event in detail. Identifies cause (battery depletion, overload, temperature), affected phases, load at failure, battery state, related alarms, and recovery pattern. If no outage_time is given, analyzes the most recent outage in the last 24 hours.",
+        "description": "Analyze a specific grid outage event in detail. Identifies affected phases, load at failure, recovery pattern.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -143,6 +192,125 @@
               "type": "integer",
               "description": "Minutes around outage_time to search",
               "default": 60
+            }
+          },
+          "required": [
+            "grid_name"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "generate_power_chart",
+        "description": "Generate a chart visualizing power data over time. Returns PNG image suitable for Telegram.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid site"
+            },
+            "chart_type": {
+              "type": "string",
+              "enum": [
+                "power_timeline",
+                "battery_soc",
+                "grid_vs_inverter",
+                "load_distribution",
+                "outage_events"
+              ],
+              "description": "Type of chart to generate"
+            },
+            "time_range": {
+              "type": "string",
+              "enum": [
+                "last_hour",
+                "last_6h",
+                "last_24h",
+                "last_7d",
+                "last_30d",
+                "last_90d"
+              ],
+              "description": "Time range for chart data",
+              "default": "last_24h"
+            },
+            "highlight_events": {
+              "type": "boolean",
+              "description": "Highlight outage events on the chart",
+              "default": true
+            }
+          },
+          "required": [
+            "grid_name",
+            "chart_type"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "get_batch_downtime_summary",
+        "description": "Get 24-hour downtime summary for multiple grids in parallel. Efficient batch operation with concurrency control. Returns total downtime minutes, outage count, and status icon per grid.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "grid_names": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "List of grid names to check"
+            },
+            "hours": {
+              "type": "integer",
+              "description": "Number of hours to analyze (default: 24)",
+              "default": 24
+            },
+            "max_concurrent": {
+              "type": "integer",
+              "description": "Max parallel API calls (default: 5)",
+              "default": 5
+            }
+          },
+          "required": [
+            "grid_names"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "schedule_equipment_check",
+        "description": "Schedule a follow-up check of equipment status. Useful after control actions (restart inverter, reboot comms) to verify success. Default: 5 min for inverter, 12 min for comms.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid site"
+            },
+            "delay_minutes": {
+              "type": "integer",
+              "description": "Minutes to wait before check",
+              "default": 5
+            },
+            "check_type": {
+              "type": "string",
+              "enum": [
+                "grid_consumption",
+                "site_online",
+                "battery_status",
+                "full_status"
+              ],
+              "description": "What to check",
+              "default": "full_status"
+            },
+            "expected_condition": {
+              "type": "string",
+              "description": "Expected condition to verify (e.g., 'grid_consumption > 1000', 'is_online == true')"
+            },
+            "notify_on_failure": {
+              "type": "boolean",
+              "description": "Send alert if expected condition not met",
+              "default": true
             }
           },
           "required": [
@@ -261,6 +429,23 @@
         "visible_to_customer": false
       },
       {
+        "name": "get_transitions",
+        "description": "[READ-ONLY] Get available status transitions for a Jira issue. This tool only retrieves information, it does not change the issue status.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "issue_key": {
+              "type": "string",
+              "description": "Jira issue key (e.g., PROJ-123)"
+            }
+          },
+          "required": [
+            "issue_key"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
         "name": "change_status",
         "description": "[ACTION] Change the status of a Jira ticket (e.g., close, start progress, reopen). Use transition names like 'Done', 'In Progress', 'To Do'. If the ticket is unassigned, it will be auto-assigned to the requesting user.",
         "inputSchema": {
@@ -303,28 +488,68 @@
           ]
         },
         "visible_to_customer": false
+      },
+      {
+        "name": "add_on_call_override",
+        "description": "[ACTION - MODIFIES JSM SCHEDULE] Add an on-call override for a specific user and time period in JSM Ops schedule. This tool creates a new on-call assignment in the schedule. Use this to assign someone to be on-call for a specific date/time range (e.g., 9am-5pm, 5pm-7pm). User will be looked up by name from the system.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "user_name": {
+              "type": "string",
+              "description": "Name of the user to add as on-call (e.g., 'Vaibhav', 'John Doe'). System will look up their email automatically."
+            },
+            "start_time": {
+              "type": "string",
+              "description": "ISO 8601 formatted start datetime (e.g., '2025-10-24T09:00:00Z' for 9am UTC)"
+            },
+            "end_time": {
+              "type": "string",
+              "description": "ISO 8601 formatted end datetime (e.g., '2025-10-24T17:00:00Z' for 5pm UTC)"
+            }
+          },
+          "required": [
+            "user_name",
+            "start_time",
+            "end_time"
+          ]
+        },
+        "visible_to_customer": false
       }
     ],
     "meters": [
       {
         "name": "get_meter_dcu_status",
-        "description": "[READ-ONLY] Check if a meter's gateway or DCU is currently online. Does not ping the meter hardware.",
+        "description": "[READ-ONLY] Get DCU/concentrator/gateway online status for any meter type. Automatically routes to the correct API based on meter type from Supabase: (1) Calin V1 meters - queries DCU online status via V1 API, (2) Calin V2 meters - queries RF concentrator online status via V2 API, (3) LoRaWAN meters - queries Chirpstack gateway status. Meter type, DCU ID, and gateway ID are automatically retrieved from Supabase 'meters' table based on meter_no. Returns online/offline status and last communication timestamp. This tool ONLY retrieves status information - it does NOT initiate communication with the physical meter or take any actions.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "meter_no": {
-              "type": "string"
+              "type": "string",
+              "description": "Meter number (all other info auto-retrieved from Supabase)"
+            },
+            "dcu_id": {
+              "type": "string",
+              "description": "DCU/concentrator ID (optional override - auto-retrieved from Supabase if not provided)"
+            },
+            "gateway_id": {
+              "type": "string",
+              "description": "LoRaWAN gateway ID (optional override - auto-retrieved from Supabase if not provided)"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "(Injected by orchestrator) User email for RLS authentication"
             }
           },
           "required": [
             "meter_no"
           ]
         },
-        "visible_to_customer": true
+        "visible_to_customer": false
       },
       {
         "name": "get_dcu_status_by_id",
-        "description": "[READ-ONLY] Check whether a DCU/concentrator or LoRaWAN base station is currently online, using the device ID itself — no meter number needed. Use when a ticket or alert references the device directly (e.g. 'DCU 230401080' or 'Base Station a84041ffff29d4da'). Device type is auto-detected. Returns online/offline status plus the meter numbers served by the device.",
+        "description": "[READ-ONLY] Check whether a DCU/concentrator or LoRaWAN base station is currently online, using the device ID itself - no meter number needed. Use this when a ticket or alert references the device directly (e.g. 'DCU 230401080' or 'Base Station a84041ffff29d4da'). Device type is auto-detected from the meters table or the ID format (base station/gateway IDs are 16-char hex, DCU IDs are numeric). Returns online/offline status plus the meter numbers served by the device. This tool ONLY retrieves status information - it does NOT communicate with meters or take any actions.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -334,11 +559,15 @@
             },
             "device_type": {
               "type": "string",
+              "description": "Optional: 'dcu' or 'base_station' to skip auto-detection",
               "enum": [
                 "dcu",
                 "base_station"
-              ],
-              "description": "Optional: 'dcu' or 'base_station' to skip auto-detection"
+              ]
+            },
+            "user_email": {
+              "type": "string",
+              "description": "(Injected by orchestrator) User email for RLS authentication"
             }
           },
           "required": [
@@ -349,23 +578,42 @@
       },
       {
         "name": "create_meter_reading_task",
-        "description": "[ACTION] Actively ping a physical meter for live data (voltage, credit). Incurs a 15-20s delay.",
+        "description": "[ACTION - SENDS COMMAND TO METER] Create remote reading task for any meter type. This tool ACTIVELY COMMUNICATES with the physical meter by sending a command. Automatically routes to the correct API based on meter type from Supabase: (1) Calin V1 meters - uses PLC-based remote reading via V1 API, (2) Calin V2 meters - uses RF-based remote reading via V2 API with protocol IDs, (3) LoRaWAN meters - sends Chirpstack downlink with Calin protocol encoding. This is a TWO-STEP operation: (1) sends downlink command to meter, (2) waits 15 seconds, (3) checks uplink response from meter. Total time: approximately 15-20 seconds. IMPORTANT: Only call this tool ONCE per conversation response - do NOT batch multiple meter readings in a single response. Supports reading types: 'voltage' (line voltage), 'current' (current draw), 'power' (active power), 'energy' (accumulated energy), 'current_credit' (remaining prepaid credit), 'power_limit' (maximum power threshold setting), 'relay_status' (meter relay on/off state), 'power_down_count' (number of power outages), 'special_status' (meter error/tamper flags), 'meter_version' (firmware version). For Calin V2, you can also use numeric protocol IDs (e.g., 5 for voltage, 39 for current credit). Returns complete reading result with meter data.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "meter_no": {
-              "type": "string"
+              "type": "string",
+              "description": "Meter number (all other info auto-retrieved from Supabase)"
             },
             "reading_type": {
               "type": "string",
+              "description": "Type of reading to request. Common types: 'voltage', 'current', 'power', 'energy', 'current_credit', 'power_limit', 'relay_status', 'power_down_count', 'special_status', 'meter_version'. For Calin V2, can also use numeric protocol ID (e.g., 5, 11, 39).",
               "enum": [
                 "voltage",
                 "current",
                 "power",
                 "energy",
                 "current_credit",
-                "relay_status"
+                "power_limit",
+                "relay_status",
+                "power_down_count",
+                "maximum_power_threshold",
+                "special_status",
+                "meter_version"
               ]
+            },
+            "customer_id": {
+              "type": "string",
+              "description": "Customer ID (optional override - auto-retrieved from Supabase for V2 meters)"
+            },
+            "dev_eui": {
+              "type": "string",
+              "description": "Device EUI (optional override - auto-retrieved from Supabase for LoRaWAN meters)"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "(Injected by orchestrator) User email for RLS authentication"
             }
           },
           "required": [
@@ -373,21 +621,49 @@
             "reading_type"
           ]
         },
-        "visible_to_customer": true
+        "visible_to_customer": false
+      },
+      {
+        "name": "get_meter_reading_task_status",
+        "description": "[READ-ONLY] Check the status and retrieve results of a previously created reading task. Automatically routes to the correct API based on meter type from Supabase: (1) Calin V1 meters - queries task status via V1 API, (2) Calin V2 meters - queries task status via V2 API, (3) LoRaWAN meters - checks Chirpstack uplink messages. Use the task ID returned by create_meter_reading_task. Returns task status (pending/complete/failed) and meter reading data if complete. This tool ONLY retrieves status information - it does NOT send commands or take actions on the meter.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "meter_no": {
+              "type": "string",
+              "description": "Meter number (used to auto-detect meter type from Supabase)"
+            },
+            "task_id": {
+              "type": "string",
+              "description": "Task ID returned from create_meter_reading_task"
+            },
+            "user_email": {
+              "type": "string",
+              "description": "(Injected by orchestrator) User email for RLS authentication"
+            }
+          },
+          "required": [
+            "meter_no",
+            "task_id"
+          ]
+        },
+        "visible_to_customer": false
       }
     ],
     "equipment_control": [
       {
         "name": "restart_inverter",
-        "description": "[CRITICAL ACTION] Physically reboot inverter hardware. Use only after confirming no recurring electrical shorts.",
+        "description": "[ACTION - RESTARTS PHYSICAL EQUIPMENT] Restart the inverter at a specific site (requires equipment.control permission). This tool PHYSICALLY RESTARTS inverter hardware at the site. CRITICAL SAFETY CHECK REQUIRED: Before calling this action, you MUST verify with the user that there is no cause for repeated shorts at the site. Restarting inverters without checking for underlying electrical faults could cause serious equipment damage or create safety hazards. Always confirm the user has investigated the root cause before proceeding.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "grid": {
-              "type": "string"
+              "type": "string",
+              "description": "Grid name"
             },
             "user_email": {
-              "type": "string"
+              "type": "string",
+              "description": "User email for permission check (required)"
             }
           },
           "required": [
@@ -399,20 +675,54 @@
       },
       {
         "name": "restart_comms_chain",
-        "description": "[ACTION] Reboot communication hardware (Cerbo, DCU, Router). Site will be offline for ~10 minutes.",
+        "description": "[ACTION - RESTARTS PHYSICAL EQUIPMENT] Restart the communications chain at a specific site (requires equipment.control permission). This tool PHYSICALLY RESTARTS communication hardware (Cerbo, router, DCU) at the site, causing temporary downtime. This tool handles multiple reboot-related requests including: 'reboot comm chain', 'reboot cerbo', 'reboot router', and 'reboot DCU'. IMPORTANT: Before calling this action, you MUST verify with the user that the communications chain still has connectivity problems and that a restart is necessary. WARNING: When rebooting the DCU, only DCUs connected to the power plant will be rebooted - confirm this is the intended behavior with the user. Note that once restarted, it can take up to 10 minutes for the site to fully reconnect and resume normal operations. Always confirm this downtime is acceptable before proceeding.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "grid": {
-              "type": "string"
+              "type": "string",
+              "description": "Grid name"
             },
             "user_email": {
-              "type": "string"
+              "type": "string",
+              "description": "User email for permission check (required)"
             }
           },
           "required": [
             "grid",
             "user_email"
+          ]
+        },
+        "visible_to_customer": false
+      }
+    ],
+    "payment_processor": [
+      {
+        "name": "check_transaction_status",
+        "description": "[READ-ONLY] Check the status of a payment transaction. Provide either transaction_id (payment processor's internal ID) or tx_ref (merchant reference). Returns transaction status (successful/pending/failed), amount, currency, payment type, and customer details. This tool ONLY retrieves transaction information - it CANNOT initiate payments, refunds, or modify transactions. Useful for verifying payment completion and troubleshooting payment issues.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "transaction_id": {
+              "type": "string",
+              "description": "Payment processor transaction ID - labeled 'Transaction No.' on receipts (e.g., '2504030201001869149859T'). NOT the 'Session ID' which is a different identifier."
+            },
+            "tx_ref": {
+              "type": "string",
+              "description": "Merchant transaction reference exactly as provided by the customer. Do NOT construct or guess this value - it must come from the customer's receipt or records."
+            }
+          },
+          "oneOf": [
+            {
+              "required": [
+                "transaction_id"
+              ]
+            },
+            {
+              "required": [
+                "tx_ref"
+              ]
+            }
           ]
         },
         "visible_to_customer": false
@@ -716,7 +1026,6 @@
       },
       {
         "name": "turn_meter_on",
-        "command_gated": true,
         "description": "[ACTION - TURNS METER ON] Turn on the relay for a meter, restoring power to the customer. Sends a TURN_ON interaction to the meter via the platform. Change takes effect on the next meter communication cycle. IMPORTANT: Use this tool only if explicitly requested by a user via the /meter_on command.",
         "inputSchema": {
           "type": "object",
@@ -738,11 +1047,11 @@
             "meter_number"
           ]
         },
-        "visible_to_customer": false
+        "visible_to_customer": false,
+        "command_gated": true
       },
       {
         "name": "turn_meter_off",
-        "command_gated": true,
         "description": "[ACTION - TURNS METER OFF] Turn off the relay for a meter, cutting power to the customer. Sends a TURN_OFF interaction to the meter via the platform. Change takes effect on the next meter communication cycle. IMPORTANT: Use this tool only if explicitly requested by a user via the /meter_off command.",
         "inputSchema": {
           "type": "object",
@@ -764,7 +1073,8 @@
             "meter_number"
           ]
         },
-        "visible_to_customer": false
+        "visible_to_customer": false,
+        "command_gated": true
       },
       {
         "name": "resend_meter_token",
@@ -1156,6 +1466,998 @@
         "visible_to_customer": false
       }
     ],
+    "meta": [
+      {
+        "name": "get_performance_report",
+        "description": "Get comprehensive bot performance report. Returns response distribution, escalation breakdown (including avg_time_to_close_minutes for resolved escalations, null if none), and feedback stats. Default: past 7 days, all organizations.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "days": {
+              "type": "integer",
+              "description": "Number of days to include (default: 7)",
+              "default": 7
+            },
+            "organization": {
+              "type": "string",
+              "description": "Filter by organization name (short or formal name)"
+            }
+          },
+          "required": []
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "response_distribution_chart",
+        "description": "Generate pie chart showing bot responses vs escalations. Returns PNG image.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "days": {
+              "type": "integer",
+              "description": "Number of days to include (default: 7)",
+              "default": 7
+            },
+            "organization": {
+              "type": "string",
+              "description": "Filter by organization name"
+            }
+          },
+          "required": []
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "escalation_types_chart",
+        "description": "Generate pie chart showing escalation reasons breakdown. Returns PNG image.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "days": {
+              "type": "integer",
+              "description": "Number of days to include (default: 7)",
+              "default": 7
+            },
+            "organization": {
+              "type": "string",
+              "description": "Filter by organization name"
+            }
+          },
+          "required": []
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "action_types_chart",
+        "description": "Generate pie chart showing action types for staff_action_required escalations. Returns PNG image.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "days": {
+              "type": "integer",
+              "description": "Number of days to include (default: 7)",
+              "default": 7
+            },
+            "organization": {
+              "type": "string",
+              "description": "Filter by organization name"
+            }
+          },
+          "required": []
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "list_escalated_messages",
+        "description": "Get list of recently escalated messages with context. Includes user message preview, reason, and timestamp.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "days": {
+              "type": "integer",
+              "description": "Number of days to include (default: 7)",
+              "default": 7
+            },
+            "organization": {
+              "type": "string",
+              "description": "Filter by organization name"
+            }
+          },
+          "required": []
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "list_negative_feedback",
+        "description": "Get list of bot messages that received negative feedback (thumbs down). Includes response preview and timestamp.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "days": {
+              "type": "integer",
+              "description": "Number of days to include (default: 7)",
+              "default": 7
+            },
+            "organization": {
+              "type": "string",
+              "description": "Filter by organization name"
+            }
+          },
+          "required": []
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "issue_type_breakdown_chart",
+        "description": "Generate pie chart showing new conversation threads broken down by issue type (token, hps, meter, transaction, commissioning, other). Returns PNG image.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "days": {
+              "type": "integer",
+              "description": "Number of days to include (default: 7)",
+              "default": 7
+            },
+            "organization": {
+              "type": "string",
+              "description": "Filter by organization name"
+            }
+          },
+          "required": []
+        },
+        "visible_to_customer": false
+      }
+    ],
+    "grid_design": [
+      {
+        "name": "design_and_bom",
+        "description": "Create a grid design and generate Bill of Materials (BOM). This tool: 1) Creates a grid if it doesn't exist by name, 2) Creates a new design with specified parameters (every parameter the old AppSheet design form offered is accepted — technology choices, connection split, Wp/connection override, regulation constraint, 3-phase enforcement, SPD type, distances, tariff), 3) Runs auto-design sizing and BOM generation, 4) Returns energy specs, BOM items and cost summary. Call list_design_options first to see valid technology choices. Use this when users ask to create a new solar grid design or generate a BOM.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid (will be created if it doesn't exist)"
+            },
+            "design_name": {
+              "type": "string",
+              "description": "Name for the new design"
+            },
+            "max_connections": {
+              "type": "integer",
+              "description": "Maximum number of connections for this grid design"
+            },
+            "community": {
+              "type": "string",
+              "description": "Community name/location for the grid"
+            },
+            "technology_family": {
+              "type": "string",
+              "description": "Power-plant technology family/architecture. Use 'deye' for Deye Hybrid ESS designs and 'victron' for the legacy Victron container architecture.",
+              "enum": [
+                "victron",
+                "deye"
+              ],
+              "default": "victron"
+            },
+            "inverter_type": {
+              "type": "string",
+              "description": "Inverter type (default: Quattro 15kVA)",
+              "default": "Quattro 15kVA"
+            },
+            "battery_type": {
+              "type": "string",
+              "description": "Battery type (default: Pylontech UP5000)",
+              "default": "Pylontech UP5000"
+            },
+            "mppt_type": {
+              "type": "string",
+              "description": "MPPT type (default: Victron 250/85 MPPT)",
+              "default": "Victron 250/85 MPPT"
+            },
+            "pv_type": {
+              "type": "string",
+              "description": "PV panel type (default: JA455W Panel)",
+              "default": "JA455W Panel"
+            },
+            "pv_inverter_type": {
+              "type": "string",
+              "description": "PV Inverter type (optional)"
+            },
+            "initial_residential_connections": {
+              "type": "integer",
+              "description": "Initial residential connections (default: 90% of max_connections)"
+            },
+            "initial_business_connections": {
+              "type": "integer",
+              "description": "Initial business connections (default: 10% of max_connections)"
+            },
+            "initial_3phase_connections": {
+              "type": "integer",
+              "description": "Initial 3-phase connections (default: 0)",
+              "default": 0
+            },
+            "num_poc_teams": {
+              "type": "integer",
+              "description": "Number of PoC teams to install meters (default: 1)",
+              "default": 1
+            },
+            "anchor_load_kw": {
+              "type": "number",
+              "description": "Anchor load in kW (default: 0)",
+              "default": 0
+            },
+            "force_3phase": {
+              "type": "boolean",
+              "description": "Force 3-phase design (default: false)",
+              "default": false
+            },
+            "target_kwp": {
+              "type": "number",
+              "description": "Target kWp to constrain the design (optional, AppSheet calculates freely if not provided)"
+            },
+            "target_kwh": {
+              "type": "number",
+              "description": "Target kWh to constrain the design (optional, AppSheet calculates freely if not provided)"
+            },
+            "avg_service_drop_length_m": {
+              "type": "number",
+              "description": "Average service drop cable length per connection in meters (default: 25)",
+              "default": 25
+            },
+            "wp_per_conn_override": {
+              "type": "number",
+              "description": "Override the Wp-per-connection sizing constant (e.g. 850). If omitted, looked up from the Wp/conn table based on the business-connection ratio."
+            },
+            "regulation_constraint": {
+              "type": "string",
+              "description": "Constrain the design to a known regulation's minimum sizing rules (default: 'Nigeria - DARES'). Use 'None' to size purely from connections and loads.",
+              "enum": [
+                "None",
+                "Nigeria - DARES"
+              ],
+              "default": "Nigeria - DARES"
+            },
+            "pue_hours_per_day": {
+              "type": "number",
+              "description": "Hours per day the anchor/PUE load runs (default: 3)",
+              "default": 3
+            },
+            "daily_generation_potential_kwh_kwp": {
+              "type": "number",
+              "description": "Daily generation potential in kWh per kWp (optional; defaults to the Design Rules value)"
+            },
+            "target_tariff_usd": {
+              "type": "number",
+              "description": "Target tariff in USD per kWh (default: 0.45)",
+              "default": 0.45
+            },
+            "max_distance_to_center_of_consumption_m": {
+              "type": "number",
+              "description": "Max distance of power plant to center of load to avoid MV lines, in meters (optional)"
+            },
+            "avg_distance_to_pv_combiner_m": {
+              "type": "number",
+              "description": "Average distance to PV combiner in meters (default: 40)",
+              "default": 40
+            },
+            "distance_to_feeder_pillar_m": {
+              "type": "number",
+              "description": "Distance to feeder pillar in meters (default: 7)",
+              "default": 7
+            },
+            "spd_type": {
+              "type": "string",
+              "description": "Surge protection device strategy (default: keep T1+T2)",
+              "enum": [
+                "Keep default T1+T2 Type SPD (Any lightning probability)",
+                "Use T2 type as T1+T2 Type due to Low (<=16 strikes per sq km per yr) lightning probability"
+              ],
+              "default": "Keep default T1+T2 Type SPD (Any lightning probability)"
+            },
+            "auto_design": {
+              "type": "boolean",
+              "description": "Run auto-design sizing after creating the design row (default: true). Set false to only record the inputs.",
+              "default": true
+            },
+            "wait_for_completion": {
+              "type": "boolean",
+              "description": "Whether to wait for generation to complete (default: true)",
+              "default": true
+            },
+            "wait_for_bom": {
+              "type": "boolean",
+              "description": "Whether to trigger BOM generation. Set False to skip BOM and return after design autopopulate (default: true)",
+              "default": true
+            }
+          },
+          "required": [
+            "grid_name",
+            "design_name",
+            "max_connections"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "find_grid",
+        "description": "Find an existing grid by name",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid to find"
+            }
+          },
+          "required": [
+            "grid_name"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "get_design_bom",
+        "description": "Get the Bill of Materials for an existing design",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_id": {
+              "type": "string",
+              "description": "ID of the design to get BOM for"
+            }
+          },
+          "required": [
+            "design_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "update_design",
+        "description": "Update parameters on an existing design. Accepts any design parameter (not just layout distances) — e.g. wp_per_conn_override (also called Wp/conn, Wp per connection), regulation_constraint (also called Nigerian law/DARES; allowed values 'None'/'Nigeria - DARES'), max_connections, technology types (inverter_type, battery_type, mppt_type, pv_type), and the layout-derived distance fields (Avg Distance to PV Combiner (m), Distance to Feeder Pillar (m), Average Service Drop Length (m)). Use after site layout to set real cable distances, or any time a design parameter needs to change.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_id": {
+              "type": "string",
+              "description": "UNIQUEID of the design to update"
+            },
+            "updates": {
+              "type": "string",
+              "description": "JSON object string of field/column names to new values, e.g. '{\"wp_per_conn_override\": 150, \"max_connections\": 200}' or the legacy distance-column form '{\"Avg Distance to PV Combiner (m)\": 15.5}'. Accepts any design parameter, not a fixed small whitelist."
+            },
+            "rerun_auto_design": {
+              "type": "boolean",
+              "description": "Re-run sizing after applying updates. WARNING: replaces ALL of the design's subassemblies, including any manually added/removed/resized ones, unless `force` is also true.",
+              "default": false
+            },
+            "regenerate_bom": {
+              "type": "boolean",
+              "description": "Regenerate the BOM after applying updates.",
+              "default": false
+            },
+            "force": {
+              "type": "boolean",
+              "description": "Required to `rerun_auto_design` when the design has manually-edited subassemblies — without it, the call is refused to protect your manual edits.",
+              "default": false
+            }
+          },
+          "required": [
+            "design_id",
+            "updates"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "trigger_bom",
+        "description": "Trigger BOM generation for a design, wait for completion, and return results. Use when component costs may have changed — this recomputes costs from the gd_purchases ledger and replaces gd_bom_items, stamping bom_generated_at.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_id": {
+              "type": "string",
+              "description": "UNIQUEID of the design to generate BOM for"
+            },
+            "grid_name": {
+              "type": "string",
+              "description": "Grid name (for output context)"
+            }
+          },
+          "required": [
+            "design_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "list_design_options",
+        "description": "List valid design-creation choices: technology types (inverters, batteries, MPPTs, PV panels — from the rental catalogue, with assembly classes and compatible technology families to tell them apart), technology families, SPD type options, regulation constraint options, and the form defaults applied when a parameter is omitted. Call this before design_and_bom when the user wants to choose equipment or override defaults interactively.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "list_design_technology_families",
+        "description": "List first-class design technology families/architectures such as victron and deye. Use this for requests like 'redo this design using Deye' before editing individual equipment fields. Each family includes its default design parameters, compatible subassemblies from gd_subassemblies.design_types, and the matching site-layout type.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "create_design",
+        "description": "Create a new design row for a grid WITHOUT auto-sizing or generating a BOM by default — the low-drama 'just record it' tool. Contrast with design_and_bom, which defaults to auto-sizing AND generating a BOM in one call. Creates the grid if it doesn't exist by name. `params` accepts the same fields as design_and_bom's flat schema (technology choices, connection split, wp_per_conn_override — also called Wp/conn, Wp per connection — regulation_constraint — also called Nigerian law/DARES, allowed values 'None'/'Nigeria - DARES' — 3-phase enforcement, SPD type, distances, tariff), just as a JSON blob instead of individual arguments. Set run_auto_design and/or generate_bom to true to also size and/or BOM the design in the same call.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid (will be created if it doesn't exist)"
+            },
+            "design_name": {
+              "type": "string",
+              "description": "Name for the new design"
+            },
+            "params": {
+              "type": "string",
+              "description": "JSON object string of additional design parameters, keyed by the same field names as design_and_bom, e.g. '{\"max_connections\": 100, \"wp_per_conn_override\": 150, \"regulation_constraint\": \"Nigeria - DARES\"}'.",
+              "default": "{}"
+            },
+            "run_auto_design": {
+              "type": "boolean",
+              "description": "Run auto-design sizing after creating the design row (default: false — opposite of design_and_bom's default, since this tool is explicitly the 'just record it' path).",
+              "default": false
+            },
+            "generate_bom": {
+              "type": "boolean",
+              "description": "Generate a BOM after creating (and, if requested, sizing) the design (default: false — opposite of design_and_bom's default).",
+              "default": false
+            }
+          },
+          "required": [
+            "grid_name",
+            "design_name"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "get_design",
+        "description": "Return current design parameters, energy specs, and design_parameters for an existing design — use before proposing a parameter change so you can quote current values.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_id": {
+              "type": "string",
+              "description": "UNIQUEID of the design to fetch"
+            }
+          },
+          "required": [
+            "design_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "list_design_artifacts",
+        "description": "List artifact types (maps, layouts, QGIS projects, etc.) generated for this design, with version counts and the latest version's metadata. Use before get_design_artifact to see what's available.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_id": {
+              "type": "string",
+              "description": "UNIQUEID of the design"
+            }
+          },
+          "required": [
+            "design_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "get_design_artifact",
+        "description": "Fetch one version of a generated design artifact (e.g. a site map image or QGIS project file). `version` is a 0-based index into the artifact's version history, newest first — 0 is the latest version, 1 is the one before that, etc. Stale or otherwise unreachable versions (files removed from Drive) are automatically skipped in favor of the next available older version. The returned entry includes a `web_view_link` — relay this link to the user (Telegram unfurls Drive links).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_id": {
+              "type": "string",
+              "description": "UNIQUEID of the design"
+            },
+            "artifact_type": {
+              "type": "string",
+              "description": "The artifact type to fetch. Artifact types vary by workflow and design — call list_design_artifacts first to see what's actually available for this design, e.g. 'map_image', 'distribution_design_draft', or 'site_layout_png'."
+            },
+            "version": {
+              "type": "integer",
+              "description": "0-based version index, newest first. 0 = latest (default). Out-of-range or all-stale/unreachable versions return an error.",
+              "default": 0
+            }
+          },
+          "required": [
+            "design_id",
+            "artifact_type"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "run_auto_design",
+        "description": "Re-run sizing (inverter/battery/MPPT/PV selection, kWp/kWh/kVA) for an existing design, optionally applying parameter overrides first. WARNING: re-running auto-design REPLACES ALL of the design's subassemblies. If any subassembly on this design has been manually added, removed, or resized, the call is blocked unless force=true — which discards those manual edits.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_id": {
+              "type": "string",
+              "description": "UNIQUEID of the design to (re-)size"
+            },
+            "param_overrides": {
+              "type": "string",
+              "description": "JSON object string of parameter overrides to apply before re-sizing, e.g. '{\"wp_per_conn_override\": 150}'.",
+              "default": "{}"
+            },
+            "force": {
+              "type": "boolean",
+              "description": "Required when the design has manually-edited subassemblies — without it, the call is refused to protect your manual edits.",
+              "default": false
+            }
+          },
+          "required": [
+            "design_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "change_design_technology",
+        "description": "Change an existing design to a first-class technology family such as 'deye' or 'victron'. Prefer this over manually editing inverter_type/battery_type for requests like 'redo this design using Deye'. Applies the family-compatible equipment defaults, optionally reruns auto-design and BOM, and returns the matching site_layout_type hint for LPP artifact reruns.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_id": {
+              "type": "string",
+              "description": "UNIQUEID of the design to convert"
+            },
+            "technology_family": {
+              "type": "string",
+              "description": "Target technology family",
+              "enum": [
+                "victron",
+                "deye"
+              ]
+            },
+            "rerun_auto_design": {
+              "type": "boolean",
+              "description": "Rerun auto-design after applying family defaults",
+              "default": true
+            },
+            "regenerate_bom": {
+              "type": "boolean",
+              "description": "Regenerate BOM after applying family defaults",
+              "default": true
+            },
+            "force": {
+              "type": "boolean",
+              "description": "Required when manually-edited design subassemblies should be replaced by the family auto-design output.",
+              "default": false
+            }
+          },
+          "required": [
+            "design_id",
+            "technology_family"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "duplicate_design",
+        "description": "Create a new design cloned from an existing one, with optional parameter overrides — e.g. 'new design like X but with Wp/conn 150 instead of 120'. Clones onto the same grid as the source design.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "source_design_id": {
+              "type": "string",
+              "description": "UNIQUEID of the design to clone"
+            },
+            "new_design_name": {
+              "type": "string",
+              "description": "Name for the cloned design"
+            },
+            "param_overrides": {
+              "type": "string",
+              "description": "JSON object string of design parameters to override on the clone, e.g. '{\"wp_per_conn_override\": 150}'.",
+              "default": "{}"
+            },
+            "run_auto_design": {
+              "type": "boolean",
+              "description": "Run auto-design sizing on the clone (default: true).",
+              "default": true
+            },
+            "generate_bom": {
+              "type": "boolean",
+              "description": "Generate a BOM for the clone (default: true).",
+              "default": true
+            }
+          },
+          "required": [
+            "source_design_id",
+            "new_design_name"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "list_design_subassemblies",
+        "description": "List the active subassembly instances on an existing design.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_id": {
+              "type": "string",
+              "description": "UNIQUEID of the design"
+            }
+          },
+          "required": [
+            "design_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "add_subassembly",
+        "description": "Add a subassembly instance to an existing design by catalogue name (fuzzy-matched — if the name is ambiguous, the closest candidates are returned instead of an arbitrary guess). Marks the design as manually-edited, which blocks a future run_auto_design/update_design rerun_auto_design call unless force=true is passed there.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_id": {
+              "type": "string",
+              "description": "UNIQUEID of the design to add the subassembly to"
+            },
+            "subassembly_name": {
+              "type": "string",
+              "description": "Name of the subassembly in the catalogue (fuzzy-matched; closest candidates are returned if ambiguous)."
+            },
+            "qty": {
+              "type": "number",
+              "description": "Quantity of this subassembly to add"
+            }
+          },
+          "required": [
+            "design_id",
+            "subassembly_name",
+            "qty"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "remove_subassembly",
+        "description": "Remove (soft-delete) a subassembly instance from a design. Requires the design_subassembly_row_id from list_design_subassemblies — NOT the design id. Marks the design as manually-edited, which blocks a future run_auto_design/update_design rerun_auto_design call unless force=true is passed there.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_subassembly_row_id": {
+              "type": "string",
+              "description": "The row id of the design subassembly to remove, from list_design_subassemblies (not the design id)."
+            }
+          },
+          "required": [
+            "design_subassembly_row_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "set_subassembly_qty",
+        "description": "Change the quantity of a subassembly instance already on a design (kWp/kWh/kVA on the row are scaled proportionally). Requires the design_subassembly_row_id from list_design_subassemblies — NOT the design id. Marks the design as manually-edited, which blocks a future run_auto_design/update_design rerun_auto_design call unless force=true is passed there.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "design_subassembly_row_id": {
+              "type": "string",
+              "description": "The row id of the design subassembly to update, from list_design_subassemblies (not the design id)."
+            },
+            "qty": {
+              "type": "number",
+              "description": "New quantity for this subassembly instance"
+            }
+          },
+          "required": [
+            "design_subassembly_row_id",
+            "qty"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "list_subassembly_components",
+        "description": "Catalogue-level (staff-only): lists what a subassembly TEMPLATE is made of — components and/or nested subassemblies — as opposed to list_design_subassemblies, which lists subassembly instances on a specific design.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "subassembly_id": {
+              "type": "string",
+              "description": "ID of the subassembly template"
+            }
+          },
+          "required": [
+            "subassembly_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "add_subassembly_component",
+        "description": "Catalogue-level (staff-only): add a child component or nested subassembly to a subassembly TEMPLATE. This is a GLOBAL catalogue edit — it affects EVERY design that uses this subassembly template on its next BOM/auto-design regen, not just one design. Exactly one of component_name or child_subassembly_name must be given. Nesting a subassembly inside something it already (directly or indirectly) contains is rejected as a circular reference. Consider duplicate_subassembly first if you want a design-specific variant instead of changing the shared template.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "subassembly_id": {
+              "type": "string",
+              "description": "ID of the subassembly template to add a child to"
+            },
+            "component_name": {
+              "type": "string",
+              "description": "Name of the plain component to add (fuzzy-matched). Exactly one of component_name/child_subassembly_name must be given."
+            },
+            "child_subassembly_name": {
+              "type": "string",
+              "description": "Name of the subassembly to nest as a child (fuzzy-matched). Exactly one of component_name/child_subassembly_name must be given. Rejected if it would create a circular reference."
+            },
+            "qty": {
+              "type": "number",
+              "description": "Quantity of this child per parent unit (default: 1)",
+              "default": 1
+            },
+            "unit": {
+              "type": "string",
+              "description": "Unit label for the quantity (optional)"
+            }
+          },
+          "required": [
+            "subassembly_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "remove_subassembly_component",
+        "description": "Catalogue-level (staff-only): remove a child component/subassembly from a subassembly TEMPLATE. GLOBAL catalogue edit — affects every design using this template on its next BOM/auto-design regen.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "row_id": {
+              "type": "string",
+              "description": "Row id from list_subassembly_components identifying the child to remove."
+            }
+          },
+          "required": [
+            "row_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "set_subassembly_component_qty",
+        "description": "Catalogue-level (staff-only): change the quantity of a child component/subassembly within a subassembly TEMPLATE. GLOBAL catalogue edit — affects every design using this template on its next BOM/auto-design regen.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "row_id": {
+              "type": "string",
+              "description": "Row id from list_subassembly_components identifying the child to update."
+            },
+            "qty": {
+              "type": "number",
+              "description": "New quantity for this child within the template"
+            }
+          },
+          "required": [
+            "row_id",
+            "qty"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "duplicate_subassembly",
+        "description": "Catalogue-level (staff-only): clone a subassembly TEMPLATE (all fields plus its full component list) under a new description. Use before editing composition to create a design-specific variant without affecting the original template used elsewhere.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "source_subassembly_id": {
+              "type": "string",
+              "description": "ID of the subassembly template to clone"
+            },
+            "new_description": {
+              "type": "string",
+              "description": "Description for the cloned subassembly"
+            }
+          },
+          "required": [
+            "source_subassembly_id",
+            "new_description"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "gd_describe_tables",
+        "description": "Returns the full registry of gd_* tables available to gd_list_rows/gd_get_row/gd_upsert_row/gd_delete_row, each with its scope, writable columns, and a one-line description. Scopes: 'grid' tables are anchored to a single grid/site and require a grid filter on every read/write; 'catalog' tables are global reference data (shared across every grid) and are staff-only, since a write there affects every grid that references it; 'denied' tables (identity/permission surfaces) are never accessible through generic CRUD. Call this BEFORE attempting to use the other four generic tools — it's the schema map that tells you which table to use and what columns it accepts.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "gd_list_rows",
+        "description": "Generic row listing for any gd_* table from gd_describe_tables. For 'grid'-scoped tables you MUST supply a grid filter — either grid_name or filters['grid']/filters['grid_id'] — otherwise the call is rejected; 'catalog' tables are staff-only and ignore grid_name. Prefer the dedicated Phase A tools (get_design, list_design_subassemblies, list_subassembly_components, etc.) for common operations — reserve this for the long tail of tables that don't have a purpose-built tool.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "table": {
+              "type": "string",
+              "description": "Bare table name from gd_describe_tables (no 'gd_' prefix), e.g. 'designs'"
+            },
+            "grid_name": {
+              "type": "string",
+              "description": "Required for grid-scoped tables unless a grid id is already known via filters; ignored for catalog tables."
+            },
+            "filters": {
+              "type": "string",
+              "description": "JSON object string of additional exact-match column filters, e.g. '{\"status\": \"active\"}'."
+            },
+            "limit": {
+              "type": "number",
+              "description": "Max rows to return",
+              "default": 50
+            },
+            "include_inactive": {
+              "type": "boolean",
+              "description": "Include soft-deleted (active=false) rows",
+              "default": false
+            }
+          },
+          "required": [
+            "table"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "gd_get_row",
+        "description": "Fetch a single row by id from any gd_* table from gd_describe_tables, with the same scope-based access rules as gd_list_rows (grid-scoped tables check the row's own grid; catalog tables are staff-only; denied tables are never accessible).",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "table": {
+              "type": "string",
+              "description": "Bare table name from gd_describe_tables (no 'gd_' prefix)"
+            },
+            "row_id": {
+              "type": "string",
+              "description": "Row id to fetch"
+            }
+          },
+          "required": [
+            "table",
+            "row_id"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "gd_upsert_row",
+        "description": "Create or update a row in any gd_* table from gd_describe_tables. Omit row_id to create a new row; provide it to update an existing one. Call gd_describe_tables first to see this table's writable_columns — unknown columns are rejected. created_by/updated_by are stamped automatically from the caller and can never be set here. IMPORTANT: writes to a 'catalog'-scope table affect EVERY grid that references that row — confirm with the user before writing to a catalog table. Soft-deleted rows are NOT resurrected by omitting 'active' from values (there is no 'active' column in any writable_columns set; it's server-managed — use gd_delete_row for delete, not an upsert). Moving a row's grid-anchor column (e.g. a design's 'grid') to a different grid re-checks access against the new grid, not just the row's current one.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "table": {
+              "type": "string",
+              "description": "Bare table name from gd_describe_tables (no 'gd_' prefix)"
+            },
+            "row_id": {
+              "type": "string",
+              "description": "Omit to create a new row; provide to update an existing one"
+            },
+            "values": {
+              "type": "string",
+              "description": "JSON object string of column: value pairs to write. Call gd_describe_tables first to see writable_columns for this table — unknown columns are rejected."
+            }
+          },
+          "required": [
+            "table",
+            "values"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "gd_delete_row",
+        "description": "SOFT delete a row (sets active=false) in any gd_* table from gd_describe_tables — never a hard delete. Check with the user before deleting rows in a 'catalog'-scope table, since that has global impact across every grid that references it. No automatic referential check is performed — other rows may still reference this one after it's deactivated.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "table": {
+              "type": "string",
+              "description": "Bare table name from gd_describe_tables (no 'gd_' prefix)"
+            },
+            "row_id": {
+              "type": "string",
+              "description": "Row id to soft-delete"
+            }
+          },
+          "required": [
+            "table",
+            "row_id"
+          ]
+        },
+        "visible_to_customer": false
+      }
+    ],
+    "solar": [
+      {
+        "name": "get_site_geo_hazard",
+        "description": "[READ-ONLY] Get flood hazard depth and terrain elevation statistics for a power plant site. Returns: (1) worst-case flood depth in metres above ground (WRI Aqueduct RP1000, structural design flood); (2) historical RP100 flood depth (1% annual chance, ~18% probability over 20-year asset life); (3) RCP8.5 2050 RP100 median and max across 5 CMIP5 models (climate-adjusted 20-year planning value); (4) site elevation from Copernicus DEM GLO-30 30m; (5) terrain min/max/range within the power plant boundary polygon (null if no boundary provided). All flood values are depth above ground surface — no DEM subtraction needed. Used during power plant planning to assess flood risk and determine panel mount height.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "latitude": {
+              "type": "number",
+              "description": "Power plant site latitude in decimal degrees"
+            },
+            "longitude": {
+              "type": "number",
+              "description": "Power plant site longitude in decimal degrees"
+            },
+            "power_plant_boundary_geojson": {
+              "type": "string",
+              "description": "Optional. GeoJSON polygon string of the power plant site boundary (not the community boundary). If provided, terrain min/max/range are computed within this polygon. If omitted, boundary terrain stats are returned as null — no radius fallback."
+            }
+          },
+          "required": [
+            "latitude",
+            "longitude"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "get_solar_potential",
+        "description": "[READ-ONLY] Get solar generation potential for a geographic location. Returns yearly and daily kWh/kWp values from Global Solar Atlas, along with irradiation data (GHI, DNI, GTI), optimal panel tilt angle, average temperature, and elevation. Useful for sizing solar installations and estimating energy production.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "latitude": {
+              "type": "number",
+              "description": "Latitude in decimal degrees (-90 to 90)",
+              "minimum": -90,
+              "maximum": 90
+            },
+            "longitude": {
+              "type": "number",
+              "description": "Longitude in decimal degrees (-180 to 180)",
+              "minimum": -180,
+              "maximum": 180
+            }
+          },
+          "required": [
+            "latitude",
+            "longitude"
+          ]
+        },
+        "visible_to_customer": false
+      }
+    ],
     "knowledge": [
       {
         "name": "summarize_knowledge",
@@ -1174,24 +2476,11 @@
         "visible_to_customer": false
       },
       {
-        "name": "get_grid_review_history",
-        "description": "[READ-ONLY] Get monthly Grid Technical Review (GTR) history for a grid. Returns distilled monthly reviews with KPIs (CUF, losses, revenue collection, connections), commentary, actions taken, and pending issues. This is the monthly technical review summary — NOT live data. For live KPIs use Grafana tools, for recent O&M chat history use customer_get_grid_chat_chronology. Supports fuzzy grid name matching.",
+        "name": "list_document_types",
+        "description": "List the types of documents available in the knowledge base with counts.",
         "inputSchema": {
           "type": "object",
-          "properties": {
-            "grid_name": {
-              "type": "string",
-              "description": "Grid name (supports fuzzy matching)"
-            },
-            "months_back": {
-              "type": "integer",
-              "description": "Number of months to look back (default 6, max 24)",
-              "default": 6
-            }
-          },
-          "required": [
-            "grid_name"
-          ]
+          "properties": {}
         },
         "visible_to_customer": false
       },
@@ -1286,6 +2575,28 @@
         "visible_to_customer": false
       },
       {
+        "name": "get_grid_review_history",
+        "description": "[READ-ONLY] Get monthly Grid Technical Review (GTR) history for a grid. Returns distilled monthly reviews with KPIs (CUF, losses, revenue collection, connections), commentary, actions taken, and pending issues. This is the monthly technical review summary — NOT live data. For live KPIs use Grafana tools, for recent O&M chat history use customer_get_grid_chat_chronology. Supports fuzzy grid name matching.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "grid_name": {
+              "type": "string",
+              "description": "Grid name (supports fuzzy matching)"
+            },
+            "months_back": {
+              "type": "integer",
+              "description": "Number of months to look back (default 6, max 24)",
+              "default": 6
+            }
+          },
+          "required": [
+            "grid_name"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
         "name": "scan_doc_comments",
         "description": "Scan a Google Doc for pending @anansibot comments. Returns a list of comments with their highlighted text, instruction, and comment ID. Use this before edit_doc_section to see what edits are requested in a document.",
         "inputSchema": {
@@ -1368,7 +2679,7 @@
     "reference": [
       {
         "name": "lookup_tariff",
-        "description": "[READ-ONLY] Look up Nigeria import tariff by item description or CET code. Accepts fuzzy item descriptions (e.g. 'breeding horses') or CET codes with or without dots (e.g. '0101.21.00.00' or '0101210000'). Returns VAT, levy (LVY), excise (EXC), and date of validity (DOV) from the Nigeria Customs import tariff schedule. NOTE: Rates are based on the 2022 Nigeria Customs tariff schedule and may not reflect subsequent policy changes or exemptions.",
+        "description": "[READ-ONLY] Look up Nigeria import tariff by item description or CET code. Accepts fuzzy item descriptions (e.g. 'breeding horses') or CET codes with or without dots (e.g. '0101.21.00.00' or '0101210000'). Returns VAT, levy (LVY), excise (EXC), and date of validity (DOV) from the Nigeria Customs import tariff schedule.",
         "inputSchema": {
           "type": "object",
           "properties": {
