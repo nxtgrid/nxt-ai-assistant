@@ -18,19 +18,19 @@ import os
 from typing import Any, Dict, List
 
 from mcp.types import TextContent
+from shared_code.tool_registry import ToolRegistry
 
 from shared.utils.telegram_send import send_telegram_message
 
+from .tool_schemas import TOOL_SCHEMAS
+
 logger = logging.getLogger("messaging-server")
 
-
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
-    """Handle tool calls for the messaging server."""
-    if name == "send_to_group":
-        return await _send_to_group(arguments)
-    raise ValueError(f"Unknown tool: {name}")
+registry = ToolRegistry("messaging")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 
+@registry.tool("send_to_group", _SCHEMAS_BY_NAME["send_to_group"])
 async def _send_to_group(arguments: Dict[str, Any]) -> List[TextContent]:
     """Send a message to a validated Telegram staff group."""
     chat_id = str(arguments.get("chat_id", "")).strip()
@@ -83,3 +83,7 @@ def _get_allowed_chat_ids() -> Dict[str, str]:
     except Exception:
         logger.warning("Could not load staff groups for validation")
         return {}
+
+
+handle_list_tools = registry.handle_list_tools
+handle_call_tool = registry.handle_call_tool

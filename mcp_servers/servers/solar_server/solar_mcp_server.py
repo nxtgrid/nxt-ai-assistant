@@ -27,8 +27,11 @@ from mcp.server import Server
 from mcp.server.models import InitializationOptions
 from mcp.types import ServerCapabilities
 from rasterio.mask import mask as rasterio_mask
+from shared_code.tool_registry import ToolRegistry
 
 from shared.utils.response_formatters import compose_error_response, compose_json_response
+
+from .tool_schemas import TOOL_SCHEMAS
 
 # Load environment variables
 load_dotenv()
@@ -46,6 +49,8 @@ print("🚀 Solar MCP Server starting...", file=sys.stderr)
 
 # Initialize MCP server
 server = Server("solar-server")
+registry = ToolRegistry("solar")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 # Configuration
 SOLAR_ACTIONS_ENABLED = os.getenv("SOLAR_ACTIONS_ENABLED", "true").lower() == "true"
@@ -353,6 +358,7 @@ async def fetch_solar_potential(latitude: float, longitude: float) -> Dict[str, 
     return result
 
 
+@registry.tool("get_site_geo_hazard", _SCHEMAS_BY_NAME["get_site_geo_hazard"])
 async def _handle_get_site_geo_hazard(args: Dict[str, Any]) -> List[types.TextContent]:
     """Handle get_site_geo_hazard tool call."""
     latitude = args.get("latitude")
@@ -486,98 +492,7 @@ async def _handle_get_site_geo_hazard(args: Dict[str, Any]) -> List[types.TextCo
     return list(compose_json_response(result))
 
 
-@server.list_tools()
-async def handle_list_tools() -> List[types.Tool]:
-    """List available solar assessment tools."""
-    tools = [
-        types.Tool(
-            name="get_solar_potential",
-            description=(
-                "[READ-ONLY] Get solar generation potential for a geographic location. "
-                "Returns yearly and daily kWh/kWp values from Global Solar Atlas, "
-                "along with irradiation data (GHI, DNI, GTI), optimal panel tilt angle, "
-                "average temperature, and elevation. Useful for sizing solar installations "
-                "and estimating energy production."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "latitude": {
-                        "type": "number",
-                        "description": "Latitude in decimal degrees (-90 to 90)",
-                        "minimum": -90,
-                        "maximum": 90,
-                    },
-                    "longitude": {
-                        "type": "number",
-                        "description": "Longitude in decimal degrees (-180 to 180)",
-                        "minimum": -180,
-                        "maximum": 180,
-                    },
-                },
-                "required": ["latitude", "longitude"],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="get_site_geo_hazard",
-            description=(
-                "[READ-ONLY] Get flood hazard depth and terrain elevation statistics for a power plant site. "
-                "Returns: (1) worst-case flood depth in metres above ground (WRI Aqueduct RP1000, structural design flood); "
-                "(2) historical RP100 flood depth (1% annual chance, ~18% probability over 20-year asset life); "
-                "(3) RCP8.5 2050 RP100 median and max across 5 CMIP5 models (climate-adjusted 20-year planning value); "
-                "(4) site elevation from Copernicus DEM GLO-30 30m; "
-                "(5) terrain min/max/range within the power plant boundary polygon (null if no boundary provided). "
-                "All flood values are depth above ground surface — no DEM subtraction needed. "
-                "Used during power plant planning to assess flood risk and determine panel mount height."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "latitude": {
-                        "type": "number",
-                        "description": "Power plant site latitude in decimal degrees",
-                    },
-                    "longitude": {
-                        "type": "number",
-                        "description": "Power plant site longitude in decimal degrees",
-                    },
-                    "power_plant_boundary_geojson": {
-                        "type": "string",
-                        "description": (
-                            "Optional. GeoJSON polygon string of the power plant site boundary "
-                            "(not the community boundary). If provided, terrain min/max/range are "
-                            "computed within this polygon. If omitted, boundary terrain stats are "
-                            "returned as null — no radius fallback."
-                        ),
-                    },
-                },
-                "required": ["latitude", "longitude"],
-            },
-            visible_to_customer=False,
-        ),
-    ]
-
-    logger.info(f"Solar server: {len(tools)} tools available")
-    return tools
-
-
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
-    """Handle tool calls."""
-    try:
-        if name == "get_solar_potential":
-            return await _handle_get_solar_potential(arguments)
-        elif name == "get_site_geo_hazard":
-            return await _handle_get_site_geo_hazard(arguments)
-        else:
-            return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
-
-    except Exception as e:
-        logger.error(f"Error in tool {name}: {e}")
-        return list(compose_error_response(e))
-
-
+@registry.tool("get_solar_potential", _SCHEMAS_BY_NAME["get_solar_potential"])
 async def _handle_get_solar_potential(args: Dict[str, Any]) -> List[types.TextContent]:
     """
     Handle get_solar_potential tool call.
@@ -634,6 +549,10 @@ async def _handle_get_solar_potential(args: Dict[str, Any]) -> List[types.TextCo
     except Exception as e:
         logger.error(f"Error fetching solar potential: {e}")
         return list(compose_error_response(Exception(f"Failed to fetch solar potential: {e}")))
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 @server.list_resources()

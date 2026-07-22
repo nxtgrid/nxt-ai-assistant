@@ -1,12 +1,16 @@
 """Integrity of the extracted Jira tool schemas.
 
-The 14 tool definitions used to be literals inside handle_list_tools. Now that
+The 16 tool definitions used to be literals inside handle_list_tools. Now that
 they are data in tool_schemas.py, nothing about them is checked by the compiler
 — a truncated file or a dropped key would surface as tools quietly missing from
 the server. These tests are that check.
 
-The gating half matters most: four of the fourteen are only listed when
-JIRA_ACTIONS_ENABLED is on, and three of those write to Jira.
+Names are unprefixed (``get_issue``, not ``jira_get_issue``) to match
+tool_definitions.json — the orchestrator adds the server prefix when
+advertising, and handle_call_tool normalizes it back on dispatch.
+
+The gating half matters most: five of the sixteen are only listed when
+JIRA_ACTIONS_ENABLED is on, and four of those write to Jira.
 """
 
 import os
@@ -26,22 +30,23 @@ from servers.jira_server.tool_schemas import (  # noqa: E402
 
 ALL_SCHEMAS = READ_ONLY_TOOL_SCHEMAS + ACTION_TOOL_SCHEMAS
 
-# The four tools JIRA_ACTIONS_ENABLED gates. Named explicitly rather than derived
+# The five tools JIRA_ACTIONS_ENABLED gates. Named explicitly rather than derived
 # so that moving a tool between the two lists fails here instead of silently
 # changing what an operator gets when they turn actions off.
 GATED_NAMES = [
-    "jira_add_comment",
-    "jira_get_transitions",
-    "jira_change_status",
-    "jira_add_on_call_override",
+    "add_comment",
+    "get_transitions",
+    "change_status",
+    "assign_issue",
+    "add_on_call_override",
 ]
 
 
 class TestSchemaIntegrity:
     def test_expected_tool_counts(self):
         """Pins the counts so a truncated or partially-merged file fails loudly."""
-        assert len(READ_ONLY_TOOL_SCHEMAS) == 10
-        assert len(ACTION_TOOL_SCHEMAS) == 4
+        assert len(READ_ONLY_TOOL_SCHEMAS) == 11
+        assert len(ACTION_TOOL_SCHEMAS) == 5
 
     def test_names_are_unique_across_both_lists(self):
         names = [s["name"] for s in ALL_SCHEMAS]

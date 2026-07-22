@@ -35,6 +35,7 @@ load_dotenv()
 from servers.grid_design_server import gd_auth, gd_crud, internal_engine
 from servers.grid_design_server.internal_engine import compute_bom_cost_summary
 from servers.grid_design_server.tool_schemas import TOOL_SCHEMAS
+from shared_code.tool_registry import ToolRegistry
 
 from shared.auth.auth_service import STAFF_ORG_ID
 from shared.utils.http_client import HTTPClientMixin
@@ -47,6 +48,35 @@ print("🚀 Grid Design MCP Server starting...", file=sys.stderr)
 
 # Initialize MCP server
 server = Server("grid-design-server")
+registry = ToolRegistry("grid_design")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
+
+# Tools implemented only by the internal backend — calling them while
+# GRID_DESIGN_BACKEND=appsheet falls through to "Unknown tool", matching the
+# original dispatch's behavior (the appsheet branch never had cases for them).
+_INTERNAL_ONLY_TOOL_NAMES = (
+    "create_design",
+    "get_design",
+    "list_design_artifacts",
+    "get_design_artifact",
+    "run_auto_design",
+    "change_design_technology",
+    "duplicate_design",
+    "list_design_subassemblies",
+    "add_subassembly",
+    "remove_subassembly",
+    "set_subassembly_qty",
+    "list_subassembly_components",
+    "add_subassembly_component",
+    "remove_subassembly_component",
+    "set_subassembly_component_qty",
+    "duplicate_subassembly",
+    "gd_describe_tables",
+    "gd_list_rows",
+    "gd_get_row",
+    "gd_upsert_row",
+    "gd_delete_row",
+)
 
 # Configuration from environment
 GRID_DESIGN_APP_ID = os.getenv("GRID_DESIGN_APP_ID", "")
@@ -847,18 +877,55 @@ async def design_and_bom_workflow(
         return workflow_result
 
 
-@server.list_tools()
-async def handle_list_tools() -> List[types.Tool]:
-    """List available tools"""
+@registry.pre_dispatch
+async def _check_gate_and_appsheet_config(
+    name: str, arguments: Dict[str, Any]
+) -> Optional[List[types.TextContent]]:
+    """Whole-server disabled gate, plus (for any tool but the two
+    backend-independent ones) the legacy AppSheet backend's configured-check.
+    Preserved verbatim as a pre_dispatch hook; per-tool backend routing still
+    happens in each tool's own handler below.
+    """
     if not GRID_DESIGN_ACTIONS_ENABLED:
-        logger.info("Grid Design actions disabled - no tools listed")
-        return []
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "success": False,
+                        "error": "Grid Design actions are disabled. Enable them in settings.",
+                    }
+                ),
+            )
+        ]
 
-    # Fresh Tool objects per call — see tool_schemas module docstring.
-    tools = [types.Tool(**schema) for schema in TOOL_SCHEMAS]
+    # The design-options catalogue lives in the Chat DB regardless of backend.
+    if name in ("list_design_options", "list_design_technology_families"):
+        return None
 
-    logger.info(f"Grid Design server: {len(tools)} tools available")
-    return tools
+    if GRID_DESIGN_BACKEND == "internal":
+        return None
+
+    # ── Legacy AppSheet backend (GRID_DESIGN_BACKEND=appsheet) ──
+    # SECURITY NOTE: this rollback path does NOT enforce grid-level
+    # authorization (gd_auth.assert_grid_access) the way the internal
+    # backend does above. Switching to appsheet reverts to pre-Phase-A
+    # behavior where any caller can read/write any grid's design. Only
+    # use this for emergency rollback, and be aware the access-control
+    # model is backend-dependent until this path gets its own auth gate.
+    if not GRID_DESIGN_APP_ID or not GRID_DESIGN_APP_KEY:
+        return [
+            types.TextContent(
+                type="text",
+                text=json.dumps(
+                    {
+                        "success": False,
+                        "error": "Grid Design not configured. Set GRID_DESIGN_APP_ID and GRID_DESIGN_APP_KEY.",
+                    }
+                ),
+            )
+        ]
+    return None
 
 
 # Optional design_and_bom arguments forwarded verbatim to the internal engine
@@ -1165,265 +1232,310 @@ async def _handle_internal_tool(name: str, arguments: Dict[str, Any]) -> List[ty
     return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
 
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
-    """Handle tool calls"""
+def _json_envelope_errors(fn):
+    """Wrap a tool handler so exceptions become the same
+    ``{"success": False, "error": ...}`` JSON envelope the original
+    ``handle_call_tool``'s one shared ``except Exception`` block produced —
+    grid-access denials in particular (``gd_auth.GridAccessDenied`` and
+    friends, raised from ``_handle_internal_tool``'s access checks) are
+    expected as JSON by existing callers and tests. The registry's own
+    generic catch-all instead returns plain "Error: ..." text
+    (``compose_error_response``), which doesn't match.
+    """
 
-    try:
-        if not GRID_DESIGN_ACTIONS_ENABLED:
+    async def _wrapped(arguments: Dict[str, Any]) -> List[types.TextContent]:
+        try:
+            return await fn(arguments)
+        except Exception as e:
+            logger.error(f"Error in tool {fn.__name__}: {e}")
             return [
                 types.TextContent(
                     type="text",
-                    text=json.dumps(
-                        {
-                            "success": False,
-                            "error": "Grid Design actions are disabled. Enable them in settings.",
-                        }
-                    ),
+                    text=json.dumps({"success": False, "error": str(e)}),
                 )
             ]
 
-        # The design-options catalogue lives in the Chat DB regardless of backend.
-        if name == "list_design_options":
-            result = await internal_engine.list_design_options()
-            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
-        if name == "list_design_technology_families":
-            result = await internal_engine.list_design_technology_families()
-            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+    return _wrapped
 
-        if GRID_DESIGN_BACKEND == "internal":
-            return await _handle_internal_tool(name, arguments)
 
-        # ── Legacy AppSheet backend (GRID_DESIGN_BACKEND=appsheet) ──
-        # SECURITY NOTE: this rollback path does NOT enforce grid-level
-        # authorization (gd_auth.assert_grid_access) the way the internal
-        # backend does above. Switching to appsheet reverts to pre-Phase-A
-        # behavior where any caller can read/write any grid's design. Only
-        # use this for emergency rollback, and be aware the access-control
-        # model is backend-dependent until this path gets its own auth gate.
-        if not GRID_DESIGN_APP_ID or not GRID_DESIGN_APP_KEY:
-            return [
-                types.TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "success": False,
-                            "error": "Grid Design not configured. Set GRID_DESIGN_APP_ID and GRID_DESIGN_APP_KEY.",
-                        }
-                    ),
-                )
-            ]
+@registry.tool(
+    "design_and_bom", _SCHEMAS_BY_NAME["design_and_bom"], gated=True, refuse_when_disabled=False
+)
+@_json_envelope_errors
+async def _tool_design_and_bom(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    if GRID_DESIGN_BACKEND == "internal":
+        return await _handle_internal_tool("design_and_bom", arguments)
 
-        if name == "design_and_bom":
-            ignored = [k for k in _APPSHEET_UNSUPPORTED_KEYS if arguments.get(k) is not None]
-            if ignored:
-                logger.warning(f"AppSheet backend ignores unsupported design parameters: {ignored}")
-            result = await design_and_bom_workflow(
-                grid_name=arguments["grid_name"],
-                design_name=arguments["design_name"],
-                max_connections=arguments["max_connections"],
-                community=arguments.get("community"),
-                inverter_type=arguments.get("inverter_type", "Quattro 15kVA"),
-                battery_type=arguments.get("battery_type", "Pylontech UP5000"),
-                mppt_type=arguments.get("mppt_type", "Victron 250/85 MPPT"),
-                pv_type=arguments.get("pv_type", "JA455W Panel"),
-                pv_inverter_type=arguments.get("pv_inverter_type"),
-                initial_residential_connections=arguments.get("initial_residential_connections"),
-                initial_business_connections=arguments.get("initial_business_connections"),
-                initial_3phase_connections=arguments.get("initial_3phase_connections", 0),
-                num_poc_teams=arguments.get("num_poc_teams", 1),
-                anchor_load_kw=arguments.get("anchor_load_kw", 0),
-                force_3phase=arguments.get("force_3phase", False),
-                target_kwp=arguments.get("target_kwp"),
-                target_kwh=arguments.get("target_kwh"),
-                avg_service_drop_length_m=arguments.get("avg_service_drop_length_m"),
-                spd_type=arguments.get("spd_type"),
-                wait_for_completion=arguments.get("wait_for_completion", True),
-                wait_for_bom=arguments.get("wait_for_bom", True),
-            )
-            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+    ignored = [k for k in _APPSHEET_UNSUPPORTED_KEYS if arguments.get(k) is not None]
+    if ignored:
+        logger.warning(f"AppSheet backend ignores unsupported design parameters: {ignored}")
+    result = await design_and_bom_workflow(
+        grid_name=arguments["grid_name"],
+        design_name=arguments["design_name"],
+        max_connections=arguments["max_connections"],
+        community=arguments.get("community"),
+        inverter_type=arguments.get("inverter_type", "Quattro 15kVA"),
+        battery_type=arguments.get("battery_type", "Pylontech UP5000"),
+        mppt_type=arguments.get("mppt_type", "Victron 250/85 MPPT"),
+        pv_type=arguments.get("pv_type", "JA455W Panel"),
+        pv_inverter_type=arguments.get("pv_inverter_type"),
+        initial_residential_connections=arguments.get("initial_residential_connections"),
+        initial_business_connections=arguments.get("initial_business_connections"),
+        initial_3phase_connections=arguments.get("initial_3phase_connections", 0),
+        num_poc_teams=arguments.get("num_poc_teams", 1),
+        anchor_load_kw=arguments.get("anchor_load_kw", 0),
+        force_3phase=arguments.get("force_3phase", False),
+        target_kwp=arguments.get("target_kwp"),
+        target_kwh=arguments.get("target_kwh"),
+        avg_service_drop_length_m=arguments.get("avg_service_drop_length_m"),
+        spd_type=arguments.get("spd_type"),
+        wait_for_completion=arguments.get("wait_for_completion", True),
+        wait_for_bom=arguments.get("wait_for_bom", True),
+    )
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
-        elif name == "find_grid":
-            client = get_client()
-            grid = await client.find_grid_by_name(arguments["grid_name"])
-            result = (
-                {"success": True, "grid": grid}
-                if grid
-                else {"success": False, "error": "Grid not found"}
-            )
-            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
-        elif name == "get_design_bom":
-            client = get_client()
-            bom = await client.get_bom_for_design(arguments["design_id"])
-            # Recompute projected costs from the Chat DB — the BOM's virtual
-            # "Projected Cost with contingency" is unreliable over the AppSheet API.
-            if bom:
-                enrich_bom_projected_cost(bom, await get_component_costs())
-            result = {"success": True, "bom_items": bom, "count": len(bom)}
-            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+@registry.tool("find_grid", _SCHEMAS_BY_NAME["find_grid"], gated=True, refuse_when_disabled=False)
+@_json_envelope_errors
+async def _tool_find_grid(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    if GRID_DESIGN_BACKEND == "internal":
+        return await _handle_internal_tool("find_grid", arguments)
 
-        elif name == "update_design":
-            client = get_client()
-            result = await client.update_design(
-                arguments["design_id"], _parse_updates(arguments["updates"])
-            )
-            return [
-                types.TextContent(
-                    type="text",
-                    text=json.dumps({"success": True, "updated": result}, indent=2, default=str),
-                )
-            ]
+    client = get_client()
+    grid = await client.find_grid_by_name(arguments["grid_name"])
+    result = (
+        {"success": True, "grid": grid} if grid else {"success": False, "error": "Grid not found"}
+    )
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
-        elif name == "trigger_bom":
-            client = get_client()
-            design_id = arguments["design_id"]
 
-            # Trigger BOM
-            action_result = await client.trigger_bom_generation(design_id)
-            action_rows = action_result.get("Rows", [])
-            action_id = action_rows[0].get("Id") if action_rows else None
-            logger.info(f"BOM triggered for {design_id}, action: {action_id}")
+@registry.tool(
+    "get_design_bom", _SCHEMAS_BY_NAME["get_design_bom"], gated=True, refuse_when_disabled=False
+)
+@_json_envelope_errors
+async def _tool_get_design_bom(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    if GRID_DESIGN_BACKEND == "internal":
+        return await _handle_internal_tool("get_design_bom", arguments)
 
-            # Poll for BOM completion instead of blind sleep.
-            # Track the exact action row we just created (action_id) rather than
-            # any "Create BOM" row for the design — otherwise stale rows from a
-            # previous run can break the loop early or never report completion,
-            # which is what made the LPP flow appear stuck at create-bom.
-            logger.info(f"Polling for BOM completion (max {BOM_GENERATION_WAIT_SECONDS}s)...")
-            poll_interval = 10
-            elapsed = 0
-            bom_items = []
-            completed = False
-            while elapsed < BOM_GENERATION_WAIT_SECONDS:
-                await asyncio.sleep(poll_interval)
-                elapsed += poll_interval
-                if action_id:
-                    action = await client.get_action_by_id(action_id)
-                else:
-                    # Fallback when AppSheet did not return the new row Id
-                    action = await client.get_action_status(design_id)
-                if action and action.get("Status") == ACTION_STATUS_COMPLETED:
-                    logger.info(f"BOM completed after {elapsed}s")
-                    completed = True
-                    break
-                logger.debug(f"BOM not yet complete ({elapsed}s elapsed)...")
+    client = get_client()
+    bom = await client.get_bom_for_design(arguments["design_id"])
+    # Recompute projected costs from the Chat DB — the BOM's virtual
+    # "Projected Cost with contingency" is unreliable over the AppSheet API.
+    if bom:
+        enrich_bom_projected_cost(bom, await get_component_costs())
+    result = {"success": True, "bom_items": bom, "count": len(bom)}
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
-            # Fetch results
-            design = await client.get_design(design_id)
-            bom_items = await client.get_bom_for_design(design_id)
 
-            # Fail explicitly when the action never confirmed completion AND no
-            # BOM items were produced, instead of silently returning a $0 BOM.
-            # A clean error lets the workflow surface the problem and retry,
-            # rather than populating the package with empty/zero values.
-            if not completed and not bom_items:
-                logger.error(
-                    f"BOM did not complete for design {design_id} within "
-                    f"{BOM_GENERATION_WAIT_SECONDS}s and 0 items were returned "
-                    f"(action_id={action_id})."
-                )
-                result = {
-                    "success": False,
-                    "error": (
-                        "BOM generation did not finish in time. AppSheet did not "
-                        "report the Create BOM action as completed and produced no "
-                        "BOM items. Please retry the package — if it keeps failing, "
-                        "check the AppSheet Create BOM automation for this design."
-                    ),
-                    "design_id": design_id,
-                    "wait_seconds": BOM_GENERATION_WAIT_SECONDS,
-                }
-                return [
-                    types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))
-                ]
+@registry.tool(
+    "update_design", _SCHEMAS_BY_NAME["update_design"], gated=True, refuse_when_disabled=False
+)
+@_json_envelope_errors
+async def _tool_update_design(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    if GRID_DESIGN_BACKEND == "internal":
+        return await _handle_internal_tool("update_design", arguments)
 
-            if not bom_items:
-                logger.warning(
-                    f"BOM fetch returned 0 items for design {design_id} after "
-                    f"{elapsed}s — AppSheet may still be generating. "
-                    "cost_summary will show $0 for all categories."
-                )
+    client = get_client()
+    result = await client.update_design(arguments["design_id"], _parse_updates(arguments["updates"]))
+    return [
+        types.TextContent(
+            type="text",
+            text=json.dumps({"success": True, "updated": result}, indent=2, default=str),
+        )
+    ]
 
-            # Recompute projected costs from the Chat DB — the BOM's virtual
-            # "Projected Cost with contingency" is unreliable over the AppSheet API.
-            if bom_items:
-                component_costs = await get_component_costs()
-                enrich_bom_projected_cost(bom_items, component_costs)
-                if not component_costs:
-                    logger.warning(
-                        f"No component costs from Chat DB for design {design_id}; BOM "
-                        "projected costs fell back to DDP / raw AppSheet values."
-                    )
 
-            cost_summary = compute_bom_cost_summary(bom_items)
-            if cost_summary.get("total_cost", 0) == 0 and bom_items:
-                logger.warning(
-                    f"BOM cost summary is $0 for design {design_id} despite "
-                    f"{len(bom_items)} items — projected and DDP costs both empty "
-                    "over the AppSheet API."
-                )
+@registry.tool(
+    "trigger_bom", _SCHEMAS_BY_NAME["trigger_bom"], gated=True, refuse_when_disabled=False
+)
+@_json_envelope_errors
+async def _tool_trigger_bom(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    if GRID_DESIGN_BACKEND == "internal":
+        return await _handle_internal_tool("trigger_bom", arguments)
 
-            # Extract energy specs
-            design_data = design or {}
-            energy_specs = {
-                "total_kwp": design_data.get("Total kWp", design_data.get("kWp", "")),
-                "total_kwh": design_data.get("Total kWh", design_data.get("kWh", "")),
-                "total_kva": design_data.get("Total kVA", design_data.get("kVA", "")),
-                "num_subsystems": design_data.get("Number of Subsystems", ""),
-                "num_inverters": design_data.get("Number of Inverters", ""),
-                "num_batteries": design_data.get("Number of Batteries", ""),
-                "num_panels": design_data.get("Number of Panels", ""),
-            }
+    client = get_client()
+    design_id = arguments["design_id"]
 
-            # Build design_parameters
-            design_parameters = {
-                "inverter_type": design_data.get("Inverter Type", ""),
-                "battery_type": design_data.get("Battery Type", ""),
-                "mppt_type": design_data.get("MPPT Type", ""),
-                "pv_type": design_data.get("PV Type", ""),
-                "pv_inverter_type": design_data.get("PV Inverter Type", ""),
-                "max_connections": design_data.get("Max connections", ""),
-                "residential_connections": design_data.get("Initial Residential Connections", ""),
-                "business_connections": design_data.get("Initial Business Connections", ""),
-                "three_phase_connections": design_data.get("Initial 3-phase Connections", ""),
-                "number_of_subsystems": design_data.get("Number of Subsystems", ""),
-                "subsystem_size_kva": design_data.get("Subsystem Size (kVA)", ""),
-            }
+    # Trigger BOM
+    action_result = await client.trigger_bom_generation(design_id)
+    action_rows = action_result.get("Rows", [])
+    action_id = action_rows[0].get("Id") if action_rows else None
+    logger.info(f"BOM triggered for {design_id}, action: {action_id}")
 
-            result = {
-                "success": True,
-                "design": design_data,
-                "bom": bom_items,
-                "cost_summary": cost_summary,
-                "energy_specs": energy_specs,
-                "output": {
-                    "design_parameters": design_parameters,
-                    "energy_specs": energy_specs,
-                    "cost_summary": cost_summary,
-                    "design_id": design_id,
-                    "design_name": design_data.get("Name", ""),
-                    "grid_name": arguments.get("grid_name", ""),
-                },
-            }
-            return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
-
+    # Poll for BOM completion instead of blind sleep.
+    # Track the exact action row we just created (action_id) rather than
+    # any "Create BOM" row for the design — otherwise stale rows from a
+    # previous run can break the loop early or never report completion,
+    # which is what made the LPP flow appear stuck at create-bom.
+    logger.info(f"Polling for BOM completion (max {BOM_GENERATION_WAIT_SECONDS}s)...")
+    poll_interval = 10
+    elapsed = 0
+    bom_items = []
+    completed = False
+    while elapsed < BOM_GENERATION_WAIT_SECONDS:
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+        if action_id:
+            action = await client.get_action_by_id(action_id)
         else:
-            return [
-                types.TextContent(
-                    type="text",
-                    text=json.dumps({"success": False, "error": f"Unknown tool: {name}"}),
-                )
-            ]
+            # Fallback when AppSheet did not return the new row Id
+            action = await client.get_action_status(design_id)
+        if action and action.get("Status") == ACTION_STATUS_COMPLETED:
+            logger.info(f"BOM completed after {elapsed}s")
+            completed = True
+            break
+        logger.debug(f"BOM not yet complete ({elapsed}s elapsed)...")
 
-    except Exception as e:
-        logger.error(f"Error in {name}: {e}")
-        return [
-            types.TextContent(
-                type="text",
-                text=json.dumps({"success": False, "error": str(e)}),
+    # Fetch results
+    design = await client.get_design(design_id)
+    bom_items = await client.get_bom_for_design(design_id)
+
+    # Fail explicitly when the action never confirmed completion AND no
+    # BOM items were produced, instead of silently returning a $0 BOM.
+    # A clean error lets the workflow surface the problem and retry,
+    # rather than populating the package with empty/zero values.
+    if not completed and not bom_items:
+        logger.error(
+            f"BOM did not complete for design {design_id} within "
+            f"{BOM_GENERATION_WAIT_SECONDS}s and 0 items were returned "
+            f"(action_id={action_id})."
+        )
+        result = {
+            "success": False,
+            "error": (
+                "BOM generation did not finish in time. AppSheet did not "
+                "report the Create BOM action as completed and produced no "
+                "BOM items. Please retry the package — if it keeps failing, "
+                "check the AppSheet Create BOM automation for this design."
+            ),
+            "design_id": design_id,
+            "wait_seconds": BOM_GENERATION_WAIT_SECONDS,
+        }
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    if not bom_items:
+        logger.warning(
+            f"BOM fetch returned 0 items for design {design_id} after "
+            f"{elapsed}s — AppSheet may still be generating. "
+            "cost_summary will show $0 for all categories."
+        )
+
+    # Recompute projected costs from the Chat DB — the BOM's virtual
+    # "Projected Cost with contingency" is unreliable over the AppSheet API.
+    if bom_items:
+        component_costs = await get_component_costs()
+        enrich_bom_projected_cost(bom_items, component_costs)
+        if not component_costs:
+            logger.warning(
+                f"No component costs from Chat DB for design {design_id}; BOM "
+                "projected costs fell back to DDP / raw AppSheet values."
             )
-        ]
+
+    cost_summary = compute_bom_cost_summary(bom_items)
+    if cost_summary.get("total_cost", 0) == 0 and bom_items:
+        logger.warning(
+            f"BOM cost summary is $0 for design {design_id} despite "
+            f"{len(bom_items)} items — projected and DDP costs both empty "
+            "over the AppSheet API."
+        )
+
+    # Extract energy specs
+    design_data = design or {}
+    energy_specs = {
+        "total_kwp": design_data.get("Total kWp", design_data.get("kWp", "")),
+        "total_kwh": design_data.get("Total kWh", design_data.get("kWh", "")),
+        "total_kva": design_data.get("Total kVA", design_data.get("kVA", "")),
+        "num_subsystems": design_data.get("Number of Subsystems", ""),
+        "num_inverters": design_data.get("Number of Inverters", ""),
+        "num_batteries": design_data.get("Number of Batteries", ""),
+        "num_panels": design_data.get("Number of Panels", ""),
+    }
+
+    # Build design_parameters
+    design_parameters = {
+        "inverter_type": design_data.get("Inverter Type", ""),
+        "battery_type": design_data.get("Battery Type", ""),
+        "mppt_type": design_data.get("MPPT Type", ""),
+        "pv_type": design_data.get("PV Type", ""),
+        "pv_inverter_type": design_data.get("PV Inverter Type", ""),
+        "max_connections": design_data.get("Max connections", ""),
+        "residential_connections": design_data.get("Initial Residential Connections", ""),
+        "business_connections": design_data.get("Initial Business Connections", ""),
+        "three_phase_connections": design_data.get("Initial 3-phase Connections", ""),
+        "number_of_subsystems": design_data.get("Number of Subsystems", ""),
+        "subsystem_size_kva": design_data.get("Subsystem Size (kVA)", ""),
+    }
+
+    result = {
+        "success": True,
+        "design": design_data,
+        "bom": bom_items,
+        "cost_summary": cost_summary,
+        "energy_specs": energy_specs,
+        "output": {
+            "design_parameters": design_parameters,
+            "energy_specs": energy_specs,
+            "cost_summary": cost_summary,
+            "design_id": design_id,
+            "design_name": design_data.get("Name", ""),
+            "grid_name": arguments.get("grid_name", ""),
+        },
+    }
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+
+@registry.tool(
+    "list_design_options",
+    _SCHEMAS_BY_NAME["list_design_options"],
+    gated=True,
+    refuse_when_disabled=False,
+)
+@_json_envelope_errors
+async def _tool_list_design_options(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    result = await internal_engine.list_design_options()
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+
+@registry.tool(
+    "list_design_technology_families",
+    _SCHEMAS_BY_NAME["list_design_technology_families"],
+    gated=True,
+    refuse_when_disabled=False,
+)
+@_json_envelope_errors
+async def _tool_list_design_technology_families(
+    arguments: Dict[str, Any],
+) -> List[types.TextContent]:
+    result = await internal_engine.list_design_technology_families()
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+
+def _make_internal_only_handler(tool_name: str):
+    """Factory for the ~21 tools the internal backend alone implements.
+
+    Calling one of these while GRID_DESIGN_BACKEND=appsheet falls through to
+    the same "Unknown tool" JSON the original appsheet branch produced for
+    them (it never had a case for them either).
+    """
+
+    async def _handler(arguments: Dict[str, Any]) -> List[types.TextContent]:
+        if GRID_DESIGN_BACKEND == "internal":
+            return await _handle_internal_tool(tool_name, arguments)
+        result = {"success": False, "error": f"Unknown tool: {tool_name}"}
+        return [types.TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
+
+    _handler.__name__ = tool_name
+    return _json_envelope_errors(_handler)
+
+
+for _name in _INTERNAL_ONLY_TOOL_NAMES:
+    registry.tool(_name, _SCHEMAS_BY_NAME[_name], gated=True, refuse_when_disabled=False)(
+        _make_internal_only_handler(_name)
+    )
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 async def main():

@@ -12,6 +12,7 @@ Usage:
 
 import asyncio
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,15 +28,38 @@ load_dotenv()
 
 from server_registry import SERVER_METADATA, _load_server
 
+# Servers whose manifest is computed at runtime and must NOT be frozen into
+# JSON: server_registry.list_tools prefers the JSON entry when present, so
+# exporting a snapshot would permanently override the live list.
+#   - grafana builds its tools from dashboard metadata in the DB (hot-reloaded)
+DYNAMIC_MANIFEST_SERVERS = {"grafana"}
+
+
+def _force_full_manifests() -> None:
+    """Make flag-gated tool lists export completely.
+
+    handle_list_tools() output can depend on {SERVER}_ACTIONS_ENABLED (e.g.
+    jira hides its action tools when disabled). Exporting with a flag off
+    would silently drop those tools from the manifest prod serves, so the
+    export always runs with actions enabled.
+    """
+    for server_name in SERVER_METADATA:
+        os.environ[f"{server_name.upper()}_ACTIONS_ENABLED"] = "true"
+
 
 async def export_all_tools() -> dict:
     """Export all tool definitions from all servers."""
+    _force_full_manifests()
+
     tools_by_server: dict[str, list] = {}
 
     total_tools = 0
     errors = []
 
     for server_name in SERVER_METADATA.keys():
+        if server_name in DYNAMIC_MANIFEST_SERVERS:
+            print(f"Skipping {server_name} (runtime-computed manifest)")
+            continue
         print(f"Exporting {server_name}...", end=" ")
         try:
             module = _load_server(server_name)
@@ -47,12 +71,14 @@ async def export_all_tools() -> dict:
                     "name": tool.name,
                     "description": tool.description,
                     "inputSchema": tool.inputSchema,
+                    "visible_to_customer": getattr(tool, "visible_to_customer", True),
                 }
-                # Add visible_to_customer if it exists
-                if hasattr(tool, "visible_to_customer"):
-                    tool_dict["visible_to_customer"] = tool.visible_to_customer
-                else:
-                    tool_dict["visible_to_customer"] = True  # Default
+                # Preserve non-standard flags (persistent_only, command_gated, ...)
+                # — user_permissions filters on them, so dropping them would
+                # silently widen a tool's exposure.
+                extras = getattr(tool, "model_extra", None) or {}
+                for key, value in extras.items():
+                    tool_dict.setdefault(key, value)
 
                 tool_list.append(tool_dict)
 

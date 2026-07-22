@@ -29,13 +29,14 @@ load_dotenv()
 
 from servers.jira_server.tool_schemas import ACTION_TOOL_SCHEMAS, READ_ONLY_TOOL_SCHEMAS
 from shared_code.config.action_flags import ActionFlags
+from shared_code.tool_registry import ToolRegistry
 
 from shared.utils.date_utils import (
     compose_date_range_query,
     filter_by_date_range,
 )
 from shared.utils.http_client import HTTPClientMixin
-from shared.utils.response_formatters import compose_error_response, compose_json_response
+from shared.utils.response_formatters import compose_json_response
 
 # Configure logging to stderr for Claude Desktop visibility
 logging.basicConfig(
@@ -53,6 +54,9 @@ print(f"📍 Python path: {sys.path}", file=sys.stderr)
 print(f"📂 Working directory: {os.getcwd()}", file=sys.stderr)
 
 server = Server("jira-analysis")
+registry = ToolRegistry("jira")
+_READ_ONLY_SCHEMAS_BY_NAME = {s["name"]: s for s in READ_ONLY_TOOL_SCHEMAS}
+_ACTION_SCHEMAS_BY_NAME = {s["name"]: s for s in ACTION_TOOL_SCHEMAS}
 
 
 @dataclass
@@ -2042,496 +2046,495 @@ async def get_ticket_statistics(days: int = 30) -> Dict[str, Any]:
 client = JiraClient()
 
 
-@server.list_tools()
-async def handle_list_tools() -> List[types.Tool]:
-    """List available tools based on actions_enabled flag"""
-    actions_enabled = ActionFlags.is_actions_enabled("jira")
+@registry.tool("search_issues_with_comments", _READ_ONLY_SCHEMAS_BY_NAME["search_issues_with_comments"])
+async def _tool_search_issues_with_comments(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    # Only apply date range defaults when at least one boundary is explicitly provided.
+    # Without explicit dates, no date filter is applied — this avoids silently
+    # excluding old-but-still-open tickets from broad queries like "all open tickets".
+    created_after = arguments.get("created_after")
+    created_before = arguments.get("created_before")
+    if created_after or created_before:
+        date_range = compose_date_range_query(
+            created_after, created_before, default_days=90
+        )
+        created_after = date_range["start_date"]
+        created_before = date_range["end_date"]
 
-    # Fresh Tool objects per call — see tool_schemas module docstring.
-    schemas = list(READ_ONLY_TOOL_SCHEMAS)
-    if actions_enabled:
-        schemas += ACTION_TOOL_SCHEMAS
-    tools = [types.Tool(**schema) for schema in schemas]
+    updated_after = arguments.get("updated_after")
+    updated_before = arguments.get("updated_before")
+    if updated_after or updated_before:
+        update_range = compose_date_range_query(
+            updated_after, updated_before, default_days=90
+        )
+        updated_after = update_range["start_date"]
+        updated_before = update_range["end_date"]
 
-    logger.info(f"JIRA server: actions_enabled={actions_enabled}, {len(tools)} tools available")
-    return tools
-
-
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
-    """Handle tool calls"""
-    # Normalize tool name - accept both "search_issues_with_comments" and "jira_search_issues_with_comments"
-    # This handles the case where the orchestrator strips the prefix when routing via bridge
-    if not name.startswith("jira_"):
-        name = f"jira_{name}"
-
-    try:
-        if name == "jira_search_issues_with_comments":
-            # Only apply date range defaults when at least one boundary is explicitly provided.
-            # Without explicit dates, no date filter is applied — this avoids silently
-            # excluding old-but-still-open tickets from broad queries like "all open tickets".
-            created_after = arguments.get("created_after")
-            created_before = arguments.get("created_before")
-            if created_after or created_before:
-                date_range = compose_date_range_query(
-                    created_after, created_before, default_days=90
-                )
-                created_after = date_range["start_date"]
-                created_before = date_range["end_date"]
-
-            updated_after = arguments.get("updated_after")
-            updated_before = arguments.get("updated_before")
-            if updated_after or updated_before:
-                update_range = compose_date_range_query(
-                    updated_after, updated_before, default_days=90
-                )
-                updated_after = update_range["start_date"]
-                updated_before = update_range["end_date"]
-
-            # Handle assignee email lookup
-            assignee_value = None
-            assignee_input = arguments.get("assignee")
-            assignee_lookup_note = None  # Track lookup status for user feedback
-            if assignee_input:
-                if assignee_input.lower() == "unassigned":
-                    assignee_value = "unassigned"
-                elif assignee_input.lower() == "me":
-                    # Use the injected user_email for "me"
-                    user_email = arguments.get("user_email")
-                    if user_email:
-                        account_id = await client.find_user_by_email(user_email)
-                        if account_id:
-                            assignee_value = account_id
-                            logger.info(f"Resolved 'me' to user: {user_email}")
-                        else:
-                            logger.warning(f"Could not find user with email: {user_email}")
-                            assignee_lookup_note = (
-                                f"Could not find Jira account for your email ({user_email})"
-                            )
-                    else:
-                        logger.warning("assignee='me' but no user_email in arguments")
-                        assignee_lookup_note = "Could not determine your email for 'me' lookup"
+    # Handle assignee email lookup
+    assignee_value = None
+    assignee_input = arguments.get("assignee")
+    assignee_lookup_note = None  # Track lookup status for user feedback
+    if assignee_input:
+        if assignee_input.lower() == "unassigned":
+            assignee_value = "unassigned"
+        elif assignee_input.lower() == "me":
+            # Use the injected user_email for "me"
+            user_email = arguments.get("user_email")
+            if user_email:
+                account_id = await client.find_user_by_email(user_email)
+                if account_id:
+                    assignee_value = account_id
+                    logger.info(f"Resolved 'me' to user: {user_email}")
                 else:
-                    # Try to resolve assignee - could be email or name
-                    if "@" in assignee_input:
-                        # Looks like an email - use directly
-                        account_id = await client.find_user_by_email(assignee_input)
+                    logger.warning(f"Could not find user with email: {user_email}")
+                    assignee_lookup_note = (
+                        f"Could not find Jira account for your email ({user_email})"
+                    )
+            else:
+                logger.warning("assignee='me' but no user_email in arguments")
+                assignee_lookup_note = "Could not determine your email for 'me' lookup"
+        else:
+            # Try to resolve assignee - could be email or name
+            if "@" in assignee_input:
+                # Looks like an email - use directly
+                account_id = await client.find_user_by_email(assignee_input)
+                if account_id:
+                    assignee_value = account_id
+                else:
+                    logger.warning(f"Could not find user with email: {assignee_input}")
+                    assignee_lookup_note = (
+                        f"Could not find Jira account for email: {assignee_input}"
+                    )
+            else:
+                # Looks like a name - fuzzy match to email first
+                user_email = await client.find_user_email_by_name(assignee_input)
+                if user_email:
+                    account_id = await client.find_user_by_email(user_email)
+                    if account_id:
+                        assignee_value = account_id
+                        logger.info(
+                            f"Resolved assignee name '{assignee_input}' -> email '{user_email}'"
+                        )
+                    else:
+                        # Email lookup failed - try searching Jira by name directly
+                        logger.info(
+                            f"Email lookup failed for '{user_email}', trying Jira name search"
+                        )
+                        account_id = await client.find_user_by_name_in_jira(assignee_input)
                         if account_id:
                             assignee_value = account_id
-                        else:
-                            logger.warning(f"Could not find user with email: {assignee_input}")
-                            assignee_lookup_note = (
-                                f"Could not find Jira account for email: {assignee_input}"
-                            )
-                    else:
-                        # Looks like a name - fuzzy match to email first
-                        user_email = await client.find_user_email_by_name(assignee_input)
-                        if user_email:
-                            account_id = await client.find_user_by_email(user_email)
-                            if account_id:
-                                assignee_value = account_id
-                                logger.info(
-                                    f"Resolved assignee name '{assignee_input}' -> email '{user_email}'"
-                                )
-                            else:
-                                # Email lookup failed - try searching Jira by name directly
-                                logger.info(
-                                    f"Email lookup failed for '{user_email}', trying Jira name search"
-                                )
-                                account_id = await client.find_user_by_name_in_jira(assignee_input)
-                                if account_id:
-                                    assignee_value = account_id
-                                    logger.info(
-                                        f"Found Jira user by name search: '{assignee_input}' -> {account_id}"
-                                    )
-                                else:
-                                    logger.warning(
-                                        f"Found email '{user_email}' for '{assignee_input}' "
-                                        f"but could not find Jira account by email or name"
-                                    )
-                                    assignee_lookup_note = (
-                                        f"Found '{assignee_input}' in system (email: {user_email}) "
-                                        f"but no matching Jira account"
-                                    )
-                        else:
-                            # No email found - try searching Jira by name directly as last resort
                             logger.info(
-                                f"No email found for '{assignee_input}', trying Jira name search"
+                                f"Found Jira user by name search: '{assignee_input}' -> {account_id}"
                             )
-                            account_id = await client.find_user_by_name_in_jira(assignee_input)
-                            if account_id:
-                                assignee_value = account_id
-                                logger.info(
-                                    f"Found Jira user by direct name search: '{assignee_input}' -> {account_id}"
-                                )
-                            else:
-                                logger.warning(f"Could not find user with name: {assignee_input}")
-                                assignee_lookup_note = (
-                                    f"Could not find user '{assignee_input}' in system or Jira. "
-                                    f"Check spelling or use full name."
-                                )
-
-            # Ensure organization field is discovered before search
-            org_field_id = await client.get_organization_field_id()
-
-            # Handle grid and organization filters for custom fields
-            custom_field_filters = {}
-            grid_lookup_note = None  # Track grid lookup status
-            grid_name = arguments.get("grid")
-            if grid_name:
-                # Fuzzy match grid name against valid options
-                try:
-                    valid_grids = await client.get_field_options("customfield_10057")
-                    if valid_grids:
-                        from shared.utils.grid_matcher import find_best_grid_match
-
-                        matched_grid, was_fuzzy, score = find_best_grid_match(
-                            grid_name, valid_grids, threshold=80
-                        )
-                        if matched_grid:
-                            if was_fuzzy:
-                                logger.info(
-                                    f"Fuzzy matched grid '{grid_name}' -> '{matched_grid}' (score: {score}%)"
-                                )
-                                grid_lookup_note = f"Matched '{grid_name}' to '{matched_grid}'"
-                            custom_field_filters["customfield_10057"] = matched_grid
                         else:
-                            # No match found - use original (will likely return empty results)
-                            logger.warning(f"No grid match found for '{grid_name}'")
-                            custom_field_filters["customfield_10057"] = grid_name
-                            grid_lookup_note = (
-                                f"Grid '{grid_name}' not found in Jira. "
-                                f"Available grids: {', '.join(valid_grids[:5])}..."
+                            logger.warning(
+                                f"Found email '{user_email}' for '{assignee_input}' "
+                                f"but could not find Jira account by email or name"
                             )
+                            assignee_lookup_note = (
+                                f"Found '{assignee_input}' in system (email: {user_email}) "
+                                f"but no matching Jira account"
+                            )
+                else:
+                    # No email found - try searching Jira by name directly as last resort
+                    logger.info(
+                        f"No email found for '{assignee_input}', trying Jira name search"
+                    )
+                    account_id = await client.find_user_by_name_in_jira(assignee_input)
+                    if account_id:
+                        assignee_value = account_id
+                        logger.info(
+                            f"Found Jira user by direct name search: '{assignee_input}' -> {account_id}"
+                        )
                     else:
-                        # Couldn't get valid grids - use original
-                        custom_field_filters["customfield_10057"] = grid_name
-                except ImportError:
-                    # rapidfuzz not available - use original
-                    custom_field_filters["customfield_10057"] = grid_name
+                        logger.warning(f"Could not find user with name: {assignee_input}")
+                        assignee_lookup_note = (
+                            f"Could not find user '{assignee_input}' in system or Jira. "
+                            f"Check spelling or use full name."
+                        )
 
-            # Handle organization filter
-            organization_name = arguments.get("organization")
-            if organization_name and org_field_id:
-                custom_field_filters[org_field_id] = organization_name
+    # Ensure organization field is discovered before search
+    org_field_id = await client.get_organization_field_id()
 
-            # Build JQL query with hardcoded project OPS
-            # Normalize statuses: "Open" isn't a real Jira status (ours are "To Do",
-            # "In Progress", "Done"). When the LLM passes "Open", the user means
-            # "all non-done tickets", so drop all statuses and use statusCategory != Done.
-            explicit_statuses = arguments.get("statuses")
-            if explicit_statuses and any(s.lower() == "open" for s in explicit_statuses):
-                # "Open" signals intent for all non-done tickets
-                explicit_statuses = None
+    # Handle grid and organization filters for custom fields
+    custom_field_filters = {}
+    grid_lookup_note = None  # Track grid lookup status
+    grid_name = arguments.get("grid")
+    if grid_name:
+        # Fuzzy match grid name against valid options
+        try:
+            valid_grids = await client.get_field_options("customfield_10057")
+            if valid_grids:
+                from shared.utils.grid_matcher import find_best_grid_match
 
-            exclude_done = arguments.get("exclude_done", not explicit_statuses)
-
-            jql = client.build_jql_query(
-                project="OPS",
-                text_search=arguments.get("text_search"),
-                statuses=explicit_statuses,
-                assignee=assignee_value,
-                created_after=created_after,
-                created_before=created_before,
-                updated_after=updated_after,
-                updated_before=updated_before,
-                custom_field_filters=custom_field_filters if custom_field_filters else None,
-                labels=arguments.get("labels"),
-                exclude_done=exclude_done,
-            )
-
-            # Search issues
-            search_result = await client.search_issues(
-                jql=jql, max_results=arguments.get("max_results", 50)
-            )
-
-            # Parse issues with full comment data
-            issues_dict_list: List[Dict[str, Any]] = []
-            for issue_data in search_result.get("issues", []):
-                issue = client.parse_issue(issue_data)
-                # Extract organization value if field is configured
-                org_value = None
-                if org_field_id:
-                    org_value = _extract_custom_field_value(issue.custom_fields.get(org_field_id))
-
-                issues_dict_list.append(
-                    {
-                        "key": issue.key,
-                        "summary": issue.summary,
-                        "status": issue.status,
-                        "assignee": issue.assignee or "Unassigned",
-                        "reporter": issue.reporter,
-                        "priority": issue.priority,
-                        "issue_type": issue.issue_type,
-                        "grid": _extract_custom_field_value(
-                            issue.custom_fields.get("customfield_10057")
-                        ),
-                        "organization": org_value,
-                        "created": issue.created,
-                        "updated": issue.updated,
-                        "comment_count": len(issue.comments),
-                        "comments": issue.comments,
-                    }
+                matched_grid, was_fuzzy, score = find_best_grid_match(
+                    grid_name, valid_grids, threshold=80
                 )
+                if matched_grid:
+                    if was_fuzzy:
+                        logger.info(
+                            f"Fuzzy matched grid '{grid_name}' -> '{matched_grid}' (score: {score}%)"
+                        )
+                        grid_lookup_note = f"Matched '{grid_name}' to '{matched_grid}'"
+                    custom_field_filters["customfield_10057"] = matched_grid
+                else:
+                    # No match found - use original (will likely return empty results)
+                    logger.warning(f"No grid match found for '{grid_name}'")
+                    custom_field_filters["customfield_10057"] = grid_name
+                    grid_lookup_note = (
+                        f"Grid '{grid_name}' not found in Jira. "
+                        f"Available grids: {', '.join(valid_grids[:5])}..."
+                    )
+            else:
+                # Couldn't get valid grids - use original
+                custom_field_filters["customfield_10057"] = grid_name
+        except ImportError:
+            # rapidfuzz not available - use original
+            custom_field_filters["customfield_10057"] = grid_name
 
-            # The newer /rest/api/3/search/jql endpoint does not return a "total"
-            # field (it uses cursor-based pagination). Fall back to issues_returned
-            # so the LLM sees a consistent value instead of 0 vs N.
-            api_total = search_result.get("total")
-            total_found = api_total if api_total is not None else len(issues_dict_list)
-            result = {
-                "jql_used": jql,
-                "total_found": total_found,
-                "issues_returned": len(issues_dict_list),
-                "issues": issues_dict_list,
-            }
-            # Add lookup notes to help user understand any issues
-            notes = []
-            if assignee_lookup_note:
-                result["assignee_lookup_note"] = assignee_lookup_note
-                notes.append(f"Assignee: {assignee_lookup_note}")
-            if grid_lookup_note:
-                result["grid_lookup_note"] = grid_lookup_note
-                notes.append(f"Grid: {grid_lookup_note}")
-            if notes:
-                result["lookup_notes"] = notes
+    # Handle organization filter
+    organization_name = arguments.get("organization")
+    if organization_name and org_field_id:
+        custom_field_filters[org_field_id] = organization_name
 
-        elif name == "jira_get_issue":
-            issue_data = await client.get_issue(arguments["issue_key"])
-            issue = client.parse_issue(issue_data)
+    # Build JQL query with hardcoded project OPS
+    # Normalize statuses: "Open" isn't a real Jira status (ours are "To Do",
+    # "In Progress", "Done"). When the LLM passes "Open", the user means
+    # "all non-done tickets", so drop all statuses and use statusCategory != Done.
+    explicit_statuses = arguments.get("statuses")
+    if explicit_statuses and any(s.lower() == "open" for s in explicit_statuses):
+        # "Open" signals intent for all non-done tickets
+        explicit_statuses = None
 
-            # Get organization field value
-            org_field_id = await client.get_organization_field_id()
-            org_value = None
-            if org_field_id:
-                org_value = _extract_custom_field_value(issue.custom_fields.get(org_field_id))
+    exclude_done = arguments.get("exclude_done", not explicit_statuses)
 
-            result = {
+    jql = client.build_jql_query(
+        project="OPS",
+        text_search=arguments.get("text_search"),
+        statuses=explicit_statuses,
+        assignee=assignee_value,
+        created_after=created_after,
+        created_before=created_before,
+        updated_after=updated_after,
+        updated_before=updated_before,
+        custom_field_filters=custom_field_filters if custom_field_filters else None,
+        labels=arguments.get("labels"),
+        exclude_done=exclude_done,
+    )
+
+    # Search issues
+    search_result = await client.search_issues(
+        jql=jql, max_results=arguments.get("max_results", 50)
+    )
+
+    # Parse issues with full comment data
+    issues_dict_list: List[Dict[str, Any]] = []
+    for issue_data in search_result.get("issues", []):
+        issue = client.parse_issue(issue_data)
+        # Extract organization value if field is configured
+        org_value = None
+        if org_field_id:
+            org_value = _extract_custom_field_value(issue.custom_fields.get(org_field_id))
+
+        issues_dict_list.append(
+            {
                 "key": issue.key,
                 "summary": issue.summary,
-                "description": issue.description,
                 "status": issue.status,
-                "assignee": issue.assignee,
+                "assignee": issue.assignee or "Unassigned",
                 "reporter": issue.reporter,
                 "priority": issue.priority,
                 "issue_type": issue.issue_type,
-                "grid": _extract_custom_field_value(issue.custom_fields.get("customfield_10057")),
+                "grid": _extract_custom_field_value(
+                    issue.custom_fields.get("customfield_10057")
+                ),
                 "organization": org_value,
                 "created": issue.created,
                 "updated": issue.updated,
-                "labels": issue.labels,
-                "components": issue.components,
-                "custom_fields": issue.custom_fields,
+                "comment_count": len(issue.comments),
                 "comments": issue.comments,
             }
+        )
 
-        elif name == "jira_analyze_comments":
-            issue_keys = arguments["issue_keys"]
-            comment_summaries_dict: Dict[str, Dict[str, Any]] = {}
+    # The newer /rest/api/3/search/jql endpoint does not return a "total"
+    # field (it uses cursor-based pagination). Fall back to issues_returned
+    # so the LLM sees a consistent value instead of 0 vs N.
+    api_total = search_result.get("total")
+    total_found = api_total if api_total is not None else len(issues_dict_list)
+    result = {
+        "jql_used": jql,
+        "total_found": total_found,
+        "issues_returned": len(issues_dict_list),
+        "issues": issues_dict_list,
+    }
+    # Add lookup notes to help user understand any issues
+    notes = []
+    if assignee_lookup_note:
+        result["assignee_lookup_note"] = assignee_lookup_note
+        notes.append(f"Assignee: {assignee_lookup_note}")
+    if grid_lookup_note:
+        result["grid_lookup_note"] = grid_lookup_note
+        notes.append(f"Grid: {grid_lookup_note}")
+    if notes:
+        result["lookup_notes"] = notes
+    return list(compose_json_response(result, default=str))
 
-            for issue_key in issue_keys:
-                try:
-                    issue_data = await client.get_issue(issue_key)
-                    issue = client.parse_issue(issue_data)
 
-                    # Filter comments by date if specified
-                    filtered_comments = client.filter_comments_by_date(
-                        issue.comments,
-                        arguments.get("comment_start_date"),
-                        arguments.get("comment_end_date"),
-                    )
+@registry.tool("get_issue", _READ_ONLY_SCHEMAS_BY_NAME["get_issue"])
+async def _tool_get_issue(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    issue_data = await client.get_issue(arguments["issue_key"])
+    issue = client.parse_issue(issue_data)
 
-                    # Summarize comments
-                    summary = client.summarize_comments(filtered_comments)
-                    comment_summaries_dict[issue_key] = {
-                        "total_comments": summary.total_comments,
-                        "comment_authors": summary.comment_authors,
-                        "date_range": summary.date_range,
-                        "key_themes": (
-                            summary.key_themes if arguments.get("include_themes", True) else []
+    # Get organization field value
+    org_field_id = await client.get_organization_field_id()
+    org_value = None
+    if org_field_id:
+        org_value = _extract_custom_field_value(issue.custom_fields.get(org_field_id))
+
+    result = {
+        "key": issue.key,
+        "summary": issue.summary,
+        "description": issue.description,
+        "status": issue.status,
+        "assignee": issue.assignee,
+        "reporter": issue.reporter,
+        "priority": issue.priority,
+        "issue_type": issue.issue_type,
+        "grid": _extract_custom_field_value(issue.custom_fields.get("customfield_10057")),
+        "organization": org_value,
+        "created": issue.created,
+        "updated": issue.updated,
+        "labels": issue.labels,
+        "components": issue.components,
+        "custom_fields": issue.custom_fields,
+        "comments": issue.comments,
+    }
+    return list(compose_json_response(result, default=str))
+
+
+@registry.tool("get_ticket_statistics", _READ_ONLY_SCHEMAS_BY_NAME["get_ticket_statistics"])
+async def _tool_get_ticket_statistics(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    days = arguments.get("days", 30)
+    result = await get_ticket_statistics(days=int(days))
+    return list(compose_json_response(result, default=str))
+
+
+@registry.tool("analyze_comments", _READ_ONLY_SCHEMAS_BY_NAME["analyze_comments"])
+async def _tool_analyze_comments(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    issue_keys = arguments["issue_keys"]
+    comment_summaries_dict: Dict[str, Dict[str, Any]] = {}
+
+    for issue_key in issue_keys:
+        try:
+            issue_data = await client.get_issue(issue_key)
+            issue = client.parse_issue(issue_data)
+
+            # Filter comments by date if specified
+            filtered_comments = client.filter_comments_by_date(
+                issue.comments,
+                arguments.get("comment_start_date"),
+                arguments.get("comment_end_date"),
+            )
+
+            # Summarize comments
+            summary = client.summarize_comments(filtered_comments)
+            comment_summaries_dict[issue_key] = {
+                "total_comments": summary.total_comments,
+                "comment_authors": summary.comment_authors,
+                "date_range": summary.date_range,
+                "key_themes": (
+                    summary.key_themes if arguments.get("include_themes", True) else []
+                ),
+                "sentiment_indicators": (
+                    summary.sentiment_indicators
+                    if arguments.get("include_sentiment", True)
+                    else []
+                ),
+                "action_items": (
+                    summary.action_items
+                    if arguments.get("include_action_items", True)
+                    else []
+                ),
+                "latest_comments": [
+                    {
+                        "author": comment["author"],
+                        "created": comment["created"],
+                        "body_preview": (
+                            comment["body"][:200] + "..."
+                            if len(comment["body"]) > 200
+                            else comment["body"]
                         ),
-                        "sentiment_indicators": (
-                            summary.sentiment_indicators
-                            if arguments.get("include_sentiment", True)
-                            else []
-                        ),
-                        "action_items": (
-                            summary.action_items
-                            if arguments.get("include_action_items", True)
-                            else []
-                        ),
-                        "latest_comments": [
-                            {
-                                "author": comment["author"],
-                                "created": comment["created"],
-                                "body_preview": (
-                                    comment["body"][:200] + "..."
-                                    if len(comment["body"]) > 200
-                                    else comment["body"]
-                                ),
-                            }
-                            for comment in summary.latest_comments
-                        ],
                     }
-                except Exception as e:
-                    comment_summaries_dict[issue_key] = {"error": str(e)}
-
-            result = {"comment_analysis": comment_summaries_dict}
-
-        elif name == "jira_prepare_llm_categorization":
-            # Build JQL query
-            jql = client.build_jql_query(
-                project=arguments.get("project"),
-                issue_types=arguments.get("issue_types"),
-                statuses=arguments.get("statuses"),
-                created_after=arguments.get("created_after"),
-                created_before=arguments.get("created_before"),
-                updated_after=arguments.get("updated_after"),
-                updated_before=arguments.get("updated_before"),
-                custom_field_filters=arguments.get("custom_field_filters"),
-            )
-
-            # Search issues
-            search_result = await client.search_issues(
-                jql=jql, max_results=arguments.get("max_results", 100)
-            )
-
-            # Parse issues and analyze comments
-            issues: List[JiraIssue] = []
-            comment_summaries: Dict[str, CommentSummary] = {}
-
-            for issue_data in search_result.get("issues", []):
-                issue = client.parse_issue(issue_data)
-                issues.append(issue)
-
-                # Filter and summarize comments
-                filtered_comments = client.filter_comments_by_date(
-                    issue.comments,
-                    arguments.get("comment_start_date"),
-                    arguments.get("comment_end_date"),
-                )
-
-                comment_summaries[issue.key] = client.summarize_comments(filtered_comments)
-
-            # Prepare LLM input
-            llm_input = client.prepare_llm_input(
-                issues,
-                comment_summaries,
-                include_descriptions=arguments.get("include_descriptions", True),
-                include_comments=arguments.get("include_comments", True),
-                max_description_length=arguments.get("max_description_length", 500),
-                max_comment_length=arguments.get("max_comment_length", 300),
-            )
-
-            result = {
-                "jql_used": jql,
-                "llm_input": llm_input,
-                "processing_summary": {
-                    "issues_processed": len(issues),
-                    "total_comments_analyzed": int(
-                        sum([s.total_comments for s in comment_summaries.values()])
-                    ),
-                    "date_filters_applied": {
-                        "comment_start_date": arguments.get("comment_start_date"),
-                        "comment_end_date": arguments.get("comment_end_date"),
-                    },
-                },
+                    for comment in summary.latest_comments
+                ],
             }
+        except Exception as e:
+            comment_summaries_dict[issue_key] = {"error": str(e)}
 
-        elif name == "jira_get_fields":
-            fields = await client.get_fields()
+    result = {"comment_analysis": comment_summaries_dict}
+    return list(compose_json_response(result, default=str))
 
-            # Organize fields by type
-            standard_fields = []
-            custom_fields = []
 
-            for field in fields:
-                field_info = {
-                    "id": field.get("id"),
-                    "name": field.get("name"),
-                    "type": field.get("schema", {}).get("type"),
-                    "custom": field.get("custom", False),
-                }
+@registry.tool("prepare_llm_categorization", _READ_ONLY_SCHEMAS_BY_NAME["prepare_llm_categorization"])
+async def _tool_prepare_llm_categorization(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    # Build JQL query
+    jql = client.build_jql_query(
+        project=arguments.get("project"),
+        issue_types=arguments.get("issue_types"),
+        statuses=arguments.get("statuses"),
+        created_after=arguments.get("created_after"),
+        created_before=arguments.get("created_before"),
+        updated_after=arguments.get("updated_after"),
+        updated_before=arguments.get("updated_before"),
+        custom_field_filters=arguments.get("custom_field_filters"),
+    )
 
-                if field.get("custom"):
-                    custom_fields.append(field_info)
-                else:
-                    standard_fields.append(field_info)
+    # Search issues
+    search_result = await client.search_issues(
+        jql=jql, max_results=arguments.get("max_results", 100)
+    )
 
-            result = {
-                "standard_fields": standard_fields,
-                "custom_fields": custom_fields,
-                "total_fields": len(fields),
-            }
+    # Parse issues and analyze comments
+    issues: List[JiraIssue] = []
+    comment_summaries: Dict[str, CommentSummary] = {}
 
-        elif name == "jira_generate_categorization_prompt":
-            categorization_type = arguments["categorization_type"]
-            custom_categories = arguments.get("custom_categories", [])
-            analysis_focus = arguments.get("analysis_focus", "both")
-            output_format = arguments.get("output_format", "json")
+    for issue_data in search_result.get("issues", []):
+        issue = client.parse_issue(issue_data)
+        issues.append(issue)
 
-            # Generate categorization prompt based on type
-            prompts = {
-                "priority": {
-                    "system": "You are analyzing Jira issues to categorize them by priority and urgency.",
-                    "categories": ["Critical", "High", "Medium", "Low", "Backlog"],
-                    "criteria": "Consider issue impact, urgency, customer affect, and business value.",
-                },
-                "theme": {
-                    "system": "You are analyzing Jira issues to categorize them by thematic content.",
-                    "categories": [
-                        "Bug Fix",
-                        "Feature Request",
-                        "Technical Debt",
-                        "Documentation",
-                        "Performance",
-                        "Security",
-                        "Infrastructure",
-                    ],
-                    "criteria": "Analyze issue content, description, and comments to identify primary themes.",
-                },
-                "sentiment": {
-                    "system": "You are analyzing Jira issues to categorize them by sentiment and tone.",
-                    "categories": ["Positive", "Neutral", "Negative", "Urgent", "Frustrated"],
-                    "criteria": "Focus on language tone, urgency indicators, and emotional content in descriptions and comments.",
-                },
-                "workload": {
-                    "system": "You are analyzing Jira issues to categorize them by estimated workload and complexity.",
-                    "categories": [
-                        "Quick Fix",
-                        "Small Task",
-                        "Medium Task",
-                        "Large Task",
-                        "Epic/Project",
-                    ],
-                    "criteria": "Consider issue complexity, scope, dependencies, and estimated effort.",
-                },
-                "custom": {
-                    "system": "You are analyzing Jira issues to categorize them using custom categories.",
-                    "categories": (
-                        custom_categories
-                        if custom_categories
-                        else ["Category A", "Category B", "Category C"]
-                    ),
-                    "criteria": "Use the provided custom categories to classify issues based on your analysis.",
-                },
-            }
+        # Filter and summarize comments
+        filtered_comments = client.filter_comments_by_date(
+            issue.comments,
+            arguments.get("comment_start_date"),
+            arguments.get("comment_end_date"),
+        )
 
-            prompt_config = prompts[categorization_type]
+        comment_summaries[issue.key] = client.summarize_comments(filtered_comments)
 
-            focus_instructions = {
-                "issues_only": "Focus your analysis only on issue titles, descriptions, and metadata. Ignore comment data.",
-                "comments_only": "Focus your analysis only on comment content and sentiment. Ignore issue descriptions.",
-                "both": "Analyze both issue content (title, description, metadata) and comment analysis data.",
-            }
+    # Prepare LLM input
+    llm_input = client.prepare_llm_input(
+        issues,
+        comment_summaries,
+        include_descriptions=arguments.get("include_descriptions", True),
+        include_comments=arguments.get("include_comments", True),
+        max_description_length=arguments.get("max_description_length", 500),
+        max_comment_length=arguments.get("max_comment_length", 300),
+    )
 
-            format_instructions = {
-                "json": "Return results as a JSON object with issue keys as keys and categories as values.",
-                "csv": "Return results as CSV format with columns: issue_key, category, confidence, reasoning.",
-                "summary": "Return a summary report with category distributions and key insights.",
-            }
+    result = {
+        "jql_used": jql,
+        "llm_input": llm_input,
+        "processing_summary": {
+            "issues_processed": len(issues),
+            "total_comments_analyzed": int(
+                sum([s.total_comments for s in comment_summaries.values()])
+            ),
+            "date_filters_applied": {
+                "comment_start_date": arguments.get("comment_start_date"),
+                "comment_end_date": arguments.get("comment_end_date"),
+            },
+        },
+    }
+    return list(compose_json_response(result, default=str))
 
-            prompt = f"""
+
+@registry.tool("get_fields", _READ_ONLY_SCHEMAS_BY_NAME["get_fields"])
+async def _tool_get_fields(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    fields = await client.get_fields()
+
+    # Organize fields by type
+    standard_fields = []
+    custom_fields = []
+
+    for field in fields:
+        field_info = {
+            "id": field.get("id"),
+            "name": field.get("name"),
+            "type": field.get("schema", {}).get("type"),
+            "custom": field.get("custom", False),
+        }
+
+        if field.get("custom"):
+            custom_fields.append(field_info)
+        else:
+            standard_fields.append(field_info)
+
+    result = {
+        "standard_fields": standard_fields,
+        "custom_fields": custom_fields,
+        "total_fields": len(fields),
+    }
+    return list(compose_json_response(result, default=str))
+
+
+@registry.tool("generate_categorization_prompt", _READ_ONLY_SCHEMAS_BY_NAME["generate_categorization_prompt"])
+async def _tool_generate_categorization_prompt(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    categorization_type = arguments["categorization_type"]
+    custom_categories = arguments.get("custom_categories", [])
+    analysis_focus = arguments.get("analysis_focus", "both")
+    output_format = arguments.get("output_format", "json")
+
+    # Generate categorization prompt based on type
+    prompts = {
+        "priority": {
+            "system": "You are analyzing Jira issues to categorize them by priority and urgency.",
+            "categories": ["Critical", "High", "Medium", "Low", "Backlog"],
+            "criteria": "Consider issue impact, urgency, customer affect, and business value.",
+        },
+        "theme": {
+            "system": "You are analyzing Jira issues to categorize them by thematic content.",
+            "categories": [
+                "Bug Fix",
+                "Feature Request",
+                "Technical Debt",
+                "Documentation",
+                "Performance",
+                "Security",
+                "Infrastructure",
+            ],
+            "criteria": "Analyze issue content, description, and comments to identify primary themes.",
+        },
+        "sentiment": {
+            "system": "You are analyzing Jira issues to categorize them by sentiment and tone.",
+            "categories": ["Positive", "Neutral", "Negative", "Urgent", "Frustrated"],
+            "criteria": "Focus on language tone, urgency indicators, and emotional content in descriptions and comments.",
+        },
+        "workload": {
+            "system": "You are analyzing Jira issues to categorize them by estimated workload and complexity.",
+            "categories": [
+                "Quick Fix",
+                "Small Task",
+                "Medium Task",
+                "Large Task",
+                "Epic/Project",
+            ],
+            "criteria": "Consider issue complexity, scope, dependencies, and estimated effort.",
+        },
+        "custom": {
+            "system": "You are analyzing Jira issues to categorize them using custom categories.",
+            "categories": (
+                custom_categories
+                if custom_categories
+                else ["Category A", "Category B", "Category C"]
+            ),
+            "criteria": "Use the provided custom categories to classify issues based on your analysis.",
+        },
+    }
+
+    prompt_config = prompts[categorization_type]
+
+    focus_instructions = {
+        "issues_only": "Focus your analysis only on issue titles, descriptions, and metadata. Ignore comment data.",
+        "comments_only": "Focus your analysis only on comment content and sentiment. Ignore issue descriptions.",
+        "both": "Analyze both issue content (title, description, metadata) and comment analysis data.",
+    }
+
+    format_instructions = {
+        "json": "Return results as a JSON object with issue keys as keys and categories as values.",
+        "csv": "Return results as CSV format with columns: issue_key, category, confidence, reasoning.",
+        "summary": "Return a summary report with category distributions and key insights.",
+    }
+
+    prompt = f"""
 {prompt_config["system"]}
 
 CATEGORIZATION TASK:
@@ -2555,182 +2558,202 @@ INSTRUCTIONS:
 The Jira data will be provided in the following message. Please categorize all issues according to the above specifications.
 """
 
-            result = {
-                "categorization_type": categorization_type,
-                "prompt": prompt,
-                "categories": prompt_config["categories"],
-                "analysis_focus": analysis_focus,
-                "output_format": output_format,
-                "usage_instructions": "Send this prompt followed by your Jira data from jira_prepare_llm_categorization to an LLM for analysis.",
-            }
+    result = {
+        "categorization_type": categorization_type,
+        "prompt": prompt,
+        "categories": prompt_config["categories"],
+        "analysis_focus": analysis_focus,
+        "output_format": output_format,
+        "usage_instructions": "Send this prompt followed by your Jira data from jira_prepare_llm_categorization to an LLM for analysis.",
+    }
+    return list(compose_json_response(result, default=str))
 
-        elif name == "jira_add_comment":
-            # Check if actions are enabled
-            if not ActionFlags.is_actions_enabled("jira"):
-                raise ValueError(
-                    "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable comment creation."
-                )
 
-            issue_key = arguments["issue_key"]
-            comment_text = arguments["comment_text"]
+@registry.tool("check_mentions", _READ_ONLY_SCHEMAS_BY_NAME["check_mentions"])
+async def _tool_check_mentions(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    issue_keys = arguments["issue_keys"]
+    user_email = arguments.get("user_email")
 
-            # Prefix comment with user attribution from auth DB
-            user_name = arguments.get("user_name")
-            user_email = arguments.get("user_email")
-            display_name = user_name or user_email or "Unknown user"
-            prefixed_comment = f"{display_name} via Support bot: {comment_text}"
+    mention_results = await client.check_user_mentions(issue_keys, user_email)
 
-            comment_result = await client.add_comment(issue_key, prefixed_comment)
+    result = {
+        "checked_issues": len(issue_keys),
+        "results": mention_results,
+        "summary": {
+            "total_issues_with_involvement": sum(
+                1
+                for r in mention_results.values()
+                if isinstance(r, dict) and r.get("is_involved")
+            ),
+            "total_mentions": sum(
+                r.get("total_mentions", 0)
+                for r in mention_results.values()
+                if isinstance(r, dict)
+            ),
+            "issues_as_assignee": [
+                k
+                for k, r in mention_results.items()
+                if isinstance(r, dict) and r.get("is_assignee")
+            ],
+            "issues_as_reporter": [
+                k
+                for k, r in mention_results.items()
+                if isinstance(r, dict) and r.get("is_reporter")
+            ],
+            "issues_with_mentions": [
+                k
+                for k, r in mention_results.items()
+                if isinstance(r, dict) and r.get("total_mentions", 0) > 0
+            ],
+        },
+    }
+    return list(compose_json_response(result, default=str))
 
-            result = {
-                "success": True,
-                "issue_key": issue_key,
-                "comment_id": comment_result.get("id"),
-                "created": comment_result.get("created"),
-                "message": f"Comment added successfully to {issue_key}",
-            }
 
-        elif name == "jira_check_mentions":
-            issue_keys = arguments["issue_keys"]
-            user_email = arguments.get("user_email")
+@registry.tool("get_on_call", _READ_ONLY_SCHEMAS_BY_NAME["get_on_call"])
+async def _tool_get_on_call(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    start_date = arguments["start_date"]
+    end_date = arguments.get("end_date")
 
-            mention_results = await client.check_user_mentions(issue_keys, user_email)
+    on_call_periods = await client.get_on_call(start_date, end_date)
 
-            result = {
-                "checked_issues": len(issue_keys),
-                "results": mention_results,
-                "summary": {
-                    "total_issues_with_involvement": sum(
-                        1
-                        for r in mention_results.values()
-                        if isinstance(r, dict) and r.get("is_involved")
-                    ),
-                    "total_mentions": sum(
-                        r.get("total_mentions", 0)
-                        for r in mention_results.values()
-                        if isinstance(r, dict)
-                    ),
-                    "issues_as_assignee": [
-                        k
-                        for k, r in mention_results.items()
-                        if isinstance(r, dict) and r.get("is_assignee")
-                    ],
-                    "issues_as_reporter": [
-                        k
-                        for k, r in mention_results.items()
-                        if isinstance(r, dict) and r.get("is_reporter")
-                    ],
-                    "issues_with_mentions": [
-                        k
-                        for k, r in mention_results.items()
-                        if isinstance(r, dict) and r.get("total_mentions", 0) > 0
-                    ],
-                },
-            }
+    result = {"on_call_periods": on_call_periods, "total_periods": len(on_call_periods)}
+    return list(compose_json_response(result, default=str))
 
-        elif name == "jira_get_transitions":
-            # Check if actions are enabled
-            if not ActionFlags.is_actions_enabled("jira"):
-                raise ValueError(
-                    "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable transition queries."
-                )
 
-            issue_key = arguments["issue_key"]
-            transitions = await client.get_available_transitions(issue_key)
+@registry.tool("get_schedule_participants", _READ_ONLY_SCHEMAS_BY_NAME["get_schedule_participants"])
+async def _tool_get_schedule_participants(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    participants = await client.get_schedule_participants()
 
-            result = {
-                "issue_key": issue_key,
-                "available_transitions": transitions,
-                "total_transitions": len(transitions),
-            }
+    result = {
+        "participants": participants,
+        "total_participants": len(participants),
+    }
+    return list(compose_json_response(result, default=str))
 
-        elif name == "jira_change_status":
-            # Check if actions are enabled
-            if not ActionFlags.is_actions_enabled("jira"):
-                raise ValueError(
-                    "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable status changes."
-                )
 
-            issue_key = arguments["issue_key"]
-            transition = arguments["transition"]
-            current_user_email = arguments.get("user_email")
-            current_user_name = arguments.get("user_name")
+@registry.tool("get_organization_options", _READ_ONLY_SCHEMAS_BY_NAME["get_organization_options"])
+async def _tool_get_organization_options(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    org_field_id = await client.get_organization_field_id()
+    if not org_field_id:
+        result = {
+            "field_id": None,
+            "options": [],
+            "error": "Organization field not found in JIRA",
+        }
+    else:
+        options = await client.get_field_options(org_field_id, "OPS")
+        result = {
+            "field_id": org_field_id,
+            "options": options,
+            "total_options": len(options),
+        }
+    return list(compose_json_response(result, default=str))
 
-            transition_result = await client.transition_issue(
-                issue_key, transition, current_user_email, current_user_name
-            )
-            result = transition_result
 
-        elif name == "jira_assign_issue":
-            if not ActionFlags.is_actions_enabled("jira"):
-                raise ValueError(
-                    "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable assignments."
-                )
+@registry.tool("add_comment", _ACTION_SCHEMAS_BY_NAME["add_comment"], gated=True, refuse_when_disabled=False)
+async def _tool_add_comment(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    # Check if actions are enabled
+    if not ActionFlags.is_actions_enabled("jira"):
+        raise ValueError(
+            "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable comment creation."
+        )
 
-            result = await client.assign_issue(
-                issue_key=arguments["issue_key"],
-                assignee=arguments["assignee"],
-                current_user_email=arguments.get("user_email"),
-            )
+    issue_key = arguments["issue_key"]
+    comment_text = arguments["comment_text"]
 
-        elif name == "jira_get_on_call":
-            start_date = arguments["start_date"]
-            end_date = arguments.get("end_date")
+    # Prefix comment with user attribution from auth DB
+    user_name = arguments.get("user_name")
+    user_email = arguments.get("user_email")
+    display_name = user_name or user_email or "Unknown user"
+    prefixed_comment = f"{display_name} via Support bot: {comment_text}"
 
-            on_call_periods = await client.get_on_call(start_date, end_date)
+    comment_result = await client.add_comment(issue_key, prefixed_comment)
 
-            result = {"on_call_periods": on_call_periods, "total_periods": len(on_call_periods)}
+    result = {
+        "success": True,
+        "issue_key": issue_key,
+        "comment_id": comment_result.get("id"),
+        "created": comment_result.get("created"),
+        "message": f"Comment added successfully to {issue_key}",
+    }
+    return list(compose_json_response(result, default=str))
 
-        elif name == "jira_get_schedule_participants":
-            participants = await client.get_schedule_participants()
 
-            result = {
-                "participants": participants,
-                "total_participants": len(participants),
-            }
+@registry.tool("get_transitions", _ACTION_SCHEMAS_BY_NAME["get_transitions"], gated=True, refuse_when_disabled=False)
+async def _tool_get_transitions(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    # Check if actions are enabled
+    if not ActionFlags.is_actions_enabled("jira"):
+        raise ValueError(
+            "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable transition queries."
+        )
 
-        elif name == "jira_get_organization_options":
-            org_field_id = await client.get_organization_field_id()
-            if not org_field_id:
-                result = {
-                    "field_id": None,
-                    "options": [],
-                    "error": "Organization field not found in JIRA",
-                }
-            else:
-                options = await client.get_field_options(org_field_id, "OPS")
-                result = {
-                    "field_id": org_field_id,
-                    "options": options,
-                    "total_options": len(options),
-                }
+    issue_key = arguments["issue_key"]
+    transitions = await client.get_available_transitions(issue_key)
 
-        elif name == "jira_add_on_call_override":
-            # Check if actions are enabled
-            if not ActionFlags.is_actions_enabled("jira"):
-                raise ValueError(
-                    "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable on-call override creation."
-                )
+    result = {
+        "issue_key": issue_key,
+        "available_transitions": transitions,
+        "total_transitions": len(transitions),
+    }
+    return list(compose_json_response(result, default=str))
 
-            user_name = arguments["user_name"]
-            start_time = arguments["start_time"]
-            end_time = arguments["end_time"]
 
-            override_result = await client.add_on_call_override(user_name, start_time, end_time)
-            result = override_result
+@registry.tool("change_status", _ACTION_SCHEMAS_BY_NAME["change_status"], gated=True, refuse_when_disabled=False)
+async def _tool_change_status(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    # Check if actions are enabled
+    if not ActionFlags.is_actions_enabled("jira"):
+        raise ValueError(
+            "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable status changes."
+        )
 
-        elif name == "jira_get_ticket_statistics":
-            days = arguments.get("days", 30)
-            result = await get_ticket_statistics(days=int(days))
+    issue_key = arguments["issue_key"]
+    transition = arguments["transition"]
+    current_user_email = arguments.get("user_email")
+    current_user_name = arguments.get("user_name")
 
-        else:
-            raise ValueError(f"Unknown tool: {name}")
+    transition_result = await client.transition_issue(
+        issue_key, transition, current_user_email, current_user_name
+    )
+    result = transition_result
+    return list(compose_json_response(result, default=str))
 
-        return list(compose_json_response(result, default=str))
 
-    except Exception as e:
-        logger.error(f"Error in {name}: {str(e)}")
-        return list(compose_error_response(e))
+@registry.tool("assign_issue", _ACTION_SCHEMAS_BY_NAME["assign_issue"], gated=True, refuse_when_disabled=False)
+async def _tool_assign_issue(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    if not ActionFlags.is_actions_enabled("jira"):
+        raise ValueError(
+            "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable assignments."
+        )
+
+    result = await client.assign_issue(
+        issue_key=arguments["issue_key"],
+        assignee=arguments["assignee"],
+        current_user_email=arguments.get("user_email"),
+    )
+    return list(compose_json_response(result, default=str))
+
+
+@registry.tool("add_on_call_override", _ACTION_SCHEMAS_BY_NAME["add_on_call_override"], gated=True, refuse_when_disabled=False)
+async def _tool_add_on_call_override(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    # Check if actions are enabled
+    if not ActionFlags.is_actions_enabled("jira"):
+        raise ValueError(
+            "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable on-call override creation."
+        )
+
+    user_name = arguments["user_name"]
+    start_time = arguments["start_time"]
+    end_time = arguments["end_time"]
+
+    override_result = await client.add_on_call_override(user_name, start_time, end_time)
+    result = override_result
+    return list(compose_json_response(result, default=str))
+
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 async def main():

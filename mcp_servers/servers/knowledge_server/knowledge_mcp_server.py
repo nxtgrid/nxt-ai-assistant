@@ -19,8 +19,11 @@ from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
 from mcp.types import ServerCapabilities
+from shared_code.tool_registry import ToolRegistry
 
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+
+from .tool_schemas import TOOL_SCHEMAS
 
 # Load environment variables
 load_dotenv()
@@ -37,6 +40,8 @@ print("🚀 Knowledge MCP Server starting...", file=sys.stderr)
 
 # Initialize MCP server
 server = Server("knowledge-server")
+registry = ToolRegistry("knowledge")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 # Database configuration
 CHAT_DB_URL = os.getenv("CHAT_DB_URL", "")
@@ -211,73 +216,7 @@ Format the response with markdown for readability."""
         return summary
 
 
-@server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    """List available tools."""
-    return [
-        types.Tool(
-            name="summarize_knowledge",
-            description=(
-                "Search the knowledge base and provide a structured summary of available information "
-                "on a specific topic. Also identifies MCP tools that can provide live/current data. "
-                "Use this to understand what the system knows about a topic before diving deeper."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Topic to summarize (e.g., 'distribution design', 'meter commissioning', 'grid troubleshooting')",
-                    },
-                    "max_words": {
-                        "type": "integer",
-                        "description": "Maximum words for summary (default: 250)",
-                        "default": 250,
-                    },
-                },
-                "required": ["topic"],
-            },
-        ),
-        types.Tool(
-            name="list_document_types",
-            description="List the types of documents available in the knowledge base with counts.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-    ]
-
-
-@server.call_tool()
-async def handle_call_tool(
-    name: str, arguments: dict | None
-) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-    """Handle tool calls."""
-    arguments = arguments or {}
-
-    if name == "summarize_knowledge":
-        return await _handle_summarize_knowledge(arguments)
-    elif name == "list_document_types":
-        return await _handle_list_document_types(arguments)
-    elif name == "get_grid_review_history":
-        return await _handle_get_grid_review_history(arguments)
-    elif name == "web_search":
-        return await _handle_web_search(arguments)
-    elif name == "web_extract":
-        return await _handle_web_extract(arguments)
-    elif name == "find_document":
-        return await _handle_find_document(arguments)
-    elif name == "read_document":
-        return await _handle_read_document(arguments)
-    elif name == "scan_doc_comments":
-        return await _handle_scan_doc_comments(arguments)
-    elif name == "edit_doc_section":
-        return await _handle_edit_doc_section(arguments)
-    else:
-        return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
-
-
+@registry.tool("summarize_knowledge", _SCHEMAS_BY_NAME["summarize_knowledge"])
 async def _handle_summarize_knowledge(arguments: dict) -> list[types.TextContent]:
     """Handle summarize_knowledge tool call."""
     topic = arguments.get("topic", "")
@@ -305,6 +244,7 @@ async def _handle_summarize_knowledge(arguments: dict) -> list[types.TextContent
     return [types.TextContent(type="text", text=summary + footer)]
 
 
+@registry.tool("list_document_types", _SCHEMAS_BY_NAME["list_document_types"])
 async def _handle_list_document_types(arguments: dict) -> list[types.TextContent]:
     """Handle list_document_types tool call."""
     try:
@@ -459,6 +399,7 @@ def _get_tavily_client():
     return TavilyClient(api_key=TAVILY_API_KEY)
 
 
+@registry.tool("web_search", _SCHEMAS_BY_NAME["web_search"])
 async def _handle_web_search(arguments: dict) -> list[types.TextContent]:
     """Search the web using Tavily."""
     import asyncio
@@ -523,6 +464,7 @@ async def _handle_web_search(arguments: dict) -> list[types.TextContent]:
         return [types.TextContent(type="text", text="Web search is temporarily unavailable")]
 
 
+@registry.tool("web_extract", _SCHEMAS_BY_NAME["web_extract"])
 async def _handle_web_extract(arguments: dict) -> list[types.TextContent]:
     """Extract clean content from a URL using Tavily."""
     import asyncio
@@ -573,6 +515,7 @@ async def _handle_web_extract(arguments: dict) -> list[types.TextContent]:
 # ── Find Document ─────────────────────────────────────────────────────
 
 
+@registry.tool("find_document", _SCHEMAS_BY_NAME["find_document"])
 async def _handle_find_document(arguments: dict) -> list[types.TextContent]:
     """Search Google Drive for a document by name fragment, code, URL, or ID."""
     import json
@@ -625,6 +568,7 @@ async def _handle_find_document(arguments: dict) -> list[types.TextContent]:
         ]
 
 
+@registry.tool("read_document", _SCHEMAS_BY_NAME["read_document"])
 async def _handle_read_document(arguments: dict) -> list[types.TextContent]:
     """Fetch a Google Doc's content as markdown."""
     document_id = (arguments.get("document_id") or "").strip()
@@ -657,6 +601,7 @@ async def _handle_read_document(arguments: dict) -> list[types.TextContent]:
 # ── GTR Review History ─────────────────────────────────────────────────
 
 
+@registry.tool("get_grid_review_history", _SCHEMAS_BY_NAME["get_grid_review_history"])
 async def _handle_get_grid_review_history(arguments: dict) -> list[types.TextContent]:
     """Handle get_grid_review_history tool call."""
     import json
@@ -728,6 +673,7 @@ async def _handle_get_grid_review_history(arguments: dict) -> list[types.TextCon
         return [types.TextContent(type="text", text="Review history is temporarily unavailable")]
 
 
+@registry.tool("scan_doc_comments", _SCHEMAS_BY_NAME["scan_doc_comments"])
 async def _handle_scan_doc_comments(arguments: dict) -> list[types.TextContent]:
     """Scan a Google Doc for pending @anansibot comments."""
     doc_id = arguments.get("document_id", "").strip()
@@ -766,6 +712,7 @@ async def _handle_scan_doc_comments(arguments: dict) -> list[types.TextContent]:
         return [types.TextContent(type="text", text="Could not scan comments. Please try again.")]
 
 
+@registry.tool("edit_doc_section", _SCHEMAS_BY_NAME["edit_doc_section"])
 async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
     """Edit a section of a Google Doc with formatted markdown."""
     doc_id = arguments.get("document_id", "").strip()
@@ -897,6 +844,10 @@ async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
                 "Please try again or edit the document manually.",
             )
         ]
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 if __name__ == "__main__":

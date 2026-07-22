@@ -24,9 +24,12 @@ from mcp.server import Server
 from mcp.server.models import InitializationOptions
 from mcp.types import ServerCapabilities
 from rapidfuzz import fuzz
+from shared_code.tool_registry import ToolRegistry
 
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
-from shared.utils.response_formatters import compose_error_response, compose_json_response
+from shared.utils.response_formatters import compose_json_response
+
+from .tool_schemas import TOOL_SCHEMAS
 
 load_dotenv()
 
@@ -38,6 +41,8 @@ logging.basicConfig(
 logger = logging.getLogger("reference-server")
 
 server = Server("reference-server")
+registry = ToolRegistry("reference")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 # --- Cache ---
 # Each cache is a tuple of (data, fetched_at_monotonic) or None
@@ -213,6 +218,7 @@ async def _translate_tariff_query(query: str) -> str:
     return query
 
 
+@registry.tool("lookup_tariff", _SCHEMAS_BY_NAME["lookup_tariff"])
 async def _handle_lookup_tariff(args: Dict[str, Any]) -> List[types.TextContent]:
     """Handle lookup_tariff tool call."""
     query = args.get("query", "").strip()
@@ -333,6 +339,7 @@ async def _get_prohibition_list() -> Dict:
     return _prohibition_cache[0]
 
 
+@registry.tool("get_import_prohibition_list", _SCHEMAS_BY_NAME["get_import_prohibition_list"])
 async def _handle_get_import_prohibition_list(args: Dict[str, Any]) -> List[types.TextContent]:
     """Handle get_import_prohibition_list tool call."""
     data = await _get_prohibition_list()
@@ -453,6 +460,7 @@ def _match_standard(query: str, rows: List[Dict]) -> List[Dict]:
     return [r for r in scored if r["score"] >= best - 5][:3]
 
 
+@registry.tool("lookup_import_standard", _SCHEMAS_BY_NAME["lookup_import_standard"])
 async def _handle_lookup_import_standard(args: Dict[str, Any]) -> List[types.TextContent]:
     """Handle lookup_import_standard tool call."""
     query = args.get("query", "").strip()
@@ -470,76 +478,8 @@ async def _handle_lookup_import_standard(args: Dict[str, Any]) -> List[types.Tex
 # --- MCP handlers ---
 
 
-@server.list_tools()
-async def handle_list_tools() -> List[types.Tool]:
-    """List available reference tools."""
-    return [
-        types.Tool(
-            name="lookup_tariff",
-            description=(
-                "[READ-ONLY] Look up Nigeria import tariff by item description or CET code. "
-                "Accepts fuzzy item descriptions (e.g. 'breeding horses') or CET codes with or "
-                "without dots (e.g. '0101.21.00.00' or '0101210000'). Returns VAT, levy (LVY), "
-                "excise (EXC), and date of validity (DOV) from the Nigeria Customs import tariff schedule."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Item description or CET code (dots optional)",
-                    }
-                },
-                "required": ["query"],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="get_import_prohibition_list",
-            description=(
-                "[READ-ONLY] Fetch the current Nigeria import prohibition list from the Nigeria "
-                "Customs Service website. Returns all categories of absolutely prohibited imports."
-            ),
-            inputSchema={"type": "object", "properties": {}},
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="lookup_import_standard",
-            description=(
-                "[READ-ONLY] Look up Nigeria import standards by item name. Fuzzy-matches against "
-                "the Nigeria Import Standards document and returns the applicable HS codes and remarks "
-                "(standard reference, e.g. NIS 54:2017)."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Item name to search for",
-                    }
-                },
-                "required": ["query"],
-            },
-            visible_to_customer=False,
-        ),
-    ]
-
-
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
-    """Dispatch tool calls to handlers."""
-    try:
-        if name == "lookup_tariff":
-            return await _handle_lookup_tariff(arguments)
-        elif name == "get_import_prohibition_list":
-            return await _handle_get_import_prohibition_list(arguments)
-        elif name == "lookup_import_standard":
-            return await _handle_lookup_import_standard(arguments)
-        else:
-            return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
-    except Exception as e:
-        logger.error(f"Error in tool {name}: {e}")
-        return list(compose_error_response(e))
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 # --- Standalone entry point ---

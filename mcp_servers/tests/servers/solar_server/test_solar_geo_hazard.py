@@ -1,8 +1,19 @@
 import json
+import os
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 import rasterio.errors
+
+# solar_mcp_server now imports shared_code.tool_registry, which needs
+# mcp_servers/ itself on sys.path (mirrors dev.sh and how server_registry
+# loads modules in production) — not just the repo root this file already
+# gets from being under mcp_servers/tests/.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../"))
+_MCP_ROOT = os.path.join(_REPO_ROOT, "mcp_servers")
+if _MCP_ROOT not in sys.path:
+    sys.path.insert(0, _MCP_ROOT)
 
 from mcp_servers.servers.solar_server import solar_mcp_server as sms
 
