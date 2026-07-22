@@ -1,6 +1,6 @@
 """Integrity of the extracted Jira tool schemas.
 
-The 16 tool definitions used to be literals inside handle_list_tools. Now that
+The 9 tool definitions used to be literals inside handle_list_tools. Now that
 they are data in tool_schemas.py, nothing about them is checked by the compiler
 — a truncated file or a dropped key would surface as tools quietly missing from
 the server. These tests are that check.
@@ -9,7 +9,7 @@ Names are unprefixed (``get_issue``, not ``jira_get_issue``) to match
 tool_definitions.json — the orchestrator adds the server prefix when
 advertising, and handle_call_tool normalizes it back on dispatch.
 
-The gating half matters most: five of the sixteen are only listed when
+The gating half matters most: five of the nine are only listed when
 JIRA_ACTIONS_ENABLED is on, and four of those write to Jira.
 """
 
@@ -45,7 +45,7 @@ GATED_NAMES = [
 class TestSchemaIntegrity:
     def test_expected_tool_counts(self):
         """Pins the counts so a truncated or partially-merged file fails loudly."""
-        assert len(READ_ONLY_TOOL_SCHEMAS) == 11
+        assert len(READ_ONLY_TOOL_SCHEMAS) == 4
         assert len(ACTION_TOOL_SCHEMAS) == 5
 
     def test_names_are_unique_across_both_lists(self):
