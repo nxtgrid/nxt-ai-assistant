@@ -17,8 +17,12 @@ from mcp.types import ServerCapabilities
 # Load environment variables from .env file BEFORE importing shared_code
 load_dotenv()
 
+from shared_code.tool_registry import ToolRegistry
+
 from shared.utils.http_client import HTTPClientMixin
 from shared.utils.response_formatters import compose_error_response, compose_json_response
+
+from .tool_schemas import TOOL_SCHEMAS
 
 # Configure logging to stderr for Claude Desktop visibility
 logging.basicConfig(
@@ -135,66 +139,11 @@ class PaymentProcessorClient(HTTPClientMixin):
 # Global client instance
 payment_processor_client = PaymentProcessorClient()
 
-
-@server.list_tools()
-async def handle_list_tools() -> List[types.Tool]:
-    """List available payment processor tools."""
-    tools = [
-        types.Tool(
-            name="check_transaction_status",
-            description=(
-                "[READ-ONLY] Check the status of a payment transaction. "
-                "Provide either transaction_id (payment processor's internal ID) or tx_ref (merchant reference). "
-                "Returns transaction status (successful/pending/failed), amount, currency, payment type, "
-                "and customer details. This tool ONLY retrieves transaction information - it CANNOT initiate payments, "
-                "refunds, or modify transactions. Useful for verifying payment completion and troubleshooting payment issues."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "transaction_id": {
-                        "type": "string",
-                        "description": (
-                            "Payment processor transaction ID - labeled 'Transaction No.' on receipts "
-                            "(e.g., '2504030201001869149859T'). "
-                            "NOT the 'Session ID' which is a different identifier."
-                        ),
-                    },
-                    "tx_ref": {
-                        "type": "string",
-                        "description": (
-                            "Merchant transaction reference exactly as provided by the customer. "
-                            "Do NOT construct or guess this value - it must come from the customer's receipt or records."
-                        ),
-                    },
-                },
-                "oneOf": [
-                    {"required": ["transaction_id"]},
-                    {"required": ["tx_ref"]},
-                ],
-            },
-            visible_to_customer=False,
-        ),
-    ]
-
-    logger.info(f"Payment processor server: {len(tools)} tools available")
-    return tools
+registry = ToolRegistry("payment_processor")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
-    """Handle tool calls."""
-    try:
-        if name == "check_transaction_status":
-            return await check_transaction_status(arguments)
-        else:
-            return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
-
-    except Exception as e:
-        logger.error(f"Error in tool {name}: {e}")
-        return list(compose_error_response(e))
-
-
+@registry.tool("check_transaction_status", _SCHEMAS_BY_NAME["check_transaction_status"])
 async def check_transaction_status(args: Dict[str, Any]) -> List[types.TextContent]:
     """
     Check payment transaction status.
@@ -270,6 +219,10 @@ async def check_transaction_status(args: Dict[str, Any]) -> List[types.TextConte
         return list(
             compose_error_response(Exception(f"Failed to check transaction status: {str(e)}"))
         )
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 @server.list_resources()
