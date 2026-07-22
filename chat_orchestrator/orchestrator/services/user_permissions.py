@@ -278,7 +278,11 @@ class UserPermissionsService:
         Filters applied in order:
         1. Server-level: Skip entirely disabled servers ({SERVER_NAME}_ENABLED=false)
         2. Tool-level: Skip individually disabled tools (MCP_DISABLED_TOOLS)
-        3. Customer visibility: Non-staff users only see visible_to_customer tools
+        3. Persistent-only / internal-only: not advertised to the LLM at all
+        4. Customer visibility: Non-staff users only see visible_to_customer tools
+
+        internal_only tools remain callable via server_registry.call_tool -
+        this only hides them from the LLM's tool list.
 
         Returns:
             List of provider-neutral function declarations.
@@ -295,9 +299,12 @@ class UserPermissionsService:
                 continue
 
             # Filter out persistent-only tools (only available to persistent agents,
-            # not the normal chat flow)
+            # not the normal chat flow) and internal-only tools (programmatic
+            # callers only, never advertised to the LLM)
             filtered_tools = [
-                tool for tool in server_tools if not tool.get("persistent_only", False)
+                tool
+                for tool in server_tools
+                if not tool.get("persistent_only", False) and not tool.get("internal_only", False)
             ]
 
             # Filter tools based on customer visibility if user is not staff
