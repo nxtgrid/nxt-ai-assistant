@@ -174,113 +174,101 @@ tail -f logs/servers.log
 
 ### Creating a New MCP Server
 
-#### 1. Create Server Directory
+Tools are declared with `shared_code.tool_registry.ToolRegistry` — one `@registry.tool(name, schema)` site per tool, not a hand-written `handle_list_tools`/`handle_call_tool` pair. See [`guides/mcp-servers.md`](../guides/mcp-servers.md) for the full walkthrough (schema file, registration, registry wiring in `server_registry.py`/`handler.py`/`flag_registry.py`, regenerating `tool_definitions.json`, and the test-enforced checklist). Short version:
 
 ```bash
 mkdir -p servers/my_server
-cd servers/my_server
 ```
 
-#### 2. Create Main Server File
-
-File: `my_server_mcp_server.py`
+`servers/my_server/tool_schemas.py`:
 
 ```python
-from mcp.server import Server
-from mcp.server.models import InitializationOptions
-import mcp.server.stdio
-import mcp.types as types
+from typing import Any, Dict, List
+
+TOOL_SCHEMAS: List[Dict[str, Any]] = [
+    {
+        "name": "my_tool",
+        "description": "Description of my tool",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"param": {"type": "string", "description": "Parameter description"}},
+            "required": ["param"],
+        },
+        "visible_to_customer": False,
+    },
+]
+```
+
+`servers/my_server/my_server_mcp_server.py`:
+
+```python
+import asyncio
 import logging
 import sys
 
-# Configure logging (stderr for Claude Desktop visibility)
+import mcp.types as types
+from mcp.server import Server
+from shared_code.stdio_runner import run_stdio_server
+from shared_code.tool_registry import ToolRegistry
+
+from .tool_schemas import TOOL_SCHEMAS
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(name)s] %(levelname)s: %(message)s',
-    handlers=[logging.StreamHandler(sys.stderr)]
+    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)],
 )
-logger = logging.getLogger("my-server-mcp")
+logger = logging.getLogger("my-server")
 
-# Create server instance
 server = Server("my-server")
+registry = ToolRegistry("my_server")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
-@server.list_tools()
-async def handle_list_tools() -> list[types.Tool]:
-    """List available tools"""
-    return [
-        types.Tool(
-            name="my_tool",
-            description="Description of my tool",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "param": {"type": "string", "description": "Parameter description"}
-                },
-                "required": ["param"]
-            }
-        )
-    ]
 
-@server.call_tool()
-async def handle_call_tool(
-    name: str, arguments: dict | None
-) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
-    """Handle tool execution"""
-    if name == "my_tool":
-        result = f"Executed with param: {arguments.get('param')}"
-        return [types.TextContent(type="text", text=result)]
-    else:
-        raise ValueError(f"Unknown tool: {name}")
+@registry.tool("my_tool", _SCHEMAS_BY_NAME["my_tool"])
+async def _my_tool(arguments: dict) -> list[types.TextContent]:
+    from shared.utils.response_formatters import compose_json_response
+
+    return list(compose_json_response({"result": f"Executed with param: {arguments.get('param')}"}))
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
+
 
 async def main():
-    """Run server using stdin/stdout streams"""
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="my-server",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
-                ),
-            ),
-        )
+    await run_stdio_server(server, name="my-server", label="My Server")
+
 
 if __name__ == "__main__":
-    import asyncio
     asyncio.run(main())
 ```
 
-#### 3. Required Patterns
+**Required patterns:**
 
-✅ **File Naming**: `{server_name}_mcp_server.py`  
-✅ **Server Instance**: `server = Server("your-server-name")`  
-✅ **Logging to stderr**: For Claude Desktop debugging  
-✅ **Environment vars**: Use shared action flags if needed
+✅ **File Naming**: `{server_name}_mcp_server.py`
+✅ **Server Instance**: `server = Server("your-server-name")`
+✅ **Logging to stderr**: For Claude Desktop debugging
+✅ **Tool name literal must equal `schema["name"]`** — `ToolRegistry.tool()` raises at import time otherwise; this is the static evidence `test_tool_manifest_sync.py` checks.
+✅ **Regenerate `tool_definitions.json`** via `scripts/export_tools.py` after adding/changing tools — never hand-edit it.
 
-#### 4. Add Action Control (Optional)
+**Action-gated tools** (hidden/refused unless `MY_SERVER_ACTIONS_ENABLED=true`):
 
 ```python
-from shared_code.config.action_flags import ActionFlags
-
-# In your list_tools handler
-actions_enabled = ActionFlags.is_actions_enabled("my_server")
-
-if not actions_enabled:
-    # Return read-only tools
-    return read_only_tools
-else:
-    # Return all tools including write operations
-    return all_tools
+@registry.tool("my_write_tool", _SCHEMAS_BY_NAME["my_write_tool"], gated=True)
+async def _my_write_tool(arguments: dict) -> list[types.TextContent]:
+    ...
 ```
 
-#### 5. Test Your Server
+#### Test Your Server
 
 ```bash
 # Set PYTHONPATH for shared modules
-PYTHONPATH=$PWD python3 servers/my_server/my_server_mcp_server.py
+PYTHONPATH=$PWD:.. python3 -c "
+import asyncio
+from servers.my_server.my_server_mcp_server import handle_call_tool
+asyncio.run(handle_call_tool('my_tool', {'param': 'x'}))
+"
 
 # Or use the launcher
 python3 mcp_launcher.py --list

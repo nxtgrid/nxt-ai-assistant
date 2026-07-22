@@ -259,12 +259,7 @@ Keep `LLM_PROVIDER=gemini` for normal deployments until you intentionally test O
 
 ### Operator-specific database columns
 
-The `customer_server` and `shared/auth` code reference a column named `is_generation_managed_by_nxt_grid` in the `grids` table. This is an operator-specific column from the reference deployment. If your schema uses a different name (or doesn't have this concept), update the column name in:
-
-- `shared/auth/auth_service.py`
-- `mcp_servers/servers/customer_server/customer_mcp_server.py`
-
-Search for `is_generation_managed_by_nxt_grid` to find all references.
+The `shared/auth` code references a column named `is_generation_managed_by_nxt_grid` in the `grids` table (via the `MANAGED_GENERATION_COLUMN` env var, defaulting to that name). This is an operator-specific column from the reference deployment. If your schema uses a different name (or doesn't have this concept), set `MANAGED_GENERATION_COLUMN` or update the default in `shared/auth/auth_service.py`.
 
 ### MCP servers
 
