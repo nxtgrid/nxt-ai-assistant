@@ -15,11 +15,8 @@ import aiohttp
 import paho.mqtt.client as mqtt
 from dotenv import load_dotenv
 from mcp.server import Server
-from mcp.server.models import InitializationOptions
-from mcp.server.stdio import stdio_server
 from mcp.types import (
     Resource,
-    ServerCapabilities,
     TextContent,
 )
 
@@ -28,6 +25,7 @@ load_dotenv()
 
 from shared_code.config.action_flags import ActionFlags
 from shared_code.database.connections import db_manager
+from shared_code.stdio_runner import run_stdio_server
 from shared_code.tool_registry import ToolRegistry
 
 from shared.auth import get_auth_service
@@ -1273,29 +1271,13 @@ async def handle_read_resource(uri: str) -> str:
 
 async def main():
     """Main server function."""
-    try:
-        logger.info("Starting Equipment Control MCP Server...")
-        print("✅ Equipment control server initialized successfully", file=sys.stderr)
-
-        # Initialize Supabase connection for permission checks
-        await db_manager.initialize_supabase()
-
-        # Initialize server
-        options = InitializationOptions(
-            server_name="equipment-control-server",
-            server_version="1.0.0",
-            capabilities=ServerCapabilities(),
-        )
-
-        async with stdio_server() as (read_stream, write_stream):
-            print("🔌 Connected to stdio streams", file=sys.stderr)
-            await server.run(read_stream, write_stream, options)
-    except Exception as e:
-        print(f"❌ Fatal error in equipment control server: {e}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc(file=sys.stderr)
-        raise
+    logger.info("Starting Equipment Control MCP Server...")
+    await run_stdio_server(
+        server,
+        name="equipment-control-server",
+        label="Equipment control",
+        on_startup=db_manager.initialize_supabase,
+    )
 
 
 if __name__ == "__main__":

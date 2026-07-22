@@ -25,11 +25,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import httpx
-import mcp.server.stdio
 import mcp.types as types
 import vl_convert as vlc
 from mcp.server import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
+from shared_code.stdio_runner import run_stdio_server
 
 from shared.charts import apply_theme
 from shared.utils.logging import get_logger
@@ -2806,29 +2805,15 @@ async def handle_read_resource(uri: str) -> str:
 
 async def main():
     """Main entry point"""
-    try:
-        logger.info("Starting Grafana MCP Server...")
-        print("✅ Grafana server initialized successfully", file=sys.stderr)
-
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            print("🔌 Connected to stdio streams", file=sys.stderr)
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="grafana-server",
-                    server_version="1.0.0",
-                    capabilities=server.get_capabilities(
-                        notification_options=NotificationOptions(), experimental_capabilities={}
-                    ),
-                ),
-            )
-    except Exception as e:
-        print(f"❌ Fatal error in Grafana server: {e}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc(file=sys.stderr)
-        raise
+    logger.info("Starting Grafana MCP Server...")
+    await run_stdio_server(
+        server,
+        name="grafana-server",
+        label="Grafana",
+        capabilities=server.get_capabilities(
+            notification_options=NotificationOptions(), experimental_capabilities={}
+        ),
+    )
 
 
 if __name__ == "__main__":

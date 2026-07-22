@@ -49,11 +49,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 import jwt
-import mcp.server.stdio
 import mcp.types as types
 from dotenv import load_dotenv
 from mcp.server import NotificationOptions, Server
-from mcp.server.models import InitializationOptions
+from shared_code.stdio_runner import run_stdio_server
 from shared_code.tool_registry import ToolRegistry
 
 from shared.auth import get_auth_service
@@ -2260,27 +2259,14 @@ handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 async def main():
     """Main entry point"""
-    try:
-        print("✅ Meters server initialized successfully", file=sys.stderr)
-        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-            print("🔌 Connected to stdio streams", file=sys.stderr)
-            await server.run(
-                read_stream,
-                write_stream,
-                InitializationOptions(
-                    server_name="meters-api",
-                    server_version="1.0.0",
-                    capabilities=server.get_capabilities(
-                        notification_options=NotificationOptions(), experimental_capabilities={}
-                    ),
-                ),
-            )
-    except Exception as e:
-        print(f"❌ Fatal error in Meters server: {e}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc(file=sys.stderr)
-        raise
+    await run_stdio_server(
+        server,
+        name="meters-api",
+        label="Meters",
+        capabilities=server.get_capabilities(
+            notification_options=NotificationOptions(), experimental_capabilities={}
+        ),
+    )
 
 
 if __name__ == "__main__":

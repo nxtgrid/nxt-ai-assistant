@@ -15,9 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from mcp.server import Server
-from mcp.server.models import InitializationOptions
-from mcp.server.stdio import stdio_server
-from mcp.types import ImageContent, ServerCapabilities, TextContent
+from mcp.types import ImageContent, TextContent
 
 load_dotenv()
 
@@ -25,6 +23,7 @@ _ORG_NAME = os.getenv("ORGANIZATION_NAME", "the operator")
 STAFF_ORG_ID: int = int(os.getenv("STAFF_ORG_ID", "2"))
 
 # Import Supabase client for direct DB queries
+from shared_code.stdio_runner import run_stdio_server
 from shared_code.tool_registry import ToolRegistry
 from supabase import Client, create_client  # type: ignore[attr-defined]
 
@@ -1066,26 +1065,12 @@ async def _handle_get_batch_downtime_summary(
 
 async def main():
     """Main server function."""
-    try:
-        logger.info("Starting Equipment Diagnostics MCP Server...")
-        print("Equipment Diagnostics server initialized", file=sys.stderr)
-
-        options = InitializationOptions(
-            server_name="equipment-diagnostics-server",
-            server_version="1.0.0",
-            capabilities=ServerCapabilities(),
-        )
-
-        async with stdio_server() as (read_stream, write_stream):
-            print("Connected to stdio streams", file=sys.stderr)
-            await server.run(read_stream, write_stream, options)
-
-    except Exception as e:
-        print(f"Fatal error in Equipment Diagnostics server: {e}", file=sys.stderr)
-        import traceback
-
-        traceback.print_exc(file=sys.stderr)
-        raise
+    logger.info("Starting Equipment Diagnostics MCP Server...")
+    await run_stdio_server(
+        server,
+        name="equipment-diagnostics-server",
+        label="Equipment Diagnostics",
+    )
 
 
 if __name__ == "__main__":
