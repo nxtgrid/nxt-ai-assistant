@@ -39,6 +39,8 @@ from shared.scheduling.recurrence import (  # noqa: E402  (must follow load_dote
     parse_time_expression,
 )
 
+from .tool_schemas import TOOL_SCHEMAS  # noqa: E402
+
 # Configure logging to stderr
 logging.basicConfig(
     level=logging.INFO,
@@ -80,112 +82,8 @@ MAX_SCHEDULES_PER_CHAT = 20
 @server.list_tools()
 async def handle_list_tools() -> List[types.Tool]:
     """List available scheduling tools."""
-    tools = [
-        types.Tool(
-            name="schedule_user_command",
-            description=(
-                "Schedule a message to run at a future time or on a recurring basis. "
-                "IMPORTANT: Schedules must be at least 2 minutes in the future - reject any past times. "
-                "The message will be executed with the current user's permissions and "
-                "results will be posted to this chat. "
-                "The message can be a slash command (e.g., '/tickets') OR any regular text "
-                "(e.g., 'show me tickets assigned to anyone'). Both are valid. "
-                "Examples: 'daily at 9am', 'every monday at 10am', 'every other monday at 9am', "
-                "'monthly on the 1st at 9am', 'tomorrow at 3pm', 'in 2 hours'. "
-                f"Default timezone is {DEFAULT_TIMEZONE}."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "message": {
-                        "type": "string",
-                        "description": (
-                            "The message to schedule. Can be a slash command like '/tickets' "
-                            "or '/grid ExampleGrid', OR any regular text like "
-                            "'show me the tickets assigned to anyone'"
-                        ),
-                    },
-                    "time_expression": {
-                        "type": "string",
-                        "description": (
-                            "When to run: 'daily at 9am', 'every monday at 10am', "
-                            "'every other monday at 9am', 'monthly on the 1st at 9am', "
-                            "'tomorrow at 3pm', 'in 2 hours', 'weekdays at 8:30am'"
-                        ),
-                    },
-                    "timezone": {
-                        "type": "string",
-                        "description": f"Timezone for interpretation (default: {DEFAULT_TIMEZONE})",
-                        "default": DEFAULT_TIMEZONE,
-                    },
-                },
-                "required": ["message", "time_expression"],
-            },
-        ),
-        types.Tool(
-            name="list_user_schedules",
-            description=(
-                "List all active scheduled commands for the current chat. "
-                "Shows schedule ID, command, timing, and next run time."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "include_inactive": {
-                        "type": "boolean",
-                        "description": "Include paused and completed schedules",
-                        "default": False,
-                    },
-                },
-                "required": [],
-            },
-        ),
-        types.Tool(
-            name="cancel_user_schedule",
-            description=(
-                "Cancel a scheduled command by its ID. "
-                "The ID can be found using list_user_schedules."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "schedule_id": {
-                        "type": "string",
-                        "description": "The schedule ID to cancel (UUID format or first 8 characters)",
-                    },
-                },
-                "required": ["schedule_id"],
-            },
-        ),
-        types.Tool(
-            name="pause_user_schedule",
-            description="Pause a recurring schedule. Can be resumed later.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "schedule_id": {
-                        "type": "string",
-                        "description": "The schedule ID to pause",
-                    },
-                },
-                "required": ["schedule_id"],
-            },
-        ),
-        types.Tool(
-            name="resume_user_schedule",
-            description="Resume a paused schedule.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "schedule_id": {
-                        "type": "string",
-                        "description": "The schedule ID to resume",
-                    },
-                },
-                "required": ["schedule_id"],
-            },
-        ),
-    ]
+    # Fresh Tool objects per call — see tool_schemas module docstring.
+    tools = [types.Tool(**schema) for schema in TOOL_SCHEMAS]
 
     logger.info(f"Returning {len(tools)} scheduling tools")
     return tools

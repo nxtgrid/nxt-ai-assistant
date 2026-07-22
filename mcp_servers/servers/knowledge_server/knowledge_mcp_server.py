@@ -22,6 +22,8 @@ from mcp.types import ServerCapabilities
 
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
 
+from .tool_schemas import TOOL_SCHEMAS
+
 # Load environment variables
 load_dotenv()
 
@@ -214,39 +216,8 @@ Format the response with markdown for readability."""
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
     """List available tools."""
-    return [
-        types.Tool(
-            name="summarize_knowledge",
-            description=(
-                "Search the knowledge base and provide a structured summary of available information "
-                "on a specific topic. Also identifies MCP tools that can provide live/current data. "
-                "Use this to understand what the system knows about a topic before diving deeper."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Topic to summarize (e.g., 'distribution design', 'meter commissioning', 'grid troubleshooting')",
-                    },
-                    "max_words": {
-                        "type": "integer",
-                        "description": "Maximum words for summary (default: 250)",
-                        "default": 250,
-                    },
-                },
-                "required": ["topic"],
-            },
-        ),
-        types.Tool(
-            name="list_document_types",
-            description="List the types of documents available in the knowledge base with counts.",
-            inputSchema={
-                "type": "object",
-                "properties": {},
-            },
-        ),
-    ]
+    # Fresh Tool objects per call — see tool_schemas module docstring.
+    return [types.Tool(**schema) for schema in TOOL_SCHEMAS]
 
 
 @server.call_tool()

@@ -201,16 +201,20 @@ async def list_tools(server_name: str) -> List[Dict[str, Any]]:
     # Call the handle_list_tools function
     tools = await module.handle_list_tools()
 
-    # Convert MCP Tool objects to dictionaries
-    return [
-        {
+    # Convert MCP Tool objects to dictionaries, preserving non-standard flags
+    # (persistent_only, command_gated, ...) — user_permissions filters on them.
+    result = []
+    for tool in tools:
+        tool_dict = {
             "name": tool.name,
             "description": tool.description,
             "inputSchema": tool.inputSchema,
             "visible_to_customer": getattr(tool, "visible_to_customer", True),
         }
-        for tool in tools
-    ]
+        for key, value in (getattr(tool, "model_extra", None) or {}).items():
+            tool_dict.setdefault(key, value)
+        result.append(tool_dict)
+    return result
 
 
 async def call_tool(server_name: str, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:

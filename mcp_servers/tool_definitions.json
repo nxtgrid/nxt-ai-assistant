@@ -1338,7 +1338,7 @@
     ],
     "messaging": [
       {
-        "name": "messaging_send_to_group",
+        "name": "send_to_group",
         "description": "Send a message to a registered staff Telegram group. Only groups defined in the Staff Groups configuration are allowed. Use this for escalations, cross-grid coordination, or posting summaries to specialized groups.",
         "inputSchema": {
           "type": "object",

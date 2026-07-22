@@ -17,11 +17,19 @@ import logging
 import os
 from typing import Any, Dict, List
 
-from mcp.types import TextContent
+from mcp.types import TextContent, Tool
 
 from shared.utils.telegram_send import send_telegram_message
 
+from .tool_schemas import TOOL_SCHEMAS
+
 logger = logging.getLogger("messaging-server")
+
+
+async def handle_list_tools() -> List[Tool]:
+    """List available messaging tools."""
+    # Fresh Tool objects per call — see tool_schemas module docstring.
+    return [Tool(**schema) for schema in TOOL_SCHEMAS]
 
 
 async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
