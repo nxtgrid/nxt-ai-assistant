@@ -63,6 +63,11 @@ class TestDefaultTimezone:
 class TestCustomerMeterActionsEnabled:
     """CUSTOMER_METER_ACTIONS_ENABLED defaults to false for safe open-source deployments."""
 
+    # CUSTOMER_METER_ACTIONS_ENABLED is computed via os.getenv() at import time in
+    # servers.customer_server.client_base (Phase 4 file split); customer_mcp_server
+    # only consumes it indirectly through the mixins. Same reload semantics as
+    # TestDefaultTimezone above: the *source* module must be reloaded directly.
+
     def test_defaults_to_false(self):
         """Default is false — write actions require explicit operator opt-in."""
         # Set explicitly to "false" rather than popping: load_dotenv(override=False) won't
@@ -74,7 +79,7 @@ class TestCustomerMeterActionsEnabled:
             )
             if mcp_servers_path not in sys.path:
                 sys.path.insert(0, mcp_servers_path)
-            import mcp_servers.servers.customer_server.customer_mcp_server as m
+            import mcp_servers.servers.customer_server.client_base as m
 
             importlib.reload(m)
             assert m.CUSTOMER_METER_ACTIONS_ENABLED is False
@@ -82,7 +87,7 @@ class TestCustomerMeterActionsEnabled:
     def test_reads_from_env(self):
         """CUSTOMER_METER_ACTIONS_ENABLED=true enables write actions."""
         with patch.dict(os.environ, {"CUSTOMER_METER_ACTIONS_ENABLED": "true"}):
-            import mcp_servers.servers.customer_server.customer_mcp_server as m
+            import mcp_servers.servers.customer_server.client_base as m
 
             importlib.reload(m)
             assert m.CUSTOMER_METER_ACTIONS_ENABLED is True
