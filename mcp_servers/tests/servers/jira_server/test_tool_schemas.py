@@ -49,8 +49,7 @@ class TestSchemaIntegrity:
 
     @pytest.mark.parametrize("schema", ALL_SCHEMAS, ids=lambda s: s["name"])
     def test_every_schema_is_complete(self, schema):
-        assert {"name", "description", "inputSchema"} <= set(schema)
-        assert set(schema) <= {"name", "description", "inputSchema", "visible_to_customer"}
+        assert set(schema) == {"name", "description", "inputSchema", "visible_to_customer"}
         assert schema["name"] and isinstance(schema["name"], str)
         assert schema["description"] and isinstance(schema["description"], str)
 
@@ -77,23 +76,28 @@ class TestActionGating:
 
 
 class TestCustomerVisibility:
-    """Pins a known hazard rather than asserting the ideal.
+    """Jira is staff-only, and every schema must say so explicitly.
 
-    Twelve of the fourteen schemas omit `visible_to_customer` entirely — carried
-    over verbatim from handle_list_tools. server_registry.list_tools defaults a
-    missing flag to True, so on the code path these would read as customer-
-    visible; today tool_definitions.json (explicit `false` for jira) is what the
-    orchestrator reads instead. This test exists so that if someone changes the
-    set of tools declaring the flag, they do it deliberately.
+    A schema that omits `visible_to_customer` is not neutral:
+    server_registry.list_tools defaults a missing flag to True, so on the code
+    path the tool reads as customer-visible. Twelve of these fourteen used to
+    omit it, closed only by tool_definitions.json carrying an explicit `false`.
+    These tests keep the code standing on its own.
     """
 
-    def test_only_the_two_known_schemas_declare_the_flag(self):
-        declared = sorted(s["name"] for s in ALL_SCHEMAS if "visible_to_customer" in s)
-        assert declared == ["jira_get_fields", "jira_get_organization_options"]
+    def test_every_schema_declares_the_flag(self):
+        """The fail-open case: a missing flag becomes True downstream."""
+        missing = [s["name"] for s in ALL_SCHEMAS if "visible_to_customer" not in s]
+        assert missing == [], f"schemas that would default to customer-visible: {missing}"
 
     def test_no_schema_declares_itself_customer_visible(self):
-        exposed = [s["name"] for s in ALL_SCHEMAS if s.get("visible_to_customer") is True]
+        exposed = [s["name"] for s in ALL_SCHEMAS if s["visible_to_customer"] is not False]
         assert exposed == [], f"Jira is staff-only, but these claim otherwise: {exposed}"
+
+    def test_flag_is_strictly_boolean(self):
+        """A falsy-but-not-False value (None, 0, "") must not pass for False."""
+        for s in ALL_SCHEMAS:
+            assert isinstance(s["visible_to_customer"], bool), s["name"]
 
 
 class TestMatchesServerOutput:
@@ -108,6 +112,12 @@ class TestMatchesServerOutput:
     def test_actions_on_returns_every_schema(self):
         tools = self._list_tools(True)
         assert [t.name for t in tools] == [s["name"] for s in ALL_SCHEMAS]
+
+    def test_served_tools_carry_the_staff_only_flag(self):
+        """End-to-end: the flag survives types.Tool construction, so
+        server_registry never has to fall back to its True default."""
+        for t in self._list_tools(True):
+            assert getattr(t, "visible_to_customer", None) is False, t.name
 
     def test_actions_off_withholds_the_gated_tools(self):
         tools = self._list_tools(False)
