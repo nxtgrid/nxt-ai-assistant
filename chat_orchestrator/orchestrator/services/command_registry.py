@@ -829,7 +829,6 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
             "equipment_diagnostics_get_equipment_status",
             "equipment_diagnostics_get_historical_power_data",
             "equipment_diagnostics_analyze_grid_outage",
-            "vrm_get_inverter_power",
         ],
         model_override="GEMINI_DEEP_THINKING_MODEL",
         nl_triggers=[

@@ -34,11 +34,6 @@ SERVER_METADATA = {
         "description": "Production equipment diagnostics, historical analysis, charts, and monitoring",
         "module": "servers.equipment_diagnostics_server.equipment_diagnostics_mcp_server",
     },
-    # Note: vrm server is being replaced by equipment_diagnostics but kept for backwards compatibility
-    "vrm": {
-        "description": "Victron VRM monitoring and control (legacy - use equipment_diagnostics)",
-        "module": "servers.vrm_server.vrm_mcp_server",
-    },
     "jira": {
         "description": "Jira analysis and comment processing",
         "module": "servers.jira_server.jira_mcp_server",

@@ -43,7 +43,6 @@ You are a specialist in ...
 
 ## Tools
 - customer_get_grid_status
-- vrm_get_current_power
 
 ## Packet Types
 - my_packet_type

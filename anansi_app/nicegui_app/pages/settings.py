@@ -45,7 +45,6 @@ RESTART_REQUIRED_KEYS = frozenset(
 _MCP_SERVER_KEYS = frozenset(
     {
         "EQUIPMENT_DIAGNOSTICS_ENABLED",
-        "VRM_ENABLED",
         "JIRA_ENABLED",
         "METERS_ENABLED",
         "EQUIPMENT_CONTROL_ENABLED",

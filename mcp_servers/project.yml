@@ -27,7 +27,6 @@ packages:
 
       # VRM credentials (if used)
       VRM_API_KEY: ${VRM_API_KEY}
-      VRM_ACTIONS_ENABLED: ${VRM_ACTIONS_ENABLED}
 
     functions:
       - name: call

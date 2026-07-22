@@ -22,13 +22,12 @@ A comprehensive collection of Model Context Protocol (MCP) servers built with Py
 1. **🎯 JIRA Server** - JIRA API integration for issue management
 2. **📝 Logs Server** - System log access and analysis
 3. **📊 Codebase Server** - Code search and repository analysis
-4. **⚡ VRM Server** - Victron Energy device monitoring
-5. **🔌 Equipment Control Server** - IoT device control
-6. **📈 Meters Server** - Smart meter data access
-7. **📉 Grafana Server** - Dashboard panel rendering
-8. **☀️ Solar Server** - Solar potential assessment using Global Solar Atlas API
+4. **🔌 Equipment Control Server** - IoT device control
+5. **📈 Meters Server** - Smart meter data access
+6. **📉 Grafana Server** - Dashboard panel rendering
+7. **☀️ Solar Server** - Solar potential assessment using Global Solar Atlas API
 
-> **Note on domain-specific servers:** `customer_server`, `vrm_server`, `meters_server`, and `jira_server` contain business logic specific to grid energy deployments. They are included as reference implementations showing how to build MCP servers against real infrastructure. You will likely want to replace them with servers for your own data sources. The `customer_server` meter write tools additionally require the Metering Platform API (see main README for details).
+> **Note on domain-specific servers:** `customer_server`, `meters_server`, and `jira_server` contain business logic specific to grid energy deployments. They are included as reference implementations showing how to build MCP servers against real infrastructure. You will likely want to replace them with servers for your own data sources. The `customer_server` meter write tools additionally require the Metering Platform API (see main README for details).
 
 ### Key Features
 
