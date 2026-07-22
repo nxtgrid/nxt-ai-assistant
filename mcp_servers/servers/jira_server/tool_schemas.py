@@ -15,14 +15,16 @@ constructs a fresh ``types.Tool`` per call, as it always has; sharing model
 instances across calls would let one caller's mutation reach the next.
 
 ``visible_to_customer`` is what ``user_permissions.filter_tools_for_user`` reads
-to decide whether a non-staff user may see a tool. Only two schemas below set it
-(both ``False``); the other twelve omit it entirely, carried over verbatim from
-handle_list_tools. That omission is not harmless: ``server_registry.list_tools``
-defaults a missing flag to ``True``, so on the code path these tools would read
-as customer-visible. Today they are saved by ``tool_definitions.json``, which
-lists jira with explicit ``false`` and is what the orchestrator actually reads.
-See ``tests/servers/jira_server/test_tool_schemas.py``, which pins the omission
-so it cannot drift unnoticed.
+to decide whether a non-staff user may see a tool. Every schema below sets it to
+``False`` — Jira is staff-only.
+
+Twelve of the fourteen used to omit it, carried over from handle_list_tools,
+which was a latent fail-open: ``server_registry.list_tools`` defaults a missing
+flag to ``True``, so on the code path those tools would have read as
+customer-visible. Nothing was exposed, because ``tool_definitions.json`` lists
+jira with explicit ``false`` and is what the orchestrator actually reads — but
+that manifest is a generated snapshot, and the code should not depend on it to
+stay closed. Declaring the flag here removes that dependency.
 """
 
 from typing import Any, Dict, List
@@ -98,7 +100,8 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_search_issues_wit
                                  'max_results': {'type': 'integer',
                                                  'default': 50,
                                                  'description': 'Maximum number of results'}},
-                  'required': []}},
+                  'required': []},
+  'visible_to_customer': False},
  {'name': 'jira_get_issue',
   'description': 'Get detailed information about a specific Jira issue. Returns: key, summary, '
                  'description, status, assignee, reporter, priority, issue_type, grid, '
@@ -107,7 +110,8 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_search_issues_wit
                   'properties': {'issue_key': {'type': 'string',
                                                'description': 'Jira issue key (e.g., '
                                                               'PROJ-123)'}},
-                  'required': ['issue_key']}},
+                  'required': ['issue_key']},
+  'visible_to_customer': False},
  {'name': 'jira_analyze_comments',
   'description': 'Analyze and summarize comments from Jira issues with date filtering',
   'inputSchema': {'type': 'object',
@@ -132,7 +136,8 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_search_issues_wit
                                                           'default': True,
                                                           'description': 'Include action item '
                                                                          'extraction'}},
-                  'required': ['issue_keys']}},
+                  'required': ['issue_keys']},
+  'visible_to_customer': False},
  {'name': 'jira_prepare_llm_categorization',
   'description': 'Prepare filtered Jira issues and comment analysis for LLM-based '
                  'categorization',
@@ -192,7 +197,8 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_search_issues_wit
                                                         'default': 300,
                                                         'description': 'Maximum comment '
                                                                        'preview length'}},
-                  'required': []}},
+                  'required': []},
+  'visible_to_customer': False},
  {'name': 'jira_get_fields',
   'description': 'Get all available Jira fields including custom fields',
   'inputSchema': {'type': 'object', 'properties': {}, 'required': []},
@@ -224,7 +230,8 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_search_issues_wit
                                                    'enum': ['json', 'csv', 'summary'],
                                                    'default': 'json',
                                                    'description': 'Desired output format'}},
-                  'required': ['categorization_type']}},
+                  'required': ['categorization_type']},
+  'visible_to_customer': False},
  {'name': 'jira_check_mentions',
   'description': 'Check if the current user (or specified user) is mentioned in Jira issues or '
                  'comments',
@@ -237,7 +244,8 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_search_issues_wit
                                                 'description': 'User email to check (optional, '
                                                                'defaults to current '
                                                                'authenticated user)'}},
-                  'required': ['issue_keys']}},
+                  'required': ['issue_keys']},
+  'visible_to_customer': False},
  {'name': 'jira_get_on_call',
   'description': 'Get on-call schedule for a date range from Jira Service Management Ops. '
                  'Returns a clean list of on-call periods with user names, email addresses, '
@@ -253,13 +261,15 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_search_issues_wit
                                               'description': 'ISO 8601 formatted end datetime. '
                                                              'Optional. If not provided, '
                                                              'defaults to start_date.'}},
-                  'required': ['start_date']}},
+                  'required': ['start_date']},
+  'visible_to_customer': False},
  {'name': 'jira_get_schedule_participants',
   'description': 'Get all team members from the on-call schedule rotations. Returns all users '
                  'who are part of any rotation in the schedule, not just who is currently '
                  'on-call. Useful for getting the full list of people who can be assigned to '
                  'on-call duties.',
-  'inputSchema': {'type': 'object', 'properties': {}, 'required': []}},
+  'inputSchema': {'type': 'object', 'properties': {}, 'required': []},
+  'visible_to_customer': False},
  {'name': 'jira_get_organization_options',
   'description': 'Get all available organization options for JIRA tickets in the OPS project. '
                  'Returns the list of organizations that can be assigned to tickets.',
@@ -275,7 +285,8 @@ ACTION_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_add_comment',
                                                               'PROJ-123)'},
                                  'comment_text': {'type': 'string',
                                                   'description': 'The comment text to add'}},
-                  'required': ['issue_key', 'comment_text']}},
+                  'required': ['issue_key', 'comment_text']},
+  'visible_to_customer': False},
  {'name': 'jira_get_transitions',
   'description': '[READ-ONLY] Get available status transitions for a Jira issue. This tool '
                  'only retrieves information, it does not change the issue status.',
@@ -283,7 +294,8 @@ ACTION_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_add_comment',
                   'properties': {'issue_key': {'type': 'string',
                                                'description': 'Jira issue key (e.g., '
                                                               'PROJ-123)'}},
-                  'required': ['issue_key']}},
+                  'required': ['issue_key']},
+  'visible_to_customer': False},
  {'name': 'jira_change_status',
   'description': '[ACTION - MODIFIES JIRA] Change the status of a Jira issue by applying a '
                  'transition. This tool modifies the issue workflow state. Only works if the '
@@ -300,7 +312,8 @@ ACTION_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_add_comment',
                                                                        'making the change '
                                                                        '(optional, defaults to '
                                                                        'authenticated user)'}},
-                  'required': ['issue_key', 'transition']}},
+                  'required': ['issue_key', 'transition']},
+  'visible_to_customer': False},
  {'name': 'jira_add_on_call_override',
   'description': '[ACTION - MODIFIES JSM SCHEDULE] Add an on-call override for a specific user '
                  'and time period in JSM Ops schedule. This tool creates a new on-call '
@@ -322,4 +335,5 @@ ACTION_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'jira_add_comment',
                                               'description': 'ISO 8601 formatted end datetime '
                                                              "(e.g., '2025-10-24T17:00:00Z' "
                                                              'for 5pm UTC)'}},
-                  'required': ['user_name', 'start_time', 'end_time']}}]
+                  'required': ['user_name', 'start_time', 'end_time']},
+  'visible_to_customer': False}]
