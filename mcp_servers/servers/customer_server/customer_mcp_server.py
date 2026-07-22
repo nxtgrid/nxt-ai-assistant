@@ -22,13 +22,14 @@ load_dotenv()
 # Import VRMPlatform for downtime fetching in /grids command
 from servers.customer_server.tool_schemas import TOOL_SCHEMAS
 from servers.equipment_diagnostics_server.platforms.vrm_platform import InverterVoltage, VRMPlatform
+from shared_code.tool_registry import ToolRegistry
 
 from shared.auth import get_auth_service
 from shared.auth.auth_service import MANAGED_GENERATION_COLUMN
 from shared.utils.date_utils import to_local_time
 from shared.utils.geo import parse_location_geom
 from shared.utils.http_client import HTTPClientMixin
-from shared.utils.response_formatters import compose_error_response, compose_json_response
+from shared.utils.response_formatters import compose_json_response
 
 # Configure logging to stderr for Claude Desktop visibility
 logging.basicConfig(
@@ -45,6 +46,8 @@ print(f"📂 Working directory: {os.getcwd()}", file=sys.stderr)
 
 # Initialize MCP server
 server = Server("customer-server")
+registry = ToolRegistry("customer")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 # Auth Database configuration (contains orders, directives, meters, connections, customers, grids)
 AUTH_SUPABASE_URL = os.getenv("AUTH_SUPABASE_URL", "")
@@ -5892,336 +5895,359 @@ async def get_my_open_issues(
         return {"error": f"Failed to fetch open issues: {str(e)}"}
 
 
-@server.list_tools()
-async def handle_list_tools() -> List[types.Tool]:
-    """List available customer-facing tools."""
-    # Fresh Tool objects per call — see tool_schemas module docstring.
-    tools = [types.Tool(**schema) for schema in TOOL_SCHEMAS]
-
-    logger.info(f"Customer server: {len(tools)} tools available")
-    return tools
-
-
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
-    """Handle tool calls."""
-    try:
-        if name == "check_payment_completion":
-            result = await customer_client.check_payment_completion(
-                transaction_reference=arguments.get("transaction_reference"),
-                user_email=arguments.get("user_email"),
-                organization_id=arguments.get("organization_id"),
-            )
-        elif name == "find_payment":
-            result = await customer_client.find_payment(
-                customer_name=arguments.get("customer_name", ""),
-                amount=arguments.get("amount"),
-                date=arguments.get("date"),
-                organization_name=arguments.get("organization_name"),
-                user_email=arguments.get("user_email", ""),
-                organization_id=arguments.get("organization_id"),
-                time_window_hours=float(arguments.get("time_window_hours", 2.0)),
-            )
-        elif name == "lookup_transactions":
-            result = await customer_client.lookup_transactions(
-                user_email=arguments.get("user_email", ""),
-                organization_id=arguments.get("organization_id"),
-                date_from=arguments.get("date_from"),
-                date_to=arguments.get("date_to"),
-                reference_number=arguments.get("reference_number"),
-                amount=arguments.get("amount"),
-                receiver_name=arguments.get("receiver_name"),
-                limit=arguments.get("limit"),
-            )
-        elif name == "meter_information":
-            result = await customer_client.meter_information(
-                meter_number=arguments.get("meter_number"),
-                user_email=arguments.get("user_email"),
-                organization_id=arguments.get("organization_id"),
-            )
-        elif name == "customer_list_grid_meters":
-            organization_id = arguments.get("organization_id")
-            grid_name = arguments.get("grid_name")
-            if not organization_id:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="Error: organization_id is required (should be injected by orchestrator)",
-                    )
-                ]
-            if not grid_name:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="Error: grid_name is required",
-                    )
-                ]
-            result = await customer_client.list_grid_meters(
-                grid_name=grid_name,
-                organization_id=int(organization_id),
-            )
-        elif name == "retry_commissioning":
-            result = await customer_client.retry_commissioning(
-                meter_number=arguments.get("meter_number"),
-                user_email=arguments.get("user_email"),
-                organization_id=arguments.get("organization_id"),
-            )
-        elif name == "unassign_meter":
-            result = await customer_client.unassign_meter(
-                meter_number=arguments.get("meter_number"),
-                user_email=arguments.get("user_email"),
-                organization_id=arguments.get("organization_id"),
-            )
-        elif name == "set_meter_power_limit":
-            meter_number = arguments.get("meter_number", "")
-            power_limit_watts = int(arguments.get("power_limit_watts", 0))
-            user_email = arguments.get("user_email", "")
-            raw_org = arguments.get("organization_id")
-            organization_id = int(raw_org) if raw_org is not None else None
-            result = await customer_client.set_meter_power_limit(
-                meter_number=meter_number,
-                power_limit_watts=power_limit_watts,
-                user_email=user_email,
-                organization_id=organization_id,
-            )
-            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
-        elif name == "set_meter_date":
-            meter_number = arguments.get("meter_number", "")
-            user_email = arguments.get("user_email", "")
-            raw_org = arguments.get("organization_id")
-            organization_id = int(raw_org) if raw_org is not None else None
-            result = await customer_client.set_meter_date(
-                meter_number=meter_number,
-                user_email=user_email,
-                organization_id=organization_id,
-            )
-            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
-        elif name in ("turn_meter_on", "turn_meter_off"):
-            meter_number = arguments.get("meter_number", "")
-            user_email = arguments.get("user_email", "")
-            raw_org = arguments.get("organization_id")
-            organization_id = int(raw_org) if raw_org is not None else None
-            result = await customer_client.send_relay_state(
-                meter_number=meter_number,
-                user_email=user_email,
-                interaction_type="TURN_ON" if name == "turn_meter_on" else "TURN_OFF",
-                organization_id=organization_id,
-            )
-            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
-        elif name == "resend_meter_token":
-            meter_number = arguments.get("meter_number", "")
-            user_email = arguments.get("user_email", "")
-            raw_org = arguments.get("organization_id")
-            organization_id = int(raw_org) if raw_org is not None else None
-            result = await customer_client.resend_meter_token(
-                meter_number=meter_number,
-                user_email=user_email,
-                organization_id=organization_id,
-            )
-            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
-        elif name == "resend_clear_tamper_token":
-            meter_number = arguments.get("meter_number", "")
-            user_email = arguments.get("user_email", "")
-            raw_org = arguments.get("organization_id")
-            organization_id = int(raw_org) if raw_org is not None else None
-            result = await customer_client.resend_clear_tamper_token(
-                meter_number=meter_number,
-                user_email=user_email,
-                organization_id=organization_id,
-            )
-            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
-        elif name == "resend_power_limit_token":
-            meter_number = arguments.get("meter_number", "")
-            user_email = arguments.get("user_email", "")
-            raw_org = arguments.get("organization_id")
-            organization_id = int(raw_org) if raw_org is not None else None
-            result = await customer_client.resend_power_limit_token(
-                meter_number=meter_number,
-                user_email=user_email,
-                organization_id=organization_id,
-            )
-            return [types.TextContent(type="text", text=json.dumps(result, default=str))]
-        elif name == "customer_get_meters_on_pole":
-            organization_id = arguments.get("organization_id")
-            if not organization_id:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="Error: organization_id is required (should be injected by orchestrator)",
-                    )
-                ]
-            result = await customer_client.get_meters_on_pole(
-                pole_reference=arguments.get("pole_reference", ""),
-                organization_id=int(organization_id),
-                grid_name=arguments.get("grid_name"),
-            )
-        elif name == "customer_get_meter_consumption":
-            organization_id = arguments.get("organization_id")
-            if not organization_id:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="Error: organization_id is required (should be injected by orchestrator)",
-                    )
-                ]
-            result = await customer_client.get_meter_consumption(
-                meter_number=arguments.get("meter_number", ""),
-                organization_id=int(organization_id),
-                days_back=int(arguments.get("days_back", 30)),
-            )
-
-            # If result includes a chart, return it as an image + JSON data
-            chart_b64 = None
-            if isinstance(result, dict):
-                chart_b64 = result.pop("chart_base64", None)
-
-            content_list = []
-            if chart_b64:
-                content_list.append(
-                    types.ImageContent(type="image", data=chart_b64, mimeType="image/png")
-                )
-            content_list.append(
-                types.TextContent(type="text", text=json.dumps(result, default=str))
-            )
-            return content_list
-
-        elif name == "customer_get_grid_status":
-            # organization_id is injected by orchestrator, not passed by LLM
-            organization_id = arguments.get("organization_id")
-            if not organization_id:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="Error: organization_id is required (should be injected by orchestrator)",
-                    )
-                ]
-            result = await customer_client.get_grid_status(
-                organization_id=int(organization_id),
-                grid_name=arguments.get("grid_name"),
-                user_email=arguments.get("user_email"),
-            )
-        elif name == "customer_get_all_grids_status":
-            # organization_id is injected by orchestrator, not passed by LLM
-            organization_id = arguments.get("organization_id")
-            if not organization_id:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="Error: organization_id is required (should be injected by orchestrator)",
-                    )
-                ]
-            result = await customer_client.get_all_grids_status(
-                organization_id=int(organization_id),
-            )
-        elif name == "customer_get_last_gtr_summary":
-            grid_name = arguments.get("grid_name")
-            if not grid_name:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="Error: grid_name is required",
-                    )
-                ]
-            result = await get_last_gtr_summary(grid_name=grid_name)
-        elif name == "customer_get_fs_daily_summary":
-            organization_id = arguments.get("organization_id")
-            if not organization_id:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="Error: organization_id is required (should be injected by orchestrator)",
-                    )
-                ]
-            result = await customer_client.get_fs_daily_summary(
-                organization_id=int(organization_id),
-                grid_name=arguments.get("grid_name", ""),
-                start_date=arguments.get("start_date"),
-                end_date=arguments.get("end_date"),
-            )
-        elif name == "customer_get_grid_chat_chronology":
-            organization_id = arguments.get("organization_id")
-            if not organization_id:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="Error: organization_id is required (should be injected by orchestrator)",
-                    )
-                ]
-            result = await customer_client.get_grid_chat_chronology(
-                grid_name=arguments.get("grid_name", ""),
-                organization_id=int(organization_id),
-                days_back=int(arguments.get("days_back", 7)),
-            )
-        elif name == "get_my_open_issues":
-            organization_id = arguments.get("organization_id")
-            if organization_id is None:
-                return [
-                    types.TextContent(
-                        type="text",
-                        text="Error: organization_id is required (should be injected by orchestrator)",
-                    )
-                ]
-            result = await get_my_open_issues(
-                organization_id=int(organization_id),
-                issue_type=arguments.get("issue_type"),
-            )
-        else:
-            return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
-
-        return list(compose_json_response(result))
-
-    except Exception as e:
-        logger.error(f"Error in tool {name}: {e}")
-        return list(compose_error_response(e))
+@registry.tool("meter_information", _SCHEMAS_BY_NAME["meter_information"])
+async def _tool_meter_information(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    result = await customer_client.meter_information(
+        meter_number=arguments.get("meter_number"),
+        user_email=arguments.get("user_email"),
+        organization_id=arguments.get("organization_id"),
+    )
+    return list(compose_json_response(result))
 
 
-@server.list_resources()
-async def handle_list_resources() -> List[types.Resource]:
-    """List available resources."""
-    return [
-        types.Resource(
-            uri="customer://config",
-            name="Customer Server Configuration",
-            description="Current customer server configuration",
-            mimeType="application/json",
-        ),
-        types.Resource(
-            uri="customer://status",
-            name="Connection Status",
-            description="Database and API connection status",
-            mimeType="application/json",
-        ),
-    ]
+@registry.tool("customer_get_meter_consumption", _SCHEMAS_BY_NAME["customer_get_meter_consumption"])
+async def _tool_customer_get_meter_consumption(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    organization_id = arguments.get("organization_id")
+    if not organization_id:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: organization_id is required (should be injected by orchestrator)",
+            )
+        ]
+    result = await customer_client.get_meter_consumption(
+        meter_number=arguments.get("meter_number", ""),
+        organization_id=int(organization_id),
+        days_back=int(arguments.get("days_back", 30)),
+    )
+
+    # If result includes a chart, return it as an image + JSON data
+    chart_b64 = None
+    if isinstance(result, dict):
+        chart_b64 = result.pop("chart_base64", None)
+
+    content_list = []
+    if chart_b64:
+        content_list.append(
+            types.ImageContent(type="image", data=chart_b64, mimeType="image/png")
+        )
+    content_list.append(
+        types.TextContent(type="text", text=json.dumps(result, default=str))
+    )
+    return content_list
 
 
-@server.read_resource()
-async def handle_read_resource(uri: str) -> str:
-    """Read resource content."""
-    if uri == "customer://config":
-        config = {
-            "auth_supabase_url": AUTH_SUPABASE_URL,
-            "auth_supabase_configured": bool(AUTH_SUPABASE_KEY or AUTH_SUPABASE_ANON_KEY),
-            "payment_processor_url": PAYMENT_PROCESSOR_API_URL,
-            "payment_processor_configured": bool(PAYMENT_PROCESSOR_SECRET_KEY),
-            "metering_api_url": METERING_API_URL,
-            "metering_configured": bool(METERING_API_URL and METERING_BEARER_TOKEN),
-            "server_name": "customer-server",
-            "server_version": "1.0.0",
-        }
-        return json.dumps(config, indent=2)
-    elif uri == "customer://status":
-        status = {
-            "auth_supabase_configured": bool(
-                AUTH_SUPABASE_URL and (AUTH_SUPABASE_KEY or AUTH_SUPABASE_ANON_KEY)
-            ),
-            "payment_processor_configured": bool(
-                PAYMENT_PROCESSOR_API_URL and PAYMENT_PROCESSOR_SECRET_KEY
-            ),
-            "metering_configured": bool(METERING_API_URL and METERING_BEARER_TOKEN),
-        }
-        return json.dumps(status, indent=2)
-    else:
-        raise ValueError(f"Unknown resource: {uri}")
+@registry.tool("customer_get_grid_chat_chronology", _SCHEMAS_BY_NAME["customer_get_grid_chat_chronology"])
+async def _tool_customer_get_grid_chat_chronology(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    organization_id = arguments.get("organization_id")
+    if not organization_id:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: organization_id is required (should be injected by orchestrator)",
+            )
+        ]
+    result = await customer_client.get_grid_chat_chronology(
+        grid_name=arguments.get("grid_name", ""),
+        organization_id=int(organization_id),
+        days_back=int(arguments.get("days_back", 7)),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("customer_list_grid_meters", _SCHEMAS_BY_NAME["customer_list_grid_meters"])
+async def _tool_customer_list_grid_meters(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    organization_id = arguments.get("organization_id")
+    grid_name = arguments.get("grid_name")
+    if not organization_id:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: organization_id is required (should be injected by orchestrator)",
+            )
+        ]
+    if not grid_name:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: grid_name is required",
+            )
+        ]
+    result = await customer_client.list_grid_meters(
+        grid_name=grid_name,
+        organization_id=int(organization_id),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("customer_get_meters_on_pole", _SCHEMAS_BY_NAME["customer_get_meters_on_pole"])
+async def _tool_customer_get_meters_on_pole(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    organization_id = arguments.get("organization_id")
+    if not organization_id:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: organization_id is required (should be injected by orchestrator)",
+            )
+        ]
+    result = await customer_client.get_meters_on_pole(
+        pole_reference=arguments.get("pole_reference", ""),
+        organization_id=int(organization_id),
+        grid_name=arguments.get("grid_name"),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("customer_get_grid_status", _SCHEMAS_BY_NAME["customer_get_grid_status"])
+async def _tool_customer_get_grid_status(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    # organization_id is injected by orchestrator, not passed by LLM
+    organization_id = arguments.get("organization_id")
+    if not organization_id:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: organization_id is required (should be injected by orchestrator)",
+            )
+        ]
+    result = await customer_client.get_grid_status(
+        organization_id=int(organization_id),
+        grid_name=arguments.get("grid_name"),
+        user_email=arguments.get("user_email"),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("customer_get_all_grids_status", _SCHEMAS_BY_NAME["customer_get_all_grids_status"])
+async def _tool_customer_get_all_grids_status(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    # organization_id is injected by orchestrator, not passed by LLM
+    organization_id = arguments.get("organization_id")
+    if not organization_id:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: organization_id is required (should be injected by orchestrator)",
+            )
+        ]
+    result = await customer_client.get_all_grids_status(
+        organization_id=int(organization_id),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("customer_get_last_gtr_summary", _SCHEMAS_BY_NAME["customer_get_last_gtr_summary"])
+async def _tool_customer_get_last_gtr_summary(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    grid_name = arguments.get("grid_name")
+    if not grid_name:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: grid_name is required",
+            )
+        ]
+    result = await get_last_gtr_summary(grid_name=grid_name)
+    return list(compose_json_response(result))
+
+
+@registry.tool("customer_get_fs_daily_summary", _SCHEMAS_BY_NAME["customer_get_fs_daily_summary"])
+async def _tool_customer_get_fs_daily_summary(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    organization_id = arguments.get("organization_id")
+    if not organization_id:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: organization_id is required (should be injected by orchestrator)",
+            )
+        ]
+    result = await customer_client.get_fs_daily_summary(
+        organization_id=int(organization_id),
+        grid_name=arguments.get("grid_name", ""),
+        start_date=arguments.get("start_date"),
+        end_date=arguments.get("end_date"),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("check_payment_completion", _SCHEMAS_BY_NAME["check_payment_completion"])
+async def _tool_check_payment_completion(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    result = await customer_client.check_payment_completion(
+        transaction_reference=arguments.get("transaction_reference"),
+        user_email=arguments.get("user_email"),
+        organization_id=arguments.get("organization_id"),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("retry_commissioning", _SCHEMAS_BY_NAME["retry_commissioning"])
+async def _tool_retry_commissioning(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    result = await customer_client.retry_commissioning(
+        meter_number=arguments.get("meter_number"),
+        user_email=arguments.get("user_email"),
+        organization_id=arguments.get("organization_id"),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("unassign_meter", _SCHEMAS_BY_NAME["unassign_meter"])
+async def _tool_unassign_meter(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    result = await customer_client.unassign_meter(
+        meter_number=arguments.get("meter_number"),
+        user_email=arguments.get("user_email"),
+        organization_id=arguments.get("organization_id"),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("set_meter_power_limit", _SCHEMAS_BY_NAME["set_meter_power_limit"])
+async def _tool_set_meter_power_limit(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    meter_number = arguments.get("meter_number", "")
+    power_limit_watts = int(arguments.get("power_limit_watts", 0))
+    user_email = arguments.get("user_email", "")
+    raw_org = arguments.get("organization_id")
+    organization_id = int(raw_org) if raw_org is not None else None
+    result = await customer_client.set_meter_power_limit(
+        meter_number=meter_number,
+        power_limit_watts=power_limit_watts,
+        user_email=user_email,
+        organization_id=organization_id,
+    )
+    return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
+
+@registry.tool("set_meter_date", _SCHEMAS_BY_NAME["set_meter_date"])
+async def _tool_set_meter_date(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    meter_number = arguments.get("meter_number", "")
+    user_email = arguments.get("user_email", "")
+    raw_org = arguments.get("organization_id")
+    organization_id = int(raw_org) if raw_org is not None else None
+    result = await customer_client.set_meter_date(
+        meter_number=meter_number,
+        user_email=user_email,
+        organization_id=organization_id,
+    )
+    return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
+
+@registry.tool("turn_meter_on", _SCHEMAS_BY_NAME["turn_meter_on"])
+async def _tool_turn_meter_on(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    meter_number = arguments.get("meter_number", "")
+    user_email = arguments.get("user_email", "")
+    raw_org = arguments.get("organization_id")
+    organization_id = int(raw_org) if raw_org is not None else None
+    result = await customer_client.send_relay_state(
+        meter_number=meter_number,
+        user_email=user_email,
+        interaction_type="TURN_ON",
+        organization_id=organization_id,
+    )
+    return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
+
+@registry.tool("turn_meter_off", _SCHEMAS_BY_NAME["turn_meter_off"])
+async def _tool_turn_meter_off(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    meter_number = arguments.get("meter_number", "")
+    user_email = arguments.get("user_email", "")
+    raw_org = arguments.get("organization_id")
+    organization_id = int(raw_org) if raw_org is not None else None
+    result = await customer_client.send_relay_state(
+        meter_number=meter_number,
+        user_email=user_email,
+        interaction_type="TURN_OFF",
+        organization_id=organization_id,
+    )
+    return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
+
+@registry.tool("resend_meter_token", _SCHEMAS_BY_NAME["resend_meter_token"])
+async def _tool_resend_meter_token(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    meter_number = arguments.get("meter_number", "")
+    user_email = arguments.get("user_email", "")
+    raw_org = arguments.get("organization_id")
+    organization_id = int(raw_org) if raw_org is not None else None
+    result = await customer_client.resend_meter_token(
+        meter_number=meter_number,
+        user_email=user_email,
+        organization_id=organization_id,
+    )
+    return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
+
+@registry.tool("resend_clear_tamper_token", _SCHEMAS_BY_NAME["resend_clear_tamper_token"])
+async def _tool_resend_clear_tamper_token(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    meter_number = arguments.get("meter_number", "")
+    user_email = arguments.get("user_email", "")
+    raw_org = arguments.get("organization_id")
+    organization_id = int(raw_org) if raw_org is not None else None
+    result = await customer_client.resend_clear_tamper_token(
+        meter_number=meter_number,
+        user_email=user_email,
+        organization_id=organization_id,
+    )
+    return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
+
+@registry.tool("resend_power_limit_token", _SCHEMAS_BY_NAME["resend_power_limit_token"])
+async def _tool_resend_power_limit_token(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    meter_number = arguments.get("meter_number", "")
+    user_email = arguments.get("user_email", "")
+    raw_org = arguments.get("organization_id")
+    organization_id = int(raw_org) if raw_org is not None else None
+    result = await customer_client.resend_power_limit_token(
+        meter_number=meter_number,
+        user_email=user_email,
+        organization_id=organization_id,
+    )
+    return [types.TextContent(type="text", text=json.dumps(result, default=str))]
+
+
+@registry.tool("find_payment", _SCHEMAS_BY_NAME["find_payment"])
+async def _tool_find_payment(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    result = await customer_client.find_payment(
+        customer_name=arguments.get("customer_name", ""),
+        amount=arguments.get("amount"),
+        date=arguments.get("date"),
+        organization_name=arguments.get("organization_name"),
+        user_email=arguments.get("user_email", ""),
+        organization_id=arguments.get("organization_id"),
+        time_window_hours=float(arguments.get("time_window_hours", 2.0)),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("lookup_transactions", _SCHEMAS_BY_NAME["lookup_transactions"])
+async def _tool_lookup_transactions(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    result = await customer_client.lookup_transactions(
+        user_email=arguments.get("user_email", ""),
+        organization_id=arguments.get("organization_id"),
+        date_from=arguments.get("date_from"),
+        date_to=arguments.get("date_to"),
+        reference_number=arguments.get("reference_number"),
+        amount=arguments.get("amount"),
+        receiver_name=arguments.get("receiver_name"),
+        limit=arguments.get("limit"),
+    )
+    return list(compose_json_response(result))
+
+
+@registry.tool("get_my_open_issues", _SCHEMAS_BY_NAME["get_my_open_issues"])
+async def _tool_get_my_open_issues(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    organization_id = arguments.get("organization_id")
+    if organization_id is None:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: organization_id is required (should be injected by orchestrator)",
+            )
+        ]
+    result = await get_my_open_issues(
+        organization_id=int(organization_id),
+        issue_type=arguments.get("issue_type"),
+    )
+    return list(compose_json_response(result))
+
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 async def main():
