@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
 from mcp.server.stdio import stdio_server
-from mcp.types import ImageContent, ServerCapabilities, TextContent, Tool
+from mcp.types import ImageContent, ServerCapabilities, TextContent
 
 load_dotenv()
 
@@ -25,6 +25,7 @@ _ORG_NAME = os.getenv("ORGANIZATION_NAME", "the operator")
 STAFF_ORG_ID: int = int(os.getenv("STAFF_ORG_ID", "2"))
 
 # Import Supabase client for direct DB queries
+from shared_code.tool_registry import ToolRegistry
 from supabase import Client, create_client  # type: ignore[attr-defined]
 
 from shared.auth import get_auth_service
@@ -44,6 +45,8 @@ print("Starting Equipment Diagnostics MCP Server...", file=sys.stderr)
 
 # Initialize MCP server
 server = Server("equipment-diagnostics-server")
+registry = ToolRegistry("equipment_diagnostics")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 # Platform instance (VRM by default, extensible to others)
 platform: Optional[VRMPlatform] = None
@@ -165,60 +168,6 @@ def parse_time_range(
     return now - delta, now
 
 
-@server.list_tools()
-async def handle_list_tools() -> List[Tool]:
-    """List available equipment diagnostics tools."""
-    # Fresh Tool objects per call — see tool_schemas module docstring.
-    tools = [Tool(**schema) for schema in TOOL_SCHEMAS]
-
-    logger.info(f"Equipment diagnostics server: {len(tools)} tools available")
-    return tools
-
-
-@server.call_tool()
-async def handle_call_tool(
-    name: str, arguments: Dict[str, Any]
-) -> List[TextContent | ImageContent]:
-    """Handle tool calls."""
-    try:
-        plat = await get_platform()
-
-        # Route to appropriate handler
-        if name == "get_equipment_status":
-            return await _handle_get_equipment_status(plat, arguments)
-
-        elif name == "get_site_info":
-            return await _handle_get_site_info(plat, arguments)
-
-        elif name == "get_equipment_details":
-            return await _handle_get_equipment_details(plat, arguments)
-
-        elif name == "get_historical_power_data":
-            return await _handle_get_historical_power_data(plat, arguments)
-
-        elif name == "get_historical_mppt_performance":
-            return await _handle_get_historical_mppt_performance(arguments)
-
-        elif name == "analyze_grid_outage":
-            return await _handle_analyze_grid_outage(plat, arguments)
-
-        elif name == "generate_power_chart":
-            return await _handle_generate_power_chart(plat, arguments)
-
-        elif name == "schedule_equipment_check":
-            return await _handle_schedule_equipment_check(plat, arguments)
-
-        elif name == "get_batch_downtime_summary":
-            return await _handle_get_batch_downtime_summary(plat, arguments)
-
-        else:
-            return [TextContent(type="text", text=f"Unknown tool: {name}")]
-
-    except Exception as e:
-        logger.error(f"Error in tool {name}: {e}")
-        return list(compose_error_response(e))
-
-
 async def _check_grid_org_access(grid_name: str, organization_id: int) -> Optional[str]:
     """Verify the grid belongs to the given org and return the canonical name, or None if denied.
 
@@ -243,6 +192,69 @@ async def _check_grid_org_access(grid_name: str, organization_id: int) -> Option
 
     matched_name, _, _ = find_best_grid_match(grid_name, org_names)
     return matched_name
+
+
+@registry.tool("get_equipment_status", _SCHEMAS_BY_NAME["get_equipment_status"])
+async def _tool_get_equipment_status(arguments: Dict[str, Any]) -> List[TextContent]:
+    plat = await get_platform()
+    return await _handle_get_equipment_status(plat, arguments)
+
+
+@registry.tool("get_site_info", _SCHEMAS_BY_NAME["get_site_info"])
+async def _tool_get_site_info(arguments: Dict[str, Any]) -> List[TextContent]:
+    plat = await get_platform()
+    return await _handle_get_site_info(plat, arguments)
+
+
+@registry.tool("get_equipment_details", _SCHEMAS_BY_NAME["get_equipment_details"])
+async def _tool_get_equipment_details(arguments: Dict[str, Any]) -> List[TextContent]:
+    plat = await get_platform()
+    return await _handle_get_equipment_details(plat, arguments)
+
+
+@registry.tool("get_historical_power_data", _SCHEMAS_BY_NAME["get_historical_power_data"])
+async def _tool_get_historical_power_data(arguments: Dict[str, Any]) -> List[TextContent]:
+    plat = await get_platform()
+    return await _handle_get_historical_power_data(plat, arguments)
+
+
+@registry.tool(
+    "get_historical_mppt_performance", _SCHEMAS_BY_NAME["get_historical_mppt_performance"]
+)
+async def _tool_get_historical_mppt_performance(
+    arguments: Dict[str, Any],
+) -> List[TextContent]:
+    return await _handle_get_historical_mppt_performance(arguments)
+
+
+@registry.tool("analyze_grid_outage", _SCHEMAS_BY_NAME["analyze_grid_outage"])
+async def _tool_analyze_grid_outage(arguments: Dict[str, Any]) -> List[TextContent]:
+    plat = await get_platform()
+    return await _handle_analyze_grid_outage(plat, arguments)
+
+
+@registry.tool("generate_power_chart", _SCHEMAS_BY_NAME["generate_power_chart"])
+async def _tool_generate_power_chart(
+    arguments: Dict[str, Any],
+) -> List[TextContent | ImageContent]:
+    plat = await get_platform()
+    return await _handle_generate_power_chart(plat, arguments)
+
+
+@registry.tool("get_batch_downtime_summary", _SCHEMAS_BY_NAME["get_batch_downtime_summary"])
+async def _tool_get_batch_downtime_summary(arguments: Dict[str, Any]) -> List[TextContent]:
+    plat = await get_platform()
+    return await _handle_get_batch_downtime_summary(plat, arguments)
+
+
+@registry.tool("schedule_equipment_check", _SCHEMAS_BY_NAME["schedule_equipment_check"])
+async def _tool_schedule_equipment_check(arguments: Dict[str, Any]) -> List[TextContent]:
+    plat = await get_platform()
+    return await _handle_schedule_equipment_check(plat, arguments)
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 async def _handle_get_equipment_status(
