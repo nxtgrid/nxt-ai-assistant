@@ -21,7 +21,6 @@ from mcp.types import (
     Resource,
     ServerCapabilities,
     TextContent,
-    Tool,
 )
 
 # Load environment variables from .env file BEFORE importing shared_code
@@ -29,12 +28,15 @@ load_dotenv()
 
 from shared_code.config.action_flags import ActionFlags
 from shared_code.database.connections import db_manager
+from shared_code.tool_registry import ToolRegistry
 
 from shared.auth import get_auth_service
 from shared.config.settings import server_settings
 from shared.utils.email_utils import parse_email_whitelist
 from shared.utils.logging import get_logger
 from shared.utils.response_formatters import compose_error_response, compose_json_response
+
+from .tool_schemas import TOOL_SCHEMAS
 
 logger = get_logger("equipment-control-server")
 
@@ -45,6 +47,8 @@ print(f"📂 Working directory: {os.getcwd()}", file=sys.stderr)
 
 # Initialize MCP server
 server = Server("equipment-control-server")
+registry = ToolRegistry("equipment_control")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 # VRM MQTT Configuration (direct MQTT connection to Victron)
 # Auth: username=VRM_MQTT_USER (email), password=VRM_MQTT_PASSWORD ("Token <personal-access-token>")
@@ -715,242 +719,224 @@ def send_mqtt_command(
         client.loop_stop()
 
 
-@server.list_tools()
-async def handle_list_tools() -> List[Tool]:
-    """List available equipment control tools."""
-    tools = [
-        Tool(
-            name="restart_inverter",
-            description="[ACTION - RESTARTS PHYSICAL EQUIPMENT] Restart the inverter at a specific site (requires equipment.control permission). This tool PHYSICALLY RESTARTS inverter hardware at the site. CRITICAL SAFETY CHECK REQUIRED: Before calling this action, you MUST verify with the user that there is no cause for repeated shorts at the site. Restarting inverters without checking for underlying electrical faults could cause serious equipment damage or create safety hazards. Always confirm the user has investigated the root cause before proceeding.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "grid": {"type": "string", "description": "Grid name"},
-                    "user_email": {
-                        "type": "string",
-                        "description": "User email for permission check (required)",
-                    },
-                },
-                "required": ["grid", "user_email"],
-            },
-            visible_to_customer=False,
-        ),
-        Tool(
-            name="restart_comms_chain",
-            description="[ACTION - RESTARTS PHYSICAL EQUIPMENT] Restart the communications chain at a specific site (requires equipment.control permission). This tool PHYSICALLY RESTARTS communication hardware (Cerbo, router, DCU) at the site, causing temporary downtime. This tool handles multiple reboot-related requests including: 'reboot comm chain', 'reboot cerbo', 'reboot router', and 'reboot DCU'. IMPORTANT: Before calling this action, you MUST verify with the user that the communications chain still has connectivity problems and that a restart is necessary. WARNING: When rebooting the DCU, only DCUs connected to the power plant will be rebooted - confirm this is the intended behavior with the user. Note that once restarted, it can take up to 10 minutes for the site to fully reconnect and resume normal operations. Always confirm this downtime is acceptable before proceeding.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "grid": {"type": "string", "description": "Grid name"},
-                    "user_email": {
-                        "type": "string",
-                        "description": "User email for permission check (required)",
-                    },
-                },
-                "required": ["grid", "user_email"],
-            },
-            visible_to_customer=False,
-        ),
-    ]
+@registry.pre_dispatch
+async def _check_and_prepare(name: str, arguments: Dict[str, Any]) -> Optional[List[TextContent]]:
+    """Shared preamble every equipment-control tool went through before dispatch:
+    action-enabled gate, whitelist check, grid/VRM-ID lookup, and site-online
+    check. Preserved verbatim as a pre_dispatch hook; the resolved IDs are
+    stashed on `arguments` for the per-tool handlers.
+    """
+    # Check if actions are enabled for equipment_control
+    if not ActionFlags.is_actions_enabled("equipment_control"):
+        return [
+            TextContent(
+                type="text",
+                text="Equipment control actions are currently disabled. Set EQUIPMENT_CONTROL_ACTIONS_ENABLED=true to enable.",
+            )
+        ]
 
-    logger.info(f"Equipment control server: {len(tools)} tools available")
-    return tools
+    # Extract user_email for permission check
+    user_email = arguments.get("user_email")
+    if not user_email:
+        return [
+            TextContent(
+                type="text", text="user_email is required for equipment control operations"
+            )
+        ]
 
+    # Check user whitelist - this is the ONLY permission gate
+    # The whitelist (EQUIPMENT_CONTROL_ALLOWED_USERS env var) is the source of truth
+    # We removed the secondary database permission check because:
+    # 1. The auth database doesn't have a roles column populated
+    # 2. The whitelist is explicit and controlled via environment variable
+    # 3. Having two permission systems is confusing and error-prone
+    whitelist_allowed, whitelist_error = check_user_whitelist(user_email)
+    if not whitelist_allowed:
+        return [
+            TextContent(
+                type="text",
+                text=f"❌ Access denied: {whitelist_error}",
+            )
+        ]
 
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
-    """Handle tool calls."""
-    try:
-        # Check if actions are enabled for equipment_control
-        if not ActionFlags.is_actions_enabled("equipment_control"):
+    # Extract context passed from orchestrator (for audit logging)
+    chat_id = arguments.get("chat_id")
+    session_id = arguments.get("session_id")
+
+    # Get grid name and lookup VRM IDs
+    # VRM uses two different IDs:
+    # - site_id (generation_external_site_id): For REST API calls (checking if site is online)
+    # - gateway_id (generation_external_gateway_id): For MQTT commands (actual equipment control)
+    grid_name = arguments.get("grid")
+    if not grid_name:
+        return [TextContent(type="text", text="grid is required")]
+
+    site_id, gateway_id, actual_grid_name, is_generation_managed = await get_vrm_ids_from_grid(
+        grid_name
+    )
+
+    # Check if grid was found at all
+    if not actual_grid_name:
+        # Grid not found - get suggestions for similar names
+        suggestions = await get_similar_grid_names(grid_name)
+        if suggestions:
+            suggestions_text = ", ".join(f"'{s}'" for s in suggestions)
             return [
                 TextContent(
                     type="text",
-                    text="Equipment control actions are currently disabled. Set EQUIPMENT_CONTROL_ACTIONS_ENABLED=true to enable.",
+                    text=f"❌ Grid '{grid_name}' not found. Did you mean: {suggestions_text}?",
                 )
             ]
-
-        # Extract user_email for permission check
-        user_email = arguments.get("user_email")
-        if not user_email:
-            return [
-                TextContent(
-                    type="text", text="user_email is required for equipment control operations"
-                )
-            ]
-
-        # Check user whitelist - this is the ONLY permission gate
-        # The whitelist (EQUIPMENT_CONTROL_ALLOWED_USERS env var) is the source of truth
-        # We removed the secondary database permission check because:
-        # 1. The auth database doesn't have a roles column populated
-        # 2. The whitelist is explicit and controlled via environment variable
-        # 3. Having two permission systems is confusing and error-prone
-        whitelist_allowed, whitelist_error = check_user_whitelist(user_email)
-        if not whitelist_allowed:
+        else:
             return [
                 TextContent(
                     type="text",
-                    text=f"❌ Access denied: {whitelist_error}",
+                    text=f"❌ Grid '{grid_name}' not found. Please check the grid name and try again.",
                 )
             ]
 
-        # Extract context passed from orchestrator (for audit logging)
-        chat_id = arguments.get("chat_id")
-        session_id = arguments.get("session_id")
+    # Use the actual grid name (may have been fuzzy matched)
+    grid_name = actual_grid_name
 
-        # Get grid name and lookup VRM IDs
-        # VRM uses two different IDs:
-        # - site_id (generation_external_site_id): For REST API calls (checking if site is online)
-        # - gateway_id (generation_external_gateway_id): For MQTT commands (actual equipment control)
-        grid_name = arguments.get("grid")
-        if not grid_name:
-            return [TextContent(type="text", text="grid is required")]
+    # Check if generation is managed by the operator
+    if not is_generation_managed:
+        org_name = os.getenv("ORGANIZATION_NAME", "the operator")
+        logger.info(
+            f"Equipment control blocked for {grid_name}: generation not managed by {org_name}"
+        )
+        return [
+            TextContent(
+                type="text",
+                text=f"❌ Equipment control is not available for '{grid_name}'. "
+                f"This grid's generation is not managed by {org_name}.",
+            )
+        ]
 
-        site_id, gateway_id, actual_grid_name, is_generation_managed = await get_vrm_ids_from_grid(
-            grid_name
+    # Validate we have both IDs needed for equipment control
+    if not site_id:
+        return [
+            TextContent(
+                type="text",
+                text=f"❌ Grid '{grid_name}' found but VRM site is not configured. "
+                "Please contact support to set up VRM integration.",
+            )
+        ]
+    if not gateway_id:
+        return [
+            TextContent(
+                type="text",
+                text=f"❌ Grid '{grid_name}' found but VRM gateway is not configured. "
+                "Please contact support to set up VRM integration.",
+            )
+        ]
+
+    # Check if site is online before attempting any equipment control
+    # Uses site_id (generation_external_site_id) for REST API check
+    is_online, offline_error = await check_site_online(site_id)
+    if not is_online:
+        logger.warning(f"Site {grid_name} is offline - blocking {name}")
+        # Log the blocked attempt (use gateway_id for rate limiting consistency)
+        await log_equipment_action(
+            action_name=name,
+            grid_name=grid_name,
+            site_id=gateway_id,  # Use gateway_id for audit log consistency
+            requester_email=user_email,
+            chat_id=chat_id,
+            session_id=session_id,
+            success=False,
+            error_message=f"Site offline: {offline_error}",
+        )
+        return [
+            TextContent(
+                type="text",
+                text=f"❌ Cannot execute {name} on grid '{grid_name}': {offline_error}. "
+                f"The command cannot be processed while the site is offline.",
+            )
+        ]
+
+    arguments["_site_id"] = site_id
+    arguments["_gateway_id"] = gateway_id
+    arguments["_grid_name"] = grid_name
+    arguments["_user_email"] = user_email
+    arguments["_chat_id"] = chat_id
+    arguments["_session_id"] = session_id
+    return None
+
+
+@registry.tool("restart_inverter", _SCHEMAS_BY_NAME["restart_inverter"])
+async def _tool_restart_inverter(arguments: Dict[str, Any]) -> List[TextContent]:
+    site_id = arguments["_site_id"]
+    gateway_id = arguments["_gateway_id"]
+    grid_name = arguments["_grid_name"]
+    user_email = arguments["_user_email"]
+    chat_id = arguments["_chat_id"]
+    session_id = arguments["_session_id"]
+
+    # Check inverter status - block if inverter is healthy (producing + inverting)
+    pre_check_info: Dict[str, Any] = {}
+    inverter_status = await check_inverter_status(site_id)
+    pre_check_info["inverter_status"] = inverter_status
+
+    if inverter_status.get("should_block"):
+        voltages = inverter_status.get("voltages", {})
+        voltage_parts = []
+        for phase, label in [("l1", "L1"), ("l2", "L2"), ("l3", "L3")]:
+            v = voltages.get(phase)
+            if v is not None:
+                voltage_parts.append(f"{label}={v:.0f}V")
+        voltage_str = ", ".join(voltage_parts) if voltage_parts else "unavailable"
+
+        block_msg = (
+            f"The inverter on grid '{grid_name}' appears to be operating normally "
+            f"(output voltages: {voltage_str}). "
+            f"Restarting is not recommended while the inverter is actively producing power. "
+            f"If you still need to restart, please confirm the inverter is actually faulty."
+        )
+        logger.info(f"Pre-check blocked restart_inverter for {grid_name}: voltages={voltages}")
+
+        # Log the blocked attempt
+        await log_equipment_action(
+            action_name="restart_inverter",
+            grid_name=grid_name,
+            site_id=gateway_id,
+            requester_email=user_email,
+            chat_id=chat_id,
+            session_id=session_id,
+            success=False,
+            error_message=f"Pre-check blocked: inverter producing ({voltage_str})",
         )
 
-        # Check if grid was found at all
-        if not actual_grid_name:
-            # Grid not found - get suggestions for similar names
-            suggestions = await get_similar_grid_names(grid_name)
-            if suggestions:
-                suggestions_text = ", ".join(f"'{s}'" for s in suggestions)
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"❌ Grid '{grid_name}' not found. Did you mean: {suggestions_text}?",
-                    )
-                ]
-            else:
-                return [
-                    TextContent(
-                        type="text",
-                        text=f"❌ Grid '{grid_name}' not found. Please check the grid name and try again.",
-                    )
-                ]
+        return [TextContent(type="text", text=f"⚠️ {block_msg}")]
 
-        # Use the actual grid name (may have been fuzzy matched)
-        grid_name = actual_grid_name
+    # Route to handler (use gateway_id for MQTT commands)
+    # Rate limiting is enforced inside the handler, right before MQTT command is sent
+    return await restart_inverter(
+        gateway_id, grid_name, user_email, chat_id, session_id, pre_check_info
+    )
 
-        # Check if generation is managed by the operator
-        if not is_generation_managed:
-            org_name = os.getenv("ORGANIZATION_NAME", "the operator")
-            logger.info(
-                f"Equipment control blocked for {grid_name}: generation not managed by {org_name}"
-            )
-            return [
-                TextContent(
-                    type="text",
-                    text=f"❌ Equipment control is not available for '{grid_name}'. "
-                    f"This grid's generation is not managed by {org_name}.",
-                )
-            ]
 
-        # Validate we have both IDs needed for equipment control
-        if not site_id:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"❌ Grid '{grid_name}' found but VRM site is not configured. "
-                    "Please contact support to set up VRM integration.",
-                )
-            ]
-        if not gateway_id:
-            return [
-                TextContent(
-                    type="text",
-                    text=f"❌ Grid '{grid_name}' found but VRM gateway is not configured. "
-                    "Please contact support to set up VRM integration.",
-                )
-            ]
+@registry.tool("restart_comms_chain", _SCHEMAS_BY_NAME["restart_comms_chain"])
+async def _tool_restart_comms_chain(arguments: Dict[str, Any]) -> List[TextContent]:
+    gateway_id = arguments["_gateway_id"]
+    grid_name = arguments["_grid_name"]
+    user_email = arguments["_user_email"]
+    chat_id = arguments["_chat_id"]
+    session_id = arguments["_session_id"]
 
-        # Check if site is online before attempting any equipment control
-        # Uses site_id (generation_external_site_id) for REST API check
-        is_online, offline_error = await check_site_online(site_id)
-        if not is_online:
-            logger.warning(f"Site {grid_name} is offline - blocking {name}")
-            # Log the blocked attempt (use gateway_id for rate limiting consistency)
-            await log_equipment_action(
-                action_name=name,
-                grid_name=grid_name,
-                site_id=gateway_id,  # Use gateway_id for audit log consistency
-                requester_email=user_email,
-                chat_id=chat_id,
-                session_id=session_id,
-                success=False,
-                error_message=f"Site offline: {offline_error}",
-            )
-            return [
-                TextContent(
-                    type="text",
-                    text=f"❌ Cannot execute {name} on grid '{grid_name}': {offline_error}. "
-                    f"The command cannot be processed while the site is offline.",
-                )
-            ]
+    # Check DCU status - never blocks, just provides info for the response
+    pre_check_info: Dict[str, Any] = {}
+    dcu_status = await check_dcu_status(grid_name)
+    pre_check_info["dcu_status"] = dcu_status
 
-        # Run pre-checks before routing to handlers
-        pre_check_info: Dict[str, Any] = {}
+    # Route to handler (use gateway_id for MQTT commands)
+    # Rate limiting is enforced inside the handler, right before MQTT command is sent
+    return await restart_comms_chain(
+        gateway_id, grid_name, user_email, chat_id, session_id, pre_check_info
+    )
 
-        if name == "restart_inverter":
-            # Check inverter status - block if inverter is healthy (producing + inverting)
-            inverter_status = await check_inverter_status(site_id)
-            pre_check_info["inverter_status"] = inverter_status
 
-            if inverter_status.get("should_block"):
-                voltages = inverter_status.get("voltages", {})
-                voltage_parts = []
-                for phase, label in [("l1", "L1"), ("l2", "L2"), ("l3", "L3")]:
-                    v = voltages.get(phase)
-                    if v is not None:
-                        voltage_parts.append(f"{label}={v:.0f}V")
-                voltage_str = ", ".join(voltage_parts) if voltage_parts else "unavailable"
-
-                block_msg = (
-                    f"The inverter on grid '{grid_name}' appears to be operating normally "
-                    f"(output voltages: {voltage_str}). "
-                    f"Restarting is not recommended while the inverter is actively producing power. "
-                    f"If you still need to restart, please confirm the inverter is actually faulty."
-                )
-                logger.info(
-                    f"Pre-check blocked restart_inverter for {grid_name}: voltages={voltages}"
-                )
-
-                # Log the blocked attempt
-                await log_equipment_action(
-                    action_name=name,
-                    grid_name=grid_name,
-                    site_id=gateway_id,
-                    requester_email=user_email,
-                    chat_id=chat_id,
-                    session_id=session_id,
-                    success=False,
-                    error_message=f"Pre-check blocked: inverter producing ({voltage_str})",
-                )
-
-                return [TextContent(type="text", text=f"⚠️ {block_msg}")]
-
-        elif name == "restart_comms_chain":
-            # Check DCU status - never blocks, just provides info for the response
-            dcu_status = await check_dcu_status(grid_name)
-            pre_check_info["dcu_status"] = dcu_status
-
-        # Route to appropriate handler (use gateway_id for MQTT commands)
-        # Rate limiting is enforced inside each handler, right before MQTT command is sent
-        if name == "restart_inverter":
-            return await restart_inverter(
-                gateway_id, grid_name, user_email, chat_id, session_id, pre_check_info
-            )
-        elif name == "restart_comms_chain":
-            return await restart_comms_chain(
-                gateway_id, grid_name, user_email, chat_id, session_id, pre_check_info
-            )
-        else:
-            return [TextContent(type="text", text=f"Unknown tool: {name}")]
-
-    except Exception as e:
-        logger.error(f"Error in tool {name}: {e}")
-        return list(compose_error_response(e))
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 async def restart_inverter(

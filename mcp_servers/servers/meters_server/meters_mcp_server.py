@@ -54,9 +54,11 @@ import mcp.types as types
 from dotenv import load_dotenv
 from mcp.server import NotificationOptions, Server
 from mcp.server.models import InitializationOptions
-from shared_code.config.action_flags import ActionFlags
+from shared_code.tool_registry import ToolRegistry
 
 from shared.auth import get_auth_service
+
+from .tool_schemas import TOOL_SCHEMAS
 
 # Load environment variables from .env file
 load_dotenv()
@@ -109,6 +111,8 @@ print(f"Python path: {sys.path}", file=sys.stderr)
 print(f"Working directory: {os.getcwd()}", file=sys.stderr)
 
 server = Server("meters-api")
+registry = ToolRegistry("meters")
+_SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 
 class MeterType(Enum):
@@ -2083,152 +2087,6 @@ class MetersAPIClient:
 client = MetersAPIClient()
 
 
-@server.list_tools()
-async def handle_list_tools() -> List[types.Tool]:
-    """List available tools based on actions_enabled flag"""
-    actions_enabled = ActionFlags.is_actions_enabled("meters")
-
-    # Unified interface tools (always show these)
-    tools = [
-        types.Tool(
-            name="get_meter_dcu_status",
-            description="[READ-ONLY] Get DCU/concentrator/gateway online status for any meter type. Automatically routes to the correct API based on meter type from Supabase: (1) Calin V1 meters - queries DCU online status via V1 API, (2) Calin V2 meters - queries RF concentrator online status via V2 API, (3) LoRaWAN meters - queries Chirpstack gateway status. Meter type, DCU ID, and gateway ID are automatically retrieved from Supabase 'meters' table based on meter_no. Returns online/offline status and last communication timestamp. This tool ONLY retrieves status information - it does NOT initiate communication with the physical meter or take any actions.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "meter_no": {
-                        "type": "string",
-                        "description": "Meter number (all other info auto-retrieved from Supabase)",
-                    },
-                    "dcu_id": {
-                        "type": "string",
-                        "description": "DCU/concentrator ID (optional override - auto-retrieved from Supabase if not provided)",
-                    },
-                    "gateway_id": {
-                        "type": "string",
-                        "description": "LoRaWAN gateway ID (optional override - auto-retrieved from Supabase if not provided)",
-                    },
-                    "user_email": {
-                        "type": "string",
-                        "description": "(Injected by orchestrator) User email for RLS authentication",
-                    },
-                },
-                "required": ["meter_no"],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="get_dcu_status_by_id",
-            description="[READ-ONLY] Check whether a DCU/concentrator or LoRaWAN base station is currently online, using the device ID itself - no meter number needed. Use this when a ticket or alert references the device directly (e.g. 'DCU 230401080' or 'Base Station a84041ffff29d4da'). Device type is auto-detected from the meters table or the ID format (base station/gateway IDs are 16-char hex, DCU IDs are numeric). Returns online/offline status plus the meter numbers served by the device. This tool ONLY retrieves status information - it does NOT communicate with meters or take any actions.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "device_id": {
-                        "type": "string",
-                        "description": "DCU/concentrator ID (e.g. '230401080') or LoRaWAN base station/gateway ID (e.g. 'a84041ffff29d4da'), as referenced in the ticket or alert",
-                    },
-                    "device_type": {
-                        "type": "string",
-                        "description": "Optional: 'dcu' or 'base_station' to skip auto-detection",
-                        "enum": ["dcu", "base_station"],
-                    },
-                    "user_email": {
-                        "type": "string",
-                        "description": "(Injected by orchestrator) User email for RLS authentication",
-                    },
-                },
-                "required": ["device_id"],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="create_meter_reading_task",
-            description="[ACTION - SENDS COMMAND TO METER] Create remote reading task for any meter type. This tool ACTIVELY COMMUNICATES with the physical meter by sending a command. Automatically routes to the correct API based on meter type from Supabase: (1) Calin V1 meters - uses PLC-based remote reading via V1 API, (2) Calin V2 meters - uses RF-based remote reading via V2 API with protocol IDs, (3) LoRaWAN meters - sends Chirpstack downlink with Calin protocol encoding. This is a TWO-STEP operation: (1) sends downlink command to meter, (2) waits 15 seconds, (3) checks uplink response from meter. Total time: approximately 15-20 seconds. IMPORTANT: Only call this tool ONCE per conversation response - do NOT batch multiple meter readings in a single response. Supports reading types: 'voltage' (line voltage), 'current' (current draw), 'power' (active power), 'energy' (accumulated energy), 'current_credit' (remaining prepaid credit), 'power_limit' (maximum power threshold setting), 'relay_status' (meter relay on/off state), 'power_down_count' (number of power outages), 'special_status' (meter error/tamper flags), 'meter_version' (firmware version). For Calin V2, you can also use numeric protocol IDs (e.g., 5 for voltage, 39 for current credit). Returns complete reading result with meter data.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "meter_no": {
-                        "type": "string",
-                        "description": "Meter number (all other info auto-retrieved from Supabase)",
-                    },
-                    "reading_type": {
-                        "type": "string",
-                        "description": "Type of reading to request. Common types: 'voltage', 'current', 'power', 'energy', 'current_credit', 'power_limit', 'relay_status', 'power_down_count', 'special_status', 'meter_version'. For Calin V2, can also use numeric protocol ID (e.g., 5, 11, 39).",
-                        "enum": [
-                            "voltage",
-                            "current",
-                            "power",
-                            "energy",
-                            "current_credit",
-                            "power_limit",
-                            "relay_status",
-                            "power_down_count",
-                            "maximum_power_threshold",
-                            "special_status",
-                            "meter_version",
-                        ],
-                    },
-                    "customer_id": {
-                        "type": "string",
-                        "description": "Customer ID (optional override - auto-retrieved from Supabase for V2 meters)",
-                    },
-                    "dev_eui": {
-                        "type": "string",
-                        "description": "Device EUI (optional override - auto-retrieved from Supabase for LoRaWAN meters)",
-                    },
-                    "user_email": {
-                        "type": "string",
-                        "description": "(Injected by orchestrator) User email for RLS authentication",
-                    },
-                },
-                "required": ["meter_no", "reading_type"],
-            },
-            visible_to_customer=False,
-        ),
-        types.Tool(
-            name="get_meter_reading_task_status",
-            description="[READ-ONLY] Check the status and retrieve results of a previously created reading task. Automatically routes to the correct API based on meter type from Supabase: (1) Calin V1 meters - queries task status via V1 API, (2) Calin V2 meters - queries task status via V2 API, (3) LoRaWAN meters - checks Chirpstack uplink messages. Use the task ID returned by create_meter_reading_task. Returns task status (pending/complete/failed) and meter reading data if complete. This tool ONLY retrieves status information - it does NOT send commands or take actions on the meter.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "meter_no": {
-                        "type": "string",
-                        "description": "Meter number (used to auto-detect meter type from Supabase)",
-                    },
-                    "task_id": {
-                        "type": "string",
-                        "description": "Task ID returned from create_meter_reading_task",
-                    },
-                    "user_email": {
-                        "type": "string",
-                        "description": "(Injected by orchestrator) User email for RLS authentication",
-                    },
-                },
-                "required": ["meter_no", "task_id"],
-            },
-            visible_to_customer=False,
-        ),
-    ]
-
-    # Write tools REMOVED: send_meter_power_limit, send_meter_token
-    # All write operations have been disabled for security
-
-    # Debug tool (always available)
-    tools.append(
-        types.Tool(
-            name="meters_debug_info",
-            description="[READ-ONLY] Get debug information about the meters server configuration and OAuth token cache status. Shows which APIs are configured (Calin V1, V2, Chirpstack, Supabase) and lists active/expired OAuth tokens for Calin V2. This tool ONLY retrieves diagnostic information - it does NOT modify configuration or take actions.",
-            inputSchema={"type": "object", "properties": {}, "required": []},
-            visible_to_customer=False,
-        )
-    )
-
-    logger.info(
-        f"Meters server: actions_enabled={actions_enabled}, {len(tools)} unified tools available"
-    )
-    return tools
-
-
 async def _verify_meter_org_access(meter_no: str, user_email: str) -> Optional[str]:
     """Return an error string if meter_no is not owned by user_email's org, else None.
 
@@ -2269,125 +2127,135 @@ async def _verify_meter_org_access(meter_no: str, user_email: str) -> Optional[s
     return None
 
 
-@server.call_tool()
-async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
-    """Handle tool calls"""
-    try:
-        result: Dict[str, Any]
-        # Unified interface tools
-        if name == "get_meter_dcu_status":
-            user_email = arguments.get("user_email")
-            if not user_email:
-                result = {"error": "Authentication required: user_email missing from request"}
-            else:
-                org_error = await _verify_meter_org_access(arguments["meter_no"], user_email)
-                if org_error:
-                    result = {"error": org_error}
-                else:
-                    result = await client.unified_get_dcu_status(
-                        meter_no=arguments["meter_no"],
-                        user_email=user_email,
-                        dcu_id=arguments.get("dcu_id"),
-                        gateway_id=arguments.get("gateway_id"),
-                    )
-        elif name == "get_dcu_status_by_id":
-            user_email = arguments.get("user_email")
-            if not user_email:
-                result = {"error": "Authentication required: user_email missing from request"}
-            else:
-                device_id = arguments["device_id"]
-                matched_meters = await client.find_meters_by_device_id(device_id)
-
-                # Org scoping: staff can query any device; customers only devices
-                # that serve at least one meter belonging to their organization
-                auth_service = get_auth_service()
-                permissions = await auth_service.get_user_permissions(email=user_email)
-                if not permissions or not permissions.organization_ids:
-                    result = {"error": "User not found or has no organization"}
-                else:
-                    org_error = None
-                    if int(permissions.organization_ids[0]) != STAFF_ORG_ID:
-                        if not matched_meters:
-                            org_error = (
-                                f"Device {device_id} is not accessible for your organization"
-                            )
-                        else:
-                            org_error = await _verify_meter_org_access(
-                                matched_meters[0]["meter_no"], user_email
-                            )
-                    if org_error:
-                        result = {"error": org_error}
-                    else:
-                        result = await client.unified_get_device_status_by_id(
-                            device_id=device_id,
-                            user_email=user_email,
-                            device_type=arguments.get("device_type"),
-                            matched_meters=matched_meters,
-                        )
-        elif name == "create_meter_reading_task":
-            user_email = arguments.get("user_email")
-            if not user_email:
-                result = {"error": "Authentication required: user_email missing from request"}
-            else:
-                org_error = await _verify_meter_org_access(arguments["meter_no"], user_email)
-                if org_error:
-                    result = {"error": org_error}
-                else:
-                    result = await client.unified_create_reading_task(
-                        meter_no=arguments["meter_no"],
-                        reading_type=arguments["reading_type"],
-                        user_email=user_email,
-                        customer_id=arguments.get("customer_id"),
-                        dev_eui=arguments.get("dev_eui"),
-                    )
-        elif name == "get_meter_reading_task_status":
-            user_email = arguments.get("user_email")
-            if not user_email:
-                result = {"error": "Authentication required: user_email missing from request"}
-            else:
-                result = await client.unified_get_reading_task_status(
-                    meter_no=arguments["meter_no"],
-                    task_id=arguments["task_id"],
-                    user_email=user_email,
-                )
-        elif name == "meters_debug_info":
-            # Get Supabase authentication status
-            supabase_auth_status = {
-                "authenticated": bool(getattr(client, "supabase_access_token", None)),
-                "user_email": (
-                    SUPABASE_USER_EMAIL if getattr(client, "supabase_access_token", None) else None
-                ),
-                "token_valid": False,
-            }
-            if getattr(client, "supabase_access_token", None) and getattr(
-                client, "supabase_token_expiry", None
-            ):
-                current_time = datetime.now().timestamp() * 1000
-                token_expiry = getattr(client, "supabase_token_expiry", 0)
-                supabase_auth_status["token_valid"] = token_expiry > current_time
-                supabase_auth_status["token_expires_at"] = datetime.fromtimestamp(
-                    token_expiry / 1000
-                ).isoformat()
-
-            result = {
-                "token_cache": client.get_token_cache_status(),
-                "supabase_auth": supabase_auth_status,
-                "config": {
-                    "calin_v1_configured": bool(CALIN_V1_BASE_URL),
-                    "calin_v2_configured": bool(CALIN_V2_BASE_URL),
-                    "chirpstack_configured": bool(CHIRPSTACK_BASE_URL),
-                    "supabase_configured": bool(SUPABASE_URL and SUPABASE_ANON_KEY),
-                    "supabase_rls_enabled": bool(SUPABASE_USER_EMAIL and SUPABASE_USER_PASSWORD),
-                },
-            }
+@registry.tool("get_meter_dcu_status", _SCHEMAS_BY_NAME["get_meter_dcu_status"])
+async def _tool_get_meter_dcu_status(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    user_email = arguments.get("user_email")
+    if not user_email:
+        result = {"error": "Authentication required: user_email missing from request"}
+    else:
+        org_error = await _verify_meter_org_access(arguments["meter_no"], user_email)
+        if org_error:
+            result = {"error": org_error}
         else:
-            raise ValueError(f"Unknown tool: {name}")
+            result = await client.unified_get_dcu_status(
+                meter_no=arguments["meter_no"],
+                user_email=user_email,
+                dcu_id=arguments.get("dcu_id"),
+                gateway_id=arguments.get("gateway_id"),
+            )
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
-        return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
-    except Exception as e:
-        logger.error(f"Error in {name}: {str(e)}")
-        return [types.TextContent(type="text", text=f"Error: {str(e)}")]
+@registry.tool("get_dcu_status_by_id", _SCHEMAS_BY_NAME["get_dcu_status_by_id"])
+async def _tool_get_dcu_status_by_id(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    user_email = arguments.get("user_email")
+    if not user_email:
+        result = {"error": "Authentication required: user_email missing from request"}
+    else:
+        device_id = arguments["device_id"]
+        matched_meters = await client.find_meters_by_device_id(device_id)
+
+        # Org scoping: staff can query any device; customers only devices
+        # that serve at least one meter belonging to their organization
+        auth_service = get_auth_service()
+        permissions = await auth_service.get_user_permissions(email=user_email)
+        if not permissions or not permissions.organization_ids:
+            result = {"error": "User not found or has no organization"}
+        else:
+            org_error = None
+            if int(permissions.organization_ids[0]) != STAFF_ORG_ID:
+                if not matched_meters:
+                    org_error = f"Device {device_id} is not accessible for your organization"
+                else:
+                    org_error = await _verify_meter_org_access(
+                        matched_meters[0]["meter_no"], user_email
+                    )
+            if org_error:
+                result = {"error": org_error}
+            else:
+                result = await client.unified_get_device_status_by_id(
+                    device_id=device_id,
+                    user_email=user_email,
+                    device_type=arguments.get("device_type"),
+                    matched_meters=matched_meters,
+                )
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+@registry.tool("create_meter_reading_task", _SCHEMAS_BY_NAME["create_meter_reading_task"])
+async def _tool_create_meter_reading_task(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    user_email = arguments.get("user_email")
+    if not user_email:
+        result = {"error": "Authentication required: user_email missing from request"}
+    else:
+        org_error = await _verify_meter_org_access(arguments["meter_no"], user_email)
+        if org_error:
+            result = {"error": org_error}
+        else:
+            result = await client.unified_create_reading_task(
+                meter_no=arguments["meter_no"],
+                reading_type=arguments["reading_type"],
+                user_email=user_email,
+                customer_id=arguments.get("customer_id"),
+                dev_eui=arguments.get("dev_eui"),
+            )
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+@registry.tool(
+    "get_meter_reading_task_status", _SCHEMAS_BY_NAME["get_meter_reading_task_status"]
+)
+async def _tool_get_meter_reading_task_status(
+    arguments: Dict[str, Any],
+) -> List[types.TextContent]:
+    user_email = arguments.get("user_email")
+    if not user_email:
+        result = {"error": "Authentication required: user_email missing from request"}
+    else:
+        result = await client.unified_get_reading_task_status(
+            meter_no=arguments["meter_no"],
+            task_id=arguments["task_id"],
+            user_email=user_email,
+        )
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+@registry.tool("meters_debug_info", _SCHEMAS_BY_NAME["meters_debug_info"])
+async def _tool_meters_debug_info(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    # Get Supabase authentication status
+    supabase_auth_status = {
+        "authenticated": bool(getattr(client, "supabase_access_token", None)),
+        "user_email": (
+            SUPABASE_USER_EMAIL if getattr(client, "supabase_access_token", None) else None
+        ),
+        "token_valid": False,
+    }
+    if getattr(client, "supabase_access_token", None) and getattr(
+        client, "supabase_token_expiry", None
+    ):
+        current_time = datetime.now().timestamp() * 1000
+        token_expiry = getattr(client, "supabase_token_expiry", 0)
+        supabase_auth_status["token_valid"] = token_expiry > current_time
+        supabase_auth_status["token_expires_at"] = datetime.fromtimestamp(
+            token_expiry / 1000
+        ).isoformat()
+
+    result = {
+        "token_cache": client.get_token_cache_status(),
+        "supabase_auth": supabase_auth_status,
+        "config": {
+            "calin_v1_configured": bool(CALIN_V1_BASE_URL),
+            "calin_v2_configured": bool(CALIN_V2_BASE_URL),
+            "chirpstack_configured": bool(CHIRPSTACK_BASE_URL),
+            "supabase_configured": bool(SUPABASE_URL and SUPABASE_ANON_KEY),
+            "supabase_rls_enabled": bool(SUPABASE_USER_EMAIL and SUPABASE_USER_PASSWORD),
+        },
+    }
+    return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+
+handle_list_tools = server.list_tools()(registry.handle_list_tools)
+handle_call_tool = server.call_tool()(registry.handle_call_tool)
 
 
 async def main():
