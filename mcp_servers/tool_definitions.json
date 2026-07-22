@@ -305,41 +305,6 @@
         "visible_to_customer": false
       }
     ],
-    "logs": [
-      {
-        "name": "fetch_logs_from_loki",
-        "description": "Retrieve raw software/application logs from Grafana Loki using LogQL queries.",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string"
-            },
-            "hours": {
-              "type": "integer",
-              "default": 12
-            }
-          }
-        },
-        "visible_to_customer": false
-      },
-      {
-        "name": "search_logs_semantic",
-        "description": "Semantic/concept search for logs. Use to find issues by description like 'database timeout' or 'payment error'.",
-        "inputSchema": {
-          "type": "object",
-          "properties": {
-            "query": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "query"
-          ]
-        },
-        "visible_to_customer": false
-      }
-    ],
     "meters": [
       {
         "name": "get_meter_dcu_status",

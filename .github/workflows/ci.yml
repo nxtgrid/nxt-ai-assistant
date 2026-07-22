@@ -118,13 +118,4 @@ jobs:
         run: pip install pip-audit
       - name: Audit ${{ matrix.target }}/requirements.txt
         working-directory: ${{ matrix.target }}
-        run: |
-          # PYSEC-2026-311 / CVE-2026-45829: pre-auth code injection in ChromaDB's
-          # HTTP server API. We only use the embedded chromadb.PersistentClient
-          # (mcp_servers/servers/logs_server/logs_mcp_server.py) - no Chroma server
-          # is ever started, so this finding does not apply to our deployment.
-          if [ "${{ matrix.target }}" = "mcp_servers" ]; then
-            pip-audit --progress-spinner off -r requirements.txt --ignore-vuln PYSEC-2026-311 --ignore-vuln GHSA-f4j7-r4q5-qw2c --ignore-vuln CVE-2026-45829
-          else
-            pip-audit --progress-spinner off -r requirements.txt
-          fi
+        run: pip-audit --progress-spinner off -r requirements.txt

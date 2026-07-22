@@ -153,7 +153,6 @@ MCP_SERVER_NAMES: List[str] = [
     "equipment_diagnostics",
     "vrm",
     "jira",
-    "logs",
     "meters",
     "equipment_control",
     "payment_processor",

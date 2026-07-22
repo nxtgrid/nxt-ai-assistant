@@ -32,10 +32,6 @@ SERVER_CONFIGS = {
         "module": "servers.meters_server.meters_mcp_server",
         "description": "Meters data operations",
     },
-    "logs": {
-        "module": "servers.logs_server.logs_mcp_server",
-        "description": "Intelligent log analysis with Loki and vector search",
-    },
     "grafana": {
         "module": "servers.grafana_server.grafana_mcp_server",
         "description": "Grafana dashboard panel rendering",

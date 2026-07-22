@@ -43,10 +43,6 @@ SERVER_METADATA = {
         "description": "Jira analysis and comment processing",
         "module": "servers.jira_server.jira_mcp_server",
     },
-    "logs": {
-        "description": "Software/application log analysis (NOT equipment logs) - backend service logs from Loki",
-        "module": "servers.logs_server.logs_mcp_server",
-    },
     "meters": {
         "description": "Meter management and operations",
         "module": "servers.meters_server.meters_mcp_server",
