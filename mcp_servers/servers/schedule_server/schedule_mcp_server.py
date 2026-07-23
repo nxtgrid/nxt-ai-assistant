@@ -36,6 +36,10 @@ load_dotenv()
 
 from shared_code.tool_registry import ToolRegistry  # noqa: E402
 
+from shared.config.db_credentials import (  # noqa: E402  (must follow load_dotenv)
+    chat_db_service_key,
+    chat_db_url,
+)
 from shared.scheduling.recurrence import (  # noqa: E402  (must follow load_dotenv)
     format_schedule_display,
     parse_time_expression,
@@ -68,9 +72,8 @@ def get_supabase() -> Optional[Client]:
     """Get or create Supabase client."""
     global _supabase
     if _supabase is None:
-        # Chat database credentials (with legacy fallback)
-        url = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL")
-        key = os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
+        url = chat_db_url()
+        key = chat_db_service_key()
         if url and key:
             _supabase = create_client(url, key)
     return _supabase

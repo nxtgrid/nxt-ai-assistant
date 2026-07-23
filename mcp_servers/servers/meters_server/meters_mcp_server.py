@@ -56,6 +56,7 @@ from shared_code.stdio_runner import run_stdio_server
 from shared_code.tool_registry import ToolRegistry
 
 from shared.auth import get_auth_service
+from shared.config.db_credentials import chat_db_url
 
 from .tool_schemas import TOOL_SCHEMAS
 
@@ -82,7 +83,7 @@ CHIRPSTACK_API_KEY = os.getenv("CHIRPSTACK_API_KEY", "")
 CHIRPSTACK_TENANT_ID = os.getenv("CHIRPSTACK_TENANT_ID", "")
 
 # Get Supabase credentials from environment (chat database with legacy fallback)
-SUPABASE_URL = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL", "")
+SUPABASE_URL = chat_db_url()
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY") or os.getenv(
     "SUPABASE_KEY", ""
 )  # Public anon key (respects RLS)

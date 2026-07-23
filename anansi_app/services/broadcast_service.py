@@ -29,6 +29,8 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__f
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
+from shared.config.db_credentials import chat_db_service_key, chat_db_url  # noqa: E402
+
 # Shared recurrence logic — single source of truth shared with the chat /schedule path
 try:
     from shared.scheduling.recurrence import advance as advance_recurrence
@@ -96,9 +98,9 @@ class BroadcastService:
 
     def __init__(self):
         """Initialize broadcast service with database connections."""
-        # Supabase client for chat database (broadcasts, logs, templates) - with legacy fallback
-        supabase_url = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
+        # Supabase client for chat database (broadcasts, logs, templates)
+        supabase_url = chat_db_url()
+        supabase_key = chat_db_service_key()
         self._supabase: Optional[Client] = None
         if supabase_url and supabase_key:
             self._supabase = create_client(supabase_url, supabase_key)

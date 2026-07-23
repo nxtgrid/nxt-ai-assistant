@@ -14,8 +14,30 @@ from typing import Any, Dict, List, Optional
 from supabase import Client, create_client  # type: ignore[attr-defined]
 
 from services._cache_compat import cache_data
+from shared.config.db_credentials import chat_db_service_key, chat_db_url
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_telegram_chat_id(telegram_chat_id: str, source_id: str) -> str:
+    """Return the telegram chat id, falling back to a legacy ``telegram_<id>`` id.
+
+    ``telegram_chat_id`` is the dedicated column preserved after session_id
+    hashing. Older rows only encode the id inside the session id, so parse it
+    out of ``source_id`` when the column is empty.
+    """
+    if telegram_chat_id:
+        return telegram_chat_id
+    if source_id.startswith("telegram_"):
+        return source_id.replace("telegram_", "")
+    return ""
+
+
+def _is_group_telegram_id(telegram_id: str) -> bool:
+    """Telegram group ids start with "-100" (or a legacy "100" variant)."""
+    return bool(telegram_id) and (
+        telegram_id.startswith("-100") or telegram_id.startswith("100")
+    )
 
 
 def _merge_undifferentiated_group_topics(context_list: list[dict]) -> list[dict]:
@@ -87,9 +109,9 @@ class SupabaseReader:
 
     def __init__(self):
         """Initialize Supabase clients for chat and auth databases."""
-        # Main database (chat messages) - with legacy fallback
-        self.supabase_url = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL")
-        self.supabase_key = os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
+        # Main database (chat messages)
+        self.supabase_url = chat_db_url()
+        self.supabase_key = chat_db_service_key()
 
         if self.supabase_url and self.supabase_key:
             self.client: Client = create_client(self.supabase_url, self.supabase_key)
@@ -158,17 +180,10 @@ class SupabaseReader:
 
                 group_id = row.get("group_id")
 
-                # Use telegram_chat_id column (preserved after session_id hashing)
-                telegram_chat_id = session_data.get("telegram_chat_id", "")
-                # Fallback to parsing session_id for legacy data
-                if not telegram_chat_id and session_id.startswith("telegram_"):
-                    telegram_chat_id = session_id.replace("telegram_", "")
-                # Groups have telegram IDs starting with "-100" or "100"
-                is_group = (
-                    telegram_chat_id.startswith("-100") or telegram_chat_id.startswith("100")
-                    if telegram_chat_id
-                    else False
+                telegram_chat_id = _resolve_telegram_chat_id(
+                    session_data.get("telegram_chat_id", ""), session_id
                 )
+                is_group = _is_group_telegram_id(telegram_chat_id)
 
                 # Create unique key for this context.
                 # For forum-style groups: separate by topic_id so each grid
@@ -626,17 +641,10 @@ class SupabaseReader:
                 chat_id = session_id if session_id else "Unknown"
                 group_id = row.get("group_id")
 
-                # Use telegram_chat_id column (preserved after session_id hashing)
-                telegram_chat_id = session_data.get("telegram_chat_id", "")
-                # Fallback to parsing session_id for legacy data
-                if not telegram_chat_id and session_id.startswith("telegram_"):
-                    telegram_chat_id = session_id.replace("telegram_", "")
-                # Groups have telegram IDs starting with "-100" or "100"
-                is_group = (
-                    telegram_chat_id.startswith("-100") or telegram_chat_id.startswith("100")
-                    if telegram_chat_id
-                    else False
+                telegram_chat_id = _resolve_telegram_chat_id(
+                    session_data.get("telegram_chat_id", ""), session_id
                 )
+                is_group = _is_group_telegram_id(telegram_chat_id)
 
                 # For forum groups: separate by topic_id
                 telegram_topic_id = session_data.get("telegram_topic_id")
@@ -976,11 +984,9 @@ class SupabaseReader:
                 return None
 
             session_uuid = session_response.data[0]["id"]
-            # Use telegram_chat_id column (preserved after session_id hashing)
-            telegram_chat_id = session_response.data[0].get("telegram_chat_id", "")
-            # Fallback to parsing session_id for legacy data
-            if not telegram_chat_id and chat_id.startswith("telegram_"):
-                telegram_chat_id = chat_id.replace("telegram_", "")
+            telegram_chat_id = _resolve_telegram_chat_id(
+                session_response.data[0].get("telegram_chat_id", ""), chat_id
+            )
 
             # Query for messages from this chat using UUID
             query = (
@@ -1192,15 +1198,11 @@ class SupabaseReader:
         Returns:
             Formatted display name
         """
-        # Use telegram_chat_id if provided (for hashed session IDs)
-        telegram_id = telegram_chat_id
-        # Fallback to parsing session_id for legacy data
-        if not telegram_id and chat_id.startswith("telegram_"):
-            telegram_id = chat_id.replace("telegram_", "")
+        telegram_id = _resolve_telegram_chat_id(telegram_chat_id, chat_id)
 
         if telegram_id:
             # Check if it's a group (starts with "-100" or "100")
-            if telegram_id.startswith("-100") or telegram_id.startswith("100"):
+            if _is_group_telegram_id(telegram_id):
                 # Look up organization name in cached map
                 if telegram_id in user_name_map:
                     return user_name_map[telegram_id]

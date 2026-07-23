@@ -10,13 +10,15 @@ from typing import Any, Dict, List, Optional
 
 from supabase import Client, create_client
 
+from shared.config.db_credentials import chat_db_service_key, chat_db_url
+
 
 class AgentManagementService:
     """Manages persistent agent instances via Chat DB (Supabase)."""
 
     def __init__(self):
-        url = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL")
-        key = os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
+        url = chat_db_url()
+        key = chat_db_service_key()
         self.client: Client = create_client(url, key) if url and key else None
 
     def is_configured(self) -> bool:

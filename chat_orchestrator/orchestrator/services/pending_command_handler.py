@@ -72,8 +72,7 @@ async def handle_pending_command(
     Returns:
         State update dict if handled, None if something went wrong.
     """
-    # Lazy import to avoid circular dependency (handler.py -> orchestrator)
-    from handler import _send_telegram_message
+    from shared.utils.telegram_send import send_telegram_message
 
     try:
         packet_service = WorkPacketService()
@@ -132,7 +131,7 @@ async def handle_pending_command(
 
             if bot_token and chat_id:
                 try:
-                    await _send_telegram_message(
+                    await send_telegram_message(
                         bot_token,
                         chat_id,
                         text,

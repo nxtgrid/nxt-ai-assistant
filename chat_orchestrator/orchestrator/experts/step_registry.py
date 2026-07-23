@@ -295,21 +295,6 @@ def get_step_handler(name: str) -> Optional[StepHandler]:
     return None
 
 
-def get_step_schema(name: str) -> Optional[StepSchema]:
-    """DEPRECATED: Step-level schemas are no longer used.
-
-    Parameter confirmation now uses expert-level schema from Google Doc.
-    This function is kept for backwards compatibility only.
-
-    Args:
-        name: Handler name
-
-    Returns:
-        StepSchema or None (always None in new architecture)
-    """
-    return get_step_registry().get_schema(name)
-
-
 def get_step_contract(name: str) -> Optional[StepContract]:
     """Get the data-dependency contract for a handler (convenience function).
 
@@ -332,6 +317,5 @@ __all__ = [
     "get_step_registry",
     "register_step",
     "get_step_handler",
-    "get_step_schema",  # Deprecated
     "get_step_contract",
 ]

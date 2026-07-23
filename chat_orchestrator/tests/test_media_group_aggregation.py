@@ -337,7 +337,7 @@ class TestPrepareMediaMultiPhoto:
             return ("base64data", "image/jpeg")
 
         with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test_token"}):
-            with patch("handler._download_telegram_photo", side_effect=mock_download):
+            with patch("orchestrator.services.telegram_transport.download_telegram_photo", side_effect=mock_download):
                 result = await prepare_media(state)
 
         assert len(result["media"]) == 3
@@ -357,7 +357,7 @@ class TestPrepareMediaMultiPhoto:
             return ("base64data", "image/jpeg")
 
         with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test_token"}):
-            with patch("handler._download_telegram_photo", side_effect=mock_download):
+            with patch("orchestrator.services.telegram_transport.download_telegram_photo", side_effect=mock_download):
                 result = await prepare_media(state)
 
         assert len(result["media"]) == 1
@@ -378,7 +378,7 @@ class TestPrepareMediaMultiPhoto:
             return ("base64data", "image/jpeg")
 
         with patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "test_token"}):
-            with patch("handler._download_telegram_photo", side_effect=mock_download):
+            with patch("orchestrator.services.telegram_transport.download_telegram_photo", side_effect=mock_download):
                 result = await prepare_media(state)
 
         # 2 out of 3 succeed
