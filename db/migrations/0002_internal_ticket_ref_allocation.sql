@@ -1,17 +1,23 @@
 -- Migration: internal ticket ref allocation RPC
 --
 -- Task 1 (0001_jira_optional_ticket_backend.sql) created internal_ticket_seq
--- and the internal_tickets table but not a way to atomically allocate a ref
--- and insert the row in one round-trip. Reading nextval() in application
--- code and then inserting separately is a read-then-write race (two
--- concurrent callers could both read N, then both try to insert -- or worse,
--- insert out of order and leave a gap that looks like a lost ticket).
+-- and the internal_tickets table. Postgres sequences are already race-free
+-- under concurrency on their own -- nextval() atomically increments and
+-- returns a unique value per call no matter how many callers invoke it
+-- concurrently, so two callers can never receive the same value. The only
+-- reason this needs a SQL-side function at all is that Supabase's PostgREST
+-- layer only exposes functions you've explicitly created for RPC use --
+-- there's no way to call the built-in nextval() directly through the
+-- Supabase client without some SQL-side wrapper.
 --
--- create_internal_ticket() does both atomically, following this repo's
--- existing RPC convention (see claim_scheduled_messages, get_bot_artifacts,
--- etc. in db/schema/chat_db.sql) -- called via
--- supabase_client.rpc("create_internal_ticket", {...}).execute() from
--- InternalTicketBackend.create_ticket().
+-- next_internal_ticket_ref() is that minimal wrapper: it allocates and
+-- formats a ref and nothing else. It does not touch internal_tickets --
+-- InternalTicketBackend.create_ticket() calls this RPC to get a ref, then
+-- does a normal .table("internal_tickets").insert(...) as a second,
+-- ordinary round-trip (see internal_backend.py). At worst, a failure
+-- between the two round-trips leaves an unused sequence number, which is
+-- an expected, harmless gap -- the same as any SERIAL/sequence-backed
+-- primary key under a failed insert.
 --
 -- Idempotent: CREATE OR REPLACE FUNCTION is safe to re-run.
 --
@@ -20,33 +26,9 @@
 
 BEGIN;
 
-CREATE OR REPLACE FUNCTION create_internal_ticket(
-    p_summary               text,
-    p_description           text DEFAULT NULL,
-    p_escalation_mapping_id uuid DEFAULT NULL,
-    p_session_id            text DEFAULT NULL,
-    p_organization_id       integer DEFAULT NULL,
-    p_grid_name             text DEFAULT NULL,
-    p_assignee_email        text DEFAULT NULL,
-    p_labels                jsonb DEFAULT '[]',
-    p_source                text DEFAULT 'escalation',
-    p_prefix                text DEFAULT 'TKT'
-)
-RETURNS SETOF internal_tickets LANGUAGE plpgsql AS $$
-DECLARE
-    v_ref text;
-BEGIN
-    v_ref := p_prefix || '-' || lpad(nextval('internal_ticket_seq')::text, 6, '0');
-    RETURN QUERY
-    INSERT INTO internal_tickets (
-        ticket_ref, escalation_mapping_id, session_id, organization_id,
-        grid_name, summary, description, assignee_email, labels, source
-    ) VALUES (
-        v_ref, p_escalation_mapping_id, p_session_id, p_organization_id,
-        p_grid_name, p_summary, p_description, p_assignee_email, p_labels, p_source
-    )
-    RETURNING *;
-END;
+CREATE OR REPLACE FUNCTION next_internal_ticket_ref(p_prefix text DEFAULT 'TKT')
+RETURNS text LANGUAGE sql AS $$
+    SELECT p_prefix || '-' || lpad(nextval('internal_ticket_seq')::text, 6, '0');
 $$;
 
 COMMIT;

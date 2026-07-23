@@ -4,11 +4,14 @@ Lets Anansi track escalation tickets without a Jira project configured.
 Tables (created by Task 1's migration -- see db/schema/chat_db.sql and
 db/migrations/0001_jira_optional_ticket_backend.sql): ``internal_tickets``
 and ``internal_ticket_comments``. Refs are allocated from the
-``internal_ticket_seq`` sequence via the ``create_internal_ticket`` RPC
-function (db/migrations/0002_internal_ticket_ref_allocation.sql), so
-allocation and row-creation happen atomically in a single DB round-trip --
-no separate read-then-write race between reading ``nextval()`` and
-inserting the row.
+``internal_ticket_seq`` sequence via the ``next_internal_ticket_ref`` RPC
+function (db/migrations/0002_internal_ticket_ref_allocation.sql) -- a thin
+wrapper that exists only because PostgREST doesn't expose the built-in
+``nextval()`` directly. ``create_ticket`` calls that RPC to get a ref, then
+does a normal ``.table("internal_tickets").insert(...)`` as a second,
+ordinary round-trip. Postgres sequences are race-free under concurrency on
+their own, so this two-round-trip shape never risks a duplicate ref -- at
+worst a failed insert leaves an unused (harmless) sequence gap.
 """
 
 from __future__ import annotations
@@ -73,31 +76,53 @@ class InternalTicketBackend:
             raise TicketBackendError("internal ticket backend: no Supabase client configured")
 
         prefix = fr.get("INTERNAL_TICKET_PREFIX")
+
+        # Round-trip 1: allocate a uniquely-formatted ref via the
+        # next_internal_ticket_ref RPC (a thin wrapper around nextval(),
+        # needed only because PostgREST doesn't expose nextval() directly).
         try:
-            response = client.rpc(
-                "create_internal_ticket",
-                {
-                    "p_summary": req.summary,
-                    "p_description": req.description or None,
-                    "p_escalation_mapping_id": req.escalation_mapping_id,
-                    "p_session_id": req.session_id,
-                    "p_organization_id": req.organization_id,
-                    "p_grid_name": req.grid_name,
-                    "p_assignee_email": req.assignee_email,
-                    "p_labels": req.labels or [],
-                    "p_source": req.source,
-                    "p_prefix": prefix,
-                },
+            ref_response = client.rpc(
+                "next_internal_ticket_ref",
+                {"p_prefix": prefix},
             ).execute()
+        except Exception as e:
+            raise TicketBackendError(f"internal ticket ref allocation failed: {e}") from e
+
+        ticket_ref = getattr(ref_response, "data", None)
+        if not ticket_ref:
+            raise TicketBackendError(
+                "internal ticket creation failed: next_internal_ticket_ref RPC returned no ref"
+            )
+
+        # Round-trip 2: ordinary insert -- no stored procedure duplicating
+        # internal_tickets' column list required.
+        try:
+            insert_response = (
+                client.table("internal_tickets")
+                .insert(
+                    {
+                        "ticket_ref": ticket_ref,
+                        "summary": req.summary,
+                        "description": req.description or None,
+                        "escalation_mapping_id": req.escalation_mapping_id,
+                        "session_id": req.session_id,
+                        "organization_id": req.organization_id,
+                        "grid_name": req.grid_name,
+                        "assignee_email": req.assignee_email,
+                        "labels": req.labels or [],
+                        "source": req.source,
+                    }
+                )
+                .execute()
+            )
         except Exception as e:
             raise TicketBackendError(f"internal ticket creation failed: {e}") from e
 
-        rows = getattr(response, "data", None) or []
+        rows = getattr(insert_response, "data", None) or []
         if not rows:
             raise TicketBackendError(
-                "internal ticket creation failed: create_internal_ticket RPC returned no row"
+                "internal ticket creation failed: insert into internal_tickets returned no row"
             )
-        ticket_ref = rows[0]["ticket_ref"]
         return TicketResult(ref=ticket_ref, backend="internal", url=None)
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:

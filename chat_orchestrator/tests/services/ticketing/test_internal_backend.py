@@ -4,6 +4,13 @@ Uses a small fake standing in for the real Supabase (postgrest) client's
 fluent API -- the same style as
 chat_orchestrator/tests/services/test_work_packet_service.py -- so tests can
 assert on what actually got persisted rather than just call arguments.
+
+``create_ticket`` is a two-round-trip call against the fake: first
+``.rpc("next_internal_ticket_ref", {"p_prefix": ...})`` (returns a scalar
+ref string, matching PostgREST's response shape for a non-set-returning
+SQL function), then ``.table("internal_tickets").insert({...}).execute()``
+for the actual row write -- mirroring the real
+InternalTicketBackend.create_ticket() implementation.
 """
 
 from __future__ import annotations
@@ -17,27 +24,32 @@ from orchestrator.services.ticketing.internal_backend import InternalTicketBacke
 
 
 class _FakeResult:
-    def __init__(self, data: List[Dict[str, Any]]):
+    def __init__(self, data: Any):
         self.data = data
 
 
 class _InternalTicketsTable:
-    """Fakes .select()/.update()/.eq()/.limit()/.execute() for internal_tickets."""
+    """Fakes .select()/.insert()/.update()/.eq()/.limit()/.execute() for internal_tickets."""
 
     def __init__(self, client: "FakeSupabaseClient"):
         self._client = client
         self._mode: Optional[str] = None
         self._eq_field: Optional[str] = None
         self._eq_value: Any = None
-        self._update_payload: Optional[Dict[str, Any]] = None
+        self._payload: Optional[Dict[str, Any]] = None
 
     def select(self, *_args, **_kwargs) -> "_InternalTicketsTable":
         self._mode = "select"
         return self
 
+    def insert(self, payload: Dict[str, Any]) -> "_InternalTicketsTable":
+        self._mode = "insert"
+        self._payload = payload
+        return self
+
     def update(self, payload: Dict[str, Any]) -> "_InternalTicketsTable":
         self._mode = "update"
-        self._update_payload = payload
+        self._payload = payload
         return self
 
     def eq(self, field: str, value: Any) -> "_InternalTicketsTable":
@@ -54,12 +66,31 @@ class _InternalTicketsTable:
                 t for t in self._client.tickets if t.get(self._eq_field) == self._eq_value
             ]
             return _FakeResult(matches)
+        if self._mode == "insert":
+            if self._client.raise_on_insert:
+                raise self._client.raise_on_insert
+            row = {
+                "ticket_ref": self._payload.get("ticket_ref"),
+                "escalation_mapping_id": self._payload.get("escalation_mapping_id"),
+                "session_id": self._payload.get("session_id"),
+                "organization_id": self._payload.get("organization_id"),
+                "grid_name": self._payload.get("grid_name"),
+                "summary": self._payload.get("summary"),
+                "description": self._payload.get("description"),
+                "assignee_email": self._payload.get("assignee_email"),
+                "labels": self._payload.get("labels") or [],
+                "source": self._payload.get("source") or "escalation",
+                "status": "open",
+            }
+            self._client.tickets.append(row)
+            self._client.insert_calls.append(dict(self._payload))
+            return _FakeResult([row])
         if self._mode == "update":
             for t in self._client.tickets:
                 if t.get(self._eq_field) == self._eq_value:
-                    t.update(self._update_payload or {})
+                    t.update(self._payload or {})
             return _FakeResult([])
-        raise AssertionError("execute() called before select()/update()")
+        raise AssertionError("execute() called before select()/insert()/update()")
 
 
 class _CommentsTable:
@@ -84,7 +115,9 @@ class FakeSupabaseClient:
         self.comments: List[Dict[str, Any]] = []
         self._seq = seed_seq
         self.rpc_calls: List[Dict[str, Any]] = []
+        self.insert_calls: List[Dict[str, Any]] = []
         self.raise_on_rpc: Optional[Exception] = None
+        self.raise_on_insert: Optional[Exception] = None
 
     def table(self, name: str):
         if name == "internal_tickets":
@@ -94,13 +127,17 @@ class FakeSupabaseClient:
         raise AssertionError(f"Unexpected table: {name}")
 
     def rpc(self, name: str, params: Dict[str, Any]):
-        if name != "create_internal_ticket":
+        if name != "next_internal_ticket_ref":
             raise AssertionError(f"Unexpected rpc: {name}")
         self.rpc_calls.append(params)
         return _RpcCall(self, params)
 
 
 class _RpcCall:
+    """Fakes the ref-allocation RPC. Returns a bare scalar string in
+    ``.data``, matching PostgREST's response shape for a function that
+    returns a plain (non-set) type rather than SETOF/TABLE."""
+
     def __init__(self, client: FakeSupabaseClient, params: Dict[str, Any]):
         self._client = client
         self._params = params
@@ -111,21 +148,7 @@ class _RpcCall:
         self._client._seq += 1
         prefix = self._params.get("p_prefix") or "TKT"
         ref = f"{prefix}-{self._client._seq:06d}"
-        row = {
-            "ticket_ref": ref,
-            "escalation_mapping_id": self._params.get("p_escalation_mapping_id"),
-            "session_id": self._params.get("p_session_id"),
-            "organization_id": self._params.get("p_organization_id"),
-            "grid_name": self._params.get("p_grid_name"),
-            "summary": self._params.get("p_summary"),
-            "description": self._params.get("p_description"),
-            "assignee_email": self._params.get("p_assignee_email"),
-            "labels": self._params.get("p_labels") or [],
-            "source": self._params.get("p_source") or "escalation",
-            "status": "open",
-        }
-        self._client.tickets.append(row)
-        return _FakeResult([row])
+        return _FakeResult(ref)
 
 
 def _make_backend(client: Optional[FakeSupabaseClient] = None):
@@ -199,14 +222,20 @@ class TestCreateTicket:
 
         await backend.create_ticket(req)
 
-        call = fake.rpc_calls[0]
-        assert call["p_escalation_mapping_id"] == "11111111-1111-1111-1111-111111111111"
-        assert call["p_session_id"] == "sess-1"
-        assert call["p_organization_id"] == 7
-        assert call["p_grid_name"] == "MainGrid"
-        assert call["p_assignee_email"] == "a@b.com"
-        assert call["p_labels"] == ["escalation-abc"]
-        assert call["p_source"] == "escalation"
+        # The ref-allocation RPC only ever receives the prefix.
+        rpc_call = fake.rpc_calls[0]
+        assert set(rpc_call.keys()) == {"p_prefix"}
+
+        # Everything else flows through the plain insert().
+        insert_call = fake.insert_calls[0]
+        assert insert_call["escalation_mapping_id"] == "11111111-1111-1111-1111-111111111111"
+        assert insert_call["session_id"] == "sess-1"
+        assert insert_call["organization_id"] == 7
+        assert insert_call["grid_name"] == "MainGrid"
+        assert insert_call["assignee_email"] == "a@b.com"
+        assert insert_call["labels"] == ["escalation-abc"]
+        assert insert_call["source"] == "escalation"
+        assert insert_call["ticket_ref"] == "TKT-000001"
 
     @pytest.mark.asyncio
     async def test_raises_when_no_client(self):
@@ -222,6 +251,20 @@ class TestCreateTicket:
 
         with pytest.raises(TicketBackendError):
             await backend.create_ticket(TicketCreateRequest(summary="x"))
+
+    @pytest.mark.asyncio
+    async def test_raises_when_insert_errors(self):
+        fake = FakeSupabaseClient()
+        fake.raise_on_insert = RuntimeError("insert failed")
+        backend, _ = _make_backend(fake)
+
+        with pytest.raises(TicketBackendError):
+            await backend.create_ticket(TicketCreateRequest(summary="x"))
+
+        # The ref-allocation call still happened -- the failure was on the
+        # second round-trip (the insert), confirming this really exercises
+        # a two-call sequence rather than short-circuiting on the RPC.
+        assert len(fake.rpc_calls) == 1
 
 
 class TestAddComment:
