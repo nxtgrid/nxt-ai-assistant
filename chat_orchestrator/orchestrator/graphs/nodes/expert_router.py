@@ -1194,6 +1194,10 @@ async def _handle_duplicate_decision_from_pending(
             "active_work_packet": None,  # Will create new packet
             "matched_expert_id": expert_id,
             "expert_command": expert_command,
+            # Restore raw NL request so _create_new_packet re-parses
+            # user-supplied parameters (technology_family, etc.) onto the
+            # fresh packet instead of falling back to the synthetic command.
+            "expert_raw_request": context.get("expert_raw_request"),
             "expert_packet_type": packet_type,
             "expert_key_entity": key_entity,
             "awaiting_duplicate_decision": False,
@@ -1379,6 +1383,10 @@ async def _handle_resume_decision_from_pending(
                 "active_work_packet": None,  # Will create new packet
                 "matched_expert_id": expert_id,
                 "expert_command": original_request,
+                # Prefer the current request's raw NL text so newly supplied
+                # parameters (technology_family, etc.) are re-parsed onto the
+                # fresh packet rather than inherited from the cancelled one.
+                "expert_raw_request": context.get("expert_raw_request") or original_request,
                 "expert_packet_type": packet_type,
                 "expert_key_entity": original_entity,
                 "awaiting_resume_decision": False,

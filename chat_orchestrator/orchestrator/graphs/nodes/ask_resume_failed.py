@@ -122,6 +122,10 @@ Reply with **1**, **2**, or **3**, or just tell me what you'd like to do."""
                     "resumable_packet": packet,
                     "matched_expert_id": state.get("matched_expert_id"),
                     "expert_command": state.get("expert_command"),
+                    # Raw NL request carries user-supplied parameters that the
+                    # synthetic expert_command has dropped; persist it so
+                    # "start fresh" can re-parse them onto the new packet.
+                    "expert_raw_request": state.get("expert_raw_request"),
                     "expert_packet_type": state.get("expert_packet_type"),
                     "expert_key_entity": state.get("expert_key_entity"),
                     # Store user info for button click validation
