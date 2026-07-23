@@ -1230,7 +1230,11 @@ async def _handle_duplicate_decision_from_pending(
                 "expert_key_entity": key_entity,
                 "awaiting_duplicate_decision": False,
                 "similar_work_packet": None,
-                "resume_from_completed": True,  # Flag for special handling
+                # Resuming a completed packet needs no special flag: passing the
+                # existing packet as active_work_packet means expert_handler skips
+                # _create_new_packet, and WorkflowExecutor sees every step already
+                # in steps_completed and returns the prior results (already_completed)
+                # instead of re-running. Driven entirely by the packet, not a flag.
                 # Mark that user_input was consumed by the decision
                 # expert_handler should NOT pass it to resume_from_input
                 "user_input_consumed": True,
