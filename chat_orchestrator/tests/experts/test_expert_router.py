@@ -10,6 +10,8 @@ import pytest
 
 from orchestrator.graphs.nodes.expert_router import (
     EXPERT_COMMANDS,
+    RESOLUTION_START_FRESH,
+    _handle_resume_decision_from_pending,
     expert_router,
     parse_expert_command,
 )
@@ -455,6 +457,56 @@ class TestPendingDecisions:
         mock_decision_service.resolve_decision.assert_called_once_with("decision-123", "run_new")
 
     @pytest.mark.asyncio
+    async def test_duplicate_run_new_restores_raw_request_for_params(self, base_state):
+        """'Run new' must restore expert_raw_request so user-supplied
+        parameters (e.g. Deye technology) survive onto the fresh packet.
+
+        Regression: the synthetic expert_command ('/lpp <lat>,<lon>') drops the
+        NL parameters, so without the raw request the fresh design falls back to
+        the Victron/DEFAULT engine defaults.
+        """
+        base_state["user_input"] = "1"  # Run new
+
+        raw_request = (
+            "Can you create an LPP for the site located at "
+            "9.3947551,9.3176320 using Deye technology and not Victron?"
+        )
+        pending_decision = {
+            "id": "decision-123",
+            "decision_type": "duplicate",
+            "context": {
+                "similar_work_packet": {"packet_id": "lpp_123"},
+                "matched_expert_id": "lpp_expert",
+                "expert_command": "/lpp 9.3947551,9.3176320",
+                "expert_raw_request": raw_request,
+                "expert_packet_type": "light_preliminary_package",
+                "expert_key_entity": "9.3947551,9.3176320",
+                "is_resumable": False,
+            },
+            "prompt": "Would you like to run new or cancel?",
+        }
+
+        with patch(
+            "orchestrator.graphs.nodes.expert_router.PendingDecisionService"
+        ) as mock_decision_class:
+            mock_decision_service = MagicMock()
+            mock_decision_service.get_pending_decision = AsyncMock(return_value=pending_decision)
+            mock_decision_service.resolve_decision = AsyncMock()
+            mock_decision_class.return_value = mock_decision_service
+
+            result = await expert_router(base_state)
+
+        assert result["expert_routing_decision"] == "expert"
+        assert result["expert_raw_request"] == raw_request
+
+        # The restored raw request must yield technology_family=deye downstream.
+        from orchestrator.services.lpp_parameter_parser import parse_lpp_request_parameters
+
+        assert parse_lpp_request_parameters(result["expert_raw_request"]).get(
+            "technology_family"
+        ) == "deye"
+
+    @pytest.mark.asyncio
     async def test_reprompts_on_invalid_duplicate_decision(self, base_state):
         """Invalid response to duplicate decision shows re-prompt."""
         base_state["user_input"] = "maybe?"  # Invalid response
@@ -524,3 +576,43 @@ class TestPendingDecisions:
         # Pending decision should be handled, not the active packet
         assert result["matched_expert_id"] == "lpp_expert"
         mock_decision_service.resolve_decision.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_resume_start_fresh_prefers_current_raw_request(self):
+        """'Start fresh' must carry the CURRENT request's raw text so newly
+        supplied parameters override the cancelled packet's stale inputs.
+
+        General across experts: the fix threads expert_raw_request (not any
+        packet-type-specific field) through the decision round-trip.
+        """
+        new_raw_request = "regenerate for ExampleGrid using Deye technology and not Victron"
+        context = {
+            "expert_raw_request": new_raw_request,
+            "resumable_packet": {
+                "packet_id": "pkt_old",
+                "assigned_expert": "lpp_expert",
+                "packet_type": "light_preliminary_package",
+                "organization_id": 1,
+                # Stale inputs from the original run (no Deye).
+                "packet_inputs": {
+                    "raw_request": "create an LPP for ExampleGrid",
+                    "key_entity": "ExampleGrid",
+                },
+            },
+        }
+
+        mock_packet_service = MagicMock()
+        mock_packet_service.cancel_packet = AsyncMock()
+        mock_packet_service.cancel_stale_packets_for_entity = AsyncMock(return_value=0)
+
+        result = await _handle_resume_decision_from_pending(
+            RESOLUTION_START_FRESH,
+            context,
+            {},
+            mock_packet_service,
+            "session_abc123",
+        )
+
+        assert result["expert_routing_decision"] == "expert"
+        # Current request wins over the cancelled packet's stale raw_request.
+        assert result["expert_raw_request"] == new_raw_request

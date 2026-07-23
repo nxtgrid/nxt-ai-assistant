@@ -198,6 +198,11 @@ Reply with *1* or *2*."""
                     "similar_work_packet": packet,
                     "matched_expert_id": expert_id,
                     "expert_command": state.get("expert_command"),
+                    # Raw NL request carries user-supplied parameters (e.g.
+                    # "using Deye technology") that the synthetic expert_command
+                    # ("lpp <lat>,<lon>") has dropped. Persist it so "Run new"
+                    # can re-parse them onto the fresh packet.
+                    "expert_raw_request": state.get("expert_raw_request"),
                     "expert_packet_type": packet_type,
                     "expert_key_entity": state.get("expert_key_entity"),
                     "is_resumable": is_resumable,  # Store for response handling
@@ -221,6 +226,7 @@ Reply with *1* or *2*."""
                 "similar_work_packet": packet,
                 "matched_expert_id": expert_id,
                 "expert_command": state.get("expert_command"),
+                "expert_raw_request": state.get("expert_raw_request"),
                 "expert_packet_type": packet_type,
                 "expert_routing_decision": None,
             }
