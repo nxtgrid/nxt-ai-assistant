@@ -18,6 +18,7 @@ from orchestrator.models.database import (
     UserModel,
 )
 from orchestrator.models.schemas import ConversationMessage, FunctionCall, ToolCallResult
+from shared.config.db_credentials import chat_db_service_key, chat_db_url
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -1652,13 +1653,11 @@ def get_supabase_client() -> EnhancedSupabaseClient:
     Returns:
         Singleton EnhancedSupabaseClient instance
     """
-    import os
-
     global _supabase_instance
     if _supabase_instance is None:
         _supabase_instance = EnhancedSupabaseClient(
-            url=os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL") or "",
-            key=os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY") or "",
+            url=chat_db_url(),
+            key=chat_db_service_key(),
         )
     return _supabase_instance
 

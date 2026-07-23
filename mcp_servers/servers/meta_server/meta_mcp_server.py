@@ -29,6 +29,7 @@ from shared_code.tool_registry import ToolRegistry
 from supabase import Client, create_client
 
 from shared.charts import apply_theme
+from shared.config.db_credentials import chat_db_service_key, chat_db_url
 from shared.utils.date_utils import parse_iso_with_timezone
 from shared.utils.logging import get_logger
 
@@ -45,9 +46,9 @@ registry = ToolRegistry("meta")
 _SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 # Configuration
-# Chat database credentials (with legacy fallback)
-CHAT_DB_URL = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL", "")
-CHAT_DB_SERVICE_KEY = os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY", "")
+# Chat database credentials (CHAT_DB_* with legacy SUPABASE_* fallback)
+CHAT_DB_URL = chat_db_url()
+CHAT_DB_SERVICE_KEY = chat_db_service_key()
 ESCALATION_CHAT_ID = os.getenv("ESCALATION_TELEGRAM_CHAT_ID", "")
 META_ACTIONS_ENABLED = os.getenv("META_ACTIONS_ENABLED", "true").lower() == "true"
 

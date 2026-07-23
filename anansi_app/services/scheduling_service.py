@@ -5,11 +5,12 @@ Provides reusable scheduling functionality for broadcasts and future automated m
 Uses the scheduled_messages table for persistent storage with atomic claim mechanism.
 """
 
-import os
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from supabase import Client, create_client
+
+from shared.config.db_credentials import chat_db_service_key, chat_db_url
 
 
 class SchedulingService:
@@ -17,9 +18,8 @@ class SchedulingService:
 
     def __init__(self):
         """Initialize scheduling service."""
-        # Chat database credentials (with legacy fallback)
-        supabase_url = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY")
+        supabase_url = chat_db_url()
+        supabase_key = chat_db_service_key()
         self._supabase: Optional[Client] = None
         if supabase_url and supabase_key:
             self._supabase = create_client(supabase_url, supabase_key)

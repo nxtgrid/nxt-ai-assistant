@@ -339,7 +339,7 @@ class StepContext:
         When a new View State button is sent, removes the button from the
         previous progress message to keep the chat clean.
 
-        Uses handler._send_telegram_message. Fails silently to not block workflow.
+        Uses shared.utils.telegram_send. Fails silently to not block workflow.
 
         Args:
             message: Progress message to send (e.g., "⏳ Generating design...")
@@ -354,7 +354,7 @@ class StepContext:
 
         import os
 
-        from handler import _send_telegram_message
+        from shared.utils.telegram_send import send_telegram_message
 
         bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         if not bot_token:
@@ -389,7 +389,7 @@ class StepContext:
                     except Exception:
                         pass  # Best-effort cleanup
 
-            msg_id = await _send_telegram_message(
+            msg_id = await send_telegram_message(
                 bot_token,
                 self.user_context.chat_id,
                 message,

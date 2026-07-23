@@ -176,9 +176,10 @@ class ConversationState(TypedDict, total=False):
     # Phase 3: Debug/notification
     tele_debug: Optional[Any]  # Debug notification function
 
-    # Phase 4: Tool executor - NOT stored in state (checkpointer serialization issue)
-    # Created locally in expert_handler.py when needed
-    tool_executor: Optional[Any]  # Deprecated - do not populate
+    # Phase 4: Tool executor - NOT stored in state (checkpointer serialization issue).
+    # Declared here for typing only; expert_handler.py builds it locally when needed
+    # and never writes it back into graph state, so it always reads back as None.
+    tool_executor: Optional[Any]
 
     # Phase 4: Expert routing
     expert_routing_decision: Optional[str]  # "expert" | "continue"

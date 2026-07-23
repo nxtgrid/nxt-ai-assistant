@@ -30,7 +30,6 @@ except ImportError:
 from orchestrator.config.settings import AppSettings, GeminiModelConfig
 from orchestrator.models.schemas import (
     ConversationMessage,
-    MediaAttachment,
     MessageSourceLiteral,
     ToolCallResult,
     UserContext,
@@ -44,11 +43,13 @@ from orchestrator.services.thread_assignment import (
     assign_passive_thread,
     is_thread_disentanglement_enabled,
 )
+from orchestrator.services.webhook_processor import (
+    process_webhook_with_graph as _process_webhook_with_graph,
+)
 from orchestrator.utils.session_id import generate_session_id
 from shared.auth import get_auth_service
 from shared.auth.auth_service import STAFF_ORG_ID as _STAFF_ORG_ID
-from shared.utils.error_messages import ErrorCategory, categorize_error, get_user_message
-from shared.utils.langfuse_utils import langfuse_observe, update_trace
+from shared.utils.error_messages import ErrorCategory, categorize_error
 from shared.utils.logging import get_logger
 from shared.utils.telegram_buttons import (
     is_procedure_buttons_enabled,
@@ -556,92 +557,6 @@ async def _save_emoji_message_feedback(
     LOGGER.info(f"Saved emoji message feedback to message {msg_id}")
 
 
-@langfuse_observe(name="chat-request")
-async def _process_webhook_with_graph(
-    user_input: str,
-    user_context: UserContext,
-    entity_context: Dict[str, Any] | None = None,
-    media: List[MediaAttachment] | None = None,
-    session_id: str | None = None,
-    metadata: Dict[str, Any] | None = None,
-) -> tuple[str, List[ToolCallResult], Dict[str, Any] | None]:
-    """Process webhook request using the full LangGraph conversation graph.
-
-    This is the Phase 3 implementation that replaces _process_webhook_async
-    with a cleaner graph-based flow.
-
-    Args:
-        user_input: User's message text
-        user_context: User identity and context
-        entity_context: Optional entity context dict
-        media: Optional media attachments
-        session_id: Session identifier
-        metadata: Additional metadata
-
-    Returns:
-        Tuple of (final response text, list of tool call results, optional reply_markup for inline buttons)
-    """
-    # Set Langfuse trace metadata (skipped for warmup requests)
-    user_email = getattr(user_context, "email", "")
-    if user_email != "warmup@system":
-        update_trace(
-            user_id=session_id,
-            session_id=session_id,
-            metadata={
-                "org_id": getattr(user_context, "organization_id", None),
-                "mode": getattr(user_context, "mode", None),
-            },
-            tags=[t for t in [getattr(user_context, "mode", None), "production"] if t],
-        )
-
-    from orchestrator.graphs.full_conversation_graph import (
-        build_full_conversation_graph,
-        invoke_full_graph,
-    )
-
-    LOGGER.info(f"Processing webhook with LangGraph full graph (session={session_id})")
-
-    try:
-        # Checkpointer removed — single-turn graph doesn't need state persistence.
-        # Multi-turn decisions (duplicate detection, resume) use pending_decisions table.
-        graph = build_full_conversation_graph()
-        final_state = await invoke_full_graph(
-            graph=graph,
-            user_input=user_input,
-            user_context=user_context,
-            session_id=session_id or "",
-            metadata=metadata,
-            entity_context=entity_context,
-        )
-
-        # Extract final response
-        final_response: str = final_state.get("final_response", "") or ""
-
-        if not final_response:
-            LOGGER.warning("Graph returned empty final_response")
-            final_response = get_user_message(ErrorCategory.SYSTEM, "empty_response")
-
-        # Extract tool results (may contain images)
-        tool_results: List[ToolCallResult] = final_state.get("accumulated_tool_results", [])
-
-        # Extract reply_markup for inline buttons (decision prompts)
-        reply_markup: Dict[str, Any] | None = final_state.get("reply_markup")
-
-        LOGGER.info(
-            f"Graph execution complete: response_len={len(final_response)}, "
-            f"rounds={final_state.get('current_round', 0)}, "
-            f"tool_results={len(tool_results)}, has_reply_markup={reply_markup is not None}"
-        )
-
-        return final_response, tool_results, reply_markup
-
-    except Exception as e:
-        LOGGER.exception(f"Error in LangGraph full graph processing: {e}")
-        # Fall back to error message
-        _, error_message = categorize_error(e)
-        return error_message, [], None
-
-
 def validate_and_override_source(
     request_source: MessageSourceLiteral,
     debug_mode: bool = False,
@@ -678,92 +593,10 @@ def validate_and_override_source(
 # Allowed domains for fetching training images (for security)
 ALLOWED_IMAGE_DOMAINS = ["drive.google.com", "docs.google.com"]
 
-# Maximum file size for media downloads (5MB)
-MAX_MEDIA_SIZE_BYTES = 5 * 1024 * 1024
-
-
-async def _download_telegram_photo(file_id: str, bot_token: str) -> tuple:
-    """
-    Download a photo from Telegram using the Bot API.
-
-    Args:
-        file_id: Telegram file_id of the photo
-        bot_token: Telegram bot token
-
-    Returns:
-        Tuple of (base64_data, mime_type) or (None, None) on failure
-    """
-    import base64
-
-    try:
-        # Get file path from Telegram
-        get_file_url = f"https://api.telegram.org/bot{bot_token}/getFile"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                get_file_url, params={"file_id": file_id}, timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                result = await response.json()
-
-                if not result.get("ok"):
-                    LOGGER.error(f"Failed to get file info: {result}")
-                    return None, None
-
-                file_path = result.get("result", {}).get("file_path")
-                file_size = result.get("result", {}).get("file_size", 0)
-
-                if not file_path:
-                    LOGGER.error("No file_path in response")
-                    return None, None
-
-                # Check file size
-                if file_size > MAX_MEDIA_SIZE_BYTES:
-                    LOGGER.warning(f"File too large: {file_size} bytes > {MAX_MEDIA_SIZE_BYTES}")
-                    return None, None
-
-            # Download the file
-            download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
-            async with session.get(
-                download_url, timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                if response.status != 200:
-                    LOGGER.error(f"Failed to download file: {response.status}")
-                    return None, None
-
-                file_data = await response.read()
-
-                # Determine mime type from file path
-                if file_path.endswith(".jpg") or file_path.endswith(".jpeg"):
-                    mime_type = "image/jpeg"
-                elif file_path.endswith(".png"):
-                    mime_type = "image/png"
-                elif file_path.endswith(".gif"):
-                    mime_type = "image/gif"
-                elif file_path.endswith(".mp4"):
-                    mime_type = "video/mp4"
-                elif file_path.endswith(".ogg") or file_path.endswith(".oga"):
-                    mime_type = "audio/ogg"
-                elif file_path.endswith(".mp3"):
-                    mime_type = "audio/mpeg"
-                elif file_path.endswith(".wav"):
-                    mime_type = "audio/wav"
-                elif file_path.endswith(".m4a"):
-                    mime_type = "audio/mp4"
-                elif file_path.endswith(".aac"):
-                    mime_type = "audio/aac"
-                elif file_path.endswith(".flac"):
-                    mime_type = "audio/flac"
-                else:
-                    mime_type = "image/jpeg"  # Default
-
-                # Encode to base64
-                base64_data = base64.b64encode(file_data).decode("utf-8")
-
-                LOGGER.info(f"Downloaded Telegram media: {len(file_data)} bytes, {mime_type}")
-                return base64_data, mime_type
-
-    except Exception as e:
-        LOGGER.exception(f"Error downloading Telegram photo: {e}")
-        return None, None
+# Maximum file size for media downloads (5 MiB). Canonical definition lives in
+# telegram_transport (alongside download_telegram_photo); re-bound here for the
+# training-image download below.
+MAX_MEDIA_SIZE_BYTES = telegram_transport.MAX_MEDIA_SIZE_BYTES
 
 
 async def _download_training_image(url: str) -> tuple:
@@ -3499,43 +3332,6 @@ async def _send_tool_images_to_telegram(
     return await telegram_transport._send_tool_images_to_telegram(
         tool_results, bot_token, chat_id, topic_id, reply_to_message_id=reply_to_message_id
     )
-
-
-async def _send_telegram_photo(
-    bot_token: str,
-    chat_id: str,
-    topic_id: str | None,
-    photo_data: str,
-    caption: str | None = None,
-    reply_to_message_id: int | None = None,
-) -> None:
-    """Send photo to Telegram via Bot API.
-
-    Args:
-        bot_token: Telegram bot token
-        chat_id: Original Telegram chat ID (with -100 prefix if present)
-        topic_id: Optional topic/thread ID for forum groups
-        photo_data: Base64-encoded photo data
-        caption: Optional caption for the photo
-        reply_to_message_id: Optional message ID to reply to (tags the original message)
-
-    Delegates to the shared helper in shared/utils/telegram_send.py.
-    """
-    from shared.utils.telegram_send import send_telegram_photo
-
-    result = await send_telegram_photo(
-        bot_token,
-        chat_id,
-        photo_data,
-        caption=caption,
-        topic_id=topic_id,
-        reply_to_message_id=reply_to_message_id,
-    )
-    if not result.get("ok"):
-        # The caller logs failures from the exception path, so keep raising
-        # rather than returning quietly as the shared helper does.
-        raise RuntimeError(f"Telegram sendPhoto failed: {result.get('description')}")
-    LOGGER.info("Successfully sent photo to Telegram")
 
 
 async def _store_buttons_message_id(

@@ -53,13 +53,12 @@ async def prepare_media(state: ConversationState) -> Dict[str, Any]:
         LOGGER.warning("TELEGRAM_BOT_TOKEN not set, cannot download media")
         return {"media": media}
 
-    # Import the download function from handler (kept as utility)
-    from handler import _download_telegram_photo
+    from orchestrator.services.telegram_transport import download_telegram_photo
 
     # Download photos (concurrently for albums)
     if photo_file_ids:
         results = await asyncio.gather(
-            *[_download_telegram_photo(fid, bot_token) for fid in photo_file_ids],
+            *[download_telegram_photo(fid, bot_token) for fid in photo_file_ids],
             return_exceptions=True,
         )
         for i, result in enumerate(results):
@@ -75,7 +74,7 @@ async def prepare_media(state: ConversationState) -> Dict[str, Any]:
 
     # Download other media types (video/voice/audio — single file)
     if other_file_id:
-        base64_data, mime_type = await _download_telegram_photo(other_file_id, bot_token)
+        base64_data, mime_type = await download_telegram_photo(other_file_id, bot_token)
         if base64_data:
             if metadata.get("voice_file_id") or metadata.get("audio_file_id"):
                 media_type = "audio"

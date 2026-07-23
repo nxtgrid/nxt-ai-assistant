@@ -20,6 +20,9 @@ from shared.utils.telegram_send import send_telegram_photo
 
 LOGGER = get_logger(__name__)
 
+# Max size for inbound media downloaded from Telegram (5 MiB).
+MAX_MEDIA_SIZE_BYTES = 5 * 1024 * 1024
+
 
 async def _answer_callback_query(
     callback_query_id: str,
@@ -444,3 +447,87 @@ async def _send_telegram_response(
     except Exception as e:
         LOGGER.exception(f"Error sending telegram response: {e}")
         raise
+
+
+async def download_telegram_photo(file_id: str, bot_token: str) -> tuple:
+    """
+    Download a photo from Telegram using the Bot API.
+
+    Args:
+        file_id: Telegram file_id of the photo
+        bot_token: Telegram bot token
+
+    Returns:
+        Tuple of (base64_data, mime_type) or (None, None) on failure
+    """
+    import base64
+
+    try:
+        # Get file path from Telegram
+        get_file_url = f"https://api.telegram.org/bot{bot_token}/getFile"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                get_file_url, params={"file_id": file_id}, timeout=aiohttp.ClientTimeout(total=10)
+            ) as response:
+                result = await response.json()
+
+                if not result.get("ok"):
+                    LOGGER.error(f"Failed to get file info: {result}")
+                    return None, None
+
+                file_path = result.get("result", {}).get("file_path")
+                file_size = result.get("result", {}).get("file_size", 0)
+
+                if not file_path:
+                    LOGGER.error("No file_path in response")
+                    return None, None
+
+                # Check file size
+                if file_size > MAX_MEDIA_SIZE_BYTES:
+                    LOGGER.warning(f"File too large: {file_size} bytes > {MAX_MEDIA_SIZE_BYTES}")
+                    return None, None
+
+            # Download the file
+            download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+            async with session.get(
+                download_url, timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status != 200:
+                    LOGGER.error(f"Failed to download file: {response.status}")
+                    return None, None
+
+                file_data = await response.read()
+
+                # Determine mime type from file path
+                if file_path.endswith(".jpg") or file_path.endswith(".jpeg"):
+                    mime_type = "image/jpeg"
+                elif file_path.endswith(".png"):
+                    mime_type = "image/png"
+                elif file_path.endswith(".gif"):
+                    mime_type = "image/gif"
+                elif file_path.endswith(".mp4"):
+                    mime_type = "video/mp4"
+                elif file_path.endswith(".ogg") or file_path.endswith(".oga"):
+                    mime_type = "audio/ogg"
+                elif file_path.endswith(".mp3"):
+                    mime_type = "audio/mpeg"
+                elif file_path.endswith(".wav"):
+                    mime_type = "audio/wav"
+                elif file_path.endswith(".m4a"):
+                    mime_type = "audio/mp4"
+                elif file_path.endswith(".aac"):
+                    mime_type = "audio/aac"
+                elif file_path.endswith(".flac"):
+                    mime_type = "audio/flac"
+                else:
+                    mime_type = "image/jpeg"  # Default
+
+                # Encode to base64
+                base64_data = base64.b64encode(file_data).decode("utf-8")
+
+                LOGGER.info(f"Downloaded Telegram media: {len(file_data)} bytes, {mime_type}")
+                return base64_data, mime_type
+
+    except Exception as e:
+        LOGGER.exception(f"Error downloading Telegram photo: {e}")
+        return None, None
