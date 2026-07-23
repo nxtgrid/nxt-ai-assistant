@@ -32,6 +32,11 @@ class TicketCreateRequest(BaseModel):
     organization_short_name: Optional[str] = None
     organization_id: Optional[int] = None
     labels: List[str] = Field(default_factory=list)
+    """Caller-supplied, not auto-generated. For escalation tickets, pass
+    ``[f"escalation-{escalation_mapping_id[:8]}"]`` -- ``JiraTicketBackend``'s
+    dedup guard (``find_by_escalation``) searches Jira by this exact label
+    format (``_search_jira_for_escalation``); omitting it means a retry can
+    never find a prior Jira ticket and may file a duplicate."""
     escalation_mapping_id: Optional[str] = None
     session_id: Optional[str] = None
     customer_chat_id: Optional[str] = None

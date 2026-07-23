@@ -136,6 +136,16 @@ class TicketService:
     # ------------------------------------------------------------------
 
     async def _stamp_escalation_mapping(self, mapping_id: str, ref: str, backend: str) -> None:
+        """Best-effort -- a failure here is safe to swallow, not just convenient to.
+
+        If this UPDATE fails after the ticket was already created, the mapping
+        row's ticket_ref/ticket_backend stay NULL despite a real ticket
+        existing. That's recoverable without a retry loop here: both backends'
+        find_by_escalation() locate the ticket independently of this stamp
+        (Jira via the caller-supplied escalation label, internal via the
+        escalation_mapping_id column on the ticket row itself) -- so the next
+        dedup check still finds it rather than filing a duplicate.
+        """
         raw = self._raw_client()
         if raw is None:
             LOGGER.warning(
@@ -183,8 +193,15 @@ class TicketService:
 
         Checks both backends -- at ticket-creation time we don't yet know
         which backend a prior (possibly failed-to-persist) attempt used.
+
+        Skips the Jira lookup entirely when ``TICKET_BACKEND_OVERRIDE=internal``:
+        that override exists so ops can route around a configured-but-unhealthy
+        Jira, and an unconditional Jira dedup call here would silently defeat
+        it with a 10s network round-trip on every escalation.
         """
-        jira_ref = await self._jira.find_by_escalation(mapping_id)
-        if jira_ref:
-            return jira_ref
+        override = (fr.get("TICKET_BACKEND_OVERRIDE") or "auto").strip().lower()
+        if override != "internal":
+            jira_ref = await self._jira.find_by_escalation(mapping_id)
+            if jira_ref:
+                return jira_ref
         return await self._internal.find_by_escalation(mapping_id)
