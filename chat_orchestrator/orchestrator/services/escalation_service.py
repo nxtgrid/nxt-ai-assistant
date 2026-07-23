@@ -609,6 +609,17 @@ class EscalationService:
                 "error": f"Escalation failed: {str(e)}",
             }
 
+    # ==========================================================================
+    # DEAD CODE (Task 4, Jira-optional ticket backend plan): everything from here
+    # down to notify_customer_resolved() has zero remaining callers. This logic
+    # was moved to orchestrator/services/ticketing/jira_backend.py's
+    # JiraTicketBackend, which is what self._tickets (TicketService) now uses for
+    # all ticket creation/comment/status/dedup. DO NOT call these methods directly
+    # or add new callers -- that would silently bypass TicketService's backend
+    # resolution (Jira-vs-internal), the exact bug class this refactor exists to
+    # prevent. Safe to delete in a follow-up cleanup pass (see Task 9).
+    # ==========================================================================
+
     # JIRA Grid field (customfield_10057) option IDs — required select field.
     # Fallback used when grid cannot be resolved from escalation context.
     JIRA_GRID_FALLBACK_OPTION_ID = "10315"  # "Software"
@@ -1094,6 +1105,10 @@ class EscalationService:
             LOGGER.debug("Error searching Jira for escalation %s", mapping_id, exc_info=True)
             return None
 
+    # ==========================================================================
+    # END DEAD CODE (Task 4)
+    # ==========================================================================
+
     async def notify_customer_resolved(
         self,
         customer_chat_id: str,
@@ -1247,7 +1262,9 @@ class EscalationService:
                             # timeline when this escalation is linked to a ticket.
                             # Best-effort: tag_message_as_ticket_comment fails soft
                             # internally, so a tagging error never breaks forwarding.
-                            ticket_ref = mapping.get("ticket_ref")
+                            ticket_ref = mapping.get("ticket_ref") or mapping.get(
+                                "jira_ticket_key"
+                            )
                             if ticket_ref and saved_messages:
                                 await supabase_client.tag_message_as_ticket_comment(
                                     saved_messages[0].id, ticket_ref
@@ -1679,8 +1696,11 @@ class EscalationService:
             assignee_email: Email of the person who clicked the button (for Jira assignment)
 
         Returns:
-            On success: {"success": True, "ticket_ref": <ref>} -- NOTE the key is
-            "ticket_ref" (backend-agnostic), NOT the legacy "jira_ticket_key".
+            On success: {"success": True, "ticket_ref": <ref>, "ticket_backend":
+            "jira"|"internal", "ticket_url": <browse url or None>} -- NOTE the key
+            is "ticket_ref" (backend-agnostic), NOT the legacy "jira_ticket_key".
+            "ticket_backend"/"ticket_url" let callers (e.g. the sweep) render a
+            link-or-plain-text ticket reference without a second backend lookup.
             Callers (e.g. callback_handlers._handle_escalation_track_callback)
             must read result["ticket_ref"].
             On failure: {"success": False, "error": <str>}.
@@ -1776,8 +1796,11 @@ class EscalationService:
                     mapping_id,
                 )
                 # Resolve the recovered ref's backend so the legacy jira_ticket_key
-                # column stays in sync for inbound Jira webhook routing. A row in
-                # internal_tickets means it's internal; otherwise treat it as Jira.
+                # column stays in sync for inbound Jira webhook routing, and so the
+                # caller (e.g. the sweep) can render a link without a second lookup.
+                # A row in internal_tickets means it's internal; otherwise treat it
+                # as Jira (fail-toward-Jira on a lookup error is a cosmetic risk at
+                # worst -- see track_as_ticket's module-level design notes).
                 recovered_is_internal = False
                 if supabase_client:
                     try:
@@ -1790,6 +1813,12 @@ class EscalationService:
                             existing_ref,
                             e,
                         )
+                recovered_backend = "internal" if recovered_is_internal else "jira"
+                recovered_url = (
+                    None
+                    if recovered_is_internal
+                    else f"{self._jira_base_url}/browse/{existing_ref}"
+                )
                 if supabase_client and not recovered_is_internal:
                     try:
                         _client = supabase_client._get_client()
@@ -1800,7 +1829,12 @@ class EscalationService:
                         LOGGER.warning(
                             "Dedup: failed to store recovered key %s: %s", existing_ref, e
                         )
-                return {"success": True, "ticket_ref": existing_ref}
+                return {
+                    "success": True,
+                    "ticket_ref": existing_ref,
+                    "ticket_backend": recovered_backend,
+                    "ticket_url": recovered_url,
+                }
 
             try:
                 result = await self._tickets.create_ticket(
@@ -1893,7 +1927,12 @@ class EscalationService:
                 )
                 return {"success": False, "error": f"DB write failed: {store_result}"}
 
-            return {"success": True, "ticket_ref": ticket_ref}
+            return {
+                "success": True,
+                "ticket_ref": ticket_ref,
+                "ticket_backend": result.backend,
+                "ticket_url": result.url,
+            }
 
         except Exception as e:
             LOGGER.exception(f"Error in track_as_ticket: {e}")
@@ -1984,20 +2023,15 @@ class EscalationService:
                     escalation_message_id = claimed_mapping.get("escalation_message_id")
                     escalation_topic_id = claimed_mapping.get("escalation_topic_id")
                     escaped_ref = _escape_telegram_markdown(ticket_ref)
-                    # Internal tickets have no browse URL — render the ref as plain
-                    # bold text; Jira tickets keep the clickable browse link.
-                    is_internal_ticket = False
-                    try:
-                        is_internal_ticket = (
-                            await supabase_client.get_internal_ticket(ticket_ref)
-                        ) is not None
-                    except Exception:
-                        pass
-                    if is_internal_ticket:
-                        ticket_link = f"*{escaped_ref}*"
+                    # track_as_ticket already resolved backend/url authoritatively --
+                    # render from that instead of a second backend lookup. Internal
+                    # tickets have no browse URL, so render the ref as plain bold
+                    # text; Jira tickets keep the clickable browse link.
+                    ticket_url = result.get("ticket_url")
+                    if ticket_url:
+                        ticket_link = f"[{escaped_ref}]({ticket_url})"
                     else:
-                        jira_url = f"{self._jira_base_url}/browse/{ticket_ref}"
-                        ticket_link = f"[{escaped_ref}]({jira_url})"
+                        ticket_link = f"*{escaped_ref}*"
 
                     if escalation_message_id:
                         # Edit original message: remove Track button, show ticket ref

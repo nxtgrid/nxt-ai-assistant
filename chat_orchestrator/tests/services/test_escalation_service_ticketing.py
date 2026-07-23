@@ -103,12 +103,37 @@ class _FakeSupabase:
         self.tag_calls: List[tuple] = []
         self.saved_messages_return: List[Any] = [SimpleNamespace(id="msg-1")]
         self.mapping_for_reply: Optional[Dict[str, Any]] = None
+        # Sweep fixtures — configure per-test, default to empty/no-op.
+        self.stale_unfiled: List[Dict[str, Any]] = []
+        self.old_unfiled: List[Dict[str, Any]] = []
+        self.active_tracked: List[Dict[str, Any]] = []
+        self.claim_returns: Dict[str, Optional[Dict[str, Any]]] = {}
+        self.reactivate_calls: List[str] = []
 
     def _get_client(self) -> _FakeRaw:
         return self._raw
 
     def em_update_payloads(self) -> List[Dict[str, Any]]:
         return [p for op, _f, p in self._raw.tables["escalation_mappings"].calls if op == "update"]
+
+    def em_update_filters(self) -> List[Dict[str, Any]]:
+        return [f for op, f, _p in self._raw.tables["escalation_mappings"].calls if op == "update"]
+
+    async def get_stale_unfiled_escalations(self, **_k):
+        return self.stale_unfiled
+
+    async def get_old_unfiled_escalations(self, **_k):
+        return self.old_unfiled
+
+    async def get_active_tracked_escalations(self, **_k):
+        return self.active_tracked
+
+    async def claim_escalation_for_tracking(self, mapping_id: str):
+        return self.claim_returns.get(mapping_id)
+
+    async def reactivate_escalation(self, mapping_id: str):
+        self.reactivate_calls.append(mapping_id)
+        return None
 
     async def get_session(self, _sid):
         return SimpleNamespace(id=uuid.uuid4())
@@ -181,15 +206,23 @@ class _FakeBackend:
 
 
 class _FakeTickets:
-    """Lightweight stand-in for TicketService for the follow-up/comment path."""
+    """Lightweight stand-in for TicketService for the follow-up/comment and
+    sweep-reconciliation paths (neither needs find_by_escalation/create_ticket)."""
 
-    def __init__(self, status: Optional[TicketStatus] = None) -> None:
+    def __init__(
+        self,
+        status: Optional[TicketStatus] = None,
+        by_ref: Optional[Dict[str, Optional[TicketStatus]]] = None,
+    ) -> None:
         self._status = status
+        self._by_ref = by_ref or {}
         self.get_status_calls: List[str] = []
         self.add_comment_calls: List[tuple] = []
 
     async def get_status(self, ref: str):
         self.get_status_calls.append(ref)
+        if ref in self._by_ref:
+            return self._by_ref[ref]
         return self._status
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
@@ -258,8 +291,15 @@ async def test_track_as_ticket_jira_success_writes_jira_key_and_returns_ticket_r
 
     result = await svc.track_as_ticket(escalation_mapping=_base_mapping())
 
-    # Return key is now backend-agnostic "ticket_ref" (not "jira_ticket_key").
-    assert result == {"success": True, "ticket_ref": "OPS-100"}
+    # Return key is now backend-agnostic "ticket_ref" (not "jira_ticket_key"),
+    # plus ticket_backend/ticket_url so callers (e.g. the sweep) can render a
+    # link without a second backend lookup.
+    assert result == {
+        "success": True,
+        "ticket_ref": "OPS-100",
+        "ticket_backend": "jira",
+        "ticket_url": "https://jira.test/browse/OPS-100",
+    }
     assert "jira_ticket_key" not in result
 
     payloads = supa.em_update_payloads()
@@ -293,7 +333,12 @@ async def test_track_as_ticket_internal_success_leaves_jira_key_null():
 
     result = await svc.track_as_ticket(escalation_mapping=_base_mapping())
 
-    assert result == {"success": True, "ticket_ref": "TKT-000001"}
+    assert result == {
+        "success": True,
+        "ticket_ref": "TKT-000001",
+        "ticket_backend": "internal",
+        "ticket_url": None,
+    }
     assert internal.create_calls == 1
 
     payloads = supa.em_update_payloads()
@@ -317,7 +362,10 @@ async def test_track_as_ticket_dedup_hit_jira_writes_jira_key():
 
     result = await svc.track_as_ticket(escalation_mapping=_base_mapping())
 
-    assert result == {"success": True, "ticket_ref": "OPS-55"}
+    assert result["success"] is True
+    assert result["ticket_ref"] == "OPS-55"
+    assert result["ticket_backend"] == "jira"
+    assert result["ticket_url"] == f"{svc._jira_base_url}/browse/OPS-55"
     assert jira.create_calls == 0  # dedup skipped creation
     assert {"jira_ticket_key": "OPS-55"} in supa.em_update_payloads()
 
@@ -332,7 +380,12 @@ async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
 
     result = await svc.track_as_ticket(escalation_mapping=_base_mapping())
 
-    assert result == {"success": True, "ticket_ref": "TKT-9"}
+    assert result == {
+        "success": True,
+        "ticket_ref": "TKT-9",
+        "ticket_backend": "internal",
+        "ticket_url": None,
+    }
     # Recovered ref is internal -> the legacy jira_ticket_key must stay untouched.
     assert all("jira_ticket_key" not in p for p in supa.em_update_payloads())
 
@@ -511,6 +564,158 @@ async def test_run_escalation_ticket_sweep_exists_and_alias_delegates():
 
 
 # ---------------------------------------------------------------------------
+# Sweep — filing loop body (claim -> track_as_ticket -> render + edit message)
+# ---------------------------------------------------------------------------
+
+
+def _stale_row(mapping_id: str = "m1") -> Dict[str, Any]:
+    return {
+        "id": mapping_id,
+        "session_id": "telegram_abc",
+        "customer_chat_id": "12345",
+        "customer_topic_id": None,
+        "org_hashtag": "#acme",
+        "question_text": "my meter is broken",
+        "escalation_message_id": 555,
+        "escalation_topic_id": None,
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "jira_ticket_key": None,
+    }
+
+
+def _wire_sweep_telegram(svc: EscalationService) -> Dict[str, List[Any]]:
+    """Monkeypatch every Telegram send/edit the sweep can call; capture calls."""
+    calls: Dict[str, List[Any]] = {"edits": [], "replies": [], "messages": []}
+
+    async def fake_edit(chat_id, message_id, text, reply_markup=None):
+        calls["edits"].append({"text": text})
+        return {"ok": True}
+
+    async def fake_reply(chat_id, reply_to_message_id, text, reply_markup=None, topic_id=None):
+        calls["replies"].append({"text": text})
+        return {"ok": True, "result": {"message_id": 999}}
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        calls["messages"].append({"chat_id": chat_id, "text": text})
+        return {"ok": True, "result": {"message_id": 1000}}
+
+    svc._edit_telegram_message = fake_edit
+    svc._send_telegram_reply = fake_reply
+    svc._send_telegram_message = fake_send
+    return calls
+
+
+async def test_sweep_files_jira_ticket_and_renders_link():
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    supa.stale_unfiled = [_stale_row("m1")]
+    supa.claim_returns = {"m1": _stale_row("m1")}
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    jira = _FakeBackend("jira", available=True, ref="OPS-42", url="https://jira.test/browse/OPS-42")
+    internal = _FakeBackend("internal", ref="TKT-000001", url=None)
+    _install_ticket_service(svc, jira, internal)
+
+    result = await svc.run_escalation_ticket_sweep()
+
+    assert result["filed"] == 1
+    assert result["failed"] == 0
+    assert calls["edits"], "expected the escalation message to be edited"
+    edit_text = calls["edits"][-1]["text"]
+    assert "https://jira.test/browse/OPS-42" in edit_text
+    assert "](" in edit_text  # clickable link
+    reply_text = calls["replies"][-1]["text"]
+    assert "https://jira.test/browse/OPS-42" in reply_text
+
+
+async def test_sweep_files_internal_ticket_and_renders_plain_bold():
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    supa.stale_unfiled = [_stale_row("m1")]
+    supa.claim_returns = {"m1": _stale_row("m1")}
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    # Jira unavailable (down) -> resolve_backend routes to internal.
+    jira = _FakeBackend("jira", available=False, ref="OPS-42")
+    internal = _FakeBackend("internal", ref="TKT-000007", url=None)
+    _install_ticket_service(svc, jira, internal)
+
+    result = await svc.run_escalation_ticket_sweep()
+
+    assert result["filed"] == 1
+    edit_text = calls["edits"][-1]["text"]
+    assert "](" not in edit_text  # no clickable link for internal
+    assert "TKT-000007" in edit_text
+    reply_text = calls["replies"][-1]["text"]
+    assert "](" not in reply_text
+    assert "TKT-000007" in reply_text
+
+
+# ---------------------------------------------------------------------------
+# Sweep — reconciliation loop (closed-ticket cleanup + open-ticket notify)
+# ---------------------------------------------------------------------------
+
+
+async def test_sweep_reconciles_closed_ticket_and_notifies_open_one():
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    # One Jira-backed row using the new ticket_ref column (closed -> reconciled),
+    # one legacy row with only jira_ticket_key set (open -> customer notified),
+    # exercising the `ticket_ref or jira_ticket_key` fallback on both sides.
+    supa.active_tracked = [
+        {
+            "id": "closed-mapping",
+            "ticket_ref": "OPS-1",
+            "jira_ticket_key": "OPS-1",
+            "customer_chat_id": "111",
+            "customer_topic_id": None,
+        },
+        {
+            "id": "open-legacy-mapping",
+            "ticket_ref": None,
+            "jira_ticket_key": "OPS-2",
+            "customer_chat_id": "222",
+            "customer_topic_id": None,
+        },
+    ]
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    tickets = _FakeTickets(
+        by_ref={
+            "OPS-1": TicketStatus(summary="Meter issue", is_done=True),
+            "OPS-2": TicketStatus(summary="Billing issue", is_done=False),
+        }
+    )
+    svc._tickets = tickets
+
+    result = await svc.run_escalation_ticket_sweep()
+
+    # Both refs were looked up via the fallback (ticket_ref for the first row,
+    # jira_ticket_key for the legacy second row).
+    assert set(tickets.get_status_calls) == {"OPS-1", "OPS-2"}
+
+    # Closed ticket -> mapping reconciled (is_active=False), no customer message
+    # sent for it.
+    assert result["reconciled"] == 1
+    close_updates = [
+        f
+        for op, f, p in raw.tables["escalation_mappings"].calls
+        if op == "update" and f.get("id") == "closed-mapping"
+    ]
+    assert close_updates, "expected the closed mapping to be reconciled via an UPDATE"
+
+    # Open ticket -> customer notified with the ticket ref and a "still open" message.
+    assert result["notified_groups"] == 1
+    assert calls["messages"], "expected a still-open notification"
+    notify_text = calls["messages"][-1]["text"]
+    assert "OPS-2" in notify_text
+    assert calls["messages"][-1]["chat_id"] == "222"
+
+
+# ---------------------------------------------------------------------------
 # handle_support_reply — chat-message tagging
 # ---------------------------------------------------------------------------
 
@@ -562,3 +767,31 @@ async def test_handle_support_reply_skips_tag_when_no_ticket_ref():
     await svc.handle_support_reply(reply_to_message_id=555, reply_text="hi there")
 
     assert supa.tag_calls == []
+
+
+async def test_handle_support_reply_tags_via_legacy_jira_ticket_key_fallback():
+    """A pre-migration or stamp-failed row has jira_ticket_key but no ticket_ref --
+    tagging must still fall back to it, consistent with every other reader in
+    this file."""
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    supa.mapping_for_reply = {
+        "is_active": True,
+        "customer_chat_id": "123",
+        "customer_topic_id": None,
+        "customer_email": None,
+        "session_id": "telegram_abc",
+        "ticket_ref": None,
+        "jira_ticket_key": "OPS-99",
+        "escalation_topic_id": None,
+    }
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 1}}
+
+    svc._send_telegram_message = fake_send
+
+    await svc.handle_support_reply(reply_to_message_id=555, reply_text="hi there")
+
+    assert supa.tag_calls == [("msg-1", "OPS-99", "comment")]
