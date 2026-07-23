@@ -1404,10 +1404,20 @@ class EnhancedSupabaseClient:
         max_age_hours: int = 24,
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
-        """Return active escalations with no Jira ticket, aged between min and max hours.
+        """Return active escalations with no ticket (Jira or internal), aged between
+        min and max hours.
 
         Excludes safety_escalation reason (non-blocking; customer unaware).
         Ordered oldest-first (FIFO) so longest-waiting are filed first.
+
+        NOTE (deployment ordering): this filters on ticket_ref, not
+        jira_ticket_key. Escalations tracked via a not-yet-migrated code path
+        that only sets jira_ticket_key (not ticket_ref) will incorrectly show
+        up here as unfiled. This method must not ship to production ahead of
+        the EscalationService rewiring that stamps ticket_ref at track-time
+        (see the Jira-optional ticket backend plan, Task 4) -- otherwise the
+        sweep that calls this will re-file duplicate tickets for escalations
+        that already have a Jira key.
         """
         try:
             now = datetime.now(timezone.utc)
@@ -1443,12 +1453,16 @@ class EnhancedSupabaseClient:
 
         These are rows where:
         - is_active=False (claim was set)
-        - jira_ticket_key IS NULL (ticket was never stored)
+        - ticket_ref IS NULL (no ticket -- Jira or internal -- was ever stored)
         - resolved_at IS NULL (not intentionally closed by staff)
         - created_at within the last max_age_hours (avoids touching ancient rows)
 
         Caused by process kill (SIGTERM) between claim and track_as_ticket completion.
         Reactivating them makes the Track button work again and lets the sweep retry.
+
+        NOTE (deployment ordering): see get_stale_unfiled_escalations' docstring --
+        this must ship together with the ticket_ref-stamping rewiring (Task 4),
+        not ahead of it.
         """
         try:
             now = datetime.now(timezone.utc)
@@ -1472,10 +1486,15 @@ class EnhancedSupabaseClient:
     async def get_old_unfiled_escalations(
         self, max_age_hours: int = 24, limit: int = 20
     ) -> List[Dict[str, Any]]:
-        """Return active escalations with no Jira ticket older than max_age_hours.
+        """Return active escalations with no ticket (Jira or internal) older than
+        max_age_hours.
 
         Used by the sweep to alert staff about escalations that aged out of the
         auto-sweep window without being filed.
+
+        NOTE (deployment ordering): see get_stale_unfiled_escalations' docstring --
+        this must ship together with the ticket_ref-stamping rewiring (Task 4),
+        not ahead of it.
         """
         effective_limit = min(limit, 20)
         try:
@@ -1502,9 +1521,14 @@ class EnhancedSupabaseClient:
             return []
 
     async def get_active_tracked_escalations(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Return active escalations that have a Jira ticket key (tracked, pending resolution).
+        """Return active escalations that have a ticket (Jira or internal), tracked
+        and pending resolution.
 
-        Used by the sweep to reconcile Jira-closed tickets and notify customers of open ones.
+        Used by the sweep to reconcile closed tickets and notify customers of open ones.
+
+        NOTE (deployment ordering): see get_stale_unfiled_escalations' docstring --
+        this must ship together with the ticket_ref-stamping rewiring (Task 4),
+        not ahead of it.
         """
         try:
             client = self._get_client()
@@ -1570,8 +1594,12 @@ class EnhancedSupabaseClient:
     ) -> List[Dict[str, Any]]:
         """List internal_tickets rows, optionally filtered by status and/or org.
 
-        Ordered created_at desc, capped at limit. Groundwork primitive for the
-        later Anansi Tickets view -- kept simple and generic.
+        Ordered created_at desc, capped at limit. General-purpose primitive
+        for chat_orchestrator-side introspection/debugging of internal
+        tickets. NOT the query path for the Anansi admin app's Tickets view
+        (Task 8 of the Jira-optional ticket backend plan) -- that's a
+        separate deployable (anansi_app) that reads chat_db via its own
+        SupabaseReader, not this class.
         """
         try:
             client = self._get_client()
@@ -1590,6 +1618,15 @@ class EnhancedSupabaseClient:
         """Update internal_tickets.status, setting resolved_at when status=="done".
 
         Returns True/False for success.
+
+        Note: orchestrator/services/ticketing/internal_backend.py's
+        InternalTicketBackend.transition_to_done() writes the same two fields
+        ("done" + resolved_at) independently, via a different (raw postgrest)
+        client, for the TicketBackend Protocol path. The two are intentionally
+        separate call surfaces (see the INTERNAL TICKET METHODS section
+        comment above), but the "done" transition's semantics are duplicated,
+        not shared -- if the closure logic ever needs to change (e.g. adding
+        validation or an audit event), update both call sites.
         """
         try:
             client = self._get_client()
@@ -1630,7 +1667,9 @@ class EnhancedSupabaseClient:
             LOGGER.error(f"Error adding internal ticket comment to {ticket_ref}: {e}")
             return False
 
-    async def get_ticket_comments(self, ticket_ref: str) -> List[Dict[str, Any]]:
+    async def get_ticket_comments(
+        self, ticket_ref: str, limit: int = 200
+    ) -> List[Dict[str, Any]]:
         """Return the merged, chronological comment timeline for a ticket ref.
 
         Per the plan's design (Sec 4.2), this unions internal_ticket_comments
@@ -1647,7 +1686,11 @@ class EnhancedSupabaseClient:
                 "created_at": str (ISO timestamp),
             }
 
-        Sorted by created_at ascending.
+        Sorted by created_at ascending, capped at `limit` total entries (most
+        recent `limit` kept if there are more). No DB index currently exists
+        on chat_messages' metadata->>'ticket_ref' expression -- fine while
+        nothing calls this method in a hot path, but add one before wiring
+        this into a frequently-loaded view.
 
         Note on the chat_messages half: this filters on the jsonb expression
         metadata->>ticket_ref rather than .contains("metadata", {...}), matching
@@ -1665,6 +1708,8 @@ class EnhancedSupabaseClient:
                 client.table("internal_ticket_comments")
                 .select("*")
                 .eq("ticket_ref", ticket_ref)
+                .order("created_at", desc=True)
+                .limit(limit)
                 .execute()
             )
             comment_rows = comments_response.data or []
@@ -1673,6 +1718,8 @@ class EnhancedSupabaseClient:
                 client.table("chat_messages")
                 .select("*")
                 .filter("metadata->>ticket_ref", "eq", ticket_ref)
+                .order("created_at", desc=True)
+                .limit(limit)
                 .execute()
             )
             message_rows = messages_response.data or []
@@ -1698,13 +1745,18 @@ class EnhancedSupabaseClient:
                     "source": "chat_message",
                     "body": row.get("content"),
                     "author": row.get("sender_telegram_id") or row.get("role"),
-                    "is_public": bool(metadata.get("is_public", False)),
+                    # tag_message_as_ticket_comment() only ever tags messages that
+                    # crossed the customer<->staff boundary (forwarded follow-ups
+                    # or forwarded replies) -- the closest analogue to Jira's
+                    # "reply to customer" jsdPublic comments -- so default True
+                    # unless a caller explicitly stamped is_public=False.
+                    "is_public": bool(metadata.get("is_public", True)),
                     "created_at": row.get("created_at"),
                 }
             )
 
         merged.sort(key=lambda entry: entry.get("created_at") or "")
-        return merged
+        return merged[-limit:]
 
     async def tag_message_as_ticket_comment(
         self, message_id: str, ticket_ref: str, ticket_role: str = "comment"

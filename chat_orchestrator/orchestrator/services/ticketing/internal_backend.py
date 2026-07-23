@@ -171,6 +171,14 @@ class InternalTicketBackend:
         )
 
     async def transition_to_done(self, ref: str) -> None:
+        """Mark a ticket as done.
+
+        Note: SupabaseClient.update_internal_ticket_status() (in
+        supabase_client.py) writes the same two fields independently for
+        EscalationService-side callers going through that wrapper instead of
+        this Protocol path. The "done" transition's semantics are duplicated
+        across both, not shared -- update both if the closure logic changes.
+        """
         client = self._client()
         if client is None:
             return

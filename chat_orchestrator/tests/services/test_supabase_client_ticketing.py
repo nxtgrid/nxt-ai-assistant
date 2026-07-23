@@ -660,6 +660,63 @@ class TestInternalTicketComments:
         assert result[1]["author"] == "staff@example.com"
 
     @pytest.mark.asyncio
+    async def test_get_ticket_comments_chat_message_is_public_defaults_true(self):
+        """A tagged chat_message with no explicit is_public in its metadata
+        represents a forwarded customer<->staff exchange, so it must default
+        to public -- not silently read as an internal-only note."""
+        messages = [
+            {
+                "id": "m1",
+                "content": "No explicit is_public key",
+                "sender_telegram_id": "12345",
+                "role": "user",
+                "metadata": {"ticket_ref": "TKT-1", "ticket_role": "comment"},
+                "created_at": "2026-01-01T00:00:00+00:00",
+            },
+            {
+                "id": "m2",
+                "content": "Explicitly marked non-public",
+                "sender_telegram_id": "12345",
+                "role": "user",
+                "metadata": {
+                    "ticket_ref": "TKT-1",
+                    "ticket_role": "comment",
+                    "is_public": False,
+                },
+                "created_at": "2026-01-01T01:00:00+00:00",
+            },
+        ]
+        raw = _FakeRawClient(tables={"internal_ticket_comments": [], "chat_messages": messages})
+        client = _make_client(raw)
+
+        result = await client.get_ticket_comments("TKT-1")
+
+        assert result[0]["is_public"] is True
+        assert result[1]["is_public"] is False
+
+    @pytest.mark.asyncio
+    async def test_get_ticket_comments_caps_total_at_limit(self):
+        comments = [
+            {
+                "id": f"c{i}",
+                "ticket_ref": "TKT-1",
+                "author": "staff",
+                "body": f"comment {i}",
+                "is_public": True,
+                "created_at": f"2026-01-01T00:0{i}:00+00:00",
+            }
+            for i in range(3)
+        ]
+        raw = _FakeRawClient(tables={"internal_ticket_comments": comments, "chat_messages": []})
+        client = _make_client(raw)
+
+        result = await client.get_ticket_comments("TKT-1", limit=2)
+
+        assert len(result) == 2
+        # Most recent 2 of the 3 kept, still chronologically ordered.
+        assert [entry["body"] for entry in result] == ["comment 1", "comment 2"]
+
+    @pytest.mark.asyncio
     async def test_get_ticket_comments_returns_empty_list_on_error(self):
         raw = _FakeRawClient()
 
