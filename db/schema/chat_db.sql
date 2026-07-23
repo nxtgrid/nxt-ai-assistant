@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS escalation_mappings (
     action_type             text,
     jira_ticket_key         text,
     ticket_ref              text,                    -- backend-agnostic ref: Jira key or internal ref (e.g. 'TKT-000123')
-    ticket_backend          text,                    -- 'jira' | 'internal'
+    ticket_backend          text CHECK (ticket_backend IN ('jira', 'internal')), -- 'jira' | 'internal'
     organization_id         integer,
     escalation_topic_id     integer,
     is_active               boolean DEFAULT true,
@@ -113,12 +113,28 @@ CREATE TABLE IF NOT EXISTS escalation_mappings (
 -- Backfill-safe additions for pre-existing installations (Jira-optional ticket backend).
 -- No-ops when escalation_mappings is created fresh above, since the columns already exist.
 ALTER TABLE escalation_mappings ADD COLUMN IF NOT EXISTS ticket_ref text;
-ALTER TABLE escalation_mappings ADD COLUMN IF NOT EXISTS ticket_backend text;
+ALTER TABLE escalation_mappings ADD COLUMN IF NOT EXISTS ticket_backend text CHECK (ticket_backend IN ('jira', 'internal'));
 
 CREATE INDEX IF NOT EXISTS escalation_mappings_session_id_idx ON escalation_mappings (session_id);
 CREATE INDEX IF NOT EXISTS escalation_mappings_customer_chat_id_idx ON escalation_mappings (customer_chat_id);
 CREATE INDEX IF NOT EXISTS escalation_mappings_thread_id_idx ON escalation_mappings (thread_id);
 CREATE INDEX IF NOT EXISTS escalation_mappings_ticket_ref_idx ON escalation_mappings (ticket_ref);
+
+-- Defensive: installs that already ran the ADD COLUMN IF NOT EXISTS above
+-- from before this CHECK constraint was added will have ticket_backend
+-- without it. ADD COLUMN IF NOT EXISTS skips the whole clause (including
+-- the inline CHECK) when the column already exists, so it won't retrofit
+-- the constraint on its own -- add it explicitly if missing.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'escalation_mappings_ticket_backend_check'
+    ) THEN
+        ALTER TABLE escalation_mappings
+            ADD CONSTRAINT escalation_mappings_ticket_backend_check
+            CHECK (ticket_backend IN ('jira', 'internal'));
+    END IF;
+END $$;
 
 -- Backfill: for escalations already resolved via Jira, ticket_ref/ticket_backend
 -- mirror jira_ticket_key so callers can query either column going forward.

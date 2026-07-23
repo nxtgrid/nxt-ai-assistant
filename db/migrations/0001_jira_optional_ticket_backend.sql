@@ -21,9 +21,29 @@ BEGIN;
 -- ── escalation_mappings: add backend-agnostic ticket reference ───────────────
 
 ALTER TABLE escalation_mappings ADD COLUMN IF NOT EXISTS ticket_ref text;
-ALTER TABLE escalation_mappings ADD COLUMN IF NOT EXISTS ticket_backend text;
+ALTER TABLE escalation_mappings ADD COLUMN IF NOT EXISTS ticket_backend text CHECK (ticket_backend IN ('jira', 'internal'));
 
+-- Built inside this transaction for atomicity with the column/table additions
+-- above; Postgres disallows CREATE INDEX CONCURRENTLY inside a transaction
+-- block, so this takes a normal (blocking) lock on escalation_mappings for the
+-- duration of the build -- worth knowing if that table is large/high-traffic.
 CREATE INDEX IF NOT EXISTS escalation_mappings_ticket_ref_idx ON escalation_mappings (ticket_ref);
+
+-- Defensive: installs that already ran the ADD COLUMN IF NOT EXISTS above
+-- from before this CHECK constraint was added will have ticket_backend
+-- without it. ADD COLUMN IF NOT EXISTS skips the whole clause (including
+-- the inline CHECK) when the column already exists, so it won't retrofit
+-- the constraint on its own -- add it explicitly if missing.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'escalation_mappings_ticket_backend_check'
+    ) THEN
+        ALTER TABLE escalation_mappings
+            ADD CONSTRAINT escalation_mappings_ticket_backend_check
+            CHECK (ticket_backend IN ('jira', 'internal'));
+    END IF;
+END $$;
 
 -- Backfill: for escalations already resolved via Jira, ticket_ref/ticket_backend
 -- mirror jira_ticket_key so callers can query either column going forward.

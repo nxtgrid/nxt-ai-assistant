@@ -1,21 +1,23 @@
 """Tests for db/migrations/0001_jira_optional_ticket_backend.sql.
 
-Not wired into any existing pytest `testpaths` config (the repo-root
-pyproject.toml points at a `tests/` directory that doesn't exist yet, and
-chat_orchestrator's suite doesn't cover db/), so run explicitly:
-
-    pytest db/migrations/test_0001_jira_optional_ticket_backend.py -v
+Lives under chat_orchestrator/tests/ (rather than next to the migration
+file) so it's covered by CI's ``pytest tests/`` invocation for this
+package -- see .github/scripts/check_test_wiring.py, which rejects any
+tracked test_*.py file that isn't under a path a CI job actually runs.
 
 Two kinds of coverage:
 
-1. A static assertion on the migration file's backfill UPDATE statement —
-   always runs, no dependencies.
+1. Static assertions on the migration file's SQL text (backfill UPDATE
+   statement, defensive column/constraint additions) -- always run, no
+   dependencies.
 2. A live test against a real, throwaway local Postgres cluster (spun up
    with initdb/pg_ctl, torn down after) that applies the migration to a
-   stand-in for the pre-migration `escalation_mappings` table and asserts
-   the backfill invariant holds, then re-applies the migration to prove
-   it's idempotent. Skipped automatically if initdb/pg_ctl/psql aren't on
-   PATH (e.g. in a CI image without Postgres installed).
+   stand-in for the pre-migration ``escalation_mappings`` table and
+   asserts the backfill invariant holds, that re-applying the migration
+   is idempotent, and that the CHECK constraints on the new columns
+   actually reject invalid values. Skipped automatically if
+   initdb/pg_ctl/psql/createdb aren't on PATH (e.g. in a CI image without
+   Postgres installed).
 """
 from __future__ import annotations
 
@@ -24,12 +26,15 @@ import shutil
 import socket
 import subprocess
 import tempfile
-import time
 from pathlib import Path
 
 import pytest
 
-MIGRATION_PATH = Path(__file__).parent / "0001_jira_optional_ticket_backend.sql"
+# This file lives at <repo_root>/chat_orchestrator/tests/, so the migration
+# it exercises is three parents up and back down into db/migrations/.
+MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2] / "db" / "migrations" / "0001_jira_optional_ticket_backend.sql"
+)
 
 HAVE_POSTGRES = all(
     shutil.which(binary) for binary in ("initdb", "pg_ctl", "psql", "createdb")
@@ -66,6 +71,17 @@ VALUES
 """
 
 
+def test_migration_file_exists_at_resolved_path():
+    """Guards the parents[N] path resolution above: if this file is ever
+    moved again, or the repo layout changes, this fails immediately instead
+    of every other test failing with a confusing FileNotFoundError."""
+    assert MIGRATION_PATH.is_file(), (
+        f"Expected migration file at {MIGRATION_PATH}, but it does not exist. "
+        "Check the parents[N] index in MIGRATION_PATH above still matches "
+        "this file's location relative to the repo root."
+    )
+
+
 def test_migration_file_backfills_ticket_ref_from_jira_ticket_key():
     """Static check: the migration's UPDATE statement mirrors jira_ticket_key
     into ticket_ref/ticket_backend, only for rows that have a Jira key and
@@ -99,6 +115,28 @@ def test_migration_file_backfills_ticket_ref_from_jira_ticket_key():
     for table in ("internal_tickets", "internal_ticket_comments"):
         assert f"CREATE TABLE IF NOT EXISTS {table}" in sql
     assert "CREATE SEQUENCE IF NOT EXISTS internal_ticket_seq" in sql
+
+
+def test_migration_file_declares_ticket_backend_check_constraint():
+    """Static check: ticket_backend documents (and enforces) the 'jira' |
+    'internal' invariant via a CHECK constraint, not just a comment -- and
+    the migration also retrofits it defensively for installs that already
+    ran an older version of this file without the constraint."""
+    sql = MIGRATION_PATH.read_text()
+
+    assert re.search(
+        r"ADD COLUMN IF NOT EXISTS ticket_backend text\s+CHECK\s*\(\s*ticket_backend\s+IN\s*\(\s*'jira'\s*,\s*'internal'\s*\)\s*\)",
+        sql,
+        re.IGNORECASE,
+    ), "Expected an inline CHECK (ticket_backend IN ('jira', 'internal')) on the ADD COLUMN IF NOT EXISTS statement"
+
+    assert "pg_constraint" in sql, (
+        "Expected a defensive pg_constraint existence check so the CHECK "
+        "constraint gets retrofitted onto installs that already ran an "
+        "older version of this migration (ADD COLUMN IF NOT EXISTS skips "
+        "the whole clause, including an inline CHECK, once the column "
+        "already exists)"
+    )
 
 
 def _free_port() -> int:
@@ -192,7 +230,7 @@ def test_migration_applies_cleanly_and_backfill_invariant_holds():
 
                 # Re-applying the migration must be a no-op for the backfill
                 # (idempotent) and must not error on the already-created
-                # tables/columns/indexes.
+                # tables/columns/indexes/constraints.
                 run_file(MIGRATION_PATH)
                 second_run_updates = run_sql(
                     "SELECT count(*) FROM escalation_mappings "
@@ -210,6 +248,25 @@ def test_migration_applies_cleanly_and_backfill_invariant_holds():
                         "INSERT INTO internal_tickets (ticket_ref, summary, status) "
                         "VALUES ('TKT-BAD', 'bad status', 'closed');"
                     )
+
+                # escalation_mappings.ticket_backend enforces the same kind
+                # of two-value invariant: reject anything other than
+                # 'jira' / 'internal'.
+                with pytest.raises(subprocess.CalledProcessError):
+                    run_sql(
+                        "UPDATE escalation_mappings SET ticket_backend = 'bogus' "
+                        "WHERE session_id = 'sess-3';"
+                    )
+
+                # A valid value for the same column must still be accepted.
+                run_sql(
+                    "UPDATE escalation_mappings SET ticket_ref = 'TKT-000002', "
+                    "ticket_backend = 'internal' WHERE session_id = 'sess-3';"
+                )
+                internal_count = run_sql(
+                    "SELECT count(*) FROM escalation_mappings WHERE ticket_backend = 'internal';"
+                )
+                assert internal_count == "1"
             finally:
                 subprocess.run(
                     ["pg_ctl", "-D", data_dir, "-m", "fast", "stop"],
