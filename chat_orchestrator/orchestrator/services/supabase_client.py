@@ -975,6 +975,8 @@ class EnhancedSupabaseClient:
         question_text: Optional[str] = None,
         thread_id: Optional[str] = None,
         jira_ticket_key: Optional[str] = None,
+        ticket_ref: Optional[str] = None,
+        ticket_backend: Optional[str] = None,
     ) -> Optional[str]:
         """
         Save escalation mapping for routing support replies back to customer.
@@ -1005,6 +1007,12 @@ class EnhancedSupabaseClient:
                 - meter_replacement: Physical meter swap
                 - commissioning_retry: Manual commissioning retry
                 - other_action: Other staff action
+            jira_ticket_key: Jira issue key (e.g. "OPS-42") if filed to Jira (optional).
+            ticket_ref: Backend-agnostic ticket reference (Jira key or internal ticket
+                ref, e.g. "TKT-000123") -- the column future has-ticket predicates and
+                lookups should key on regardless of backend (optional).
+            ticket_backend: Which backend filed the ticket -- "jira" or "internal"
+                (optional).
 
         Returns:
             Mapping ID (UUID string) if saved successfully, None otherwise.
@@ -1035,6 +1043,8 @@ class EnhancedSupabaseClient:
                 "question_text": question_text[:2000] if question_text else None,
                 "thread_id": thread_id,
                 "jira_ticket_key": jira_ticket_key,
+                "ticket_ref": ticket_ref,
+                "ticket_backend": ticket_backend,
             }
 
             client.table("escalation_mappings").insert(mapping_data).execute()
@@ -1083,6 +1093,31 @@ class EnhancedSupabaseClient:
             return dict(response.data[0]) if response.data else None
         except Exception as e:
             LOGGER.error(f"Error fetching escalation mapping for Jira key {jira_ticket_key}: {e}")
+            return None
+
+    async def get_escalation_mapping_by_ticket_ref(
+        self, ticket_ref: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get the active escalation mapping for a backend-agnostic ticket ref.
+
+        Mirrors get_escalation_mapping_by_jira_key but keyed on ticket_ref, the
+        backend-agnostic column populated for both Jira and internal tickets.
+        Returns the most recent active mapping, or None if not found.
+        """
+        try:
+            client = self._get_client()
+            response = (
+                client.table("escalation_mappings")
+                .select("*")
+                .eq("ticket_ref", ticket_ref)
+                .eq("is_active", True)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            return dict(response.data[0]) if response.data else None
+        except Exception as e:
+            LOGGER.error(f"Error fetching escalation mapping for ticket ref {ticket_ref}: {e}")
             return None
 
     async def get_escalation_mapping(self, escalation_message_id: int) -> Optional[Dict[str, Any]]:
@@ -1385,10 +1420,10 @@ class EnhancedSupabaseClient:
                     "id, session_id, org_hashtag, customer_email, customer_username, "
                     "customer_chat_id, customer_topic_id, organization_id, "
                     "escalation_message_id, escalation_topic_id, reason, jira_ticket_key, "
-                    "question_text, created_at"
+                    "ticket_ref, ticket_backend, question_text, created_at"
                 )
                 .eq("is_active", True)
-                .is_("jira_ticket_key", "null")
+                .is_("ticket_ref", "null")
                 .neq("reason", "safety_escalation")
                 .gt("created_at", cutoff_old)
                 .lt("created_at", cutoff_recent)
@@ -1421,9 +1456,9 @@ class EnhancedSupabaseClient:
             client = self._get_client()
             result = (
                 client.table("escalation_mappings")
-                .select("id, session_id, created_at")
+                .select("id, session_id, created_at, ticket_ref, ticket_backend")
                 .eq("is_active", False)
-                .is_("jira_ticket_key", "null")
+                .is_("ticket_ref", "null")
                 .is_("resolved_at", "null")
                 .gte("created_at", cutoff)
                 .limit(limit)
@@ -1451,10 +1486,10 @@ class EnhancedSupabaseClient:
                 client.table("escalation_mappings")
                 .select(
                     "id, org_hashtag, customer_username, customer_email, "
-                    "escalation_message_id, created_at"
+                    "escalation_message_id, created_at, ticket_ref, ticket_backend"
                 )
                 .eq("is_active", True)
-                .is_("jira_ticket_key", "null")
+                .is_("ticket_ref", "null")
                 .neq("reason", "safety_escalation")
                 .lt("created_at", cutoff)
                 .order("created_at", desc=False)
@@ -1477,10 +1512,11 @@ class EnhancedSupabaseClient:
                 client.table("escalation_mappings")
                 .select(
                     "id, session_id, customer_chat_id, customer_topic_id, "
-                    "jira_ticket_key, org_hashtag, customer_username, created_at"
+                    "jira_ticket_key, ticket_ref, ticket_backend, org_hashtag, "
+                    "customer_username, created_at"
                 )
                 .eq("is_active", True)
-                .filter("jira_ticket_key", "not.is", "null")
+                .filter("ticket_ref", "not.is", "null")
                 .order("created_at", desc=False)
                 .limit(limit)
                 .execute()
@@ -1495,6 +1531,231 @@ class EnhancedSupabaseClient:
         except Exception as e:
             LOGGER.error(f"Error fetching active tracked escalations: {e}")
             return []
+
+    # =========================================================================
+    # INTERNAL TICKET METHODS
+    # =========================================================================
+    #
+    # These are SupabaseClient-level primitives for callers that already hold
+    # a SupabaseClient instance (e.g. EscalationService) and want to read/write
+    # internal_tickets / internal_ticket_comments through it, rather than
+    # reaching into a raw postgrest client themselves. This is a distinct
+    # surface from orchestrator/services/ticketing/internal_backend.py, which
+    # does its own direct Supabase access for the TicketBackend Protocol path.
+
+    async def get_internal_ticket(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single internal_tickets row by ticket_ref.
+
+        Returns the row dict, or None if not found or on error.
+        """
+        try:
+            client = self._get_client()
+            response = (
+                client.table("internal_tickets")
+                .select("*")
+                .eq("ticket_ref", ticket_ref)
+                .limit(1)
+                .execute()
+            )
+            return dict(response.data[0]) if response.data else None
+        except Exception as e:
+            LOGGER.error(f"Error fetching internal ticket {ticket_ref}: {e}")
+            return None
+
+    async def list_internal_tickets(
+        self,
+        status: Optional[str] = None,
+        organization_id: Optional[int] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """List internal_tickets rows, optionally filtered by status and/or org.
+
+        Ordered created_at desc, capped at limit. Groundwork primitive for the
+        later Anansi Tickets view -- kept simple and generic.
+        """
+        try:
+            client = self._get_client()
+            query = client.table("internal_tickets").select("*")
+            if status is not None:
+                query = query.eq("status", status)
+            if organization_id is not None:
+                query = query.eq("organization_id", organization_id)
+            result = query.order("created_at", desc=True).limit(limit).execute()
+            return result.data or []
+        except Exception as e:
+            LOGGER.error(f"Error listing internal tickets: {e}")
+            return []
+
+    async def update_internal_ticket_status(self, ticket_ref: str, status: str) -> bool:
+        """Update internal_tickets.status, setting resolved_at when status=="done".
+
+        Returns True/False for success.
+        """
+        try:
+            client = self._get_client()
+            payload: Dict[str, Any] = {"status": status}
+            if status == "done":
+                payload["resolved_at"] = datetime.now(timezone.utc).isoformat()
+            client.table("internal_tickets").update(payload).eq(
+                "ticket_ref", ticket_ref
+            ).execute()
+            LOGGER.info(f"Updated internal ticket {ticket_ref} status to {status}")
+            return True
+        except Exception as e:
+            LOGGER.error(f"Error updating internal ticket {ticket_ref} status: {e}")
+            return False
+
+    async def add_internal_ticket_comment(
+        self,
+        ticket_ref: str,
+        body: str,
+        author: Optional[str] = None,
+        is_public: bool = False,
+        source: str = "staff",
+    ) -> bool:
+        """Insert a row into internal_ticket_comments. Returns True/False for success."""
+        try:
+            client = self._get_client()
+            client.table("internal_ticket_comments").insert(
+                {
+                    "ticket_ref": ticket_ref,
+                    "author": author,
+                    "body": body,
+                    "is_public": is_public,
+                    "source": source,
+                }
+            ).execute()
+            return True
+        except Exception as e:
+            LOGGER.error(f"Error adding internal ticket comment to {ticket_ref}: {e}")
+            return False
+
+    async def get_ticket_comments(self, ticket_ref: str) -> List[Dict[str, Any]]:
+        """Return the merged, chronological comment timeline for a ticket ref.
+
+        Per the plan's design (Sec 4.2), this unions internal_ticket_comments
+        with chat_messages tagged via tag_message_as_ticket_comment() -- so
+        staff replies filed as formal comments and forwarded chat messages
+        both show up in one debug/display timeline.
+
+        Each entry is normalized to:
+            {
+                "source": "internal_ticket_comments" | "chat_message",
+                "body": str,
+                "author": Optional[str],
+                "is_public": bool,
+                "created_at": str (ISO timestamp),
+            }
+
+        Sorted by created_at ascending.
+
+        Note on the chat_messages half: this filters on the jsonb expression
+        metadata->>ticket_ref rather than .contains("metadata", {...}), matching
+        the existing "metadata->>organization_id" .filter() pattern already used
+        elsewhere in this codebase (see
+        experts/handlers/ingestion_expert/detect_duplicates.py) for jsonb text
+        equality via postgrest-py's .filter(column, operator, value). This is a
+        debug/display method, not a hot path, so the extra round-trip cost of
+        two separate queries (rather than a single SQL union) is acceptable.
+        """
+        try:
+            client = self._get_client()
+
+            comments_response = (
+                client.table("internal_ticket_comments")
+                .select("*")
+                .eq("ticket_ref", ticket_ref)
+                .execute()
+            )
+            comment_rows = comments_response.data or []
+
+            messages_response = (
+                client.table("chat_messages")
+                .select("*")
+                .filter("metadata->>ticket_ref", "eq", ticket_ref)
+                .execute()
+            )
+            message_rows = messages_response.data or []
+        except Exception as e:
+            LOGGER.error(f"Error fetching ticket comments for {ticket_ref}: {e}")
+            return []
+
+        merged: List[Dict[str, Any]] = []
+        for row in comment_rows:
+            merged.append(
+                {
+                    "source": "internal_ticket_comments",
+                    "body": row.get("body"),
+                    "author": row.get("author"),
+                    "is_public": bool(row.get("is_public")),
+                    "created_at": row.get("created_at"),
+                }
+            )
+        for row in message_rows:
+            metadata = row.get("metadata") or {}
+            merged.append(
+                {
+                    "source": "chat_message",
+                    "body": row.get("content"),
+                    "author": row.get("sender_telegram_id") or row.get("role"),
+                    "is_public": bool(metadata.get("is_public", False)),
+                    "created_at": row.get("created_at"),
+                }
+            )
+
+        merged.sort(key=lambda entry: entry.get("created_at") or "")
+        return merged
+
+    async def tag_message_as_ticket_comment(
+        self, message_id: str, ticket_ref: str, ticket_role: str = "comment"
+    ) -> None:
+        """Tag a chat_messages row as belonging to a ticket's comment timeline.
+
+        Merges {"ticket_ref": ticket_ref, "ticket_role": ticket_role} into the
+        row's existing metadata jsonb WITHOUT clobbering other keys already
+        present (e.g. token-count data on model messages). PostgREST's
+        .update({"metadata": {...}}) replaces the whole jsonb column rather
+        than merging, so this is implemented as a plain read-then-write:
+        (1) SELECT metadata for the row by id, (2) merge the new keys into
+        whatever dict is already there in Python, (3) .update({"metadata": merged}).
+        Not atomic -- fine here since tagging a message right after creating it
+        isn't a concurrency-sensitive operation.
+
+        Best-effort: logs a warning and returns (doesn't raise) on failure,
+        since this is annotation only and must never break the caller's
+        actual message-forwarding flow.
+        """
+        try:
+            client = self._get_client()
+            response = (
+                client.table("chat_messages")
+                .select("metadata")
+                .eq("id", message_id)
+                .limit(1)
+                .execute()
+            )
+            rows = response.data or []
+            if not rows:
+                LOGGER.warning(
+                    f"tag_message_as_ticket_comment: message {message_id} not found"
+                )
+                return
+
+            existing_metadata = rows[0].get("metadata") or {}
+            merged_metadata = {
+                **existing_metadata,
+                "ticket_ref": ticket_ref,
+                "ticket_role": ticket_role,
+            }
+
+            client.table("chat_messages").update({"metadata": merged_metadata}).eq(
+                "id", message_id
+            ).execute()
+        except Exception as e:
+            LOGGER.warning(
+                f"Failed to tag message {message_id} as ticket comment for {ticket_ref}: {e}"
+            )
+            return
 
     # =========================================================================
     # ORG METADATA METHODS
