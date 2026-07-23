@@ -186,6 +186,13 @@ class ConversationState(TypedDict, total=False):
     active_work_packet: Optional[Dict[str, Any]]  # Current work packet if any
     matched_expert_id: Optional[str]  # Expert ID if routing to expert
     expert_command: Optional[str]  # Original command (e.g., /analyze)
+    # Full natural-language request (e.g. "...using Deye technology"). Must be a
+    # declared channel: expert_router sets it, but downstream nodes
+    # (ask_about_duplicate, expert_handler) only receive it across a node hop if
+    # it's declared here — undeclared TypedDict keys are dropped by LangGraph, so
+    # user-supplied params (technology_family, etc.) would be lost and the packet
+    # would fall back to the synthetic "lpp <lat>,<lon>" command (Victron/DEFAULT).
+    expert_raw_request: Optional[str]  # Full NL request preserving user parameters
     expert_packet_type: Optional[str]  # Packet type to create
     expert_key_entity: Optional[str]  # Site/entity name extracted from command
 
