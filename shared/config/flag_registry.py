@@ -332,6 +332,29 @@ _FLAGS: List[Flag] = [
         "Telegram (n8n / VRM / Grafana passthrough). When off the endpoint returns 503.",
         scope=SERVICE_BOT,
     ),
+    # --- Ticketing (Jira-optional ticket backend) ---------------------------
+    _s(
+        "TICKET_BACKEND_OVERRIDE",
+        "auto",
+        "Which ticket backend customer escalations use: 'auto' (Jira if configured "
+        "and healthy, else internal), 'jira' (Jira if creds present, else internal -- "
+        "never hard-fails), or 'internal' (always internal). Ops kill-switch / forcing.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "INTERNAL_TICKET_PREFIX",
+        "TKT",
+        "Prefix for internal ticket refs allocated when the internal backend is used, "
+        "e.g. 'TKT' -> 'TKT-000123'.",
+        scope=SERVICE_BOT,
+    ),
+    _i(
+        "JIRA_HEALTHCHECK_TTL_SECONDS",
+        60,
+        "How long JiraTicketBackend caches its Jira health probe result before "
+        "re-checking (seconds).",
+        scope=SERVICE_BOT,
+    ),
     # --- Expert workflow / interaction ------------------------------------
     _b(
         "WORKFLOW_PARAMETER_CONFIRMATION",
