@@ -27,6 +27,8 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
+from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
+from orchestrator.services.ticketing.service import TicketService
 from shared.utils.logging import get_logger
 from shared.utils.telegram_buttons import build_escalation_track_keyboard
 from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
@@ -119,6 +121,11 @@ class EscalationService:
         self._jira_api_token = os.getenv("JIRA_API_TOKEN", "")
         self._jira_project_key = os.getenv("JIRA_PROJECT_KEY", "OPS")
         self._jira_issue_type = os.getenv("JIRA_ISSUE_TYPE", "Task")
+
+        # Backend-agnostic ticketing seam. Routes to Jira or the internal ticket
+        # backend per TICKET_BACKEND_OVERRIDE / Jira health. Shares this service's
+        # own lazy-singleton Supabase getter so both see the same client.
+        self._tickets = TicketService(get_supabase_client=self._get_supabase_client)
 
     def is_enabled(self) -> bool:
         """Check if escalation service is properly configured."""
@@ -354,46 +361,62 @@ class EscalationService:
                                 f"Failed to send standalone follow-up escalation: {standalone_result}"
                             )
 
-                    # If the parent escalation already has a Jira ticket, add a follow-up
+                    # If the parent escalation already has a ticket, add a follow-up
                     # comment to it (only when the Telegram send succeeded and the ticket
                     # is still open) so the sweep does not create a duplicate ticket.
-                    existing_jira_key: Optional[str] = existing.get("jira_ticket_key")
-                    if existing_jira_key:
+                    # ticket_ref is the backend-agnostic reference; fall back to the
+                    # legacy jira_ticket_key for any pre-migration row that predates it.
+                    existing_ref: Optional[str] = existing.get("ticket_ref") or existing.get(
+                        "jira_ticket_key"
+                    )
+                    existing_backend: Optional[str] = existing.get("ticket_backend")
+                    # Whether existing_ref was sourced from the legacy jira_ticket_key
+                    # column — used to keep webhook routing working for old rows whose
+                    # ticket_backend was never backfilled.
+                    _ref_from_jira_key = not existing.get("ticket_ref")
+                    if existing_ref:
                         try:
-                            ticket_fields = await self._fetch_jira_issue_fields(existing_jira_key)
-                            if ticket_fields and ticket_fields.get("is_done"):
+                            status = await self._tickets.get_status(existing_ref)
+                            if status and status.is_done:
                                 LOGGER.info(
-                                    "Parent Jira ticket %s is Done — will not pre-link follow-up "
+                                    "Parent ticket %s is Done — will not pre-link follow-up "
                                     "for session %s; sweep will create a fresh ticket",
-                                    existing_jira_key,
+                                    existing_ref,
                                     session_id,
                                 )
-                                existing_jira_key = None
+                                existing_ref = None
                         except Exception:
-                            pass  # fail-open: keep existing_jira_key if status check fails
+                            pass  # fail-open: keep existing_ref if status check fails
 
                     # Create a new escalation mapping for this follow-up so closing
                     # the original doesn't lose this request. Pre-link to the existing
-                    # Jira ticket (if any) so the sweep does not create a second ticket.
+                    # ticket (if any) so the sweep does not create a second ticket.
                     supabase_client = self._get_supabase_client()
                     if supabase_client and followup_msg_id and customer_chat_id:
-                        if existing_jira_key:
+                        if existing_ref:
                             comment_body = f"Follow-up from customer:\n\n{question_summary}"
-                            commented = await self._add_jira_comment(
-                                existing_jira_key, comment_body
+                            commented = await self._tickets.add_comment(
+                                existing_ref, comment_body, public=False
                             )
                             if commented:
                                 LOGGER.info(
-                                    "Added follow-up comment to existing Jira ticket %s for session %s",
-                                    existing_jira_key,
+                                    "Added follow-up comment to existing ticket %s for session %s",
+                                    existing_ref,
                                     session_id,
                                 )
                             else:
                                 LOGGER.warning(
-                                    "Failed to add follow-up comment to Jira ticket %s for session %s",
-                                    existing_jira_key,
+                                    "Failed to add follow-up comment to ticket %s for session %s",
+                                    existing_ref,
                                     session_id,
                                 )
+                        # Keep the legacy jira_ticket_key populated on the new row when the
+                        # linked ticket is a Jira ticket, so inbound Jira webhooks (which
+                        # look up by jira_ticket_key) keep routing to this follow-up too.
+                        followup_is_jira = bool(existing_ref) and (
+                            existing_backend == "jira"
+                            or (not existing_backend and _ref_from_jira_key)
+                        )
                         await supabase_client.save_escalation_mapping(
                             escalation_message_id=followup_msg_id,
                             customer_chat_id=customer_chat_id,
@@ -411,7 +434,9 @@ class EscalationService:
                             escalation_topic_id=followup_topic_id,
                             question_text=question_summary,
                             thread_id=thread_id,
-                            jira_ticket_key=existing_jira_key,
+                            ticket_ref=existing_ref,
+                            ticket_backend=existing_backend if existing_ref else None,
+                            jira_ticket_key=existing_ref if followup_is_jira else None,
                         )
 
                     return {
@@ -1210,7 +1235,7 @@ class EscalationService:
                                 role="model",
                                 content=response_text,
                             )
-                            await supabase_client.save_messages(
+                            saved_messages = await supabase_client.save_messages(
                                 session_uuid=session.id,
                                 messages=[message],
                                 from_chat_id=customer_chat_id,
@@ -1218,6 +1243,15 @@ class EscalationService:
                             LOGGER.info(
                                 f"Saved support reply to chat history for session {session_id}"
                             )
+                            # Tag the forwarded reply as part of the ticket's comment
+                            # timeline when this escalation is linked to a ticket.
+                            # Best-effort: tag_message_as_ticket_comment fails soft
+                            # internally, so a tagging error never breaks forwarding.
+                            ticket_ref = mapping.get("ticket_ref")
+                            if ticket_ref and saved_messages:
+                                await supabase_client.tag_message_as_ticket_comment(
+                                    saved_messages[0].id, ticket_ref
+                                )
                         else:
                             LOGGER.warning(
                                 f"Could not find session {session_id} to save support reply"
@@ -1626,7 +1660,14 @@ class EscalationService:
         assignee_email: Optional[str] = None,
         auto_filed: bool = False,
     ) -> Dict[str, Any]:
-        """Create JIRA ticket from escalation, notify customer, store ticket key.
+        """File a ticket for an escalation, notify the customer, store the ref.
+
+        Routes through TicketService, which picks the Jira or internal backend
+        per TICKET_BACKEND_OVERRIDE / Jira health. On success the customer is
+        notified with a ref number and TicketService stamps ticket_ref /
+        ticket_backend onto the mapping row; for Jira-backed tickets the legacy
+        jira_ticket_key column is ALSO written here so inbound Jira webhooks keep
+        routing.
 
         The caller is responsible for:
         - Atomically claiming the escalation (is_active = false)
@@ -1635,7 +1676,14 @@ class EscalationService:
 
         Args:
             escalation_mapping: Claimed escalation row from DB
-            assignee_email: Email of the person who clicked the button (for JIRA assignment)
+            assignee_email: Email of the person who clicked the button (for Jira assignment)
+
+        Returns:
+            On success: {"success": True, "ticket_ref": <ref>} -- NOTE the key is
+            "ticket_ref" (backend-agnostic), NOT the legacy "jira_ticket_key".
+            Callers (e.g. callback_handlers._handle_escalation_track_callback)
+            must read result["ticket_ref"].
+            On failure: {"success": False, "error": <str>}.
         """
         session_id = escalation_mapping["session_id"]
         customer_chat_id = escalation_mapping["customer_chat_id"]
@@ -1717,52 +1765,82 @@ class EscalationService:
             except Exception as e:
                 LOGGER.debug(f"Could not resolve grid for JIRA ticket: {e}")
 
-            # Dedup guard: if a previous attempt created a Jira ticket but failed to
-            # store the key in DB, find it by label and reuse it instead of filing again.
-            existing_key = await self._search_jira_for_escalation(mapping_id)
-            if existing_key:
+            # Dedup guard: if a previous attempt already filed a ticket for this
+            # escalation but failed to persist it, reuse that ticket instead of
+            # filing again. find_by_escalation checks both backends.
+            existing_ref = await self._tickets.find_by_escalation(mapping_id)
+            if existing_ref:
                 LOGGER.info(
-                    "Dedup: found existing Jira ticket %s for mapping %s — skipping creation",
-                    existing_key,
+                    "Dedup: found existing ticket %s for mapping %s — skipping creation",
+                    existing_ref,
                     mapping_id,
                 )
+                # Resolve the recovered ref's backend so the legacy jira_ticket_key
+                # column stays in sync for inbound Jira webhook routing. A row in
+                # internal_tickets means it's internal; otherwise treat it as Jira.
+                recovered_is_internal = False
                 if supabase_client:
+                    try:
+                        recovered_is_internal = (
+                            await supabase_client.get_internal_ticket(existing_ref)
+                        ) is not None
+                    except Exception as e:
+                        LOGGER.warning(
+                            "Dedup: could not resolve backend for recovered ref %s: %s",
+                            existing_ref,
+                            e,
+                        )
+                if supabase_client and not recovered_is_internal:
                     try:
                         _client = supabase_client._get_client()
                         _client.table("escalation_mappings").update(
-                            {"jira_ticket_key": existing_key}
+                            {"jira_ticket_key": existing_ref}
                         ).eq("id", mapping_id).execute()
                     except Exception as e:
                         LOGGER.warning(
-                            "Dedup: failed to store recovered key %s: %s", existing_key, e
+                            "Dedup: failed to store recovered key %s: %s", existing_ref, e
                         )
-                return {"success": True, "jira_ticket_key": existing_key}
+                return {"success": True, "ticket_ref": existing_ref}
 
-            ticket_result = await self._create_jira_ticket(
-                summary=summary,
-                description=description,
-                grid_name=grid_name,
-                assignee_email=assignee_email,
-                organization_short_name=_org_short_name,
-                labels=[f"escalation-{mapping_id[:8]}"],
-            )
+            try:
+                result = await self._tickets.create_ticket(
+                    TicketCreateRequest(
+                        summary=summary,
+                        description=description,
+                        grid_name=grid_name,
+                        assignee_email=assignee_email,
+                        organization_short_name=_org_short_name,
+                        labels=[f"escalation-{mapping_id[:8]}"],
+                        escalation_mapping_id=mapping_id,
+                        session_id=session_id,
+                        customer_chat_id=str(customer_chat_id) if customer_chat_id else None,
+                        customer_topic_id=str(customer_topic_id) if customer_topic_id else None,
+                        source="escalation",
+                    )
+                )
+            except TicketBackendError as e:
+                LOGGER.warning("Ticket creation failed for mapping %s: %s", mapping_id, e)
+                return {"success": False, "error": str(e)}
 
-            if not ticket_result.get("success"):
-                return {"success": False, "error": ticket_result.get("error", "JIRA API error")}
-
-            jira_key = ticket_result["key"]
-            issue_number = jira_key.split("-")[-1]
+            ticket_ref = result.ref
+            issue_number = ticket_ref.split("-")[-1]
 
             # 6+7+8. Run independent post-ticket operations concurrently.
             async def _store_jira_key():
+                # Backward-compat: TicketService.create_ticket already stamped
+                # ticket_ref/ticket_backend, but the legacy jira_ticket_key column
+                # (read by inbound Jira webhook handlers) is Jira-specific and only
+                # written here — skip it entirely for internal tickets.
                 # Retry up to 3 times — a transient DB error here causes the sweep to
                 # reactivate and re-file a duplicate ticket on the next run.
+                if result.backend != "jira":
+                    return
                 if supabase_client:
                     _client = supabase_client._get_client()
                     for _attempt in range(3):
                         try:
                             _client.table("escalation_mappings").update(
-                                {"jira_ticket_key": jira_key}
+                                {"jira_ticket_key": ticket_ref}
                             ).eq("id", mapping_id).execute()
                             return
                         except Exception:
@@ -1800,7 +1878,7 @@ class EscalationService:
                         topic_id=int(customer_topic_id) if customer_topic_id else None,
                     )
                 except Exception as e:
-                    LOGGER.warning(f"Failed to notify customer about ticket {jira_key}: {e}")
+                    LOGGER.warning(f"Failed to notify customer about ticket {ticket_ref}: {e}")
 
             results = await asyncio.gather(
                 _store_jira_key(),
@@ -1815,7 +1893,7 @@ class EscalationService:
                 )
                 return {"success": False, "error": f"DB write failed: {store_result}"}
 
-            return {"success": True, "jira_ticket_key": jira_key}
+            return {"success": True, "ticket_ref": ticket_ref}
 
         except Exception as e:
             LOGGER.exception(f"Error in track_as_ticket: {e}")
@@ -1827,7 +1905,25 @@ class EscalationService:
         max_age_hours: int = 24,
         limit: int = 20,
     ) -> Dict[str, Any]:
-        """Auto-file Jira tickets for stale escalations that staff never manually tracked.
+        """Backward-compatible alias for run_escalation_ticket_sweep.
+
+        Kept so the existing APScheduler registration in app.py
+        (escalation_service.run_escalation_jira_sweep) keeps working after the
+        rename. See run_escalation_ticket_sweep for the actual implementation.
+        """
+        return await self.run_escalation_ticket_sweep(
+            min_age_hours=min_age_hours,
+            max_age_hours=max_age_hours,
+            limit=limit,
+        )
+
+    async def run_escalation_ticket_sweep(
+        self,
+        min_age_hours: int = 1,
+        max_age_hours: int = 24,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Auto-file tickets for stale escalations that staff never manually tracked.
 
         Runs daily at 9am WAT (scheduled via APScheduler in app.py).  For each
         eligible escalation (active, no ticket, 1-24h old, not safety_escalation):
@@ -1884,17 +1980,30 @@ class EscalationService:
                 )
 
                 if result.get("success"):
-                    jira_key = result["jira_ticket_key"]
+                    ticket_ref = result["ticket_ref"]
                     escalation_message_id = claimed_mapping.get("escalation_message_id")
                     escalation_topic_id = claimed_mapping.get("escalation_topic_id")
-                    jira_url = f"{self._jira_base_url}/browse/{jira_key}"
-                    escaped_key = _escape_telegram_markdown(jira_key)
+                    escaped_ref = _escape_telegram_markdown(ticket_ref)
+                    # Internal tickets have no browse URL — render the ref as plain
+                    # bold text; Jira tickets keep the clickable browse link.
+                    is_internal_ticket = False
+                    try:
+                        is_internal_ticket = (
+                            await supabase_client.get_internal_ticket(ticket_ref)
+                        ) is not None
+                    except Exception:
+                        pass
+                    if is_internal_ticket:
+                        ticket_link = f"*{escaped_ref}*"
+                    else:
+                        jira_url = f"{self._jira_base_url}/browse/{ticket_ref}"
+                        ticket_link = f"[{escaped_ref}]({jira_url})"
 
                     if escalation_message_id:
                         # Edit original message: remove Track button, show ticket ref
                         edit_text = (
                             f"🆘 *Customer Support Escalation*\n\n"
-                            f"🎫 *Auto-tracked:* [{escaped_key}]({jira_url})"
+                            f"🎫 *Auto-tracked:* {ticket_link}"
                         )
                         close_keyboard = build_escalation_track_keyboard(
                             mapping_id, include_track=False
@@ -1914,12 +2023,12 @@ class EscalationService:
                             reply_to_message_id=escalation_message_id,
                             text=(
                                 f"⏰ *Auto-filed by daily sweep* (escalated {escalation_date})\n"
-                                f"🎫 [{escaped_key}]({jira_url})"
+                                f"🎫 {ticket_link}"
                             ),
                             topic_id=escalation_topic_id,
                         )
                     filed += 1
-                    LOGGER.info("Sweep filed %s for escalation %s", jira_key, mapping_id)
+                    LOGGER.info("Sweep filed %s for escalation %s", ticket_ref, mapping_id)
                 else:
                     failed += 1
                     LOGGER.warning(
@@ -1948,7 +2057,7 @@ class EscalationService:
             old_count = len(old_escalations)
             lines = [
                 f"⚠️ *{old_count} escalation{'s' if old_count > 1 else ''} "
-                f"older than {max_age_hours}h with no Jira ticket:*"
+                f"older than {max_age_hours}h with no ticket:*"
             ]
             chat_id_str = str(self._escalation_chat_id)
             channel_id = chat_id_str[4:] if chat_id_str.startswith("-100") else None
@@ -1979,22 +2088,26 @@ class EscalationService:
         tracked = await supabase_client.get_active_tracked_escalations()
         if tracked:
             open_tracked: List[tuple] = []
-            # Fetch all Jira ticket statuses concurrently (cap at 10 parallel to avoid rate limits).
+            # Fetch all ticket statuses concurrently (cap at 10 parallel to avoid rate limits).
             _sem = asyncio.Semaphore(10)
 
-            async def _fetch_with_sem(key: str):
+            async def _fetch_with_sem(ref: str) -> Optional[Dict[str, Any]]:
                 async with _sem:
-                    return await self._fetch_jira_issue_fields(key)
+                    st = await self._tickets.get_status(ref)
+                    # Normalise TicketStatus → the plain dict shape this loop expects.
+                    return {"summary": st.summary, "is_done": st.is_done} if st else None
 
-            keys_to_fetch = [esc.get("jira_ticket_key") or "" for esc in tracked]
+            refs_to_fetch = [
+                (esc.get("ticket_ref") or esc.get("jira_ticket_key") or "") for esc in tracked
+            ]
             field_results = await asyncio.gather(
-                *[_fetch_with_sem(k) for k in keys_to_fetch],
+                *[_fetch_with_sem(r) for r in refs_to_fetch],
                 return_exceptions=True,
             )
 
             for esc, fields_or_exc in zip(tracked, field_results):
-                key = esc.get("jira_ticket_key") or ""
-                if not key:
+                ref = esc.get("ticket_ref") or esc.get("jira_ticket_key") or ""
+                if not ref:
                     continue
                 fields: Optional[Dict[str, Any]] = (
                     None
@@ -2002,8 +2115,8 @@ class EscalationService:
                     else cast(Optional[Dict[str, Any]], fields_or_exc)
                 )
                 if fields and fields["is_done"]:
-                    # Jira webhook was missed — close the mapping silently
-                    LOGGER.info("Reconciling Jira-closed ticket %s (mapping %s)", key, esc["id"])
+                    # Ticket closed outside the webhook path — close the mapping silently
+                    LOGGER.info("Reconciling closed ticket %s (mapping %s)", ref, esc["id"])
                     try:
                         client = supabase_client._get_client()
                         client.table("escalation_mappings").update(
@@ -2032,9 +2145,9 @@ class EscalationService:
                     groups[group_key] = {
                         "chat_id": chat_id,
                         "topic_id": topic_id,
-                        "issues": {},  # keyed by jira_ticket_key for dedup
+                        "issues": {},  # keyed by ticket ref for dedup
                     }
-                ticket_key = esc["jira_ticket_key"]
+                ticket_key = esc.get("ticket_ref") or esc.get("jira_ticket_key") or ""
                 if ticket_key not in groups[group_key]["issues"]:
                     groups[group_key]["issues"][ticket_key] = {
                         "key": ticket_key,
@@ -2194,68 +2307,84 @@ class EscalationService:
                 messages, dummy_mapping, question_summary, telegram_link=telegram_link
             )
 
-            ticket_result = await self._create_jira_ticket(
-                summary=summary,
-                description=description,
-                organization_short_name=organization_short_name,
-                labels=[f"escalation-{mapping_id[:8]}"],
-            )
-
-            if ticket_result.get("success") and ticket_result.get("key"):
-                jira_key = ticket_result["key"]
-                LOGGER.info(
-                    "After-hours auto-created Jira ticket %s for mapping %s", jira_key, mapping_id
-                )
-
-                # Store Jira key in DB
-                if supabase_client:
-                    try:
-                        client = supabase_client._get_client()
-                        client.table("escalation_mappings").update(
-                            {"jira_ticket_key": jira_key}
-                        ).eq("id", mapping_id).execute()
-                    except Exception as e:
-                        LOGGER.warning("Failed to store after-hours Jira key: %s", e)
-
-                # Edit the Telegram escalation message to prepend the ticket ref while
-                # preserving the original question text so staff retain context.
-                jira_url = f"{self._jira_base_url}/browse/{jira_key}"
-                escaped_jira_key = _escape_telegram_markdown(jira_key)
-                edit_suffix = f"\n\n🎫 *Auto-tracked:* [{escaped_jira_key}]({jira_url})"
-                if question_summary:
-                    escaped_summary = _escape_telegram_markdown(question_summary)
-                    base_text = (
-                        f"🆘 *Customer Support Escalation*\n\n*Question:*\n{escaped_summary}"
+            try:
+                result = await self._tickets.create_ticket(
+                    TicketCreateRequest(
+                        summary=summary,
+                        description=description,
+                        organization_short_name=organization_short_name,
+                        labels=[f"escalation-{mapping_id[:8]}"],
+                        escalation_mapping_id=mapping_id,
+                        customer_chat_id=str(customer_chat_id) if customer_chat_id else None,
+                        customer_topic_id=str(customer_topic_id) if customer_topic_id else None,
+                        source="escalation",
                     )
-                else:
-                    base_text = "🆘 *Customer Support Escalation*"
-                # Build close-only keyboard (Track already absent, now Jira exists)
-                close_keyboard = build_escalation_track_keyboard(mapping_id, include_track=False)
-                await self._edit_telegram_message(
-                    chat_id=self._escalation_chat_id,
-                    message_id=escalation_message_id,
-                    text=f"{base_text}{edit_suffix}",
-                    reply_markup=close_keyboard,
                 )
-            else:
-                # Jira failed — restore Track button so staff can create manually
+            except TicketBackendError as e:
+                # Ticket creation failed — restore Track button so staff can create manually
                 LOGGER.warning(
-                    "After-hours Jira creation failed for mapping %s: %s — restoring Track button",
+                    "After-hours ticket creation failed for mapping %s: %s — restoring Track button",
                     mapping_id,
-                    ticket_result.get("error"),
+                    e,
                 )
                 restore_keyboard = build_escalation_track_keyboard(mapping_id, include_track=True)
                 if question_summary:
                     escaped_summary = _escape_telegram_markdown(question_summary)
-                    fail_text = f"🆘 *Customer Support Escalation*\n\n*Question:*\n{escaped_summary}\n\n⚠️ _Auto-Jira failed — please track manually._"
+                    fail_text = f"🆘 *Customer Support Escalation*\n\n*Question:*\n{escaped_summary}\n\n⚠️ _Auto-tracking failed — please track manually._"
                 else:
-                    fail_text = "🆘 *Customer Support Escalation*\n\n⚠️ _Auto-Jira failed — please track manually._"
+                    fail_text = "🆘 *Customer Support Escalation*\n\n⚠️ _Auto-tracking failed — please track manually._"
                 await self._edit_telegram_message(
                     chat_id=self._escalation_chat_id,
                     message_id=escalation_message_id,
                     text=fail_text,
                     reply_markup=restore_keyboard,
                 )
+                return
+
+            ticket_ref = result.ref
+            LOGGER.info(
+                "After-hours auto-created ticket %s (%s) for mapping %s",
+                ticket_ref,
+                result.backend,
+                mapping_id,
+            )
+
+            # Backward-compat: mirror the ref into the legacy jira_ticket_key column
+            # for Jira tickets so inbound Jira webhooks keep routing. TicketService
+            # already stamped ticket_ref/ticket_backend.
+            if supabase_client and result.backend == "jira":
+                try:
+                    client = supabase_client._get_client()
+                    client.table("escalation_mappings").update(
+                        {"jira_ticket_key": ticket_ref}
+                    ).eq("id", mapping_id).execute()
+                except Exception as e:
+                    LOGGER.warning("Failed to store after-hours Jira key: %s", e)
+
+            # Edit the Telegram escalation message to prepend the ticket ref while
+            # preserving the original question text so staff retain context. Internal
+            # tickets have no browse URL — render the ref as plain bold in that case.
+            escaped_ref = _escape_telegram_markdown(ticket_ref)
+            if result.url:
+                ticket_link = f"[{escaped_ref}]({result.url})"
+            else:
+                ticket_link = f"*{escaped_ref}*"
+            edit_suffix = f"\n\n🎫 *Auto-tracked:* {ticket_link}"
+            if question_summary:
+                escaped_summary = _escape_telegram_markdown(question_summary)
+                base_text = (
+                    f"🆘 *Customer Support Escalation*\n\n*Question:*\n{escaped_summary}"
+                )
+            else:
+                base_text = "🆘 *Customer Support Escalation*"
+            # Build close-only keyboard (Track already absent, now a ticket exists)
+            close_keyboard = build_escalation_track_keyboard(mapping_id, include_track=False)
+            await self._edit_telegram_message(
+                chat_id=self._escalation_chat_id,
+                message_id=escalation_message_id,
+                text=f"{base_text}{edit_suffix}",
+                reply_markup=close_keyboard,
+            )
         except Exception:
             LOGGER.exception("After-hours auto-Jira task failed for mapping %s", mapping_id)
 
