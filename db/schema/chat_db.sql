@@ -99,6 +99,8 @@ CREATE TABLE IF NOT EXISTS escalation_mappings (
     reason                  text,
     action_type             text,
     jira_ticket_key         text,
+    ticket_ref              text,                    -- backend-agnostic ref: Jira key or internal ref (e.g. 'TKT-000123')
+    ticket_backend          text,                    -- 'jira' | 'internal'
     organization_id         integer,
     escalation_topic_id     integer,
     is_active               boolean DEFAULT true,
@@ -108,9 +110,64 @@ CREATE TABLE IF NOT EXISTS escalation_mappings (
     thread_id               text
 );
 
+-- Backfill-safe additions for pre-existing installations (Jira-optional ticket backend).
+-- No-ops when escalation_mappings is created fresh above, since the columns already exist.
+ALTER TABLE escalation_mappings ADD COLUMN IF NOT EXISTS ticket_ref text;
+ALTER TABLE escalation_mappings ADD COLUMN IF NOT EXISTS ticket_backend text;
+
 CREATE INDEX IF NOT EXISTS escalation_mappings_session_id_idx ON escalation_mappings (session_id);
 CREATE INDEX IF NOT EXISTS escalation_mappings_customer_chat_id_idx ON escalation_mappings (customer_chat_id);
 CREATE INDEX IF NOT EXISTS escalation_mappings_thread_id_idx ON escalation_mappings (thread_id);
+CREATE INDEX IF NOT EXISTS escalation_mappings_ticket_ref_idx ON escalation_mappings (ticket_ref);
+
+-- Backfill: for escalations already resolved via Jira, ticket_ref/ticket_backend
+-- mirror jira_ticket_key so callers can query either column going forward.
+-- Invariant: ticket_backend = 'jira'  => ticket_ref = jira_ticket_key (both populated).
+--            ticket_backend = 'internal' => jira_ticket_key stays NULL, ticket_ref is set.
+UPDATE escalation_mappings
+    SET ticket_ref = jira_ticket_key, ticket_backend = 'jira'
+    WHERE jira_ticket_key IS NOT NULL AND ticket_ref IS NULL;
+
+-- ── Internal Tickets (Jira-optional ticket backend) ──────────────────────────
+-- Lets Anansi track escalation/notify tickets without a Jira project. Jira
+-- remains supported via escalation_mappings.jira_ticket_key; internal tickets
+-- are the alternate backend selected via escalation_mappings.ticket_backend.
+
+CREATE SEQUENCE IF NOT EXISTS internal_ticket_seq;
+
+CREATE TABLE IF NOT EXISTS internal_tickets (
+    id                      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticket_ref              text UNIQUE NOT NULL,              -- e.g. 'TKT-000123'
+    escalation_mapping_id   uuid,                              -- nullable (notify tickets have none)
+    session_id              text,
+    organization_id         integer,
+    grid_name               text,
+    summary                 text NOT NULL,
+    description             text,
+    status                  text NOT NULL DEFAULT 'open'
+                            CHECK (status IN ('open','in_progress','done')),
+    assignee_email          text,
+    labels                  jsonb DEFAULT '[]',
+    source                  text NOT NULL DEFAULT 'escalation' -- 'escalation' | 'notify'
+                            CHECK (source IN ('escalation','notify')),
+    created_at              timestamptz DEFAULT now(),
+    updated_at              timestamptz DEFAULT now(),
+    resolved_at             timestamptz
+);
+CREATE INDEX IF NOT EXISTS internal_tickets_mapping_idx ON internal_tickets (escalation_mapping_id);
+CREATE INDEX IF NOT EXISTS internal_tickets_status_idx ON internal_tickets (status);
+CREATE INDEX IF NOT EXISTS internal_tickets_org_idx ON internal_tickets (organization_id);
+
+CREATE TABLE IF NOT EXISTS internal_ticket_comments (
+    id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticket_ref    text NOT NULL REFERENCES internal_tickets(ticket_ref) ON DELETE CASCADE,
+    author        text,               -- staff name / source system
+    body          text NOT NULL,
+    is_public     boolean DEFAULT false,   -- mirrors Jira jsdPublic (public = forward to customer)
+    source        text DEFAULT 'staff',    -- 'staff' | 'customer' | 'notify' | 'system'
+    created_at    timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS internal_ticket_comments_ref_idx ON internal_ticket_comments (ticket_ref, created_at);
 
 -- ── Conversation Threads ──────────────────────────────────────────────────────
 
@@ -718,7 +775,7 @@ BEGIN
         ('chat_sessions'), ('agent_work_packets'), ('user_schedules'),
         ('user_preferences'), ('broadcast_templates'), ('documents'),
         ('entities'), ('relationships'), ('persistent_agent_instances'),
-        ('bot_artifacts')
+        ('bot_artifacts'), ('internal_tickets')
     LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS %I ON %I; CREATE TRIGGER %I BEFORE UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION update_updated_at()',
