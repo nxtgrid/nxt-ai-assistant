@@ -122,6 +122,33 @@ class TestGetOnCallDegradation:
 
 
 class TestAddOnCallOverrideDegradation:
+    async def test_healthy_path_includes_available_true(self, _reset_client_config, monkeypatch):
+        """Success shape must match get_on_call's: "available": True alongside
+        the existing "success": True, not just on the failure paths."""
+        monkeypatch.setattr(jira_module.ActionFlags, "is_actions_enabled", lambda _s: True)
+        client = _reset_client_config
+        client.auth_header = "Basic xxx"
+        client.ops_cloud_id = "cloud-1"
+        client.ops_schedule_id = "sched-1"
+
+        async def _fake_override(self, user_name, start_time, end_time):
+            return {"success": True, "user_email": "alice@example.com"}
+
+        monkeypatch.setattr(jira_module.JiraClient, "add_on_call_override", _fake_override)
+
+        result = await jira_module._tool_add_on_call_override(
+            {
+                "user_name": "Alice",
+                "start_time": "2026-01-01T00:00:00Z",
+                "end_time": "2026-01-02T00:00:00Z",
+            }
+        )
+
+        data = _parse(result)
+        assert data["available"] is True
+        assert data["success"] is True
+        assert data["user_email"] == "alice@example.com"
+
     async def test_no_config_returns_clean_unavailable(self, _reset_client_config, monkeypatch):
         monkeypatch.setattr(jira_module.ActionFlags, "is_actions_enabled", lambda _s: True)
         client = _reset_client_config

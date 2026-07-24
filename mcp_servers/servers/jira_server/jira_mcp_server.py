@@ -2081,7 +2081,7 @@ async def _tool_add_on_call_override(arguments: Dict[str, Any]) -> List[types.Te
         }
         return list(compose_json_response(result, default=str))
 
-    result = override_result
+    result = {"available": True, **override_result}
     return list(compose_json_response(result, default=str))
 
 
