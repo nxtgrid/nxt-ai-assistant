@@ -13,7 +13,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -852,6 +852,19 @@ class NotifyRequest(BaseModel):
     dedup_key: Optional[str] = Field(
         default=None, description="Optional idempotency hint (logged, not enforced here)."
     )
+    ticket_id: Optional[str] = Field(
+        default=None,
+        description="Ticketing hint. Omit for a pure passthrough alert (today's behavior, "
+        "unchanged). Empty string ('') to FILE a new ticket from this notification -- "
+        "response returns {ok, ticket_ref}. A ref (e.g. 'TKT-000123' or 'OPS-55') to append "
+        "this notification as a comment/update to that existing ticket -- response returns "
+        "{ok, ticket_ref: ticket_id}. An unresolvable ref returns 404.",
+    )
+    close: Optional[bool] = Field(
+        default=False,
+        description="With a populated ticket_id, also transition that ticket to done "
+        "after the comment is added. Ignored when ticket_id is omitted or blank.",
+    )
 
 
 async def _log_notification_to_chat_db(
@@ -859,12 +872,18 @@ async def _log_notification_to_chat_db(
     chat_id: str,
     topic_id: Optional[str],
     telegram_message_id: int,
+    ticket_ref: Optional[str] = None,
 ) -> None:
     """Best-effort: record a forwarded notification in the chat's existing session.
 
     Gives Anansi context when a user later replies to the alert in the group.
     Never creates a session (that would pollute session state for chats that have
     never talked to the bot) and never raises — logging failures are non-fatal.
+
+    When ``ticket_ref`` is set (this notification created or updated a ticket),
+    the saved message is also tagged via ``tag_message_as_ticket_comment`` so it
+    shows up in that ticket's comment timeline (``get_ticket_comments``), mirroring
+    how forwarded escalation replies are tagged.
     """
     try:
         from orchestrator.models.schemas import ConversationMessage
@@ -891,17 +910,22 @@ async def _log_notification_to_chat_db(
                 **({"dedup_key": body.dedup_key} if body.dedup_key else {}),
             },
         )
-        await client.save_messages(session.id, [message], from_chat_id=str(chat_id))
+        saved = await client.save_messages(session.id, [message], from_chat_id=str(chat_id))
+        if ticket_ref and saved:
+            await client.tag_message_as_ticket_comment(saved[0].id, ticket_ref)
     except Exception as e:
         logger.warning("Notify: chat-db logging failed (non-fatal): %s", e)
 
 
-async def _deliver_notification(body: "NotifyRequest", target: "GridNotificationTarget") -> None:
+async def _deliver_notification(
+    body: "NotifyRequest", target: "GridNotificationTarget", ticket_ref: Optional[str] = None
+) -> None:
     """Convert, send, and log a notification to an already-resolved grid target.
 
-    Grid resolution happens synchronously in the handler so an unresolvable grid
-    is reported to the caller (404) rather than silently dropped here; this runs in
-    the background and only covers the Telegram send + best-effort session logging.
+    Grid resolution (and, if requested, ticket creation/comment/close) happens
+    synchronously in the handler so failures are reported to the caller rather
+    than silently dropped here; this runs in the background and only covers the
+    Telegram send + best-effort session logging/tagging.
     """
     from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
     from shared.utils.telegram_send import send_telegram_message_with_fallback
@@ -940,7 +964,82 @@ async def _deliver_notification(body: "NotifyRequest", target: "GridNotification
         target.chat_id,
         message_id,
     )
-    await _log_notification_to_chat_db(body, target.chat_id, target.topic_id, message_id)
+    await _log_notification_to_chat_db(
+        body, target.chat_id, target.topic_id, message_id, ticket_ref=ticket_ref
+    )
+
+
+async def _resolve_notify_ticket(
+    body: "NotifyRequest", target: "GridNotificationTarget"
+) -> "tuple[Optional[str], Optional[JSONResponse]]":
+    """Resolve ``body.ticket_id`` into a ticket ref per the /notify ticketing contract.
+
+    Returns ``(ticket_ref, None)`` on success -- ``ticket_ref`` is ``None`` when
+    ``body.ticket_id`` was omitted (pure passthrough, unchanged behavior) -- or
+    ``(None, response)`` when the request must fail fast with ``response``
+    before any delivery is scheduled.
+
+    Runs synchronously in the handler (not the background delivery task) so
+    ticket failures reach the caller in the HTTP response, same rationale as
+    the existing synchronous grid resolution.
+
+    Notify-originated tickets use NOTIFY_TICKETS_BACKEND (default 'internal'),
+    independent of TICKET_BACKEND_OVERRIDE (which only governs customer
+    escalations) -- so Grafana/n8n/VRM alerts never land in the Jira OPS
+    project unless an operator explicitly opts them into 'auto'.
+    """
+    if body.ticket_id is None:
+        return None, None
+
+    from orchestrator.services.supabase_client import get_supabase_client
+    from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
+    from orchestrator.services.ticketing.service import TicketService
+    from shared.config import flag_registry as fr
+
+    ticket_service = TicketService(get_supabase_client=get_supabase_client)
+    backend_override = fr.get("NOTIFY_TICKETS_BACKEND") or "internal"
+
+    if body.ticket_id == "":
+        first_line = next(
+            (line.strip() for line in body.text.splitlines() if line.strip()), "Notification"
+        )
+        try:
+            result = await ticket_service.create_ticket(
+                TicketCreateRequest(
+                    summary=first_line[:120],
+                    description=body.text,
+                    grid_name=target.grid_name,
+                    source="notify",
+                ),
+                backend_override=backend_override,
+            )
+        except TicketBackendError as e:
+            logger.error("Notify: ticket creation failed source=%s: %s", body.source, e)
+            return None, JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": f"Ticket creation failed: {e}"},
+            )
+        return result.ref, None
+
+    # Populated ticket_id: comment on (and optionally close) an existing ticket.
+    ticket_ref = body.ticket_id
+    status = await ticket_service.get_status(ticket_ref)
+    if status is None:
+        logger.warning("Notify: unresolvable ticket_id=%r (source=%s)", ticket_ref, body.source)
+        return None, JSONResponse(
+            status_code=404,
+            content={"ok": False, "error": f"Unknown or unresolvable ticket_id: {ticket_ref!r}"},
+        )
+    commented = await ticket_service.add_comment(ticket_ref, body.text, public=False)
+    if not commented:
+        logger.warning(
+            "Notify: add_comment reported failure for ticket_ref=%r (source=%s)",
+            ticket_ref,
+            body.source,
+        )
+    if body.close:
+        await ticket_service.transition_to_done(ticket_ref)
+    return ticket_ref, None
 
 
 @app.post("/chat/notify")
@@ -1008,10 +1107,21 @@ async def handle_notify(
             },
         )
 
+    # Ticket resolution (if requested) is synchronous, same rationale as grid
+    # resolution above: a 404/500 must reach the caller, not be dropped in the
+    # background. body.ticket_id is None -> ticket_ref stays None -> the
+    # response below is byte-identical to today's passthrough-only behavior.
+    ticket_ref, error_response = await _resolve_notify_ticket(body, target)
+    if error_response is not None:
+        return error_response
+
     # Return fast; the send + logging happen in the background (mirrors the
     # Telegram-webhook pattern — responses go out via the Bot API, not this body).
-    background_tasks.add_task(_deliver_notification, body, target)
-    return JSONResponse(status_code=202, content={"ok": True})
+    background_tasks.add_task(_deliver_notification, body, target, ticket_ref)
+    response_content: Dict[str, Any] = {"ok": True}
+    if ticket_ref:
+        response_content["ticket_ref"] = ticket_ref
+    return JSONResponse(status_code=202, content=response_content)
 
 
 @app.post("/api/v1/metrics/test")

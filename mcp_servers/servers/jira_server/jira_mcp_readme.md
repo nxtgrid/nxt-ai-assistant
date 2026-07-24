@@ -214,6 +214,8 @@ Set the following environment variables in your `.env` file:
 - `JIRA_OPS_CLOUD_ID`: Your JSM Ops cloud ID
 - `JIRA_OPS_SCHEDULE_ID`: Your on-call schedule ID
 
+**Graceful degradation:** on-call stays Jira/JSM-dependent (there is no internal fallback schedule). If the required config above is missing, or Jira/JSM is unreachable, this tool does not raise — it returns `{"available": false, "reason": "..."}` instead of `on_call_periods`, so callers can tell the user plainly that the schedule is temporarily unavailable rather than surfacing a raw error.
+
 ### 9. `jira_add_on_call_override` (Actions Enabled Only)
 Add an on-call override for a specific user and time period in the JSM Ops schedule.
 
@@ -232,6 +234,8 @@ Add an on-call override for a specific user and time period in the JSM Ops sched
 ```
 
 **Note:** This tool requires `JIRA_ACTIONS_ENABLED=true` in your environment configuration.
+
+**Graceful degradation:** same as `jira_get_on_call` above — missing JSM Ops config or an unreachable Jira/JSM returns `{"available": false, "success": false, "reason": "..."}` instead of raising. A genuine business-logic failure (e.g. the named user can't be found) is not treated as "unavailable" and still raises normally.
 
 ## Usage Workflows
 

@@ -130,7 +130,7 @@ async def _handle_callback_query(args: Dict[str, Any]) -> Dict[str, Any]:
             )
 
         # =================================================================
-        # ESCALATION TRACKING CALLBACKS (es:mapping_id) - Track as JIRA ticket
+        # ESCALATION TRACKING CALLBACKS (es:mapping_id) - Track as ticket
         # =================================================================
         if callback_type == ESCALATION_TRACK_CALLBACK_PREFIX:
             return await _handle_escalation_track_callback(
@@ -767,8 +767,10 @@ async def _handle_escalation_track_callback(
 ) -> Dict[str, Any]:
     """Handle escalation tracking callback (es:mapping_id).
 
-    Atomically claims the escalation, creates a JIRA ticket, edits the
-    escalation message to show the ticket key, and notifies the customer.
+    Atomically claims the escalation, creates a ticket (Jira or internal,
+    resolved by TicketService per TICKET_BACKEND_OVERRIDE / Jira health),
+    edits the escalation message to show the ticket ref, and notifies the
+    customer.
     """
     from orchestrator.services.escalation_service import EscalationService
 
@@ -796,7 +798,7 @@ async def _handle_escalation_track_callback(
             await _edit_message_remove_buttons(chat_id, message_id)
             return {"success": True, "message": "Already claimed", "statusCode": 200}
 
-        # Resolve clicker's email for JIRA assignment (non-blocking)
+        # Resolve clicker's email for ticket assignment (Jira-only; non-blocking)
         clicker_email = None
         if clicker_telegram_id:
             try:
@@ -809,7 +811,7 @@ async def _handle_escalation_track_callback(
                 LOGGER.debug(f"Could not resolve clicker email: {e}")
 
         # Show "Creating ticket..." toast immediately
-        await _answer_callback_query(callback_id, "Creating JIRA ticket...")
+        await _answer_callback_query(callback_id, "Creating ticket...")
 
         # Create ticket + notify customer + close escalation
         escalation_service = EscalationService()
@@ -819,16 +821,18 @@ async def _handle_escalation_track_callback(
         )
 
         if result.get("success"):
-            jira_key = result["jira_ticket_key"]
+            # NOTE: track_as_ticket's return key is "ticket_ref" (backend-agnostic),
+            # not the legacy "jira_ticket_key" \u2014 see track_as_ticket's docstring.
+            ticket_ref = result["ticket_ref"]
             # Edit escalation message: append ticket ref, remove button
-            updated_text = f"{original_text}\n\n\u2705 Tracked as {jira_key}"
+            updated_text = f"{original_text}\n\n\u2705 Tracked as {ticket_ref}"
             await _edit_message_text(
                 chat_id,
                 message_id,
                 updated_text,
                 reply_markup={"inline_keyboard": []},
             )
-            LOGGER.info(f"Escalation {mapping_id} tracked as {jira_key}")
+            LOGGER.info(f"Escalation {mapping_id} tracked as {ticket_ref}")
         else:
             # Revert: re-activate the escalation since ticket creation failed
             await supabase_client.reactivate_escalation(mapping_id)
@@ -840,7 +844,7 @@ async def _handle_escalation_track_callback(
 
         return {
             "success": True,
-            "message": f"Escalation tracking: {result.get('jira_ticket_key', 'failed')}",
+            "message": f"Escalation tracking: {result.get('ticket_ref', 'failed')}",
             "statusCode": 200,
         }
 
@@ -949,12 +953,17 @@ async def _handle_escalation_close_callback(
         )
         claimed = False  # Success — no rollback needed
 
-        # Transition Jira to Done if the escalation had a tracked ticket.
-        # Non-fatal — failure is logged inside _transition_jira_to_done.
-        jira_key = escalation.get("jira_ticket_key")
-        if jira_key:
+        # Transition the ticket to done if the escalation had one tracked.
+        # Routes through TicketService so this works for both Jira (calls the
+        # Jira API) and internal tickets (sets internal_tickets.status='done')
+        # — the escalation row alone doesn't say which, so ticket_ref is tried
+        # first with a fallback to the legacy jira_ticket_key column, same
+        # pattern used everywhere else this ambiguity comes up.
+        # Non-fatal — TicketService.transition_to_done logs failures internally.
+        ticket_ref = escalation.get("ticket_ref") or escalation.get("jira_ticket_key")
+        if ticket_ref:
             escalation_svc = EscalationService()
-            await escalation_svc._transition_jira_to_done(jira_key)
+            await escalation_svc._tickets.transition_to_done(ticket_ref)
 
         LOGGER.info(
             f"Escalation {mapping_id} closed by {clicker_telegram_id} (notify={notify_customer})"

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import aiohttp
 import mcp.types as types
 from dotenv import load_dotenv
 from mcp.server import Server
@@ -1924,14 +1925,48 @@ async def _tool_get_ticket_statistics(arguments: Dict[str, Any]) -> List[types.T
     return list(compose_json_response(result, default=str))
 
 
+def _jira_ops_unavailable_reason() -> Optional[str]:
+    """Return a human-readable reason if JSM Ops isn't configured, else None.
+
+    Checked upfront so a missing-config on-call query returns a clean
+    {"available": False, "reason": ...} instead of the generic "Error: ..."
+    every other unhandled-exception tool call falls back to (see
+    ToolRegistry.handle_call_tool) -- an LLM caller should be able to tell a
+    customer plainly that the schedule is unavailable rather than surface a
+    raw config-error string.
+    """
+    if not client.auth_header:
+        return "Jira is not configured, so the on-call schedule is unavailable."
+    if not client.ops_cloud_id or not client.ops_schedule_id:
+        return "JSM Ops on-call schedule is not configured."
+    return None
+
+
 @registry.tool("get_on_call", _READ_ONLY_SCHEMAS_BY_NAME["get_on_call"])
 async def _tool_get_on_call(arguments: Dict[str, Any]) -> List[types.TextContent]:
     start_date = arguments["start_date"]
     end_date = arguments.get("end_date")
 
-    on_call_periods = await client.get_on_call(start_date, end_date)
+    config_reason = _jira_ops_unavailable_reason()
+    if config_reason:
+        result = {"available": False, "reason": config_reason}
+        return list(compose_json_response(result, default=str))
 
-    result = {"on_call_periods": on_call_periods, "total_periods": len(on_call_periods)}
+    try:
+        on_call_periods = await client.get_on_call(start_date, end_date)
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.warning(f"get_on_call: Jira/JSM unreachable: {e}")
+        result = {
+            "available": False,
+            "reason": "On-call schedule is unavailable because Jira/JSM is offline.",
+        }
+        return list(compose_json_response(result, default=str))
+
+    result = {
+        "available": True,
+        "on_call_periods": on_call_periods,
+        "total_periods": len(on_call_periods),
+    }
     return list(compose_json_response(result, default=str))
 
 
@@ -2026,12 +2061,27 @@ async def _tool_add_on_call_override(arguments: Dict[str, Any]) -> List[types.Te
             "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable on-call override creation."
         )
 
+    config_reason = _jira_ops_unavailable_reason()
+    if config_reason:
+        result = {"available": False, "success": False, "reason": config_reason}
+        return list(compose_json_response(result, default=str))
+
     user_name = arguments["user_name"]
     start_time = arguments["start_time"]
     end_time = arguments["end_time"]
 
-    override_result = await client.add_on_call_override(user_name, start_time, end_time)
-    result = override_result
+    try:
+        override_result = await client.add_on_call_override(user_name, start_time, end_time)
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logger.warning(f"add_on_call_override: Jira/JSM unreachable: {e}")
+        result = {
+            "available": False,
+            "success": False,
+            "reason": "On-call schedule is unavailable because Jira/JSM is offline.",
+        }
+        return list(compose_json_response(result, default=str))
+
+    result = {"available": True, **override_result}
     return list(compose_json_response(result, default=str))
 
 
