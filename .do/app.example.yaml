@@ -106,6 +106,9 @@ envs:
     value: "${TELEGRAM_BOT_TOKEN}"
     scope: RUN_TIME
     type: SECRET
+  - key: TELEGRAM_BOT_USERNAME
+    value: "${TELEGRAM_BOT_USERNAME}"
+    scope: RUN_TIME
   - key: ESCALATION_TELEGRAM_CHAT_ID
     value: "your-escalation-telegram-chat-id"
     scope: RUN_TIME

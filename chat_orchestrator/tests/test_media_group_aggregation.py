@@ -4,7 +4,10 @@ Tests the _buffer_media_group_message and _flush_media_group functions
 that aggregate Telegram album photos into a single merged request.
 """
 
+import asyncio
+import copy
 import time
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -206,6 +209,44 @@ class TestFlushMediaGroup:
     """Tests for _flush_media_group."""
 
     @pytest.mark.asyncio
+    async def test_flushed_album_reaches_processing_once(self):
+        """A flushed album bypasses only its redundant handler deduplication."""
+        import handler
+
+        body = _make_telegram_body(
+            message_id=1,
+            chat_id=-100123,
+            media_group_id="album_reentry",
+            photo_file_id="photo_1",
+            caption="@YourSupportBot please review these",
+        )
+        body["message"]["chat"]["type"] = "supergroup"
+
+        auth_service = SimpleNamespace(
+            get_organization_from_chat=AsyncMock(return_value="org_1"),
+        )
+        with patch.dict("os.environ", {"TELEGRAM_BOT_USERNAME": "YourSupportBot"}):
+            with patch("handler._send_telegram_typing_indicator", new_callable=AsyncMock):
+                assert await handler._buffer_media_group_message(body) is True
+
+            timer = handler._MEDIA_GROUP_TIMERS.pop("album_reentry")
+            timer.cancel()
+            await asyncio.gather(timer, return_exceptions=True)
+
+            with patch("handler.get_auth_service", return_value=auth_service):
+                with patch("handler._get_settings", return_value=SimpleNamespace(debug=False)):
+                    with patch("handler._send_telegram_typing_indicator", new_callable=AsyncMock):
+                        with patch("handler._process_telegram_async", new_callable=AsyncMock) as process:
+                            with patch("handler._MEDIA_GROUP_FLUSH_DELAY", 0):
+                                await handler._flush_media_group("album_reentry")
+                            await asyncio.sleep(0)
+                            retry_result = await handler.async_main(copy.deepcopy(body))
+
+        assert retry_result == {"success": True, "statusCode": 200}
+        assert ("-100123", 1) in handler._PROCESSED_MESSAGES
+        process.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_flush_merges_photos(self):
         """Flush collects all photo file_ids into _photo_file_ids."""
         from handler import _MEDIA_GROUP_BUFFERS, _flush_media_group
@@ -282,8 +323,10 @@ class TestFlushMediaGroup:
         assert set(body["message"].keys()) == original_msg_keys
 
     @pytest.mark.asyncio
-    async def test_flush_sets_internal_reentry_flag(self):
-        """Merged body has _internal_reentry flag to skip field sanitization."""
+    async def test_flush_sets_internal_reentry_sentinel(self):
+        """Merged body carries the non-forgeable internal re-entry sentinel."""
+        import handler
+
         from handler import _MEDIA_GROUP_BUFFERS, _flush_media_group
 
         bodies = [
@@ -296,7 +339,7 @@ class TestFlushMediaGroup:
                 await _flush_media_group("album_re")
 
             merged = mock_main.call_args[0][0]
-            assert merged.get("_internal_reentry") is True
+            assert merged.get("_internal_reentry_sentinel") is handler._INTERNAL_REENTRY_SENTINEL
 
     @pytest.mark.asyncio
     async def test_flush_sends_error_on_failure(self):

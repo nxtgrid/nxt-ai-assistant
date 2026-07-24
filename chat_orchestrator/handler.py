@@ -88,6 +88,10 @@ _MEDIA_GROUP_FLUSH_DELAY = 2.0  # seconds (community consensus for Telegram albu
 _MAX_MEDIA_GROUP_SIZE = 10  # Telegram album limit
 _MAX_ACTIVE_MEDIA_GROUPS = 200  # Prevent unbounded memory growth
 
+# Identity marker for album re-entry. It cannot be represented in an external
+# Telegram JSON update, so only _flush_media_group can grant internal provenance.
+_INTERNAL_REENTRY_SENTINEL = object()
+
 
 def _is_duplicate_webhook(chat_id: str, message_id: int | None) -> bool:
     """Check if this message has already been processed recently.
@@ -248,9 +252,9 @@ async def _flush_media_group(media_group_id: str) -> None:
     )
 
     # Re-enter async_main with the merged body — _auth_method is preserved from first body,
-    # and the _photo_file_ids guard prevents re-buffering.
-    # Mark as internal re-entry so field sanitization is skipped.
-    merged_body["_internal_reentry"] = True
+    # and the _photo_file_ids guard prevents re-buffering. The sentinel proves this
+    # is internal re-entry, so external JSON cannot bypass sanitization or deduplication.
+    merged_body["_internal_reentry_sentinel"] = _INTERNAL_REENTRY_SENTINEL
     try:
         await async_main(merged_body)
     except asyncio.CancelledError:
@@ -822,6 +826,8 @@ def _normalize_telegram_webhook(args: Dict[str, Any]) -> Dict[str, Any]:
         # Handle photos — prefer _photo_file_ids from media group aggregation
         if "_photo_file_ids" in telegram_msg:
             normalized["metadata"]["photo_file_ids"] = telegram_msg["_photo_file_ids"]
+            if args.get("_trusted_media_group_reentry"):
+                normalized["metadata"]["media_group_aggregated"] = True
             LOGGER.info(f"Telegram album with {len(telegram_msg['_photo_file_ids'])} photos")
         elif "photo" in telegram_msg and telegram_msg["photo"]:
             # Single photo — existing behavior
@@ -1886,10 +1892,19 @@ async def async_main(args: Dict[str, Any]) -> Dict[str, Any]:
     Use this entry point when calling from an async context (e.g., FastAPI).
     """
     try:
+        is_internal_media_group_reentry = (
+            args.pop("_internal_reentry_sentinel", None) is _INTERNAL_REENTRY_SENTINEL
+        )
+        # Never trust externally supplied internal markers.
+        args.pop("_internal_reentry", None)
+        args.pop("_trusted_media_group_reentry", None)
+        if is_internal_media_group_reentry:
+            args["_trusted_media_group_reentry"] = True
+
         # SECURITY: Strip metadata from Telegram webhook requests to prevent auth bypass.
         # API-key-authenticated requests (e.g., broadcast scheduler) are trusted.
         # Internal re-entries (e.g., _flush_media_group) also keep their metadata.
-        if not args.get("_internal_reentry") and args.get("_auth_method") != "api":
+        if not is_internal_media_group_reentry and args.get("_auth_method") != "api":
             args.pop("metadata", None)
 
         # Check if this is a Jira webhook (has webhookEvent field)
@@ -2166,9 +2181,9 @@ async def async_main(args: Dict[str, Any]) -> Dict[str, Any]:
         # Sanitize: strip synthetic underscore-prefixed fields from raw webhooks.
         # These fields (_photo_file_ids, _merged_text) are only valid when injected
         # internally by _flush_media_group. An external caller must not inject them.
-        # Skip sanitization for internal re-entry (marked by _internal_reentry flag).
+        # Skip sanitization only for a verified internal album re-entry.
         raw_msg = _get_tg_message(args)
-        if raw_msg and not args.get("_internal_reentry"):
+        if raw_msg and not is_internal_media_group_reentry:
             for key in [k for k in raw_msg if k.startswith("_")]:
                 del raw_msg[key]
 
@@ -2476,7 +2491,11 @@ async def _handle_webhook_async(args: Dict[str, Any]) -> Dict[str, Any]:
         webhook_req = WebhookRequest(**args)
 
         # Deduplicate Telegram webhooks (prevent retry from reprocessing)
-        if webhook_req.source == "telegram" and webhook_req.metadata:
+        if (
+            webhook_req.source == "telegram"
+            and webhook_req.metadata
+            and not webhook_req.metadata.get("media_group_aggregated")
+        ):
             message_id = webhook_req.metadata.get("telegram_message_id")
             if _is_duplicate_webhook(webhook_req.chat_id, message_id):
                 return {

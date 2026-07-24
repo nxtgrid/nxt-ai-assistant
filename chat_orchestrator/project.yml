@@ -91,6 +91,9 @@ services:
       - key: TELEGRAM_BOT_TOKEN
         scope: RUN_TIME
         value: ${TELEGRAM_BOT_TOKEN}
+      - key: TELEGRAM_BOT_USERNAME
+        scope: RUN_TIME
+        value: ${TELEGRAM_BOT_USERNAME}
       - key: ESCALATION_TELEGRAM_CHAT_ID
         scope: RUN_TIME
         value: ${ESCALATION_TELEGRAM_CHAT_ID}
