@@ -79,16 +79,25 @@ class TicketService:
     # Backend resolution
     # ------------------------------------------------------------------
 
-    async def resolve_backend(self) -> TicketBackend:
-        """Pick a backend per ``TICKET_BACKEND_OVERRIDE`` (``auto``|``jira``|``internal``).
+    async def resolve_backend(self, override: Optional[str] = None) -> TicketBackend:
+        """Pick a backend per an override value (``auto``|``jira``|``internal``).
 
         - ``internal``: always internal.
         - ``jira``: Jira if creds are present, else internal (never hard-fails).
         - ``auto`` (default, and any unrecognized value): Jira if
           ``JiraTicketBackend.is_available()`` (creds + healthy cached probe),
           else internal.
+
+        Args:
+            override: Explicit override value, takes precedence over the
+                ``TICKET_BACKEND_OVERRIDE`` flag when given. Lets callers with
+                their own backend-selection policy (e.g. the ``/notify``
+                endpoint's ``NOTIFY_TICKETS_BACKEND``) reuse this resolution
+                logic without being tied to the customer-escalation flag.
+                Existing callers that omit this keep reading
+                ``TICKET_BACKEND_OVERRIDE`` exactly as before.
         """
-        override = (fr.get("TICKET_BACKEND_OVERRIDE") or "auto").strip().lower()
+        override = (override or fr.get("TICKET_BACKEND_OVERRIDE") or "auto").strip().lower()
 
         if override == "internal":
             return self._internal
@@ -167,8 +176,12 @@ class TicketService:
     # TicketBackend-shaped public API
     # ------------------------------------------------------------------
 
-    async def create_ticket(self, req: TicketCreateRequest) -> TicketResult:
-        backend = await self.resolve_backend()
+    async def create_ticket(
+        self, req: TicketCreateRequest, backend_override: Optional[str] = None
+    ) -> TicketResult:
+        """Create a ticket. ``backend_override`` is forwarded to ``resolve_backend``
+        (see its docstring) -- omit to use ``TICKET_BACKEND_OVERRIDE`` as usual."""
+        backend = await self.resolve_backend(override=backend_override)
         result = await backend.create_ticket(req)
         if req.escalation_mapping_id:
             await self._stamp_escalation_mapping(

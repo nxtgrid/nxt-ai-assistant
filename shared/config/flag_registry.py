@@ -355,6 +355,14 @@ _FLAGS: List[Flag] = [
         "re-checking (seconds).",
         scope=SERVICE_BOT,
     ),
+    _s(
+        "NOTIFY_TICKETS_BACKEND",
+        "internal",
+        "Which ticket backend /notify-originated tickets use: 'internal' (default -- "
+        "ops alerts from Grafana/n8n/VRM never land in the Jira OPS project) or 'auto' "
+        "(Jira if configured and healthy, else internal, same as customer escalations).",
+        scope=SERVICE_BOT,
+    ),
     # --- Expert workflow / interaction ------------------------------------
     _b(
         "WORKFLOW_PARAMETER_CONFIRMATION",
