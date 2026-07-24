@@ -53,7 +53,7 @@ For the generation side, Anansi renders the power-plant footprint itself: PV arr
 
 ### Ticketing, escalation, and institutional memory
 
-Conversations that need a human are routed to the right internal Telegram group automatically, or opened as a JIRA issue with the full transcript attached. The same pipeline ingests your historical Telegram support chats, Google Drive docs, and GitHub repos into a GraphRAG index — so the bot answers from your actual past decisions, not generic LLM knowledge.
+Conversations that need a human are routed to the right internal Telegram group automatically, and tracked as a ticket with the full transcript attached — as a JIRA issue when Jira is configured and healthy, or in an internal ledger when it isn't, so escalations keep working (and stay recoverable) with or without Jira. The same pipeline ingests your historical Telegram support chats, Google Drive docs, and GitHub repos into a GraphRAG index — so the bot answers from your actual past decisions, not generic LLM knowledge.
 
 <table>
   <tr>
@@ -591,6 +591,37 @@ SUPABASE_ACTIONS_ENABLED=true
 TIMESCALE_ACTIONS_ENABLED=true
 JIRA_ACTIONS_ENABLED=true
 ```
+
+#### Ticket backend (Jira-optional escalations)
+
+Escalations always post to the internal Telegram support group; whether they're *also* tracked as a Jira ticket or an internal ledger entry is decided per-call by `TicketService`, independent of Jira being configured at all. All of these are optional — sensible defaults apply if unset — and are managed like any other operator flag (see [`shared/config/flag_registry.py`](shared/config/flag_registry.py) / [`shared/config/flags.env.example`](shared/config/flags.env.example) for the full, generated list):
+
+```bash
+# 'auto' (default): Jira if JIRA_* creds are set and Jira answers a health probe,
+# else the internal ledger (internal_tickets / internal_ticket_comments in chat_db).
+# 'jira': Jira if creds are present, else internal (never hard-fails).
+# 'internal': always internal — an ops kill-switch, e.g. during a Jira outage.
+TICKET_BACKEND_OVERRIDE=auto
+
+# Backend for tickets filed via POST /chat/notify (see below). Independent of
+# TICKET_BACKEND_OVERRIDE: defaults to 'internal' so Grafana/n8n/VRM alerts
+# never land in the Jira project unless you opt into 'auto'.
+NOTIFY_TICKETS_BACKEND=internal
+
+# Prefix for internal ticket refs, e.g. 'TKT' -> 'TKT-000123'.
+INTERNAL_TICKET_PREFIX=TKT
+
+# How long the Jira health probe result is cached before re-checking (seconds).
+JIRA_HEALTHCHECK_TTL_SECONDS=60
+```
+
+Without any Jira credentials configured, escalations, the staff Track/Close buttons, and the daily sweep all work exactly the same, filing and updating internal tickets instead. The on-call schedule (`get_on_call`/`add_on_call_override`, JSM Ops) stays Jira-dependent by design — with Jira offline, on-call queries return a clean "unavailable" response instead of an error.
+
+**`POST /chat/notify` ticketing:** the existing alert-forwarding endpoint (`source`, `grid_name`, `text`, ...) accepts two more optional fields:
+- `ticket_id` — omit for today's plain passthrough (unchanged). Pass `""` to file a new ticket from this notification (response includes `ticket_ref`). Pass an existing ref (e.g. `"TKT-000123"` or `"OPS-55"`) to append the notification as a comment on that ticket; an unresolvable ref returns `404`.
+- `close` — with a populated `ticket_id`, also transition that ticket to done.
+
+The alert is still forwarded to Telegram in every case; `ticket_id`/`close` only control the ticketing side effect.
 
 ### Getting Google Doc IDs
 
