@@ -60,6 +60,36 @@ def login_page(request: Request) -> None:
         )
 
 
+@ui.page("/tickets")
+async def tickets_route() -> None:
+    user = auth.current_user()
+    if not user:
+        ui.navigate.to("/login")
+        return
+    with layout.frame(user, "/tickets"):
+        if not perms.can_view_bot_admin(user["email"]):
+            layout.access_denied()
+            return
+        from nicegui_app.pages import tickets
+
+        await tickets.render(user)
+
+
+@ui.page("/tickets/{ref}")
+async def ticket_detail_route(ref: str) -> None:
+    user = auth.current_user()
+    if not user:
+        ui.navigate.to("/login")
+        return
+    with layout.frame(user, "/tickets"):
+        if not perms.can_view_bot_admin(user["email"]):
+            layout.access_denied()
+            return
+        from nicegui_app.pages import tickets
+
+        await tickets.render(user, ref)
+
+
 # NB: the admin chat page is served at /conversations, NOT /chat — the DO ingress
 # routes the /chat prefix to the anansi-bot orchestrator (its Telegram webhook),
 # so a /chat page here 405s. See DEPLOY_NICEGUI.md.
@@ -144,11 +174,14 @@ def index_page() -> None:
     can_admin = perms.can_view_bot_admin(user["email"])
     can_grid = perms.can_view_grid(user["email"])
     with layout.frame(user, "/"):
-        if can_grid:
+        # Precedence flip (confirmed with the user): every bot-admin — including
+        # grid+admin users — lands on /tickets first. Grid-only users (no bot
+        # admin) still get the grid welcome.
+        if can_admin:
+            ui.navigate.to("/tickets")
+        elif can_grid:
             ui.label("⚡ Grid Designs & BOMs").classes("text-h5")
             ui.label("Select a table from the sidebar to begin.")
-        elif can_admin:
-            ui.navigate.to("/conversations")
         else:
             layout.access_denied()
 

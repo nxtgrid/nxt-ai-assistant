@@ -104,6 +104,20 @@ def _merge_undifferentiated_group_topics(context_list: list[dict]) -> list[dict]
     return result
 
 
+# Per-source over-fetch cap for the unified Tickets view. Because tickets come
+# from two tables (internal_tickets + Jira-backed escalation_mappings), filtering
+# and pagination happen in Python after merging, so we over-fetch this many rows
+# from each source. Comfortably above expected ticket volumes for this bot; see
+# ``list_tickets`` for the (deliberately simple) merge/paginate tradeoff.
+_MERGE_FETCH_CAP = 500
+
+
+def _truncate(text: Optional[str], length: int) -> str:
+    """Trim ``text`` to ``length`` chars, appending an ellipsis when clipped."""
+    text = text or ""
+    return text if len(text) <= length else text[: length - 1] + "…"
+
+
 class SupabaseReader:
     """Read-only access to chat history database."""
 
@@ -1687,6 +1701,403 @@ class SupabaseReader:
         except Exception as e:
             logger.error("Error fetching user schedules: %s", e)
             return []
+
+
+    # ── Tickets (Task 8): unified, read-only view across both backends ─────────
+    #
+    # Design notes for this section:
+    #   * Comment count / timeline are UNIFIED for both backends: the union of
+    #     ``internal_ticket_comments`` and ``chat_messages`` tagged via
+    #     ``metadata->>ticket_ref`` (tag_message_as_ticket_comment). This makes
+    #     the list's count equal to the length of the detail timeline. Jira-backed
+    #     tickets don't get internal_ticket_comments rows today, so their count is
+    #     effectively the tagged-message count — but the code path is identical for
+    #     both, which keeps it simple and correct.
+    #   * No live Jira fetch on render. Jira-backed status is an "as of last sync"
+    #     proxy derived from the mapping's own lifecycle (is_active / resolved_at),
+    #     which the sweep keeps reconciled with Jira. A stale badge is acceptable.
+    #   * These methods are SYNCHRONOUS (this file's convention) and are meant to be
+    #     called from NiceGUI pages via ``run.io_bound``. They are intentionally
+    #     uncached (@cache_data omitted) so a status view always reflects the latest
+    #     sync — freshness matters more than shaving a query on this low-traffic page.
+
+    def list_tickets(
+        self,
+        status_filter: Optional[List[str]] = None,
+        org_filter: Optional[str] = None,
+        backend_filter: Optional[str] = None,
+        search: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Return a unified, read-only list of tickets across both backends.
+
+        Merges ``internal_tickets`` (backend="internal") with Jira-backed
+        ``escalation_mappings`` (ticket_backend="jira", backend="jira") into one
+        normalized row shape, applies filters, sorts newest-first, paginates.
+
+        Args:
+            status_filter: keep only rows whose status is in this list (e.g.
+                ["open", "in_progress"]); None => all statuses.
+            org_filter: case-insensitive substring over organization_id (as text)
+                or org_hashtag; None => all orgs.
+            backend_filter: "jira" | "internal" | None (both).
+            search: case-insensitive substring over ticket_ref / summary /
+                customer_username; None => no search filter.
+            limit / offset: pagination, applied AFTER the merge.
+
+        Efficiency note: because rows come from two tables, filtering and
+        pagination happen in Python after over-fetching up to ``_MERGE_FETCH_CAP``
+        rows from each source. This is intentionally simple — a low-traffic admin
+        view, not a hot path — and accurate for this bot's ticket volumes. Swap in
+        a SQL view/union if ticket counts ever grow large.
+        """
+        if not self.client:
+            return []
+
+        try:
+            rows: List[Dict[str, Any]] = []
+            if backend_filter in (None, "internal"):
+                rows.extend(self._fetch_internal_ticket_rows())
+            if backend_filter in (None, "jira"):
+                rows.extend(self._fetch_jira_ticket_rows())
+        except Exception as e:
+            logger.error("Error listing tickets: %s", e)
+            return []
+
+        status_set = set(status_filter) if status_filter else None
+        org_lower = org_filter.strip().lower() if org_filter else ""
+        search_lower = search.strip().lower() if search else ""
+
+        def _matches(row: Dict[str, Any]) -> bool:
+            if status_set is not None and row.get("status") not in status_set:
+                return False
+            if org_lower:
+                hay = f"{row.get('organization_id') or ''} {row.get('org_hashtag') or ''}".lower()
+                if org_lower not in hay:
+                    return False
+            if search_lower:
+                hay = " ".join(
+                    str(row.get(k) or "")
+                    for k in ("ticket_ref", "summary", "customer_username")
+                ).lower()
+                if search_lower not in hay:
+                    return False
+            return True
+
+        filtered = [r for r in rows if _matches(r)]
+        filtered.sort(key=lambda r: r.get("created_at") or "", reverse=True)
+
+        page = filtered[offset : offset + limit]
+        self._attach_comment_counts(page)
+        return page
+
+    def get_ticket_detail(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
+        """Return a ticket's full row plus its unified, read-only comment timeline.
+
+        Resolves ``ticket_ref`` against ``internal_tickets`` first, then
+        Jira-backed ``escalation_mappings``. Returns ``None`` if it resolves to no
+        known ticket. The ``comments`` list unions ``internal_ticket_comments``
+        with tagged ``chat_messages``, normalized and sorted chronologically — a
+        parallel, read-only sibling of chat_orchestrator's
+        ``SupabaseClient.get_ticket_comments``.
+        """
+        if not self.client:
+            return None
+        try:
+            ticket = self._resolve_ticket_row(ticket_ref)
+        except Exception as e:
+            logger.error("Error fetching ticket detail for %s: %s", ticket_ref, e)
+            return None
+        if ticket is None:
+            return None
+        comments = self._fetch_ticket_comments(ticket_ref)
+        ticket["comments"] = comments
+        ticket["comment_count"] = len(comments)
+        return ticket
+
+    # ── internal ticket helpers ────────────────────────────────────────────────
+    def _fetch_internal_ticket_rows(self) -> List[Dict[str, Any]]:
+        resp = (
+            self.client.table("internal_tickets")
+            .select(
+                "ticket_ref, escalation_mapping_id, session_id, organization_id, "
+                "grid_name, summary, status, source, created_at"
+            )
+            .order("created_at", desc=True)
+            .limit(_MERGE_FETCH_CAP)
+            .execute()
+        )
+        internal_rows = resp.data or []
+        mapping_ids = [
+            r.get("escalation_mapping_id")
+            for r in internal_rows
+            if r.get("escalation_mapping_id")
+        ]
+        mappings = self._fetch_mappings_by_id(mapping_ids)
+
+        out: List[Dict[str, Any]] = []
+        for r in internal_rows:
+            m = mappings.get(r.get("escalation_mapping_id")) or {}
+            out.append(
+                {
+                    "ticket_ref": r.get("ticket_ref"),
+                    "backend": "internal",
+                    "status": r.get("status") or "open",
+                    "organization_id": r.get("organization_id"),
+                    "org_hashtag": m.get("org_hashtag"),
+                    "grid_name": r.get("grid_name"),
+                    "summary": r.get("summary") or "",
+                    "reason": m.get("reason"),
+                    "created_at": r.get("created_at"),
+                    "customer_username": m.get("customer_username"),
+                    "customer_chat_id": m.get("customer_chat_id"),
+                    "customer_topic_id": m.get("customer_topic_id"),
+                    "customer_email": m.get("customer_email"),
+                    "escalation_message_id": m.get("escalation_message_id"),
+                    "session_id": r.get("session_id"),
+                    "source": r.get("source"),
+                    "comment_count": 0,
+                }
+            )
+        return out
+
+    def _fetch_jira_ticket_rows(self) -> List[Dict[str, Any]]:
+        resp = (
+            self.client.table("escalation_mappings")
+            .select(
+                "ticket_ref, ticket_backend, session_id, organization_id, "
+                "org_hashtag, reason, question_text, customer_username, "
+                "customer_chat_id, customer_topic_id, customer_email, "
+                "escalation_message_id, is_active, resolved_at, created_at"
+            )
+            .eq("ticket_backend", "jira")
+            .order("created_at", desc=True)
+            .limit(_MERGE_FETCH_CAP)
+            .execute()
+        )
+        out: List[Dict[str, Any]] = []
+        for r in resp.data or []:
+            ref = r.get("ticket_ref")
+            if not ref:
+                # Defensive: a jira-backed mapping must carry a ticket_ref.
+                continue
+            resolved = bool(r.get("resolved_at")) or not r.get("is_active", True)
+            out.append(
+                {
+                    "ticket_ref": ref,
+                    "backend": "jira",
+                    # "As of last sync" proxy — no live Jira call on render.
+                    "status": "done" if resolved else "open",
+                    "organization_id": r.get("organization_id"),
+                    "org_hashtag": r.get("org_hashtag"),
+                    "grid_name": None,
+                    "summary": _truncate(r.get("question_text"), 200),
+                    "reason": r.get("reason"),
+                    "created_at": r.get("created_at"),
+                    "customer_username": r.get("customer_username"),
+                    "customer_chat_id": r.get("customer_chat_id"),
+                    "customer_topic_id": r.get("customer_topic_id"),
+                    "customer_email": r.get("customer_email"),
+                    "escalation_message_id": r.get("escalation_message_id"),
+                    "session_id": r.get("session_id"),
+                    "source": "escalation",
+                    "comment_count": 0,
+                }
+            )
+        return out
+
+    def _fetch_mappings_by_id(self, mapping_ids: List[Any]) -> Dict[Any, Dict[str, Any]]:
+        ids = [i for i in dict.fromkeys(mapping_ids) if i]
+        if not ids:
+            return {}
+        resp = (
+            self.client.table("escalation_mappings")
+            .select(
+                "id, org_hashtag, reason, customer_username, customer_chat_id, "
+                "customer_topic_id, customer_email, escalation_message_id"
+            )
+            .in_("id", ids)
+            .execute()
+        )
+        return {
+            row["id"]: row for row in (resp.data or []) if row.get("id") is not None
+        }
+
+    def _resolve_ticket_row(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
+        """Normalize a single ticket (internal first, then Jira-backed) or None."""
+        iresp = (
+            self.client.table("internal_tickets")
+            .select("*")
+            .eq("ticket_ref", ticket_ref)
+            .limit(1)
+            .execute()
+        )
+        if iresp.data:
+            r = iresp.data[0]
+            mapping_id = r.get("escalation_mapping_id")
+            m = self._fetch_mappings_by_id([mapping_id]).get(mapping_id) or {}
+            return {
+                "ticket_ref": r.get("ticket_ref"),
+                "backend": "internal",
+                "status": r.get("status") or "open",
+                "organization_id": r.get("organization_id"),
+                "org_hashtag": m.get("org_hashtag"),
+                "grid_name": r.get("grid_name"),
+                "summary": r.get("summary") or "",
+                "description": r.get("description") or "",
+                "reason": m.get("reason"),
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+                "resolved_at": r.get("resolved_at"),
+                "assignee_email": r.get("assignee_email"),
+                "labels": r.get("labels"),
+                "source": r.get("source"),
+                "customer_username": m.get("customer_username"),
+                "customer_chat_id": m.get("customer_chat_id"),
+                "customer_topic_id": m.get("customer_topic_id"),
+                "customer_email": m.get("customer_email"),
+                "escalation_message_id": m.get("escalation_message_id"),
+                "session_id": r.get("session_id"),
+            }
+
+        jresp = (
+            self.client.table("escalation_mappings")
+            .select("*")
+            .eq("ticket_ref", ticket_ref)
+            .eq("ticket_backend", "jira")
+            .limit(1)
+            .execute()
+        )
+        if jresp.data:
+            r = jresp.data[0]
+            resolved = bool(r.get("resolved_at")) or not r.get("is_active", True)
+            return {
+                "ticket_ref": r.get("ticket_ref"),
+                "backend": "jira",
+                "status": "done" if resolved else "open",
+                "organization_id": r.get("organization_id"),
+                "org_hashtag": r.get("org_hashtag"),
+                "grid_name": None,
+                "summary": _truncate(r.get("question_text"), 200),
+                "description": r.get("question_text") or "",
+                "reason": r.get("reason"),
+                "created_at": r.get("created_at"),
+                "updated_at": None,
+                "resolved_at": r.get("resolved_at"),
+                "assignee_email": None,
+                "labels": None,
+                "source": "escalation",
+                "customer_username": r.get("customer_username"),
+                "customer_chat_id": r.get("customer_chat_id"),
+                "customer_topic_id": r.get("customer_topic_id"),
+                "customer_email": r.get("customer_email"),
+                "escalation_message_id": r.get("escalation_message_id"),
+                "session_id": r.get("session_id"),
+            }
+        return None
+
+    def _attach_comment_counts(self, rows: List[Dict[str, Any]]) -> None:
+        """Fill each row's ``comment_count`` with its unified comment total.
+
+        Batched (two queries total for the page) via ``.in_`` over the page's
+        ticket refs — internal_ticket_comments plus tagged chat_messages.
+        """
+        refs = [r["ticket_ref"] for r in rows if r.get("ticket_ref")]
+        if not refs:
+            return
+        counts: Dict[str, int] = {ref: 0 for ref in refs}
+        try:
+            cresp = (
+                self.client.table("internal_ticket_comments")
+                .select("ticket_ref")
+                .in_("ticket_ref", refs)
+                .execute()
+            )
+            for row in cresp.data or []:
+                ref = row.get("ticket_ref")
+                if ref in counts:
+                    counts[ref] += 1
+        except Exception as e:
+            logger.warning("Error counting internal ticket comments: %s", e)
+        try:
+            mresp = (
+                self.client.table("chat_messages")
+                .select("metadata")
+                .in_("metadata->>ticket_ref", refs)
+                .execute()
+            )
+            for row in mresp.data or []:
+                meta = row.get("metadata") or {}
+                ref = meta.get("ticket_ref")
+                if ref in counts:
+                    counts[ref] += 1
+        except Exception as e:
+            logger.warning("Error counting tagged ticket messages: %s", e)
+        for r in rows:
+            r["comment_count"] = counts.get(r.get("ticket_ref"), 0)
+
+    def _fetch_ticket_comments(
+        self, ticket_ref: str, limit: int = 200
+    ) -> List[Dict[str, Any]]:
+        """Unified, chronological, read-only comment timeline for a ticket ref.
+
+        Union of ``internal_ticket_comments`` and tagged ``chat_messages``,
+        normalized to {source, author, body, is_public, created_at}. Mirrors
+        chat_orchestrator's get_ticket_comments in spirit (read-only here).
+        """
+        merged: List[Dict[str, Any]] = []
+        try:
+            cresp = (
+                self.client.table("internal_ticket_comments")
+                .select("*")
+                .eq("ticket_ref", ticket_ref)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            for row in cresp.data or []:
+                merged.append(
+                    {
+                        "source": row.get("source") or "staff",
+                        "author": row.get("author"),
+                        "body": row.get("body") or "",
+                        "is_public": bool(row.get("is_public")),
+                        "created_at": row.get("created_at"),
+                    }
+                )
+        except Exception as e:
+            logger.warning(
+                "Error fetching internal ticket comments for %s: %s", ticket_ref, e
+            )
+        try:
+            mresp = (
+                self.client.table("chat_messages")
+                .select("content, role, metadata, created_at")
+                .filter("metadata->>ticket_ref", "eq", ticket_ref)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+            for row in mresp.data or []:
+                meta = row.get("metadata") or {}
+                role = row.get("role") or ""
+                merged.append(
+                    {
+                        "source": "customer" if role == "user" else "staff",
+                        "author": meta.get("author") or role or None,
+                        "body": row.get("content") or "",
+                        "is_public": bool(meta.get("is_public", True)),
+                        "created_at": row.get("created_at"),
+                    }
+                )
+        except Exception as e:
+            logger.warning(
+                "Error fetching tagged ticket messages for %s: %s", ticket_ref, e
+            )
+        merged.sort(key=lambda c: c.get("created_at") or "")
+        return merged[-limit:]
+
 
 
 __all__ = ["SupabaseReader"]

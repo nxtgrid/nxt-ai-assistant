@@ -19,6 +19,7 @@ ACCENT = "#4da6ff"
 PAGE_BG = "#f0f2f6"
 
 BOT_ADMIN_NAV = [
+    ("/tickets", "🎫 Tickets"),
     ("/conversations", "💬 Chats"),
     ("/documents", "📚 RAG Knowledgebase"),
     ("/agents", "🤖 Agents"),
