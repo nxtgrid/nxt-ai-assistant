@@ -123,6 +123,19 @@ async def test_blank_ticket_id_uses_first_line_as_summary():
     assert req.description == "Meter offline\n\nFull details below..."
 
 
+async def test_blank_ticket_id_ignores_close_flag():
+    """close=True is only meaningful for the populated-ticket_id (comment) branch
+    -- a freshly created ticket is never auto-closed."""
+    body = _notify_body(ticket_id="", close=True)
+
+    ref, error = await _resolve_notify_ticket(body, _target())
+
+    assert error is None
+    assert ref == "TKT-000001"
+    svc = _FakeTicketService.instances[-1]
+    assert svc.transition_to_done_calls == []
+
+
 async def test_blank_ticket_id_creation_failure_returns_500(monkeypatch):
     body = _notify_body(ticket_id="")
 

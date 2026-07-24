@@ -1030,7 +1030,13 @@ async def _resolve_notify_ticket(
             status_code=404,
             content={"ok": False, "error": f"Unknown or unresolvable ticket_id: {ticket_ref!r}"},
         )
-    await ticket_service.add_comment(ticket_ref, body.text, public=False)
+    commented = await ticket_service.add_comment(ticket_ref, body.text, public=False)
+    if not commented:
+        logger.warning(
+            "Notify: add_comment reported failure for ticket_ref=%r (source=%s)",
+            ticket_ref,
+            body.source,
+        )
     if body.close:
         await ticket_service.transition_to_done(ticket_ref)
     return ticket_ref, None
