@@ -74,6 +74,7 @@ from orchestrator.clients.gemini import GeminiClient
 from orchestrator.clients.openrouter import OpenRouterClient
 from orchestrator.config.settings import AppSettings, get_settings
 from orchestrator.graphs.conversation_graph import ConversationGraphBuilder
+from orchestrator.graphs.execution_limit_recovery import graph_recursion_limit
 from orchestrator.graphs.nodes import (
     ask_about_duplicate,
     ask_resume_failed,
@@ -363,6 +364,9 @@ class FullConversationGraphBuilder:
         if state.get("pending_tool_calls"):
             return "execute_tools"
 
+        if state.get("graceful_limit_recovery"):
+            return "safety_check"
+
         # Check if verification is enabled
         verification_enabled = state.get("verification_enabled", False)
         user_context = state.get("user_context")
@@ -635,6 +639,8 @@ async def invoke_full_graph(
         # Initialize optional fields
         "final_response": None,
         "error": None,
+        "execution_limit_reason": None,
+        "graceful_limit_recovery": False,
         "unlocked_tools": [],
         # Phase 4: Expert routing defaults
         "expert_routing_decision": None,
@@ -679,7 +685,10 @@ async def invoke_full_graph(
         ),
     }
 
-    result: Dict[str, Any] = await graph.ainvoke(initial_state, config={"recursion_limit": 50})
+    result: Dict[str, Any] = await graph.ainvoke(
+        initial_state,
+        config={"recursion_limit": graph_recursion_limit(50)},
+    )
     return result
 
 

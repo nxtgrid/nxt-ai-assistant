@@ -21,6 +21,10 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 from orchestrator.clients.gemini import GeminiClient
 from orchestrator.config.settings import AppSettings, get_settings, inject_reasoning_param
+from orchestrator.graphs.execution_limit_recovery import (
+    ExecutionLimitReason,
+    format_execution_limit_response,
+)
 from orchestrator.graphs.state import ConversationState
 from orchestrator.models.schemas import (
     ConversationMessage,
@@ -281,37 +285,10 @@ class ConversationGraphBuilder:
 
         # Check if we've exceeded max rounds
         if current_round >= max_rounds:
-            # Staff: synthesize a partial answer from accumulated tool results instead of
-            # returning a generic system error, so the investigation isn't wasted.
-            user_ctx = state.get("user_context")
-            is_staff = bool(getattr(user_ctx, "is_staff", False))
-            if is_staff and state.get("accumulated_tool_results"):
-                try:
-                    synthesized = await self._synthesize_partial_answer(state)
-                    if synthesized:
-                        LOGGER.info(
-                            "Max rounds exceeded for staff session — returning synthesized "
-                            f"partial answer ({len(synthesized)} chars, "
-                            f"{len(state['accumulated_tool_results'])} tool results)"
-                        )
-                        return {
-                            "final_response": synthesized,
-                            "should_continue": False,
-                            "error_category": ErrorCategory.SYSTEM.value,
-                            "error": "Max tool rounds exceeded — returned partial synthesis",
-                        }
-                except Exception as synth_err:
-                    LOGGER.exception(
-                        f"Partial-answer synthesis failed, falling back to canned error: {synth_err}"
-                    )
-
-            return {
-                "error": "Max tool rounds exceeded without final response from Gemini",
-                "error_category": ErrorCategory.SYSTEM.value,
-                "final_response": get_user_message(ErrorCategory.SYSTEM, "internal_error"),
-                "should_continue": False,
-                "reply_markup": self._make_escalation_offer_markup(state),
-            }
+            return await self._recover_execution_limit(
+                state,
+                ExecutionLimitReason.TOOL_BUDGET,
+            )
 
         # Apply command model override if set (e.g., /editdoc uses deep thinking model).
         # IMPORTANT: shallow copy the model config to avoid mutating the shared singleton.
@@ -364,7 +341,12 @@ class ConversationGraphBuilder:
             if finish_reason not in ("STOP", "MAX_TOKENS"):
                 LOGGER.warning(f"Gemini finishReason: {finish_reason}")
             elif finish_reason == "MAX_TOKENS":
-                LOGGER.info("Gemini hit MAX_TOKENS limit - response may be truncated")
+                LOGGER.warning("Gemini hit MAX_TOKENS limit - returning continuation summary")
+                return await self._recover_execution_limit(
+                    state,
+                    ExecutionLimitReason.OUTPUT_LIMIT,
+                    partial_response=turn.text,
+                )
 
         # Check for blocked content BEFORE other processing
         # This prevents blocked responses from being treated as "rephrase" errors
@@ -1189,26 +1171,57 @@ class ConversationGraphBuilder:
             return "[Entity Context]\n" + "\n".join(parts)
         return ""
 
-    async def _synthesize_partial_answer(self, state: ConversationState) -> Optional[str]:
-        """Ask Gemini to summarize what was gathered when the tool budget is exhausted.
+    async def _recover_execution_limit(
+        self,
+        state: ConversationState,
+        reason: ExecutionLimitReason,
+        partial_response: str | None = None,
+    ) -> Dict[str, Any]:
+        """Return a persisted continuation response without making further tool calls."""
+        summary = None
+        try:
+            summary = await self._synthesize_partial_answer(state, partial_response)
+        except Exception as synth_err:
+            LOGGER.exception(f"Execution-limit synthesis failed: {synth_err}")
 
-        Used for staff sessions when MAX_TOOL_ROUNDS is hit, so the investigation context
-        already in the neutral LLM message history isn't discarded. Called WITHOUT tools
-        so Gemini is forced to produce final text instead of requesting more calls.
-        """
+        tool_results = state.get("accumulated_tool_results", [])
+        successful_results = sum(bool(result.success) for result in tool_results)
+        failed_results = len(tool_results) - successful_results
+        LOGGER.warning(
+            f"Execution limit reached: reason={reason.value} "
+            f"tool_results={len(tool_results)} successful={successful_results} "
+            f"failed={failed_results} synthesized={bool(summary)}"
+        )
+        return {
+            "final_response": format_execution_limit_response(reason, summary),
+            "should_continue": False,
+            "pending_tool_calls": [],
+            "error_category": ErrorCategory.SYSTEM.value,
+            "error": f"Execution limit reached: {reason.value}",
+            "execution_limit_reason": reason.value,
+            "graceful_limit_recovery": True,
+        }
+
+    async def _synthesize_partial_answer(
+        self,
+        state: ConversationState,
+        partial_response: str | None = None,
+    ) -> Optional[str]:
+        """Ask Gemini for a tools-disabled, factual summary of completed work."""
         messages = list(state.get("llm_messages") or state.get("history_messages") or [])
         if not messages:
             return None
 
         synthesis_prompt = (
-            "You've used your full tool-call budget without producing a final answer. "
-            "Do NOT request any more tools — based ONLY on the tool results above, write a "
-            "concise answer to the user's original question. Explicitly call out:\n"
-            "• What you were able to confirm\n"
-            "• What you couldn't complete (and why)\n"
-            "• Any tickets, grids, meters, or items that still need follow-up\n\n"
-            "Format for Telegram: short, scannable, use bullet points."
+            "This task reached its tool-call budget or another processing limit. Do NOT "
+            "request any tools and do NOT perform any action. Based ONLY on the prior tool "
+            "results and messages, write a concise Telegram-ready bullet summary of "
+            "confirmed completed work. Do not claim an action succeeded unless its tool "
+            "result confirms success. Include any remaining items or uncertainty in the "
+            "same summary."
         )
+        if partial_response:
+            synthesis_prompt += f"\n\nPartial draft that was cut off:\n{partial_response}"
         messages.append(ConversationMessage(role="user", content=synthesis_prompt))
 
         turn = await self._gemini.generate_messages(

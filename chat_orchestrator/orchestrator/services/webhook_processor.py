@@ -12,7 +12,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from langgraph.errors import GraphRecursionError
+
+from orchestrator.graphs.execution_limit_recovery import (
+    ExecutionLimitReason,
+    format_execution_limit_response,
+)
 from orchestrator.models.schemas import (
+    ConversationMessage,
     MediaAttachment,
     ToolCallResult,
     UserContext,
@@ -22,6 +29,44 @@ from shared.utils.langfuse_utils import langfuse_observe, update_trace
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+
+
+async def _persist_execution_limit_fallback(
+    response: str,
+    session_id: str | None,
+    user_context: UserContext,
+    metadata: Dict[str, Any] | None,
+) -> None:
+    """Persist a final response when graph execution cannot reach save_history."""
+    if not session_id:
+        return
+
+    try:
+        from orchestrator.graphs.nodes.save_user_message import get_or_create_session
+        from orchestrator.services.supabase_client import get_supabase_client
+
+        supabase_client = get_supabase_client()
+        session = await get_or_create_session(supabase_client, session_id, user_context)
+        group_id = getattr(user_context, "chat_id", None)
+        if not group_id or not str(group_id).startswith("-"):
+            group_id = None
+        message_type = "scheduled" if (metadata or {}).get("scheduled_execution") else "interactive"
+        response_message = ConversationMessage(
+            role="model",
+            content=response,
+            metadata={
+                "message_type": message_type,
+                "execution_limit_reason": ExecutionLimitReason.RECURSION_FALLBACK.value,
+            },
+        )
+        await supabase_client.save_messages(
+            session_uuid=session.id,
+            messages=[response_message],
+            from_chat_id=getattr(user_context, "chat_id", None),
+            group_id=group_id,
+        )
+    except Exception as exc:
+        LOGGER.warning(f"Could not persist execution-limit fallback: {exc}")
 
 
 @langfuse_observe(name="chat-request")
@@ -103,6 +148,16 @@ async def process_webhook_with_graph(
 
         return final_response, tool_results, reply_markup
 
+    except GraphRecursionError as exc:
+        LOGGER.exception(f"Graph recursion guard fired before graceful recovery: {exc}")
+        response = format_execution_limit_response(ExecutionLimitReason.RECURSION_FALLBACK, None)
+        await _persist_execution_limit_fallback(
+            response=response,
+            session_id=session_id,
+            user_context=user_context,
+            metadata=metadata,
+        )
+        return response, [], None
     except Exception as e:
         LOGGER.exception(f"Error in LangGraph full graph processing: {e}")
         # Fall back to error message

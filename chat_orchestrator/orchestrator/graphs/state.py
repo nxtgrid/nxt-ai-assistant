@@ -141,6 +141,8 @@ class ConversationState(TypedDict, total=False):
     error: Optional[str]
     error_category: Optional[str]
     finish_reason: Optional[str]  # Gemini finishReason (STOP, SAFETY, RECITATION, etc.)
+    execution_limit_reason: Optional[str]
+    graceful_limit_recovery: bool
 
     # Phase 3: Services
     # NOTE: Service objects are NOT stored in state (causes checkpointer serialization errors).
