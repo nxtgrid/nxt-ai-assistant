@@ -234,6 +234,44 @@ def test_list_tickets_unifies_both_backends():
     }
 
 
+def test_jira_ticket_with_followup_escalation_appears_once():
+    """A follow-up escalation (Task 4) stamps ticket_ref/ticket_backend onto
+    its OWN new mapping row when it pre-links to an already-open Jira ticket,
+    so one Jira ticket can have several escalation_mappings rows. The list
+    must show it once, using the newest mapping's state, not once per row."""
+    seed = _seed()
+    seed["escalation_mappings"].append(
+        {
+            "id": 22,
+            "session_id": "s3",
+            "ticket_ref": "JIRA-100",
+            "ticket_backend": "jira",
+            "organization_id": 3,
+            "org_hashtag": "#orgC",
+            "reason": "jira reason",
+            "question_text": "a follow-up question",
+            "customer_username": "bob",
+            "customer_chat_id": 222,
+            "customer_topic_id": 9,
+            "customer_email": "bob@example.com",
+            "escalation_message_id": 6099,
+            "is_active": True,
+            "resolved_at": None,
+            "created_at": "2026-07-23T08:00:00",  # newer than the original id=20 row
+        }
+    )
+    reader = SupabaseReader.__new__(SupabaseReader)
+    reader.client = _FakeClient(seed)
+
+    rows = reader.list_tickets()
+    jira_100_rows = [r for r in rows if r["ticket_ref"] == "JIRA-100"]
+
+    assert len(jira_100_rows) == 1
+    # Kept the newest mapping row (id=22's data), not the original (id=20's).
+    assert jira_100_rows[0]["summary"] == "a follow-up question"
+    assert jira_100_rows[0]["escalation_message_id"] == 6099
+
+
 def test_internal_row_is_enriched_from_mapping():
     row = next(r for r in _reader().list_tickets() if r["ticket_ref"] == "INT-1")
     assert row["org_hashtag"] == "#orgA"

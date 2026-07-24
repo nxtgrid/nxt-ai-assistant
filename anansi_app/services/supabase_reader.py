@@ -1877,11 +1877,23 @@ class SupabaseReader:
             .execute()
         )
         out: List[Dict[str, Any]] = []
+        seen_refs: set[str] = set()
         for r in resp.data or []:
             ref = r.get("ticket_ref")
             if not ref:
                 # Defensive: a jira-backed mapping must carry a ticket_ref.
                 continue
+            if ref in seen_refs:
+                # A follow-up escalation (Task 4) stamps ticket_ref/ticket_backend
+                # onto its own new mapping row when it pre-links to an already-open
+                # Jira ticket, so one Jira ticket can have several mapping rows.
+                # Rows are ordered created_at desc, so the first occurrence of a
+                # ref is the newest mapping -- keep that one and skip the rest to
+                # avoid showing the same ticket multiple times (possibly with
+                # conflicting statuses, since each row's is_active/resolved_at is
+                # independent).
+                continue
+            seen_refs.add(ref)
             resolved = bool(r.get("resolved_at")) or not r.get("is_active", True)
             out.append(
                 {
