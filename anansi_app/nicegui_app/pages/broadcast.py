@@ -92,7 +92,9 @@ async def open_dialog(user: dict) -> None:
             t_templates = ui.tab("Templates")
             t_scheduled = ui.tab("Scheduled")
             t_history = ui.tab("History")
-        with ui.tab_panels(tabs, value=t_compose).classes("w-full"):
+        with ui.tab_panels(tabs, value=t_compose).classes("w-full").style(
+            "min-height: 0; overflow-y: auto"
+        ):
             with ui.tab_panel(t_compose):
                 await _compose_tab(svc, vsvc, email)
             with ui.tab_panel(t_templates):

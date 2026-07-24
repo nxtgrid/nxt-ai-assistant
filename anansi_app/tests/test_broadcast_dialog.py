@@ -7,8 +7,8 @@ BROADCAST_PATH = (
 )
 
 
-def test_broadcast_dialog_card_is_viewport_safe():
+def test_broadcast_dialog_has_viewport_scroll_container():
     src = BROADCAST_PATH.read_text()
 
     assert "max-height: calc(100dvh - 32px)" in src
-    assert "overflow-y: auto" in src
+    assert "min-height: 0; overflow-y: auto" in src
