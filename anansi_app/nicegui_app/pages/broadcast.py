@@ -81,7 +81,9 @@ async def open_dialog(user: dict) -> None:
 
     email = user.get("email", "unknown")
 
-    with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width: 900px"):
+    with ui.dialog() as dialog, ui.card().classes("w-full").style(
+        "max-width: 900px; max-height: calc(100dvh - 32px); overflow-y: auto"
+    ):
         with ui.row().classes("items-center justify-between w-full"):
             ui.label("📢 Broadcast Message").classes("text-h6")
             ui.button(icon="close", on_click=dialog.close).props("flat round dense")
