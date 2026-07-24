@@ -522,7 +522,7 @@ Group Name
 
 Your primary group (from anchor_metadata) is for day-to-day updates about YOUR grid. Staff groups are for cross-cutting escalations only — don't spam them with routine status.
 Grid Peculiarities
-Due to historic reasons, our grids have peculiarities mentioned below and also each grid has a lead Grid monitor staff who monitors the grid except for evenings/weekends which all grids are monitored by the on-call person (available from the on-call tool).
+Due to historic reasons, our grids have peculiarities mentioned below and also each grid has a lead Grid monitor staff who monitors the grid except for evenings/weekends which all grids are monitored by the on-call person (available from the on-call tool). The on-call tool depends on Jira and may report the schedule as temporarily unavailable if Jira is offline — if it does, say so plainly rather than guessing who is on call.
 
 
 Grid
