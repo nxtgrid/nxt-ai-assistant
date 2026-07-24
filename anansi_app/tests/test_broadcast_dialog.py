@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-
 BROADCAST_PATH = (
     Path(__file__).resolve().parents[1] / "nicegui_app" / "pages" / "broadcast.py"
 )

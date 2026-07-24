@@ -326,7 +326,6 @@ class TestFlushMediaGroup:
     async def test_flush_sets_internal_reentry_sentinel(self):
         """Merged body carries the non-forgeable internal re-entry sentinel."""
         import handler
-
         from handler import _MEDIA_GROUP_BUFFERS, _flush_media_group
 
         bodies = [
