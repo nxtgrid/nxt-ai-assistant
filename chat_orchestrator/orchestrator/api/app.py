@@ -1250,11 +1250,11 @@ async def _resolve_notify_ticket_auto(
             _new_ticket_delivery(result.ref),
         )
 
+    from orchestrator.services.supabase_client import get_supabase_client
     from orchestrator.services.ticketing.alert_facts import enrich_alert_facts
     from orchestrator.services.ticketing.correlation_render import apply_amendment
     from orchestrator.services.ticketing.correlation_store import CorrelationStore
     from orchestrator.services.ticketing.correlator import AlertCorrelator
-    from orchestrator.services.supabase_client import get_supabase_client
     from orchestrator.services.ticketing.service import TicketService
 
     if body.alert is not None:

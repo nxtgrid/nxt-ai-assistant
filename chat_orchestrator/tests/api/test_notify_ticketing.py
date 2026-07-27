@@ -567,8 +567,9 @@ class TestResolveNotifyTicketAutoFailureModes:
     async def test_lock_timeout_falls_back_to_plain_create(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
 
-        import orchestrator.api.app as app_module
         from contextlib import asynccontextmanager
+
+        import orchestrator.api.app as app_module
 
         @asynccontextmanager
         async def _never_available(grid_name, timeout_seconds):
