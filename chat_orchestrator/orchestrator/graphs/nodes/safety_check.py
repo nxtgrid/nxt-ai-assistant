@@ -3,6 +3,9 @@
 This node runs post-generation safety checks:
 1. Detects when the model claims to have escalated without calling the tool
 2. Strips fabricated "Response from Support Team" blocks (impersonation guard)
+3. Detects a raw tool-call invocation leaked into the response as plain text
+   (e.g. "Call Tool: escalate_to_support(...)") instead of a native function
+   call, and replaces it before it reaches the customer
 """
 
 import os
@@ -45,6 +48,24 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
             "Impersonation guard triggered: stripped fabricated 'Response from Support Team' block"
         )
         final_response = stripped_response
+        state_updates["final_response"] = final_response
+
+    # Guard: the model can emit a tool invocation as plain text (e.g.
+    # "Call Tool: escalate_to_support(...)") instead of a native function call —
+    # observed from the fallback model in production. That raw syntax must never
+    # reach the customer. Recover the model's own summary/context from the leaked
+    # call's keyword arguments (better than falling back to a truncated dump of
+    # the raw syntax), replace the response with a safe message, and treat it the
+    # same as a natural-language escalation claim below.
+    raw_tool_call_leaked = _detect_raw_tool_call_leak(final_response)
+    leaked_kwargs: Dict[str, str] = {}
+    if raw_tool_call_leaked:
+        LOGGER.error(
+            f"Raw tool-call syntax leaked into response, replacing with safe message: "
+            f"{final_response[:200]!r}"
+        )
+        leaked_kwargs = _extract_kwargs_from_tool_call_text(final_response, "escalate_to_support")
+        final_response = get_user_message(ErrorCategory.ESCALATION, "failed")
         state_updates["final_response"] = final_response
 
     # If the session has an active escalation AND this turn was already handled by
@@ -95,7 +116,11 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
     # unconditionally for any tool failure, regardless of the bot's response content.
     # This is intentional: a failed tool call means the customer may not be escalated,
     # so we attempt backup even when the bot's response does not claim escalation.
-    if not escalation_tool_called and not _detect_escalation_claim(final_response):
+    if (
+        not escalation_tool_called
+        and not raw_tool_call_leaked
+        and not _detect_escalation_claim(final_response)
+    ):
         LOGGER.debug("No escalation claim detected in response")
         return {**state_updates, "safety_escalation_needed": False}
 
@@ -134,8 +159,14 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
                 user_context.organization_ids[0]
             )
 
-        # Extract summary from bot's response
-        summary = _extract_escalation_summary(final_response)
+        # Extract summary from bot's response. Prefer the model's own summary
+        # recovered from a leaked raw tool call over a truncated dump of that
+        # call's syntax.
+        summary = (
+            leaked_kwargs.get("question_summary")
+            or leaked_kwargs.get("conversation_context")
+            or _extract_escalation_summary(final_response)
+        )
 
         # Trigger the escalation
         if escalation_tool_called:
@@ -143,6 +174,14 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
                 f"[SAFETY ESCALATION - escalate_to_support tool was called but FAILED]\n"
                 f"User message: {user_input[:500]}"
             )
+        elif raw_tool_call_leaked:
+            esc_context = (
+                f"[SAFETY ESCALATION - raw tool-call text leaked from model instead of "
+                f"a native function call]\n"
+                f"User message: {user_input[:500]}"
+            )
+            if leaked_kwargs.get("conversation_context"):
+                esc_context += f"\nModel context: {leaked_kwargs['conversation_context'][:500]}"
         else:
             esc_context = (
                 f"[SAFETY ESCALATION - Model claimed escalation without tool call]\n"
@@ -211,6 +250,42 @@ def _strip_impersonation(response_text: str) -> str:
             return response_text.split("💬")[0].rstrip()
 
     return cleaned
+
+
+def _detect_raw_tool_call_leak(response_text: str) -> bool:
+    """Detect a tool invocation leaked into the response as plain text.
+
+    The orchestrator relies entirely on native provider function-calling
+    (Gemini `functionCall` parts / OpenRouter `tool_calls`) — there is no
+    text-based tool-call scheme. If a model instead writes the call out as
+    text (e.g. "Call Tool: escalate_to_support(question_summary='...')"),
+    nothing else strips it, so it would otherwise reach the customer as-is.
+    Matching the tool name followed immediately by an opening paren is the
+    reliable signal that this is code, not customer-facing prose — plain
+    mentions of the tool name (no call syntax) do not match.
+    """
+    if not response_text:
+        return False
+    return bool(re.search(r"\bescalate_to_support\s*\(", response_text))
+
+
+def _extract_kwargs_from_tool_call_text(response_text: str, tool_name: str) -> Dict[str, str]:
+    """Best-effort recovery of keyword arguments from a leaked raw tool-call string.
+
+    Used so the internal escalation notice carries the model's own summary
+    (e.g. `question_summary=...`) instead of a truncated dump of the raw call
+    syntax. Returns {} if the text doesn't match the expected call shape.
+    """
+    match = re.search(rf"{tool_name}\s*\((.*)\)\s*$", response_text, re.DOTALL)
+    if not match:
+        return {}
+
+    kwargs: Dict[str, str] = {}
+    for kw_match in re.finditer(r"(\w+)\s*=\s*'([^']*)'|(\w+)\s*=\s*\"([^\"]*)\"", match.group(1)):
+        key = kw_match.group(1) or kw_match.group(3)
+        value = kw_match.group(2) if kw_match.group(1) else kw_match.group(4)
+        kwargs[key] = value
+    return kwargs
 
 
 def _detect_escalation_claim(response_text: str) -> bool:
