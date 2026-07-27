@@ -1169,6 +1169,19 @@ async def _record_new_correlation(
 
 
 @dataclass(frozen=True)
+class NotificationTicket:
+    """Backend-neutral ticket data needed to render a notification."""
+
+    ref: str
+    backend: str
+    url: Optional[str] = None
+
+
+def _notification_ticket_from_result(result: Any) -> NotificationTicket:
+    return NotificationTicket(ref=result.ref, backend=result.backend, url=result.url)
+
+
+@dataclass(frozen=True)
 class NotificationDelivery:
     """How ``_deliver_notification`` should actually post (or suppress) this
     alert to Telegram -- computed once ticket correlation has decided
@@ -1182,13 +1195,14 @@ class NotificationDelivery:
     reply_to_message_id: Optional[int] = None
     top_level: bool = False  # escalation: force a fresh (non-reply) post
     record_message_id_for_ticket_ref: Optional[str] = None
+    ticket: Optional[NotificationTicket] = None
 
 
-def _new_ticket_delivery(ticket_ref: Optional[str]) -> NotificationDelivery:
+def _new_ticket_delivery(ticket: NotificationTicket) -> NotificationDelivery:
     """A freshly-filed ticket (plain "new", flag-off, or any fallback path)
     posts the alert in full, unthreaded, and remembers the resulting
     message_id against the ticket so a later amend can reply to it."""
-    return NotificationDelivery(record_message_id_for_ticket_ref=ticket_ref)
+    return NotificationDelivery(record_message_id_for_ticket_ref=ticket.ref, ticket=ticket)
 
 
 def _default_update_message(decision: Any, ticket_ref: str) -> str:
@@ -1247,7 +1261,7 @@ async def _resolve_notify_ticket_auto(
             result.ref,
             None,
             {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "flag_off"},
-            _new_ticket_delivery(result.ref),
+            _new_ticket_delivery(_notification_ticket_from_result(result)),
         )
 
     from orchestrator.services.supabase_client import get_supabase_client
@@ -1281,7 +1295,7 @@ async def _resolve_notify_ticket_auto(
                 result.ref,
                 None,
                 {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(result.ref),
+                _new_ticket_delivery(_notification_ticket_from_result(result)),
             )
 
         store = CorrelationStore(get_client=_raw_supabase_client)
@@ -1307,7 +1321,7 @@ async def _resolve_notify_ticket_auto(
                 result.ref,
                 None,
                 {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(result.ref),
+                _new_ticket_delivery(_notification_ticket_from_result(result)),
             )
 
         try:
@@ -1355,7 +1369,7 @@ async def _resolve_notify_ticket_auto(
                             "confidence": decision.confidence,
                             "decided_by": decision.decided_by,
                         },
-                        _new_ticket_delivery(result.ref),
+                        _new_ticket_delivery(_notification_ticket_from_result(result)),
                     )
 
                 first_line = next(
@@ -1378,7 +1392,7 @@ async def _resolve_notify_ticket_auto(
                         "confidence": decision.confidence,
                         "decided_by": decision.decided_by,
                     },
-                    _new_ticket_delivery(result.ref),
+                    _new_ticket_delivery(_notification_ticket_from_result(result)),
                 )
 
             # amend (onto an existing ticket) or duplicate.
@@ -1429,7 +1443,7 @@ async def _resolve_notify_ticket_auto(
                 result.ref,
                 None,
                 {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(result.ref),
+                _new_ticket_delivery(_notification_ticket_from_result(result)),
             )
 
 
@@ -1469,7 +1483,8 @@ async def _resolve_notify_ticket_full(
         result, error = await _create_notify_ticket(body, target, backend_override)
         if error is not None:
             return None, error, None, None
-        return result.ref, None, None, None
+        ticket = _notification_ticket_from_result(result)
+        return ticket.ref, None, None, _new_ticket_delivery(ticket)
 
     if normalized == "auto":
         return await _resolve_notify_ticket_auto(body, target, backend_override)
@@ -1496,7 +1511,11 @@ async def _resolve_notify_ticket_full(
         )
     if body.close:
         await ticket_service.transition_to_done(ticket_ref)
-    return ticket_ref, None, None, None
+    ticket = NotificationTicket(
+        ref=ticket_ref,
+        backend=await ticket_service.get_backend_name(ticket_ref),
+    )
+    return ticket_ref, None, None, NotificationDelivery(ticket=ticket)
 
 
 async def _resolve_notify_ticket(

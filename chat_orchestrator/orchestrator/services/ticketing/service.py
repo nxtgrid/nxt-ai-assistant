@@ -203,6 +203,15 @@ class TicketService:
         backend = await self._backend_for_ref(ref)
         return await backend.get_status(ref)
 
+    async def get_backend_name(self, ref: str) -> str:
+        """Return the persisted backend that owns ``ref``.
+
+        Callers that need to render a ticket must use this instead of inferring
+        the backend from a reference prefix: Jira project keys differ by
+        deployment and internal prefixes are configurable.
+        """
+        return (await self._backend_for_ref(ref)).name
+
     async def transition_to_done(self, ref: str) -> None:
         backend = await self._backend_for_ref(ref)
         await backend.transition_to_done(ref)

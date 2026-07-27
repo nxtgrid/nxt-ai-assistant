@@ -15,6 +15,7 @@ import pytest
 from fastapi import BackgroundTasks
 
 from orchestrator.api.app import (
+    NotificationTicket,
     NotifyRequest,
     _resolve_notify_ticket,
     _resolve_notify_ticket_full,
@@ -31,6 +32,7 @@ class _FakeTicketService:
     _resolve_notify_ticket (`from ...ticketing.service import TicketService`)."""
 
     instances: List["_FakeTicketService"] = []
+    backend_for_ref = "internal"
 
     def __init__(self, *args, **kwargs) -> None:
         self.init_kwargs = kwargs
@@ -53,6 +55,9 @@ class _FakeTicketService:
     async def get_status(self, ref: str):
         return self.get_status_return
 
+    async def get_backend_name(self, ref: str) -> str:
+        return self.backend_for_ref
+
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         self.add_comment_calls.append((ref, body, public))
         return True
@@ -64,6 +69,7 @@ class _FakeTicketService:
 @pytest.fixture(autouse=True)
 def _reset_fake_instances():
     _FakeTicketService.instances = []
+    _FakeTicketService.backend_for_ref = "internal"
     yield
     _FakeTicketService.instances = []
 
@@ -128,6 +134,32 @@ async def test_blank_ticket_id_uses_first_line_as_summary():
     req, _ = svc.create_ticket_calls[0]
     assert req.summary == "Meter offline"
     assert req.description == "Meter offline\n\nFull details below..."
+
+
+async def test_new_ticket_delivery_keeps_backend_and_url_context():
+    _FakeTicketService.instances = []
+    body = _notify_body(ticket_id="")
+    ticket_ref, error, _extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+    assert error is None
+    assert ticket_ref == "TKT-000001"
+    assert delivery is not None
+    assert delivery.ticket == NotificationTicket(
+        ref="TKT-000001", backend="internal", url=None
+    )
+
+
+async def test_existing_ticket_delivery_uses_persisted_backend_context():
+    _FakeTicketService.backend_for_ref = "internal"
+    body = _notify_body(ticket_id="TKT-000101")
+    ticket_ref, error, _extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+    assert error is None
+    assert ticket_ref == "TKT-000101"
+    assert delivery is not None
+    assert delivery.ticket == NotificationTicket(
+        ref="TKT-000101", backend="internal", url=None
+    )
 
 
 async def test_blank_ticket_id_ignores_close_flag():
