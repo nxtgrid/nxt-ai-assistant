@@ -1790,6 +1790,7 @@ class SupabaseReader:
 
         page = filtered[offset : offset + limit]
         self._attach_comment_counts(page)
+        self._attach_correlation_info(page)
         return page
 
     def get_ticket_detail(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
@@ -1814,6 +1815,8 @@ class SupabaseReader:
         comments = self._fetch_ticket_comments(ticket_ref)
         ticket["comments"] = comments
         ticket["comment_count"] = len(comments)
+        ticket["correlation"] = self._fetch_correlation(ticket_ref)
+        ticket["correlation_events"] = self._fetch_correlation_events(ticket_ref)
         return ticket
 
     # ── internal ticket helpers ────────────────────────────────────────────────
@@ -2110,6 +2113,80 @@ class SupabaseReader:
         merged.sort(key=lambda c: c.get("created_at") or "")
         return merged[-limit:]
 
+    # ── Alert correlation (smart /notify ticketing) — read-only surfacing ─────
+    #
+    # Left-joins ticket_correlations / ticket_correlation_events
+    # (db/migrations/0003_alert_correlation.sql) onto both list and detail
+    # views. No FK to internal_tickets — a correlation row may point at
+    # either backend's ref — so these are always a best-effort lookup by
+    # ticket_ref, never assumed present. A ticket the correlator never
+    # touched (filed by a human, or before this feature existed) simply has
+    # no correlation row and renders as it always has.
+
+    def _attach_correlation_info(self, rows: List[Dict[str, Any]]) -> None:
+        """Batched (one query) correlation summary for a page of tickets --
+        affected-component count, occurrence count, root cause, and whether
+        the ticket has been auto-escalated."""
+        refs = [r["ticket_ref"] for r in rows if r.get("ticket_ref")]
+        if not refs:
+            return
+        by_ref: Dict[str, Dict[str, Any]] = {}
+        try:
+            resp = (
+                self.client.table("ticket_correlations")
+                .select("ticket_ref, affected_keys, occurrence_count, root_cause_kind, escalated_at")
+                .in_("ticket_ref", refs)
+                .execute()
+            )
+            for row in resp.data or []:
+                ref = row.get("ticket_ref")
+                if ref:
+                    by_ref[ref] = row
+        except Exception as e:
+            logger.warning("Error fetching correlation info: %s", e)
+
+        for row in rows:
+            corr = by_ref.get(row.get("ticket_ref"))
+            row["affected_keys_count"] = len(corr.get("affected_keys") or []) if corr else 0
+            row["occurrence_count"] = corr.get("occurrence_count") if corr else None
+            row["root_cause_kind"] = corr.get("root_cause_kind") if corr else None
+            row["escalated"] = bool(corr.get("escalated_at")) if corr else False
+
+    def _fetch_correlation(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
+        """Full ticket_correlations row for one ticket, or None if the
+        correlator never touched this ticket."""
+        try:
+            resp = (
+                self.client.table("ticket_correlations")
+                .select("*")
+                .eq("ticket_ref", ticket_ref)
+                .limit(1)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning("Error fetching correlation for %s: %s", ticket_ref, e)
+            return None
+        rows = resp.data or []
+        return rows[0] if rows else None
+
+    def _fetch_correlation_events(
+        self, ticket_ref: str, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """Chronological correlation decision history for a ticket (audit
+        trail: what was decided, by which rung of the pipeline, and why)."""
+        try:
+            resp = (
+                self.client.table("ticket_correlation_events")
+                .select("decision, decided_by, confidence, reason, signature, created_at")
+                .eq("ticket_ref", ticket_ref)
+                .order("created_at", desc=False)
+                .limit(limit)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning("Error fetching correlation events for %s: %s", ticket_ref, e)
+            return []
+        return resp.data or []
 
 
 __all__ = ["SupabaseReader"]

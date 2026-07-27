@@ -363,6 +363,151 @@ _FLAGS: List[Flag] = [
         "(Jira if configured and healthy, else internal, same as customer escalations).",
         scope=SERVICE_BOT,
     ),
+    # --- Alert correlation (smart /notify ticketing) ------------------------
+    _b(
+        "ALERT_CORRELATION_ENABLED",
+        False,
+        "Master switch for /notify ticket_id='auto' correlation. Off: 'auto' behaves "
+        "exactly like '' (plain create) -- the kill switch can never drop an alert.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "ALERT_CORRELATION_MODEL",
+        "gemini-2.5-flash",
+        "Model used for the new-vs-amend-vs-duplicate correlation decision.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "ALERT_CORRELATION_DOC_ID",
+        "",
+        "Google Doc id holding operator-editable alert correlation rules. Falls back "
+        "to the bundled alert_correlation_instructions.md when unset/unreachable.",
+        scope=SERVICE_BOT,
+    ),
+    _f(
+        "ALERT_CORRELATION_MIN_CONFIDENCE",
+        0.75,
+        "Minimum LLM confidence to accept an amend/duplicate decision; below this the "
+        "alert is filed as a new ticket instead.",
+        scope=SERVICE_BOT,
+    ),
+    _i(
+        "ALERT_CORRELATION_TIMEOUT_SECONDS",
+        12,
+        "Budget (seconds) for the correlation LLM call and per-grid lock acquisition "
+        "combined; exceeding it falls back to filing a new ticket.",
+        scope=SERVICE_BOT,
+    ),
+    _i(
+        "ALERT_CORRELATION_LOOKBACK_HOURS",
+        168,
+        "How far back to look for open candidate tickets on a grid.",
+        scope=SERVICE_BOT,
+    ),
+    _i(
+        "ALERT_CORRELATION_MAX_CANDIDATES",
+        15,
+        "Maximum number of candidate tickets included in the correlation LLM prompt.",
+        scope=SERVICE_BOT,
+    ),
+    _i(
+        "ALERT_CORRELATION_ESCALATE_AFTER",
+        3,
+        "Number of distinct affected components on one ticket before it is "
+        "auto-escalated (priority bump + fresh top-level Telegram post).",
+        scope=SERVICE_BOT,
+    ),
+    _i(
+        "ALERT_CORRELATION_ROLLUP_EVERY",
+        10,
+        "Post a roll-up reply to the O&M topic every Nth silent duplicate occurrence.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "ALERT_CORRELATION_RAG_IDENTITY",
+        "",
+        "Staff email used for permission-filtered RAG context during correlation. "
+        "Blank disables RAG lookup for correlation (independent of rag__enabled).",
+        scope=SERVICE_BOT,
+    ),
+    # --- Jira alert-ticket profile (n8n field parity for /notify tickets) ---
+    _s("JIRA_ALERT_PROJECT_ID", "", "Jira project id for alert tickets (numeric).", scope=SERVICE_BOT),
+    _s("JIRA_ALERT_PROJECT_KEY", "", "Jira project key for alert tickets, e.g. 'ALM'.", scope=SERVICE_BOT),
+    _s(
+        "JIRA_ALERT_ISSUE_TYPE_ID", "", "Issue type id used for alert tickets.", scope=SERVICE_BOT
+    ),
+    _s(
+        "JIRA_ALERT_REPORTER_ACCOUNT_ID",
+        "",
+        "Reporter accountId stamped on alert tickets.",
+        scope=SERVICE_BOT,
+    ),
+    _s("JIRA_ALERT_LABEL", "", "Label applied to every alert ticket.", scope=SERVICE_BOT),
+    _s(
+        "JIRA_ALERT_GRID_FIELD_ID",
+        "",
+        "Custom field id (e.g. 'customfield_10057') for the Grid select field.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "JIRA_ALERT_GRID_CONTEXT_ID",
+        "",
+        "Field context id for the Grid select field (needed to list/add options).",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "JIRA_ALERT_GRID_IGNORED_OPTION_ID",
+        "",
+        "Grid field option id to exclude from exact-match lookups (a stale/placeholder "
+        "option some Jira projects keep around).",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "JIRA_ALERT_TYPE_FIELD_ID", "", "Custom field id for the Alarm Type field.", scope=SERVICE_BOT
+    ),
+    _s(
+        "JIRA_ALERT_TYPE_OPTION_ID",
+        "",
+        "Option id stamped on the Alarm Type field for every alert ticket.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "JIRA_ALERT_CATEGORY_FIELD_ID",
+        "",
+        "Custom field id for the (cascading) Category field.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "JIRA_ALERT_CATEGORY_PARENT_OPTION_ID",
+        "",
+        "Parent option id for the Category cascading field.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "JIRA_ALERT_CATEGORY_CHILD_OPTION_ID",
+        "",
+        "Child option id for the Category cascading field.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "JIRA_ALERT_DATE_FIELD_ID",
+        "",
+        "Custom field id for the alert date field (stamped YYYY-MM-DD).",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "JIRA_ALERT_NO_GRID_PRIORITY_ID",
+        "",
+        "Priority id applied when an alert ticket has no resolvable grid.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "JIRA_ALERT_ESCALATED_PRIORITY_ID",
+        "",
+        "Priority id applied when a ticket is auto-escalated (see "
+        "ALERT_CORRELATION_ESCALATE_AFTER).",
+        scope=SERVICE_BOT,
+    ),
     # --- Expert workflow / interaction ------------------------------------
     _b(
         "WORKFLOW_PARAMETER_CONFIRMATION",

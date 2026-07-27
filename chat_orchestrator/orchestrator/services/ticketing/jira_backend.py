@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -20,7 +21,19 @@ import aiohttp
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
-from .backend import TicketBackendError, TicketCreateRequest, TicketResult, TicketStatus
+from .backend import (
+    TicketBackendError,
+    TicketCreateRequest,
+    TicketResult,
+    TicketStatus,
+    TicketSummary,
+)
+from .jira_alert_profile import (
+    AlertTicketProfile,
+    build_alert_issue_fields,
+    load_alert_ticket_profile,
+    resolve_or_create_grid_option,
+)
 
 LOGGER = get_logger(__name__)
 
@@ -47,12 +60,99 @@ _JIRA_ORGS_TTL: float = 1800.0  # 30 minutes
 
 
 def _adf_to_text(adf: Any, _depth: int = 0, _max_depth: int = 50) -> str:
-    """Extract plain text from an Atlassian Document Format node (recursive, depth-limited)."""
+    """Extract plain text from an Atlassian Document Format node (recursive, depth-limited).
+
+    Sibling blocks (``paragraph``, ``bulletList``) are joined with ``\\n``,
+    ``hardBreak`` becomes ``\\n``, and a ``listItem`` is prefixed with
+    ``"- "`` -- the inverse of ``_text_to_adf`` for whatever shape that
+    function actually produces. A single plain paragraph (no bullets, no
+    line breaks) still returns exactly its own text, unchanged from before
+    this function supported multi-block docs.
+    """
     if _depth > _max_depth or not adf or not isinstance(adf, dict):
         return ""
-    if adf.get("type") == "text":
+    node_type = adf.get("type")
+    if node_type == "text":
         return str(adf.get("text", ""))
-    return "".join(_adf_to_text(child, _depth + 1, _max_depth) for child in adf.get("content", []))
+    if node_type == "hardBreak":
+        return "\n"
+    children = adf.get("content", []) or []
+    if node_type == "listItem":
+        inner = "".join(_adf_to_text(child, _depth + 1, _max_depth) for child in children)
+        return f"- {inner}"
+    if node_type in ("doc", "bulletList"):
+        return "\n".join(_adf_to_text(child, _depth + 1, _max_depth) for child in children)
+    # paragraph (and any other/unknown block type): concatenate inline content directly.
+    return "".join(_adf_to_text(child, _depth + 1, _max_depth) for child in children)
+
+
+def _text_to_adf(text: str) -> Dict[str, Any]:
+    """Convert plain text into an ADF doc -- consecutive plain lines become
+    one ``paragraph`` (joined by ``hardBreak``), consecutive ``"- "``-prefixed
+    lines become a ``bulletList``, interleaved in whatever order they occur.
+    A single plain line/paragraph (this module's original use -- escalation
+    ticket descriptions, plain alert comments) degrades to exactly the old
+    single-paragraph shape. Inverse of ``_adf_to_text``.
+    """
+    lines = text.split("\n")
+    blocks: List[Dict[str, Any]] = []
+    para_lines: List[str] = []
+    bullet_lines: List[str] = []
+
+    def flush_paragraph() -> None:
+        if not para_lines:
+            return
+        content: List[Dict[str, Any]] = []
+        for i, line in enumerate(para_lines):
+            if i > 0:
+                content.append({"type": "hardBreak"})
+            if line:
+                content.append({"type": "text", "text": line})
+        blocks.append({"type": "paragraph", "content": content})
+        para_lines.clear()
+
+    def flush_bullets() -> None:
+        if not bullet_lines:
+            return
+        blocks.append(
+            {
+                "type": "bulletList",
+                "content": [
+                    {
+                        "type": "listItem",
+                        "content": [
+                            {"type": "paragraph", "content": [{"type": "text", "text": item}]}
+                        ],
+                    }
+                    for item in bullet_lines
+                ],
+            }
+        )
+        bullet_lines.clear()
+
+    for line in lines:
+        if line.startswith("- "):
+            flush_paragraph()
+            bullet_lines.append(line[2:])
+        else:
+            flush_bullets()
+            para_lines.append(line)
+    flush_paragraph()
+    flush_bullets()
+
+    if not blocks:
+        blocks = [{"type": "paragraph", "content": []}]
+
+    return {"type": "doc", "version": 1, "content": blocks}
+
+
+def _slugify_grid(grid_name: str) -> str:
+    """Lowercase, alnum-and-hyphen slug used for the backend-independent
+    ``grid-<slug>`` label -- lets ``find_open_by_grid`` locate a grid's open
+    tickets by label alone, without depending on the alert-ticket Jira
+    profile's custom grid field being configured."""
+    slug = re.sub(r"[^a-z0-9]+", "-", grid_name.strip().lower()).strip("-")
+    return slug or "unknown"
 
 
 class JiraTicketBackend:
@@ -128,6 +228,10 @@ class JiraTicketBackend:
             return False
 
     async def create_ticket(self, req: TicketCreateRequest) -> TicketResult:
+        if req.source == "notify":
+            profile = load_alert_ticket_profile()
+            if profile.is_configured():
+                return await self._create_alert_jira_ticket(req, profile)
         result = await self._create_jira_ticket(
             summary=req.summary,
             description=req.description,
@@ -141,6 +245,55 @@ class JiraTicketBackend:
         key = result["key"]
         url = f"{self._jira_base_url}/browse/{key}" if self._jira_base_url else None
         return TicketResult(ref=key, backend="jira", url=url)
+
+    async def _create_alert_jira_ticket(
+        self, req: TicketCreateRequest, profile: AlertTicketProfile
+    ) -> TicketResult:
+        """n8n field-parity path for ``source='notify'`` alert tickets --
+        see ``jira_alert_profile.py``. Only reached when that profile is
+        fully configured; otherwise ``create_ticket`` uses the OPS/Task path
+        exactly as it always has.
+        """
+        headers = self._jira_auth_headers()
+        grid_option_id = None
+        if req.grid_name:
+            grid_option_id = await resolve_or_create_grid_option(
+                base_url=self._jira_base_url,
+                headers=headers,
+                profile=profile,
+                grid_name=req.grid_name,
+                get_session=_get_jira_session,
+            )
+
+        payload = build_alert_issue_fields(
+            profile,
+            summary=req.summary,
+            description=req.description,
+            grid_option_id=grid_option_id,
+            grid_name=req.grid_name,
+            extra_labels=req.labels or None,
+        )
+
+        url = f"{self._jira_base_url}/rest/api/3/issue"
+        try:
+            session = _get_jira_session()
+            async with session.post(
+                url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status in (200, 201):
+                    result = await response.json()
+                    key = result.get("key")
+                    url_out = f"{self._jira_base_url}/browse/{key}" if self._jira_base_url else None
+                    LOGGER.info("Created alert Jira ticket: %s", key)
+                    return TicketResult(ref=key, backend="jira", url=url_out)
+                body = await response.text()
+                raise TicketBackendError(
+                    f"Alert Jira ticket creation failed: HTTP {response.status}: {body}"
+                )
+        except TicketBackendError:
+            raise
+        except Exception as e:
+            raise TicketBackendError(f"Alert Jira ticket creation failed: {e}") from e
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         # `public` is accepted for Protocol parity with the internal backend
@@ -164,6 +317,106 @@ class JiraTicketBackend:
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         return await self._search_jira_for_escalation(mapping_id)
+
+    async def update_ticket(
+        self,
+        ref: str,
+        summary: Optional[str] = None,
+        description: Optional[str] = None,
+        priority_id: Optional[str] = None,
+    ) -> bool:
+        """PUT summary/description/priority onto an existing issue.
+
+        Never raises -- returns False on any HTTP error or transport failure,
+        same fail-quiet contract as ``add_comment``/``transition_to_done``.
+        """
+        if not self._jira_base_url:
+            return False
+        fields: Dict[str, Any] = {}
+        if summary is not None:
+            fields["summary"] = summary
+        if description is not None:
+            fields["description"] = _text_to_adf(description)
+        if priority_id is not None:
+            fields["priority"] = {"id": priority_id}
+        if not fields:
+            return True
+
+        url = f"{self._jira_base_url}/rest/api/3/issue/{ref}"
+        try:
+            session = _get_jira_session()
+            async with session.put(
+                url,
+                json={"fields": fields},
+                headers=self._jira_auth_headers(),
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status in (200, 204):
+                    return True
+                body = await resp.text()
+                LOGGER.warning("Failed to update Jira issue %s: HTTP %s -- %s", ref, resp.status, body)
+                return False
+        except Exception:
+            LOGGER.warning("Error updating Jira issue %s", ref, exc_info=True)
+            return False
+
+    async def find_open_by_grid(self, grid_name: str, limit: int = 20) -> List[TicketSummary]:
+        """Search for open issues carrying this grid's ``grid-<slug>`` label.
+
+        Label-based rather than the alert-ticket profile's custom grid field
+        (see ``jira_alert_profile.py``) so this works whether or not that
+        profile is configured -- every ticket the alert-ticket path files
+        gets the label unconditionally.
+        """
+        if not self._jira_base_url or not self._jira_project_key:
+            return []
+        slug = _slugify_grid(grid_name)
+        jql = (
+            f'project = "{self._jira_project_key}" AND statusCategory != Done '
+            f'AND labels = "grid-{slug}" ORDER BY created DESC'
+        )
+        url = f"{self._jira_base_url}/rest/api/3/issue/search"
+        try:
+            session = _get_jira_session()
+            async with session.get(
+                url,
+                params={
+                    "jql": jql,
+                    "fields": "summary,description,status,created,labels",
+                    "maxResults": str(limit),
+                },
+                headers=self._jira_auth_headers(),
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    LOGGER.warning(
+                        "Jira search failed for grid %r: HTTP %s -- %s", grid_name, resp.status, body
+                    )
+                    return []
+                data = await resp.json()
+        except Exception:
+            LOGGER.warning("Error searching Jira for grid %r", grid_name, exc_info=True)
+            return []
+
+        results: List[TicketSummary] = []
+        for issue in data.get("issues", []):
+            fields = issue.get("fields", {}) or {}
+            status_field = fields.get("status", {}) or {}
+            status_category = status_field.get("statusCategory", {}).get("key", "")
+            results.append(
+                TicketSummary(
+                    ref=issue.get("key", ""),
+                    backend="jira",
+                    summary=fields.get("summary") or "",
+                    description=_adf_to_text(fields.get("description")),
+                    status=status_field.get("name", ""),
+                    is_done=(status_category == "done"),
+                    created_at=fields.get("created"),
+                    labels=fields.get("labels") or [],
+                )
+            )
+        return results
 
     # ------------------------------------------------------------------
     # Jira REST helpers (moved from EscalationService unchanged)

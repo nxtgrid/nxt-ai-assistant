@@ -222,10 +222,14 @@ def _ticket_row(db, ticket: dict) -> None:
     ref = ticket.get("ticket_ref") or "—"
     summary = ticket.get("summary") or ""
     summary_short = summary if len(summary) <= 70 else summary[:69] + "…"
+    affected_count = ticket.get("affected_keys_count") or 0
+    correlation_suffix = f"  ·  🔗 {affected_count} affected" if affected_count > 1 else ""
+    escalated_prefix = "🔴 " if ticket.get("escalated") else ""
     header = (
-        f"{_backend_chip(ticket.get('backend'))}  ·  {ref}  ·  {summary_short}"
+        f"{escalated_prefix}{_backend_chip(ticket.get('backend'))}  ·  {ref}  ·  {summary_short}"
         f"  ·  {_format_time_ago(ticket.get('created_at'))}"
         f"  ·  💬 {ticket.get('comment_count', 0)}"
+        f"{correlation_suffix}"
     )
 
     exp = ui.expansion(header).classes("w-full").style(
@@ -247,6 +251,8 @@ def _ticket_row(db, ticket: dict) -> None:
             ui.label(f"👤 {_mask_customer(ticket)}").classes("text-caption")
             if ticket.get("reason"):
                 ui.label(f"📌 {ticket['reason']}").classes("text-caption")
+            if ticket.get("root_cause_kind"):
+                ui.label(f"🧭 root cause: {ticket['root_cause_kind']}").classes("text-caption")
         body = ui.column().classes("w-full gap-2")
 
     async def _on_toggle() -> None:
@@ -289,6 +295,8 @@ def _render_detail_body(container, detail: dict) -> None:
             ui.label("Description").classes("text-bold q-mt-sm")
             ui.label(description).classes("text-body2").style("white-space: pre-wrap")
 
+        _correlation_section(detail)
+
         ui.label("Comment timeline (read-only)").classes("text-bold q-mt-sm")
         comments = detail.get("comments") or []
         if not comments:
@@ -296,6 +304,75 @@ def _render_detail_body(container, detail: dict) -> None:
             return
         for comment in comments:
             _comment_card(comment)
+
+
+_DECISION_LABELS = {"new": "🆕 New", "amend": "✏️ Amend", "duplicate": "🔁 Duplicate"}
+_DECIDED_BY_LABELS = {
+    "replay": "replay (dedup)",
+    "flag_off": "correlation disabled",
+    "no_candidates": "no open candidates",
+    "signature": "exact signature match",
+    "llm": "LLM decision",
+    "fallback": "fallback (error/timeout)",
+}
+
+
+def _correlation_section(detail: dict) -> None:
+    """Read-only surfacing of alert-correlation state (Task 11) -- affected
+    components, occurrence count, root cause, and the decision audit trail
+    from ticket_correlation_events. Renders nothing when the correlator never
+    touched this ticket (filed by a human, or before this feature existed)."""
+    correlation = detail.get("correlation")
+    events = detail.get("correlation_events") or []
+    if not correlation and not events:
+        return
+
+    ui.label("Alert correlation").classes("text-bold q-mt-sm")
+    with ui.row().classes("items-center gap-3 flex-wrap"):
+        if correlation:
+            ui.label(f"🔁 Occurrences: {correlation.get('occurrence_count') or 1}").classes(
+                "text-caption"
+            )
+            if correlation.get("root_cause_kind"):
+                ui.label(f"🧭 Root cause: {correlation['root_cause_kind']}").classes(
+                    "text-caption"
+                )
+            if correlation.get("escalated_at"):
+                ui.label(f"🔴 Escalated {_format_time_ago(correlation['escalated_at'])}").classes(
+                    "text-caption"
+                )
+
+    affected_keys = (correlation or {}).get("affected_keys") or []
+    if affected_keys:
+        with ui.column().classes("gap-1 q-mt-xs"):
+            ui.label(f"Affected components ({len(affected_keys)})").classes(
+                "text-caption text-bold"
+            )
+            for entry in affected_keys:
+                label = entry.get("label") or f"{entry.get('kind', '')} {entry.get('key', '')}"
+                count = entry.get("count", 1)
+                ui.label(
+                    f"• {label} — last seen {_format_time_ago(entry.get('last_seen'))} ({count}×)"
+                ).classes("text-caption")
+
+    if events:
+        with ui.column().classes("gap-1 q-mt-xs"):
+            ui.label("Decision history").classes("text-caption text-bold")
+            for event in events:
+                decision_label = _DECISION_LABELS.get(
+                    event.get("decision"), event.get("decision") or "—"
+                )
+                decided_by = _DECIDED_BY_LABELS.get(
+                    event.get("decided_by"), event.get("decided_by") or ""
+                )
+                confidence = event.get("confidence")
+                confidence_text = f" ({confidence:.0%})" if isinstance(confidence, (int, float)) else ""
+                reason = event.get("reason") or ""
+                ui.label(
+                    f"{_format_time_ago(event.get('created_at'))} — {decision_label} "
+                    f"via {decided_by}{confidence_text}"
+                    + (f": {reason}" if reason else "")
+                ).classes("text-caption")
 
 
 def _comment_card(comment: dict) -> None:

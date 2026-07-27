@@ -11,6 +11,8 @@ import os
 import signal
 import sys
 import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -23,6 +25,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from orchestrator.services.ticketing.alert_facts import AlertFacts
 from shared.utils.gdrive_doc_fetcher import GoogleDriveDocFetcher
 from shared.utils.logging import get_logger
 
@@ -856,14 +859,25 @@ class NotifyRequest(BaseModel):
         default=None,
         description="Ticketing hint. Omit for a pure passthrough alert (today's behavior, "
         "unchanged). Empty string ('') to FILE a new ticket from this notification -- "
-        "response returns {ok, ticket_ref}. A ref (e.g. 'TKT-000123' or 'OPS-55') to append "
-        "this notification as a comment/update to that existing ticket -- response returns "
-        "{ok, ticket_ref: ticket_id}. An unresolvable ref returns 404.",
+        "response returns {ok, ticket_ref}. 'auto' to let Anansi decide whether this alert "
+        "is new, relates to an existing open ticket on this grid (amend), or is an exact "
+        "re-fire (duplicate) -- see ALERT_CORRELATION_ENABLED; response additionally returns "
+        "{decision, correlated_with, confidence, decided_by}. A ref (e.g. 'TKT-000123' or "
+        "'OPS-55') to append this notification as a comment/update to that existing ticket -- "
+        "response returns {ok, ticket_ref: ticket_id}. An unresolvable ref returns 404.",
     )
     close: Optional[bool] = Field(
         default=False,
         description="With a populated ticket_id, also transition that ticket to done "
-        "after the comment is added. Ignored when ticket_id is omitted or blank.",
+        "after the comment is added. Ignored when ticket_id is omitted, blank, or 'auto'.",
+    )
+    alert: Optional[AlertFacts] = Field(
+        default=None,
+        description="Structured alert facts for ticket_id='auto' correlation (subject, "
+        "alert_type, details, severity, component_kind/key/label, fired_at, rule_id). "
+        "Every field is independently derivable from `text`/`subject` when omitted -- pass "
+        "what you already have (e.g. n8n's extracted MPPT/DCU id) and Anansi fills the rest. "
+        "Ignored for any ticket_id other than 'auto'.",
     )
 
 
@@ -918,7 +932,10 @@ async def _log_notification_to_chat_db(
 
 
 async def _deliver_notification(
-    body: "NotifyRequest", target: "GridNotificationTarget", ticket_ref: Optional[str] = None
+    body: "NotifyRequest",
+    target: "GridNotificationTarget",
+    ticket_ref: Optional[str] = None,
+    delivery: "Optional[NotificationDelivery]" = None,
 ) -> None:
     """Convert, send, and log a notification to an already-resolved grid target.
 
@@ -926,9 +943,25 @@ async def _deliver_notification(
     synchronously in the handler so failures are reported to the caller rather
     than silently dropped here; this runs in the background and only covers the
     Telegram send + best-effort session logging/tagging.
+
+    ``delivery`` (populated only for ``ticket_id="auto"``, see
+    ``_resolve_notify_ticket_auto``) can suppress the send entirely (a silent
+    "duplicate" between roll-ups), override the text (a short amend/roll-up
+    reply instead of the full alert), and/or thread the send as a reply to an
+    earlier message. ``delivery=None`` (every other ``ticket_id`` path) is
+    exactly today's behavior: the full alert text, unthreaded.
     """
     from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
     from shared.utils.telegram_send import send_telegram_message_with_fallback
+
+    if delivery is not None and delivery.suppress:
+        logger.info(
+            "Notify: delivery suppressed source=%s grid=%s ticket_ref=%s",
+            body.source,
+            target.grid_name,
+            ticket_ref,
+        )
+        return
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     if not bot_token:
@@ -936,9 +969,14 @@ async def _deliver_notification(
         return
 
     parse_mode = (body.parse_mode or "").strip() or None
-    text = body.text
+    raw_text = (delivery.text_override if delivery is not None and delivery.text_override else body.text)
+    text = raw_text
     if parse_mode and parse_mode.lower().startswith("markdown"):
-        text = convert_github_to_telegram_markdown(body.text)
+        text = convert_github_to_telegram_markdown(raw_text)
+
+    reply_to_message_id = (
+        delivery.reply_to_message_id if delivery is not None and not delivery.top_level else None
+    )
 
     message_id = await send_telegram_message_with_fallback(
         bot_token,
@@ -946,6 +984,7 @@ async def _deliver_notification(
         text,
         parse_mode=parse_mode,
         topic_id=target.topic_id,
+        reply_to_message_id=reply_to_message_id,
     )
     if message_id is None:
         logger.warning(
@@ -968,16 +1007,446 @@ async def _deliver_notification(
         body, target.chat_id, target.topic_id, message_id, ticket_ref=ticket_ref
     )
 
+    if delivery is not None and delivery.record_message_id_for_ticket_ref:
+        try:
+            from orchestrator.services.ticketing.correlation_store import CorrelationStore
 
-async def _resolve_notify_ticket(
+            store = CorrelationStore(get_client=_raw_supabase_client)
+            await store.record_message_id(delivery.record_message_id_for_ticket_ref, message_id)
+        except Exception:
+            logger.warning(
+                "Notify: failed to record telegram_message_id for %r",
+                delivery.record_message_id_for_ticket_ref,
+                exc_info=True,
+            )
+
+
+def _raw_supabase_client() -> Optional[Any]:
+    """Raw postgrest client (``.table()``/``.rpc()``) for the correlation-layer
+    services (``CorrelationStore``) -- mirrors ``TicketService``'s own
+    ``_raw_client()`` accessor, which does the same
+    ``get_supabase_client()._get_client()`` unwrap."""
+    from orchestrator.services.supabase_client import get_supabase_client
+
+    wrapper = get_supabase_client()
+    return wrapper._get_client() if wrapper else None
+
+
+# Per-grid in-process locks serializing alert-correlation decisions for a
+# grid, so N alerts arriving in the same second don't each see "no open
+# candidate" and each file their own ticket. Correct only for the current
+# single-process deployment (chat_orchestrator/Dockerfile runs uvicorn with
+# no --workers); at instance_count > 1 this stops serializing across
+# processes -- the follow-up is a `grid_correlation_leases` table with a
+# short-TTL lease (see the plan's "Concurrency" section). Module-level dict
+# keyed by resolved grid name; safe to grow/read without an extra guard
+# since asyncio is single-threaded and nothing awaits between the .get()
+# and the .setdefault() below.
+_grid_correlation_locks: Dict[str, asyncio.Lock] = {}
+
+
+def _get_grid_correlation_lock(grid_name: str) -> asyncio.Lock:
+    lock = _grid_correlation_locks.get(grid_name)
+    if lock is None:
+        lock = asyncio.Lock()
+        _grid_correlation_locks[grid_name] = lock
+    return lock
+
+
+@asynccontextmanager
+async def _acquire_grid_correlation_lock(grid_name: str, timeout_seconds: float):
+    """Yields ``True`` if the per-grid lock was acquired within
+    ``timeout_seconds``, ``False`` on timeout (never raises) -- callers must
+    treat a timeout the same as any other correlation failure: fall through
+    to filing a plain new ticket rather than blocking the request."""
+    lock = _get_grid_correlation_lock(grid_name)
+    try:
+        await asyncio.wait_for(lock.acquire(), timeout=timeout_seconds)
+    except asyncio.TimeoutError:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        lock.release()
+
+
+async def _create_notify_ticket(
+    body: "NotifyRequest",
+    target: "GridNotificationTarget",
+    backend_override: str,
+    summary: Optional[str] = None,
+    description: Optional[str] = None,
+) -> "tuple[Optional[Any], Optional[JSONResponse]]":
+    """File a new notify-originated ticket. Shared by the plain ``ticket_id=""``
+    path and every ``"auto"`` fallback (flag off, lock timeout, correlation
+    failure, decided "new") -- all of them file exactly the same way.
+
+    Returns ``(TicketResult, None)`` on success or ``(None, response)`` on
+    failure (500 -- ticket creation failing is the one /notify-ticketing
+    failure mode that must reach the caller, same as before this task).
+    """
+    from orchestrator.services.supabase_client import get_supabase_client
+    from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
+    from orchestrator.services.ticketing.service import TicketService
+
+    ticket_service = TicketService(get_supabase_client=get_supabase_client)
+
+    if summary is None:
+        first_line = next(
+            (line.strip() for line in body.text.splitlines() if line.strip()), "Notification"
+        )
+        summary = first_line[:120]
+    if description is None:
+        description = body.text
+
+    try:
+        result = await ticket_service.create_ticket(
+            TicketCreateRequest(
+                summary=summary,
+                description=description,
+                grid_name=target.grid_name,
+                source="notify",
+            ),
+            backend_override=backend_override,
+        )
+    except TicketBackendError as e:
+        logger.error("Notify: ticket creation failed source=%s: %s", body.source, e)
+        return None, JSONResponse(
+            status_code=500,
+            content={"ok": False, "error": f"Ticket creation failed: {e}"},
+        )
+    return result, None
+
+
+async def _record_new_correlation(
+    store: Any,
+    target: "GridNotificationTarget",
+    alert: "AlertFacts",
+    result: Any,
+    root_cause_kind: Optional[str],
+    summary: str,
+    description: str,
+) -> None:
+    """Seed the ``ticket_correlations`` row for a freshly-filed notify ticket
+    (plain "new", or a newly-created root-cause parent). Best-effort -- a
+    failure here means the ticket exists but alert correlation won't find it
+    as a candidate later (degrades to filing another new ticket next time,
+    not a lost alert)."""
+    try:
+        signatures = [alert.signature] if alert.signature else []
+        affected_keys: List[Dict[str, Any]] = []
+        if alert.component_kind and alert.component_key:
+            affected_keys = [
+                {
+                    "kind": alert.component_kind,
+                    "key": alert.component_key,
+                    "label": alert.component_label,
+                    "first_seen": alert.fired_at,
+                    "last_seen": alert.fired_at,
+                    "count": 1,
+                }
+            ]
+        await store.upsert_correlation(
+            ticket_ref=result.ref,
+            ticket_backend=result.backend,
+            grid_name=target.grid_name,
+            organization_id=None,
+            root_cause_kind=root_cause_kind,
+            primary_signature=alert.signature or "",
+            signatures=signatures,
+            affected_keys=affected_keys,
+            summary_base=summary,
+            description_base=description,
+            severity=alert.severity,
+            telegram_chat_id=target.chat_id,
+            telegram_topic_id=target.topic_id,
+        )
+    except Exception:
+        logger.warning(
+            "Notify: failed to seed correlation row for %r", result.ref, exc_info=True
+        )
+
+
+@dataclass(frozen=True)
+class NotificationDelivery:
+    """How ``_deliver_notification`` should actually post (or suppress) this
+    alert to Telegram -- computed once ticket correlation has decided
+    new/amend/duplicate. ``None`` (the default used by every non-"auto"
+    ``ticket_id`` path) means "send ``body.text`` in full, no reply,
+    exactly as before this existed".
+    """
+
+    suppress: bool = False
+    text_override: Optional[str] = None
+    reply_to_message_id: Optional[int] = None
+    top_level: bool = False  # escalation: force a fresh (non-reply) post
+    record_message_id_for_ticket_ref: Optional[str] = None
+
+
+def _new_ticket_delivery(ticket_ref: Optional[str]) -> NotificationDelivery:
+    """A freshly-filed ticket (plain "new", flag-off, or any fallback path)
+    posts the alert in full, unthreaded, and remembers the resulting
+    message_id against the ticket so a later amend can reply to it."""
+    return NotificationDelivery(record_message_id_for_ticket_ref=ticket_ref)
+
+
+def _default_update_message(decision: Any, ticket_ref: str) -> str:
+    if decision.update_message:
+        return decision.update_message
+    if decision.affected_key:
+        label = decision.affected_key.get("label") or "another component"
+        return f"{ticket_ref}: {label} also affected"
+    return f"{ticket_ref}: updated"
+
+
+def _amend_delivery(decision: Any, amendment: Any, ticket_ref: str) -> NotificationDelivery:
+    message = _default_update_message(decision, ticket_ref)
+    if amendment is not None and amendment.escalated:
+        return NotificationDelivery(text_override=f"🔴 {message}", top_level=True)
+    reply_to = amendment.telegram_message_id if amendment is not None else None
+    return NotificationDelivery(text_override=f"↻ {message}", reply_to_message_id=reply_to)
+
+
+def _duplicate_delivery(amendment: Any, ticket_ref: str) -> NotificationDelivery:
+    """Silent by default (that's the whole point of "duplicate") -- except
+    every ``ALERT_CORRELATION_ROLLUP_EVERY``-th occurrence, which gets one
+    reply so a long-running issue doesn't vanish from the topic entirely."""
+    from shared.config import flag_registry as fr
+
+    if amendment is None:
+        return NotificationDelivery(suppress=True)
+    rollup_every = int(fr.get("ALERT_CORRELATION_ROLLUP_EVERY"))
+    if rollup_every > 0 and amendment.occurrence_count % rollup_every == 0:
+        message = f"{ticket_ref}: still firing — {amendment.occurrence_count} occurrences"
+        return NotificationDelivery(
+            text_override=f"↻ {message}", reply_to_message_id=amendment.telegram_message_id
+        )
+    return NotificationDelivery(suppress=True)
+
+
+async def _resolve_notify_ticket_auto(
+    body: "NotifyRequest", target: "GridNotificationTarget", backend_override: str
+) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
+    """``ticket_id == "auto"``: smart alert correlation (see
+    docs/superpowers/plans/2026-07-27-smart-alert-correlation-notify.md).
+
+    Fails open at every step -- ``ALERT_CORRELATION_ENABLED`` off, a grid-lock
+    timeout, or the correlator/executor raising all fall back to filing a
+    plain new ticket via ``_create_notify_ticket`` (the exact same path as
+    ``ticket_id=""``). An alert is never dropped; correlation only ever adds
+    grouping on top, never a new way to fail.
+    """
+    from shared.config import flag_registry as fr
+
+    if not fr.get("ALERT_CORRELATION_ENABLED"):
+        result, error = await _create_notify_ticket(body, target, backend_override)
+        if error is not None:
+            return None, error, None, None
+        return (
+            result.ref,
+            None,
+            {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "flag_off"},
+            _new_ticket_delivery(result.ref),
+        )
+
+    from orchestrator.services.supabase_client import get_supabase_client
+    from orchestrator.services.ticketing.alert_facts import enrich_alert_facts
+    from orchestrator.services.ticketing.correlation_render import apply_amendment
+    from orchestrator.services.ticketing.correlation_store import CorrelationStore
+    from orchestrator.services.ticketing.correlator import AlertCorrelator
+    from orchestrator.services.ticketing.service import TicketService
+
+    if body.alert is not None:
+        base_alert = body.alert
+    else:
+        first_line = next(
+            (line.strip() for line in body.text.splitlines() if line.strip()), ""
+        )
+        base_alert = AlertFacts(subject=first_line, details=body.text)
+    alert = enrich_alert_facts(base_alert, grid_name=target.grid_name)
+
+    timeout_seconds = float(fr.get("ALERT_CORRELATION_TIMEOUT_SECONDS"))
+
+    async with _acquire_grid_correlation_lock(target.grid_name, timeout_seconds) as acquired:
+        if not acquired:
+            logger.warning(
+                "Notify: grid-correlation lock timeout for %r -- filing plain ticket",
+                target.grid_name,
+            )
+            result, error = await _create_notify_ticket(body, target, backend_override)
+            if error is not None:
+                return None, error, None, None
+            return (
+                result.ref,
+                None,
+                {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
+                _new_ticket_delivery(result.ref),
+            )
+
+        store = CorrelationStore(get_client=_raw_supabase_client)
+        ticket_service = TicketService(get_supabase_client=get_supabase_client)
+        correlator = AlertCorrelator(store=store, ticket_service=ticket_service)
+
+        try:
+            decision = await correlator.decide(
+                target.grid_name, alert, dedup_key=body.dedup_key, backend_override=backend_override
+            )
+        except Exception:
+            logger.exception(
+                "Notify: correlator.decide() raised for grid %r -- filing plain ticket",
+                target.grid_name,
+            )
+            decision = None
+
+        if decision is None:
+            result, error = await _create_notify_ticket(body, target, backend_override)
+            if error is not None:
+                return None, error, None, None
+            return (
+                result.ref,
+                None,
+                {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
+                _new_ticket_delivery(result.ref),
+            )
+
+        try:
+            if decision.decision == "new" or (
+                decision.decision == "amend" and decision.needs_root_cause_ticket
+            ):
+                if decision.decision == "amend" and decision.needs_root_cause_ticket:
+                    # Root-cause-first: file the parent ticket now (this
+                    # alert becomes its first attached child, below), rather
+                    # than amending onto whatever ticket the model picked.
+                    # Delivery-wise this is a brand-new ticket too -- there is
+                    # no prior message to reply to, so post it in full.
+                    root_summary = (
+                        f"! Urgent: {target.grid_name} root cause ({decision.root_cause_kind}) — "
+                        f"dependent equipment alerts are being grouped here !"
+                    )
+                    root_description = (
+                        decision.reason
+                        or "Filed automatically to group alerts sharing this root cause."
+                    )
+                    result, error = await _create_notify_ticket(
+                        body, target, backend_override, summary=root_summary, description=root_description
+                    )
+                    if error is not None:
+                        return None, error, None, None
+                    await _record_new_correlation(
+                        store, target, alert, result, decision.root_cause_kind, root_summary, root_description
+                    )
+                    import dataclasses
+
+                    await apply_amendment(
+                        store=store,
+                        ticket_service=ticket_service,
+                        ticket_ref=result.ref,
+                        alert=alert,
+                        decision=dataclasses.replace(decision, ticket_ref=result.ref),
+                        raw_text=body.text,
+                    )
+                    return (
+                        result.ref,
+                        None,
+                        {
+                            "decision": "amend",
+                            "correlated_with": None,
+                            "confidence": decision.confidence,
+                            "decided_by": decision.decided_by,
+                        },
+                        _new_ticket_delivery(result.ref),
+                    )
+
+                first_line = next(
+                    (line.strip() for line in body.text.splitlines() if line.strip()), "Notification"
+                )
+                result, error = await _create_notify_ticket(
+                    body, target, backend_override, summary=first_line[:120], description=body.text
+                )
+                if error is not None:
+                    return None, error, None, None
+                await _record_new_correlation(
+                    store, target, alert, result, decision.root_cause_kind, first_line[:120], body.text
+                )
+                return (
+                    result.ref,
+                    None,
+                    {
+                        "decision": "new",
+                        "correlated_with": None,
+                        "confidence": decision.confidence,
+                        "decided_by": decision.decided_by,
+                    },
+                    _new_ticket_delivery(result.ref),
+                )
+
+            # amend (onto an existing ticket) or duplicate.
+            amendment = await apply_amendment(
+                store=store,
+                ticket_service=ticket_service,
+                ticket_ref=decision.ticket_ref,
+                alert=alert,
+                decision=decision,
+                raw_text=body.text,
+            )
+            if amendment is None:
+                # Correlation row vanished between decide() and here (store
+                # outage) -- the target ticket still exists, so at minimum
+                # comment on it rather than silently dropping the alert.
+                # No reply-target context survives this, so deliver nothing
+                # rather than risk a misdirected/noisy post.
+                await ticket_service.add_comment(decision.ticket_ref, body.text, public=False)
+                ref = decision.ticket_ref
+                delivery = NotificationDelivery(suppress=True)
+            else:
+                ref = amendment.ticket_ref
+                delivery = (
+                    _amend_delivery(decision, amendment, ref)
+                    if decision.decision == "amend"
+                    else _duplicate_delivery(amendment, ref)
+                )
+            return (
+                ref,
+                None,
+                {
+                    "decision": decision.decision,
+                    "correlated_with": decision.ticket_ref,
+                    "confidence": decision.confidence,
+                    "decided_by": decision.decided_by,
+                },
+                delivery,
+            )
+        except Exception:
+            logger.exception(
+                "Notify: correlation execution raised for grid %r -- filing plain ticket",
+                target.grid_name,
+            )
+            result, error = await _create_notify_ticket(body, target, backend_override)
+            if error is not None:
+                return None, error, None, None
+            return (
+                result.ref,
+                None,
+                {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
+                _new_ticket_delivery(result.ref),
+            )
+
+
+async def _resolve_notify_ticket_full(
     body: "NotifyRequest", target: "GridNotificationTarget"
-) -> "tuple[Optional[str], Optional[JSONResponse]]":
+) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
     """Resolve ``body.ticket_id`` into a ticket ref per the /notify ticketing contract.
 
-    Returns ``(ticket_ref, None)`` on success -- ``ticket_ref`` is ``None`` when
-    ``body.ticket_id`` was omitted (pure passthrough, unchanged behavior) -- or
-    ``(None, response)`` when the request must fail fast with ``response``
-    before any delivery is scheduled.
+    Returns ``(ticket_ref, None, extra, delivery)`` on success -- ``ticket_ref``
+    is ``None`` when ``body.ticket_id`` was omitted (pure passthrough,
+    unchanged behavior) -- or ``(None, response, None, None)`` when the
+    request must fail fast with ``response`` before any delivery is
+    scheduled. ``extra`` (decision/correlated_with/confidence/decided_by) and
+    ``delivery`` (how ``_deliver_notification`` should post/suppress/reply)
+    are only ever populated for ``ticket_id="auto"`` -- every other path
+    returns ``None`` for both, so neither the response body nor the Telegram
+    send behavior changes for existing callers.
 
     Runs synchronously in the handler (not the background delivery task) so
     ticket failures reach the caller in the HTTP response, same rationale as
@@ -989,39 +1458,27 @@ async def _resolve_notify_ticket(
     project unless an operator explicitly opts them into 'auto'.
     """
     if body.ticket_id is None:
-        return None, None
+        return None, None, None, None
 
-    from orchestrator.services.supabase_client import get_supabase_client
-    from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
-    from orchestrator.services.ticketing.service import TicketService
     from shared.config import flag_registry as fr
 
-    ticket_service = TicketService(get_supabase_client=get_supabase_client)
     backend_override = fr.get("NOTIFY_TICKETS_BACKEND") or "internal"
+    normalized = body.ticket_id.strip().lower()
 
     if body.ticket_id == "":
-        first_line = next(
-            (line.strip() for line in body.text.splitlines() if line.strip()), "Notification"
-        )
-        try:
-            result = await ticket_service.create_ticket(
-                TicketCreateRequest(
-                    summary=first_line[:120],
-                    description=body.text,
-                    grid_name=target.grid_name,
-                    source="notify",
-                ),
-                backend_override=backend_override,
-            )
-        except TicketBackendError as e:
-            logger.error("Notify: ticket creation failed source=%s: %s", body.source, e)
-            return None, JSONResponse(
-                status_code=500,
-                content={"ok": False, "error": f"Ticket creation failed: {e}"},
-            )
-        return result.ref, None
+        result, error = await _create_notify_ticket(body, target, backend_override)
+        if error is not None:
+            return None, error, None, None
+        return result.ref, None, None, None
+
+    if normalized == "auto":
+        return await _resolve_notify_ticket_auto(body, target, backend_override)
 
     # Populated ticket_id: comment on (and optionally close) an existing ticket.
+    from orchestrator.services.supabase_client import get_supabase_client
+    from orchestrator.services.ticketing.service import TicketService
+
+    ticket_service = TicketService(get_supabase_client=get_supabase_client)
     ticket_ref = body.ticket_id
     status = await ticket_service.get_status(ticket_ref)
     if status is None:
@@ -1029,7 +1486,7 @@ async def _resolve_notify_ticket(
         return None, JSONResponse(
             status_code=404,
             content={"ok": False, "error": f"Unknown or unresolvable ticket_id: {ticket_ref!r}"},
-        )
+        ), None, None
     commented = await ticket_service.add_comment(ticket_ref, body.text, public=False)
     if not commented:
         logger.warning(
@@ -1039,7 +1496,17 @@ async def _resolve_notify_ticket(
         )
     if body.close:
         await ticket_service.transition_to_done(ticket_ref)
-    return ticket_ref, None
+    return ticket_ref, None, None, None
+
+
+async def _resolve_notify_ticket(
+    body: "NotifyRequest", target: "GridNotificationTarget"
+) -> "tuple[Optional[str], Optional[JSONResponse]]":
+    """Backward-compatible 2-tuple wrapper over ``_resolve_notify_ticket_full``
+    for callers that only care about ``(ticket_ref, error_response)`` -- the
+    contract this function had before ``ticket_id="auto"`` existed."""
+    ticket_ref, error_response, _extra, _delivery = await _resolve_notify_ticket_full(body, target)
+    return ticket_ref, error_response
 
 
 @app.post("/chat/notify")
@@ -1111,16 +1578,18 @@ async def handle_notify(
     # resolution above: a 404/500 must reach the caller, not be dropped in the
     # background. body.ticket_id is None -> ticket_ref stays None -> the
     # response below is byte-identical to today's passthrough-only behavior.
-    ticket_ref, error_response = await _resolve_notify_ticket(body, target)
+    ticket_ref, error_response, extra, delivery = await _resolve_notify_ticket_full(body, target)
     if error_response is not None:
         return error_response
 
     # Return fast; the send + logging happen in the background (mirrors the
     # Telegram-webhook pattern — responses go out via the Bot API, not this body).
-    background_tasks.add_task(_deliver_notification, body, target, ticket_ref)
+    background_tasks.add_task(_deliver_notification, body, target, ticket_ref, delivery)
     response_content: Dict[str, Any] = {"ok": True}
     if ticket_ref:
         response_content["ticket_ref"] = ticket_ref
+    if extra:
+        response_content.update(extra)
     return JSONResponse(status_code=202, content=response_content)
 
 

@@ -1062,6 +1062,70 @@ class AuthService:
             LOGGER.exception(f"Error getting DCU status for grid '{grid_name}': {e}")
             return []
 
+    async def get_grid_operational_facts(self, grid_name: str) -> dict:
+        """Deterministic operational facts about a grid, for alert correlation.
+
+        Returns ``is_hps_on``/``is_hps_on_updated_at`` (how long the grid has
+        been in its current on/off state) plus a DCU status roll-up (reusing
+        ``get_dcu_status_by_grid_name``) -- what lets the correlator reason
+        e.g. "grid has been OFF for 41h -> this MPPT alert is a child".
+
+        Returns ``{}`` on any failure or if the grid isn't found -- callers
+        must treat that as "no extra context", not an error.
+        """
+        try:
+            pool = await self._get_db_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    SELECT id, name, organization_id, is_hps_on, is_hps_on_updated_at
+                    FROM public.grids
+                    WHERE LOWER(name) = LOWER($1) AND deleted_at IS NULL
+                    LIMIT 1
+                    """,
+                    grid_name,
+                )
+                if not row:
+                    all_grids = await conn.fetch(
+                        "SELECT name FROM public.grids WHERE deleted_at IS NULL"
+                    )
+                    valid_names = [r["name"] for r in all_grids if r["name"]]
+                    matched_name, _was_fuzzy, _score = find_best_grid_match(
+                        grid_name, valid_names
+                    )
+                    if not matched_name:
+                        return {}
+                    row = await conn.fetchrow(
+                        """
+                        SELECT id, name, organization_id, is_hps_on, is_hps_on_updated_at
+                        FROM public.grids
+                        WHERE name = $1 AND deleted_at IS NULL
+                        LIMIT 1
+                        """,
+                        matched_name,
+                    )
+                    if not row:
+                        return {}
+
+            dcu_statuses = await self.get_dcu_status_by_grid_name(row["name"])
+            dcu_offline_count = sum(1 for d in dcu_statuses if not d.get("is_online"))
+
+            return {
+                "grid_name": row["name"],
+                "organization_id": row["organization_id"],
+                "is_hps_on": row["is_hps_on"],
+                "is_hps_on_updated_at": (
+                    row["is_hps_on_updated_at"].isoformat()
+                    if row["is_hps_on_updated_at"]
+                    else None
+                ),
+                "dcu_total_count": len(dcu_statuses),
+                "dcu_offline_count": dcu_offline_count,
+            }
+        except Exception as e:
+            LOGGER.exception(f"Error getting grid operational facts for '{grid_name}': {e}")
+            return {}
+
     async def get_all_grid_names(self) -> List[str]:
         """
         Get all valid grid names for suggestions/autocomplete.

@@ -195,6 +195,63 @@ RETURNS text LANGUAGE sql AS $$
     SELECT p_prefix || '-' || lpad(nextval('internal_ticket_seq')::text, 6, '0');
 $$;
 
+-- ── Alert Correlation (smart /notify ticketing) ──────────────────────────────
+-- Backend-agnostic state for grouping incoming alerts (n8n/VRM/Grafana via
+-- /chat/notify) against a grid's already-open tickets, on either backend.
+-- No FK to internal_tickets: ticket_ref may be an internal ref or a Jira key.
+-- See db/migrations/0003_alert_correlation.sql and
+-- docs/superpowers/plans/2026-07-27-smart-alert-correlation-notify.md.
+
+CREATE TABLE IF NOT EXISTS ticket_correlations (
+    id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticket_ref           text UNIQUE NOT NULL,
+    ticket_backend       text CHECK (ticket_backend IN ('jira', 'internal')),
+    grid_name            text NOT NULL,
+    organization_id      integer,
+    root_cause_kind      text,
+    primary_signature    text,
+    signatures           jsonb NOT NULL DEFAULT '[]',
+    affected_keys        jsonb NOT NULL DEFAULT '[]',
+    summary_base         text,
+    summary_current      text,
+    description_base     text,
+    severity             text,
+    occurrence_count     integer NOT NULL DEFAULT 1,
+    escalated_at         timestamptz,
+    status               text NOT NULL DEFAULT 'open',
+    telegram_chat_id     text,
+    telegram_topic_id    text,
+    telegram_message_id  bigint,
+    last_alert_at        timestamptz DEFAULT now(),
+    created_at           timestamptz DEFAULT now(),
+    updated_at           timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ticket_correlations_grid_idx
+    ON ticket_correlations (grid_name, status, last_alert_at DESC);
+CREATE INDEX IF NOT EXISTS ticket_correlations_sig_idx
+    ON ticket_correlations USING gin (signatures jsonb_path_ops);
+
+CREATE TABLE IF NOT EXISTS ticket_correlation_events (
+    id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    ticket_ref      text,
+    grid_name       text NOT NULL,
+    source          text,
+    signature       text,
+    dedup_key       text,
+    decision        text NOT NULL,
+    decided_by      text NOT NULL,
+    confidence      real,
+    reason          text,
+    candidate_refs  jsonb NOT NULL DEFAULT '[]',
+    alert           jsonb,
+    llm_raw         text,
+    created_at      timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ticket_correlation_events_grid_idx
+    ON ticket_correlation_events (grid_name, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS ticket_correlation_events_dedup_idx
+    ON ticket_correlation_events (dedup_key) WHERE dedup_key IS NOT NULL;
+
 -- ── Conversation Threads ──────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS chat_threads (
@@ -801,7 +858,7 @@ BEGIN
         ('chat_sessions'), ('agent_work_packets'), ('user_schedules'),
         ('user_preferences'), ('broadcast_templates'), ('documents'),
         ('entities'), ('relationships'), ('persistent_agent_instances'),
-        ('bot_artifacts'), ('internal_tickets')
+        ('bot_artifacts'), ('internal_tickets'), ('ticket_correlations')
     LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS %I ON %I; CREATE TRIGGER %I BEFORE UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION update_updated_at()',

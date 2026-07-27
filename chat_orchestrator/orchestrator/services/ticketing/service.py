@@ -10,12 +10,18 @@ in without also having to design its public surface.
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional
 
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
-from .backend import TicketBackend, TicketCreateRequest, TicketResult, TicketStatus
+from .backend import (
+    TicketBackend,
+    TicketCreateRequest,
+    TicketResult,
+    TicketStatus,
+    TicketSummary,
+)
 from .internal_backend import InternalTicketBackend
 from .jira_backend import JiraTicketBackend
 
@@ -200,6 +206,38 @@ class TicketService:
     async def transition_to_done(self, ref: str) -> None:
         backend = await self._backend_for_ref(ref)
         await backend.transition_to_done(ref)
+
+    async def update_ticket(
+        self,
+        ref: str,
+        summary: Optional[str] = None,
+        description: Optional[str] = None,
+        priority_id: Optional[str] = None,
+    ) -> bool:
+        """Update an existing ticket's summary/description/priority.
+
+        Routes by the ref's *persisted* backend (like ``add_comment``/
+        ``get_status``), used by alert correlation to re-render a ticket
+        after an amend (see ``correlation_render.py``).
+        """
+        backend = await self._backend_for_ref(ref)
+        return await backend.update_ticket(
+            ref, summary=summary, description=description, priority_id=priority_id
+        )
+
+    async def find_open_by_grid(
+        self, grid_name: str, limit: int = 20, backend_override: Optional[str] = None
+    ) -> List[TicketSummary]:
+        """Find open tickets for a grid on the currently-resolved backend.
+
+        Uses ``resolve_backend`` (same override semantics as ``create_ticket``)
+        rather than querying both backends -- correlation's own
+        ``ticket_correlations`` index already covers historical tickets
+        across a backend switch; this call exists to also catch tickets
+        filed by humans directly in Jira (or by n8n before a cutover).
+        """
+        backend = await self.resolve_backend(override=backend_override)
+        return await backend.find_open_by_grid(grid_name, limit=limit)
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         """Dedup guard used before filing a new ticket for an escalation.

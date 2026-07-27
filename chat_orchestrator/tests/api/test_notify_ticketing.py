@@ -14,8 +14,15 @@ from typing import Any, Dict, List, Optional
 import pytest
 from fastapi import BackgroundTasks
 
-from orchestrator.api.app import NotifyRequest, _resolve_notify_ticket, handle_notify
+from orchestrator.api.app import (
+    NotifyRequest,
+    _resolve_notify_ticket,
+    _resolve_notify_ticket_full,
+    handle_notify,
+)
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketResult, TicketStatus
+from orchestrator.services.ticketing.correlation_render import AmendmentResult
+from orchestrator.services.ticketing.correlator import CorrelationDecision
 from shared.auth.auth_service import GridNotificationTarget
 
 
@@ -282,3 +289,512 @@ async def test_handle_notify_unknown_ticket_returns_404_before_scheduling_delive
     assert response.status_code == 404
     # The alert must not be delivered when the ticket ref is unresolvable.
     assert len(background_tasks.tasks) == 0
+
+
+# ---------------------------------------------------------------------------
+# ticket_id="auto" -- smart alert correlation
+# ---------------------------------------------------------------------------
+
+
+class _FakeCorrelator:
+    """Stands in for AlertCorrelator, constructed fresh inside
+    _resolve_notify_ticket_auto (`from ...ticketing.correlator import AlertCorrelator`)."""
+
+    instances: List["_FakeCorrelator"] = []
+    decision_to_return: Optional[CorrelationDecision] = None
+    raise_error: Optional[Exception] = None
+
+    def __init__(self, store=None, ticket_service=None, **kwargs) -> None:
+        self.store = store
+        self.ticket_service = ticket_service
+        self.decide_calls: List[tuple] = []
+        _FakeCorrelator.instances.append(self)
+
+    async def decide(self, grid_name, alert, dedup_key=None, backend_override=None):
+        self.decide_calls.append((grid_name, alert, dedup_key, backend_override))
+        if _FakeCorrelator.raise_error:
+            raise _FakeCorrelator.raise_error
+        return _FakeCorrelator.decision_to_return
+
+
+@pytest.fixture(autouse=True)
+def _reset_fake_correlator():
+    _FakeCorrelator.instances = []
+    _FakeCorrelator.decision_to_return = None
+    _FakeCorrelator.raise_error = None
+    yield
+    _FakeCorrelator.instances = []
+    _FakeCorrelator.decision_to_return = None
+    _FakeCorrelator.raise_error = None
+
+
+@pytest.fixture(autouse=True)
+def _patch_correlator(monkeypatch):
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.correlator.AlertCorrelator", _FakeCorrelator
+    )
+
+
+@pytest.fixture
+def fake_apply_amendment(monkeypatch):
+    calls: List[Dict[str, Any]] = []
+    result_holder: Dict[str, Optional[AmendmentResult]] = {"result": None}
+
+    async def _fake(*, store, ticket_service, ticket_ref, alert, decision, raw_text, **kwargs):
+        calls.append(
+            {
+                "ticket_ref": ticket_ref,
+                "decision": decision.decision,
+                "raw_text": raw_text,
+            }
+        )
+        return result_holder["result"]
+
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.correlation_render.apply_amendment", _fake
+    )
+    return calls, result_holder
+
+
+def _decision(**overrides: Any) -> CorrelationDecision:
+    defaults: Dict[str, Any] = dict(
+        decision="new",
+        ticket_ref=None,
+        confidence=None,
+        decided_by="no_candidates",
+        reason="no open candidates",
+        affected_key=None,
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=[],
+        llm_raw=None,
+        needs_root_cause_ticket=False,
+    )
+    defaults.update(overrides)
+    return CorrelationDecision(**defaults)
+
+
+class TestResolveNotifyTicketAutoFlagOff:
+    async def test_flag_off_files_plain_ticket(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
+        body = _notify_body(ticket_id="auto")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "TKT-000001"
+        assert extra == {
+            "decision": "new",
+            "correlated_with": None,
+            "confidence": None,
+            "decided_by": "flag_off",
+        }
+        assert delivery is not None
+        assert delivery.suppress is False
+        assert delivery.reply_to_message_id is None
+        assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
+        # Never even constructs a correlator when the flag is off.
+        assert _FakeCorrelator.instances == []
+
+
+class TestResolveNotifyTicketAutoNew:
+    async def test_new_decision_creates_ticket(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="new", decided_by="no_candidates", confidence=None
+        )
+        body = _notify_body(ticket_id="auto", text="Meter offline\n\ndetails")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "TKT-000001"
+        assert extra["decision"] == "new"
+        assert extra["decided_by"] == "no_candidates"
+        assert extra["correlated_with"] is None
+        svc = _FakeTicketService.instances[-1]
+        assert len(svc.create_ticket_calls) == 1
+        assert delivery is not None
+        assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
+        assert delivery.suppress is False
+        assert delivery.reply_to_message_id is None
+
+
+class TestResolveNotifyTicketAutoAmend:
+    async def test_amend_decision_calls_apply_amendment(self, fake_apply_amendment, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="TKT-000042",
+            decision="amend",
+            escalated=False,
+            affected_keys_count=2,
+            occurrence_count=3,
+            telegram_chat_id="-100555",
+            telegram_topic_id="42",
+            telegram_message_id=123,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="amend",
+            ticket_ref="TKT-000042",
+            confidence=0.9,
+            decided_by="llm",
+            affected_key={"kind": "mppt", "key": "A7", "label": "MPPT A7"},
+        )
+        body = _notify_body(ticket_id="auto")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "TKT-000042"
+        assert extra == {
+            "decision": "amend",
+            "correlated_with": "TKT-000042",
+            "confidence": 0.9,
+            "decided_by": "llm",
+        }
+        assert len(calls) == 1
+        assert calls[0]["ticket_ref"] == "TKT-000042"
+        # No separate ticket-creation call for an amend.
+        assert _FakeTicketService.instances[-1].create_ticket_calls == []
+        assert delivery is not None
+        assert delivery.suppress is False
+        assert delivery.reply_to_message_id == 123
+        assert delivery.top_level is False
+        assert delivery.text_override.startswith("↻")
+
+
+class TestResolveNotifyTicketAutoDuplicate:
+    async def test_duplicate_decision_returns_existing_ref_without_new_ticket(
+        self, fake_apply_amendment, monkeypatch
+    ):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="TKT-000042",
+            decision="duplicate",
+            escalated=False,
+            affected_keys_count=1,
+            occurrence_count=5,
+            telegram_chat_id="-100555",
+            telegram_topic_id="42",
+            telegram_message_id=123,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="duplicate",
+            ticket_ref="TKT-000042",
+            confidence=1.0,
+            decided_by="signature",
+        )
+        body = _notify_body(ticket_id="auto")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "TKT-000042"
+        assert extra["decision"] == "duplicate"
+        assert extra["decided_by"] == "signature"
+        assert _FakeTicketService.instances[-1].create_ticket_calls == []
+        assert delivery is not None
+        assert delivery.suppress is True  # occurrence 5 is not a rollup-every-10th
+
+
+class TestResolveNotifyTicketAutoRootCauseFirst:
+    async def test_root_cause_ticket_filed_then_amended(self, fake_apply_amendment, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="TKT-000001",  # matches the fake TicketService's create_ticket result
+            decision="amend",
+            escalated=False,
+            affected_keys_count=1,
+            occurrence_count=1,
+            telegram_chat_id="-100555",
+            telegram_topic_id="42",
+            telegram_message_id=None,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="amend",
+            ticket_ref=None,
+            confidence=0.9,
+            decided_by="llm",
+            root_cause_kind="grid_off",
+            needs_root_cause_ticket=True,
+            affected_key={"kind": "mppt", "key": "A7", "label": "MPPT A7"},
+        )
+        body = _notify_body(ticket_id="auto")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "TKT-000001"
+        assert extra["decision"] == "amend"
+        assert extra["correlated_with"] is None  # nothing pre-existing -- a fresh parent was filed
+        # The root-cause ticket was actually filed via TicketService.create_ticket...
+        svc = _FakeTicketService.instances[-1]
+        assert len(svc.create_ticket_calls) == 1
+        req, _backend_override = svc.create_ticket_calls[0]
+        assert "grid_off" in req.summary or "root cause" in req.summary.lower()
+        # ...then attached to via apply_amendment, targeting the newly-created ref.
+        assert calls[0]["ticket_ref"] == "TKT-000001"
+        # Delivery is "new ticket" style -- full post, no reply -- since there's
+        # no prior message for this brand-new parent to reply to.
+        assert delivery is not None
+        assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
+        assert delivery.reply_to_message_id is None
+
+
+class TestResolveNotifyTicketAutoFailureModes:
+    async def test_correlator_exception_falls_back_to_plain_create(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _FakeCorrelator.raise_error = RuntimeError("LLM gateway down")
+        body = _notify_body(ticket_id="auto")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "TKT-000001"
+        assert extra == {
+            "decision": "new",
+            "correlated_with": None,
+            "confidence": None,
+            "decided_by": "fallback",
+        }
+        assert delivery is not None
+        assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
+
+    async def test_lock_timeout_falls_back_to_plain_create(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+
+        from contextlib import asynccontextmanager
+
+        import orchestrator.api.app as app_module
+
+        @asynccontextmanager
+        async def _never_available(grid_name, timeout_seconds):
+            yield False
+
+        monkeypatch.setattr(app_module, "_acquire_grid_correlation_lock", _never_available)
+        body = _notify_body(ticket_id="auto")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "TKT-000001"
+        assert extra["decided_by"] == "fallback"
+        assert delivery is not None
+        assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
+
+    async def test_ticket_creation_failure_still_returns_500(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
+        body = _notify_body(ticket_id="auto")
+
+        async def _boom(self, req, backend_override=None):
+            raise TicketBackendError("both backends down")
+
+        monkeypatch.setattr(_FakeTicketService, "create_ticket", _boom)
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert ref is None
+        assert extra is None
+        assert delivery is None
+        assert error is not None
+        assert error.status_code == 500
+
+
+class TestHandleNotifyAutoResponseShape:
+    async def test_response_includes_decision_fields(self, monkeypatch):
+        monkeypatch.setattr(
+            "shared.auth.get_auth_service", lambda: _FakeAuthService(_target())
+        )
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
+        request = _FakeRequest(headers={"X-Notify-Secret": "test-secret"})
+        body = _notify_body(ticket_id="auto")
+        background_tasks = BackgroundTasks()
+
+        response = await handle_notify(request, body, background_tasks)  # type: ignore[arg-type]
+
+        assert response.status_code == 202
+        import json
+
+        content = json.loads(response.body)
+        assert content == {
+            "ok": True,
+            "ticket_ref": "TKT-000001",
+            "decision": "new",
+            "correlated_with": None,
+            "confidence": None,
+            "decided_by": "flag_off",
+        }
+
+    async def test_omitted_ticket_id_response_unaffected_by_auto_wiring(self, monkeypatch):
+        """Sanity re-check at the handle_notify level: passthrough stays
+        byte-identical even with all the new auto-sentinel plumbing in place."""
+        monkeypatch.setattr(
+            "shared.auth.get_auth_service", lambda: _FakeAuthService(_target())
+        )
+        request = _FakeRequest(headers={"X-Notify-Secret": "test-secret"})
+        body = _notify_body(ticket_id=None)
+        background_tasks = BackgroundTasks()
+
+        response = await handle_notify(request, body, background_tasks)  # type: ignore[arg-type]
+
+        import json
+
+        assert json.loads(response.body) == {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# _deliver_notification -- reply/suppress/escalation Telegram behavior
+# ---------------------------------------------------------------------------
+
+
+class _FakeSendResult:
+    def __init__(self, message_id: Optional[int]) -> None:
+        self.message_id = message_id
+        self.calls: List[Dict[str, Any]] = []
+
+    async def send(self, bot_token, chat_id, text, reply_markup=None, parse_mode=None, topic_id=None, reply_to_message_id=None):
+        self.calls.append(
+            {
+                "text": text,
+                "parse_mode": parse_mode,
+                "topic_id": topic_id,
+                "reply_to_message_id": reply_to_message_id,
+            }
+        )
+        return self.message_id
+
+
+@pytest.fixture
+def fake_telegram_send(monkeypatch):
+    fake = _FakeSendResult(message_id=999)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+
+    async def _send(bot_token, chat_id, text, reply_markup=None, parse_mode=None, topic_id=None, reply_to_message_id=None):
+        return await fake.send(
+            bot_token, chat_id, text, reply_markup, parse_mode, topic_id, reply_to_message_id
+        )
+
+    monkeypatch.setattr(
+        "shared.utils.telegram_send.send_telegram_message_with_fallback", _send
+    )
+    return fake
+
+
+@pytest.fixture(autouse=True)
+def _stub_chat_db_logging(monkeypatch):
+    """_log_notification_to_chat_db does its own supabase lookups -- irrelevant
+    to delivery behavior, so make it a no-op for these tests."""
+    from orchestrator.api import app as app_module
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(app_module, "_log_notification_to_chat_db", _noop)
+
+
+class TestDeliverNotificationDelivery:
+    async def test_new_ticket_delivery_sends_full_text_no_reply(self, fake_telegram_send):
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        body = _notify_body(text="Full alert text")
+        delivery = NotificationDelivery(record_message_id_for_ticket_ref="TKT-000001")
+
+        await _deliver_notification(body, _target(), "TKT-000001", delivery)
+
+        assert len(fake_telegram_send.calls) == 1
+        call = fake_telegram_send.calls[0]
+        assert "Full alert text" in call["text"]
+        assert call["reply_to_message_id"] is None
+
+    async def test_amend_delivery_sends_short_text_as_reply(self, fake_telegram_send):
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        body = _notify_body()
+        delivery = NotificationDelivery(
+            text_override="↻ TKT-000042: MPPT A7 also affected", reply_to_message_id=555
+        )
+
+        await _deliver_notification(body, _target(), "TKT-000042", delivery)
+
+        call = fake_telegram_send.calls[0]
+        assert call["text"] == "↻ TKT-000042: MPPT A7 also affected"
+        assert call["reply_to_message_id"] == 555
+
+    async def test_duplicate_suppressed_sends_nothing(self, fake_telegram_send):
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        body = _notify_body()
+        delivery = NotificationDelivery(suppress=True)
+
+        await _deliver_notification(body, _target(), "TKT-000042", delivery)
+
+        assert fake_telegram_send.calls == []
+
+    async def test_rollup_delivery_sends_one_message(self, fake_telegram_send):
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        body = _notify_body()
+        delivery = NotificationDelivery(
+            text_override="↻ TKT-000042: still firing — 10 occurrences", reply_to_message_id=555
+        )
+
+        await _deliver_notification(body, _target(), "TKT-000042", delivery)
+
+        assert len(fake_telegram_send.calls) == 1
+        assert "still firing" in fake_telegram_send.calls[0]["text"]
+
+    async def test_escalation_delivery_is_top_level_not_a_reply(self, fake_telegram_send):
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        body = _notify_body()
+        delivery = NotificationDelivery(
+            text_override="🔴 4 MPPTs in Kudi affected (A3, A5, A6, A7) !",
+            reply_to_message_id=555,  # present but must be ignored -- top_level wins
+            top_level=True,
+        )
+
+        await _deliver_notification(body, _target(), "TKT-000042", delivery)
+
+        call = fake_telegram_send.calls[0]
+        assert call["text"].startswith("🔴")
+        assert call["reply_to_message_id"] is None
+
+    async def test_none_delivery_is_unchanged_full_send(self, fake_telegram_send):
+        """delivery=None (every non-"auto" ticket_id path) must behave exactly
+        like before this task existed."""
+        from orchestrator.api.app import _deliver_notification
+
+        body = _notify_body(text="Plain passthrough alert")
+
+        await _deliver_notification(body, _target(), None, None)
+
+        call = fake_telegram_send.calls[0]
+        assert "Plain passthrough alert" in call["text"]
+        assert call["reply_to_message_id"] is None
+
+    async def test_new_ticket_delivery_records_message_id(self, fake_telegram_send, monkeypatch):
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        recorded: List[tuple] = []
+
+        class _FakeCorrelationStore:
+            def __init__(self, get_client=None):
+                pass
+
+            async def record_message_id(self, ticket_ref, message_id):
+                recorded.append((ticket_ref, message_id))
+                return True
+
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+            _FakeCorrelationStore,
+        )
+        body = _notify_body()
+        delivery = NotificationDelivery(record_message_id_for_ticket_ref="TKT-000001")
+
+        await _deliver_notification(body, _target(), "TKT-000001", delivery)
+
+        assert recorded == [("TKT-000001", 999)]

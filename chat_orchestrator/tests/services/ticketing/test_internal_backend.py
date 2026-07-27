@@ -29,13 +29,16 @@ class _FakeResult:
 
 
 class _InternalTicketsTable:
-    """Fakes .select()/.insert()/.update()/.eq()/.limit()/.execute() for internal_tickets."""
+    """Fakes .select()/.insert()/.update()/.eq()/.neq()/.order()/.limit()/.execute()
+    for internal_tickets. Predicates chain (AND); order/limit apply only to select."""
 
     def __init__(self, client: "FakeSupabaseClient"):
         self._client = client
         self._mode: Optional[str] = None
-        self._eq_field: Optional[str] = None
-        self._eq_value: Any = None
+        self._predicates: List[tuple] = []  # (field, op, value)
+        self._order_field: Optional[str] = None
+        self._order_desc: bool = False
+        self._limit: Optional[int] = None
         self._payload: Optional[Dict[str, Any]] = None
 
     def select(self, *_args, **_kwargs) -> "_InternalTicketsTable":
@@ -53,18 +56,39 @@ class _InternalTicketsTable:
         return self
 
     def eq(self, field: str, value: Any) -> "_InternalTicketsTable":
-        self._eq_field = field
-        self._eq_value = value
+        self._predicates.append((field, "eq", value))
         return self
 
-    def limit(self, _n: int) -> "_InternalTicketsTable":
+    def neq(self, field: str, value: Any) -> "_InternalTicketsTable":
+        self._predicates.append((field, "neq", value))
         return self
+
+    def order(self, field: str, desc: bool = False) -> "_InternalTicketsTable":
+        self._order_field = field
+        self._order_desc = desc
+        return self
+
+    def limit(self, n: int) -> "_InternalTicketsTable":
+        self._limit = n
+        return self
+
+    def _matches(self, row: Dict[str, Any]) -> bool:
+        for field, op, value in self._predicates:
+            if op == "eq" and row.get(field) != value:
+                return False
+            if op == "neq" and row.get(field) == value:
+                return False
+        return True
 
     def execute(self) -> _FakeResult:
         if self._mode == "select":
-            matches = [
-                t for t in self._client.tickets if t.get(self._eq_field) == self._eq_value
-            ]
+            matches = [t for t in self._client.tickets if self._matches(t)]
+            if self._order_field:
+                matches.sort(
+                    key=lambda t: t.get(self._order_field) or "", reverse=self._order_desc
+                )
+            if self._limit is not None:
+                matches = matches[: self._limit]
             return _FakeResult(matches)
         if self._mode == "insert":
             if self._client.raise_on_insert:
@@ -81,13 +105,14 @@ class _InternalTicketsTable:
                 "labels": self._payload.get("labels") or [],
                 "source": self._payload.get("source") or "escalation",
                 "status": "open",
+                "created_at": f"2026-01-01T00:00:{len(self._client.tickets):02d}Z",
             }
             self._client.tickets.append(row)
             self._client.insert_calls.append(dict(self._payload))
             return _FakeResult([row])
         if self._mode == "update":
             for t in self._client.tickets:
-                if t.get(self._eq_field) == self._eq_value:
+                if self._matches(t):
                     t.update(self._payload or {})
             return _FakeResult([])
         raise AssertionError("execute() called before select()/insert()/update()")
@@ -362,3 +387,115 @@ class TestFindByEscalation:
     async def test_none_when_no_client(self):
         backend = InternalTicketBackend(get_client=lambda: None)
         assert await backend.find_by_escalation("anything") is None
+
+
+class TestUpdateTicket:
+    @pytest.mark.asyncio
+    async def test_updates_summary_and_description(self):
+        backend, fake = _make_backend()
+        await backend.create_ticket(TicketCreateRequest(summary="orig", description="orig d"))
+
+        ok = await backend.update_ticket(
+            "TKT-000001", summary="new summary", description="new description"
+        )
+
+        assert ok is True
+        assert fake.tickets[0]["summary"] == "new summary"
+        assert fake.tickets[0]["description"] == "new description"
+
+    @pytest.mark.asyncio
+    async def test_ignores_priority_id(self):
+        """Internal backend has no priority concept -- must not raise or write it."""
+        backend, fake = _make_backend()
+        await backend.create_ticket(TicketCreateRequest(summary="orig"))
+
+        ok = await backend.update_ticket("TKT-000001", summary="s2", priority_id="10001")
+
+        assert ok is True
+        assert "priority_id" not in fake.tickets[0]
+        assert "priority" not in fake.tickets[0]
+
+    @pytest.mark.asyncio
+    async def test_partial_update_omits_unset_fields(self):
+        backend, fake = _make_backend()
+        await backend.create_ticket(TicketCreateRequest(summary="orig", description="orig d"))
+
+        await backend.update_ticket("TKT-000001", summary="new summary only")
+
+        assert fake.tickets[0]["summary"] == "new summary only"
+        assert fake.tickets[0]["description"] == "orig d"
+
+    @pytest.mark.asyncio
+    async def test_false_when_no_client(self):
+        backend = InternalTicketBackend(get_client=lambda: None)
+        assert await backend.update_ticket("TKT-000001", summary="x") is False
+
+    @pytest.mark.asyncio
+    async def test_false_on_error(self):
+        fake = FakeSupabaseClient()
+        fake.raise_on_insert = None
+        backend, _ = _make_backend(fake)
+        await backend.create_ticket(TicketCreateRequest(summary="s"))
+
+        class _RaisingTable:
+            def update(self, *_a, **_k):
+                raise RuntimeError("db down")
+
+        original_table = fake.table
+        fake.table = lambda name: _RaisingTable() if name == "internal_tickets" else original_table(name)
+
+        assert await backend.update_ticket("TKT-000001", summary="x") is False
+
+
+class TestFindOpenByGrid:
+    @pytest.mark.asyncio
+    async def test_returns_open_tickets_for_grid_most_recent_first(self):
+        backend, fake = _make_backend()
+        await backend.create_ticket(TicketCreateRequest(summary="first", grid_name="Kudi"))
+        await backend.create_ticket(TicketCreateRequest(summary="second", grid_name="Kudi"))
+        await backend.create_ticket(TicketCreateRequest(summary="other grid", grid_name="Other"))
+
+        results = await backend.find_open_by_grid("Kudi")
+
+        assert [r.summary for r in results] == ["second", "first"]
+        assert all(r.backend == "internal" for r in results)
+        assert all(r.is_done is False for r in results)
+
+    @pytest.mark.asyncio
+    async def test_excludes_done_tickets(self):
+        backend, fake = _make_backend()
+        await backend.create_ticket(TicketCreateRequest(summary="s1", grid_name="Kudi"))
+        await backend.create_ticket(TicketCreateRequest(summary="s2", grid_name="Kudi"))
+        await backend.transition_to_done("TKT-000001")
+
+        results = await backend.find_open_by_grid("Kudi")
+
+        assert [r.ref for r in results] == ["TKT-000002"]
+
+    @pytest.mark.asyncio
+    async def test_respects_limit(self):
+        backend, fake = _make_backend()
+        for i in range(5):
+            await backend.create_ticket(TicketCreateRequest(summary=f"s{i}", grid_name="Kudi"))
+
+        results = await backend.find_open_by_grid("Kudi", limit=2)
+
+        assert len(results) == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_client(self):
+        backend = InternalTicketBackend(get_client=lambda: None)
+        assert await backend.find_open_by_grid("Kudi") == []
+
+    @pytest.mark.asyncio
+    async def test_empty_on_error(self):
+        fake = FakeSupabaseClient()
+        backend, _ = _make_backend(fake)
+
+        class _RaisingTable:
+            def select(self, *_a, **_k):
+                raise RuntimeError("db down")
+
+        fake.table = lambda name: _RaisingTable()
+
+        assert await backend.find_open_by_grid("Kudi") == []
