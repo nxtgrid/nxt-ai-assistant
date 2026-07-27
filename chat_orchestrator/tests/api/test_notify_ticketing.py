@@ -795,6 +795,30 @@ class TestDeliverNotificationDelivery:
 
         assert fake_telegram_send.calls[0]["text"].endswith("🎫 Ticket: *TKT-00101*")
 
+    @pytest.mark.parametrize("parse_mode", [None, "HTML"])
+    async def test_ticketed_notification_escapes_body_markdown_and_forces_telegram_markdown(
+        self, fake_telegram_send, parse_mode
+    ):
+        from orchestrator.api.app import _deliver_notification
+
+        body = _notify_body(
+            text="See [runbook](https://example.test/runbook) before restarting",
+            parse_mode=parse_mode,
+            alert={"subject": "Inverter offline"},
+        )
+        ticket = NotificationTicket(
+            ref="OPS-3124", backend="jira", url="https://jira.test/browse/OPS-3124"
+        )
+
+        await _deliver_notification(
+            body, _target(), ticket.ref, NotificationDelivery(ticket=ticket)
+        )
+
+        call = fake_telegram_send.calls[0]
+        assert call["parse_mode"] == "Markdown"
+        assert "\\[runbook](https://example.test/runbook)" in call["text"]
+        assert "[OPS-3124](https://jira.test/browse/OPS-3124)" in call["text"]
+
     async def test_new_ticket_delivery_sends_full_text_no_reply(self, fake_telegram_send):
         from orchestrator.api.app import NotificationDelivery, _deliver_notification
 

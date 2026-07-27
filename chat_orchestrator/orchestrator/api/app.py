@@ -970,8 +970,16 @@ async def _deliver_notification(
         return
 
     parse_mode = (body.parse_mode or "").strip() or None
+    ticketed_delivery = (
+        delivery is not None and delivery.ticket is not None and not delivery.text_override
+    )
+    if ticketed_delivery:
+        # Ticket references are deliberately rendered as Telegram Markdown
+        # links, so a caller-provided plain/HTML mode cannot make the link
+        # literal or parse it under the wrong grammar.
+        parse_mode = "Markdown"
     raw_text = (delivery.text_override if delivery is not None and delivery.text_override else body.text)
-    if delivery is not None and delivery.ticket is not None and not delivery.text_override:
+    if ticketed_delivery:
         raw_text = _format_ticket_notification(body, raw_text, delivery.ticket)
     text = raw_text
     if parse_mode and parse_mode.lower().startswith("markdown"):
@@ -1219,7 +1227,7 @@ def _format_ticket_notification(
     ticket_link = f"[{escaped_ref}]({ticket_url})" if ticket_url else f"*{escaped_ref}*"
     urgent_prefix = "🔴 " if severity == "urgent" else ""
     return (
-        f"{urgent_prefix}*{escape_markdown(subject)}*\n\n{raw_text}\n\n"
+        f"{urgent_prefix}*{escape_markdown(subject)}*\n\n{escape_markdown(raw_text)}\n\n"
         f"🎫 Ticket: {ticket_link}"
     )
 
