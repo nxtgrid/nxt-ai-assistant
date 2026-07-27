@@ -798,6 +798,20 @@ class TestDeliverNotificationDelivery:
             "🎫 Ticket: [TKT-00101](https://anansi.test/tickets/TKT-00101)"
         )
 
+    async def test_ticket_url_is_escaped_for_telegram_markdown(self, fake_telegram_send):
+        from orchestrator.api.app import _deliver_notification
+
+        body = _notify_body(alert={"subject": "Inverter offline"})
+        ticket = NotificationTicket(
+            ref="OPS-42", backend="jira", url="https://jira.test/browse/(OPS-42)"
+        )
+
+        await _deliver_notification(
+            body, _target(), ticket.ref, NotificationDelivery(ticket=ticket)
+        )
+
+        assert "[OPS-42](https://jira.test/browse/%28OPS-42%29)" in fake_telegram_send.calls[0]["text"]
+
     async def test_urgent_ticket_notification_uses_red_indicator(
         self, fake_telegram_send
     ):

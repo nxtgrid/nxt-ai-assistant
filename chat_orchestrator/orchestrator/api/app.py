@@ -1216,6 +1216,18 @@ def _ticket_notification_url(ticket: NotificationTicket) -> Optional[str]:
     return None
 
 
+def _ticket_notification_link(ticket: NotificationTicket) -> str:
+    """Return a Telegram-Markdown-safe ticket reference link or bold fallback."""
+    from shared.utils.telegram_markdown import escape_markdown
+
+    ticket_url = _ticket_notification_url(ticket)
+    escaped_ref = escape_markdown(ticket.ref)
+    if not ticket_url:
+        return f"*{escaped_ref}*"
+    safe_url = quote(ticket_url, safe=":/?&=%#")
+    return f"[{escaped_ref}]({safe_url})"
+
+
 def _format_ticket_notification(body: "NotifyRequest", ticket: NotificationTicket) -> str:
     """Render a newly-filed or updated ticket alert as Telegram Markdown."""
     from shared.utils.telegram_markdown import escape_markdown
@@ -1228,9 +1240,7 @@ def _format_ticket_notification(body: "NotifyRequest", ticket: NotificationTicke
     if not severity:
         severity = derive_severity(subject)
 
-    ticket_url = _ticket_notification_url(ticket)
-    escaped_ref = escape_markdown(ticket.ref)
-    ticket_link = f"[{escaped_ref}]({ticket_url})" if ticket_url else f"*{escaped_ref}*"
+    ticket_link = _ticket_notification_link(ticket)
     urgent_prefix = "🔴 " if severity == "urgent" else ""
     return "\n".join(
         (
@@ -1247,9 +1257,7 @@ def _format_ticket_update_notification(
     """Render a concise factual correlation update with its ticket reference linked."""
     from shared.utils.telegram_markdown import escape_markdown
 
-    ticket_url = _ticket_notification_url(ticket)
-    escaped_ref = escape_markdown(ticket.ref)
-    ticket_link = f"[{escaped_ref}]({ticket_url})" if ticket_url else f"*{escaped_ref}*"
+    ticket_link = _ticket_notification_link(ticket)
     prefix = "🔴" if urgent else "↻"
     return f"{prefix} {ticket_link} — {escape_markdown(update)}"
 
