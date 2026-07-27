@@ -13,6 +13,7 @@ import aiohttp
 logger = logging.getLogger(__name__)
 
 _MAX_TELEGRAM_DOC_BYTES = 45 * 1024 * 1024  # 45 MB (Telegram limit is 50 MB)
+_MAX_TELEGRAM_MESSAGE_CHARS = 4096
 _ESCALATION_TOPIC_COLOR = 16749490  # 0xFF93B2 pink — distinguishable from staff-created topics
 
 # Reuse a single ClientSession across calls to avoid per-call TCP handshakes.
@@ -24,6 +25,29 @@ def _get_session() -> aiohttp.ClientSession:
     if _session is None or _session.closed:
         _session = aiohttp.ClientSession()
     return _session
+
+
+def _split_telegram_message(text: str) -> list[str]:
+    """Split text into Telegram-sized chunks without dropping characters."""
+    if len(text) <= _MAX_TELEGRAM_MESSAGE_CHARS:
+        return [text]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > _MAX_TELEGRAM_MESSAGE_CHARS:
+        split_at = remaining.rfind("\n", 0, _MAX_TELEGRAM_MESSAGE_CHARS)
+        if split_at >= 0:
+            split_at += 1
+        else:
+            split_at = remaining.rfind(" ", 0, _MAX_TELEGRAM_MESSAGE_CHARS)
+            if split_at >= 0:
+                split_at += 1
+            else:
+                split_at = _MAX_TELEGRAM_MESSAGE_CHARS
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    chunks.append(remaining)
+    return chunks
 
 
 async def send_telegram_message(
@@ -191,19 +215,25 @@ async def send_telegram_message_with_fallback(
     Returns:
         The message_id of the sent message, or None on failure.
     """
-    result = await send_telegram_message_raw(
-        bot_token,
-        chat_id,
-        text,
-        reply_markup=reply_markup,
-        parse_mode=parse_mode,
-        topic_id=topic_id,
-        reply_to_message_id=reply_to_message_id,
-    )
-    if not result.get("ok"):
-        return None
-    msg_id: Optional[int] = result.get("result", {}).get("message_id")
-    return msg_id
+    chunks = _split_telegram_message(text)
+    if len(chunks) > 1:
+        logger.info("Splitting Telegram message into %d chunks", len(chunks))
+
+    message_id: Optional[int] = None
+    for index, chunk in enumerate(chunks):
+        result = await send_telegram_message_raw(
+            bot_token,
+            chat_id,
+            chunk,
+            reply_markup=reply_markup if index == 0 else None,
+            parse_mode=parse_mode,
+            topic_id=topic_id,
+            reply_to_message_id=reply_to_message_id if index == 0 else None,
+        )
+        if not result.get("ok"):
+            return None
+        message_id = result.get("result", {}).get("message_id")
+    return message_id
 
 
 async def create_forum_topic(
