@@ -316,18 +316,29 @@ envs:
 # =============================================================================
 ingress:
   rules:
+    # preserve_path_prefix is required here: DigitalOcean strips the matched
+    # prefix before forwarding by default, so without it a request to
+    # /chat/notify would reach the chat-orchestrator container as bare
+    # /notify (no such route -> 404) and a request to bare /chat would
+    # collapse to / (the wrong handler). Omitting this on just the /chat
+    # rule broke every nested route under /chat in production while /chat
+    # itself kept "working" by accident (both handlers share the same auth
+    # check, so the misrouted response looked plausible).
     - component:
         name: chat-orchestrator
+        preserve_path_prefix: true
       match:
         path:
           prefix: /chat
     - component:
         name: chat-orchestrator
+        preserve_path_prefix: true
       match:
         path:
           prefix: /mini-app
     - component:
         name: chat-orchestrator
+        preserve_path_prefix: true
       match:
         path:
           prefix: /api/mini-app
