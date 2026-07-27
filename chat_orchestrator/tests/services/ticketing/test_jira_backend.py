@@ -17,6 +17,7 @@ import pytest
 from orchestrator.services.ticketing import jira_backend as jira_backend_module
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
 from orchestrator.services.ticketing.jira_backend import JiraTicketBackend
+from orchestrator.services.ticketing.jira_issue_types import JiraIssueTypeSelector, normalize_issue_types
 
 
 class _FakeResponse:
@@ -120,6 +121,35 @@ class TestHasCredentials:
     def test_false_when_missing(self):
         backend = JiraTicketBackend(base_url="", email="", api_token="")
         assert backend.has_credentials() is False
+
+
+class TestAlertIssueTypeMetadata:
+    def test_normalizes_creatable_types_and_required_fields(self):
+        types = normalize_issue_types(
+            {
+                "values": [
+                    {
+                        "id": "10001",
+                        "name": "Electricity Service Disruption",
+                        "fields": {
+                            "summary": {"required": True},
+                            "customfield_123": {"required": True},
+                            "labels": {"required": False},
+                        },
+                    }
+                ]
+            }
+        )
+
+        assert len(types) == 1
+        assert types[0].id == "10001"
+        assert types[0].required_fields == ("summary", "customfield_123")
+
+    def test_fallback_type_is_limited_to_project_catalogue(self):
+        types = normalize_issue_types({"values": [{"id": "1", "name": "Task"}]})
+
+        assert JiraIssueTypeSelector.fallback(types, "task").issue_type.id == "1"
+        assert JiraIssueTypeSelector.fallback(types, "Bug") is None
 
 
 class TestIsAvailable:

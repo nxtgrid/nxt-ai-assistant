@@ -86,9 +86,106 @@ class JiraClient(HTTPClientMixin):
         self.organization_field_id: Optional[str] = None
         self._organization_field_id_cached: bool = False
         self._auth_pool = None  # Auth database pool for user lookups
+        self._chat_supabase = None
 
         # Auto-configure from environment variables if available
         self._auto_configure_from_env()
+
+    def _get_chat_supabase(self):
+        """Return the chat DB client used to recognise internal tickets.
+
+        This lookup intentionally happens before any Jira call.  A ticket
+        created while the deployment used the internal backend must remain
+        operable after the deployment switches to Jira (and vice versa).
+        """
+        if self._chat_supabase is not None:
+            return self._chat_supabase
+        chat_db_url = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL", "")
+        service_key = os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY", "")
+        if not chat_db_url or not service_key:
+            return None
+        from supabase import create_client
+
+        self._chat_supabase = create_client(chat_db_url, service_key)
+        return self._chat_supabase
+
+    async def _internal_ticket_row(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
+        def query() -> Optional[Dict[str, Any]]:
+            db = self._get_chat_supabase()
+            if db is None:
+                return None
+            response = (
+                db.table("internal_tickets")
+                .select("*")
+                .eq("ticket_ref", ticket_ref)
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(response, "data", None) or []
+            return dict(rows[0]) if rows else None
+
+        try:
+            return await asyncio.to_thread(query)
+        except Exception as exc:
+            logger.warning("Internal ticket lookup failed for %s: %s", ticket_ref, exc)
+            return None
+
+    async def get_internal_ticket(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
+        row = await self._internal_ticket_row(ticket_ref)
+        if row is None:
+            return None
+
+        def comments() -> List[Dict[str, Any]]:
+            db = self._get_chat_supabase()
+            if db is None:
+                return []
+            response = (
+                db.table("internal_ticket_comments")
+                .select("author,body,is_public,source,created_at")
+                .eq("ticket_ref", ticket_ref)
+                .order("created_at")
+                .execute()
+            )
+            return list(getattr(response, "data", None) or [])
+
+        try:
+            row["comments"] = await asyncio.to_thread(comments)
+        except Exception as exc:
+            logger.warning("Internal ticket comment lookup failed for %s: %s", ticket_ref, exc)
+            row["comments"] = []
+        return row
+
+    async def add_internal_comment(self, ticket_ref: str, body: str) -> bool:
+        def insert() -> bool:
+            db = self._get_chat_supabase()
+            if db is None:
+                return False
+            db.table("internal_ticket_comments").insert(
+                {"ticket_ref": ticket_ref, "body": body, "is_public": False, "source": "staff"}
+            ).execute()
+            return True
+
+        try:
+            return await asyncio.to_thread(insert)
+        except Exception as exc:
+            logger.warning("Internal ticket comment failed for %s: %s", ticket_ref, exc)
+            return False
+
+    async def close_internal_ticket(self, ticket_ref: str) -> bool:
+        def close() -> bool:
+            db = self._get_chat_supabase()
+            if db is None:
+                return False
+            db.table("internal_tickets").update(
+                {"status": "done", "resolved_at": datetime.utcnow().isoformat() + "Z"}
+            ).eq("ticket_ref", ticket_ref).execute()
+            return True
+
+        try:
+            return await asyncio.to_thread(close)
+        except Exception as exc:
+            logger.warning("Internal ticket close failed for %s: %s", ticket_ref, exc)
+            return False
 
     async def _get_auth_pool(self):
         """Get or create auth database connection pool for user lookups."""
@@ -1888,7 +1985,26 @@ async def _tool_search_issues_with_comments(arguments: Dict[str, Any]) -> List[t
 
 @registry.tool("get_issue", _READ_ONLY_SCHEMAS_BY_NAME["get_issue"])
 async def _tool_get_issue(arguments: Dict[str, Any]) -> List[types.TextContent]:
-    issue_data = await client.get_issue(arguments["issue_key"])
+    issue_key = arguments["issue_key"]
+    internal = await client.get_internal_ticket(issue_key)
+    if internal is not None:
+        result = {
+            "key": internal["ticket_ref"],
+            "backend": "internal",
+            "summary": internal.get("summary"),
+            "description": internal.get("description"),
+            "status": internal.get("status"),
+            "issue_type": internal.get("ticket_type") or "Task",
+            "assignee": internal.get("assignee_email"),
+            "created": internal.get("created_at"),
+            "updated": internal.get("updated_at"),
+            "labels": internal.get("labels") or [],
+            "grid": internal.get("grid_name"),
+            "comments": internal.get("comments") or [],
+        }
+        return list(compose_json_response(result, default=str))
+
+    issue_data = await client.get_issue(issue_key)
     issue = client.parse_issue(issue_data)
 
     # Get organization field value
@@ -1987,6 +2103,16 @@ async def _tool_add_comment(arguments: Dict[str, Any]) -> List[types.TextContent
     display_name = user_name or user_email or "Unknown user"
     prefixed_comment = f"{display_name} via Support bot: {comment_text}"
 
+    if await client.get_internal_ticket(issue_key) is not None:
+        if not await client.add_internal_comment(issue_key, prefixed_comment):
+            raise ValueError(f"Unable to add a comment to internal ticket {issue_key}.")
+        return list(compose_json_response({
+            "success": True,
+            "issue_key": issue_key,
+            "backend": "internal",
+            "message": f"Comment added successfully to {issue_key}",
+        }, default=str))
+
     comment_result = await client.add_comment(issue_key, prefixed_comment)
 
     result = {
@@ -2008,6 +2134,13 @@ async def _tool_get_transitions(arguments: Dict[str, Any]) -> List[types.TextCon
         )
 
     issue_key = arguments["issue_key"]
+    if await client.get_internal_ticket(issue_key) is not None:
+        return list(compose_json_response({
+            "issue_key": issue_key,
+            "backend": "internal",
+            "available_transitions": [{"name": "Done", "id": "done"}],
+            "total_transitions": 1,
+        }, default=str))
     transitions = await client.get_available_transitions(issue_key)
 
     result = {
@@ -2031,6 +2164,21 @@ async def _tool_change_status(arguments: Dict[str, Any]) -> List[types.TextConte
     current_user_email = arguments.get("user_email")
     current_user_name = arguments.get("user_name")
 
+    if await client.get_internal_ticket(issue_key) is not None:
+        if transition.strip().lower() not in {"done", "close", "closed", "resolve", "resolved"}:
+            raise ValueError(
+                "Internal tickets support only closing. Use transition 'Done' for this ticket."
+            )
+        if not await client.close_internal_ticket(issue_key):
+            raise ValueError(f"Unable to close internal ticket {issue_key}.")
+        return list(compose_json_response({
+            "success": True,
+            "issue_key": issue_key,
+            "backend": "internal",
+            "status": "done",
+            "message": f"Closed internal ticket {issue_key}",
+        }, default=str))
+
     transition_result = await client.transition_issue(
         issue_key, transition, current_user_email, current_user_name
     )
@@ -2045,8 +2193,11 @@ async def _tool_assign_issue(arguments: Dict[str, Any]) -> List[types.TextConten
             "JIRA actions are disabled. Set JIRA_ACTIONS_ENABLED=true to enable assignments."
         )
 
+    issue_key = arguments["issue_key"]
+    if await client.get_internal_ticket(issue_key) is not None:
+        raise ValueError("Assignment is Jira-only; internal tickets do not support assignment.")
     result = await client.assign_issue(
-        issue_key=arguments["issue_key"],
+        issue_key=issue_key,
         assignee=arguments["assignee"],
         current_user_email=arguments.get("user_email"),
     )

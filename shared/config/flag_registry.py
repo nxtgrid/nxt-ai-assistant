@@ -436,6 +436,24 @@ _FLAGS: List[Flag] = [
     _s(
         "JIRA_ALERT_ISSUE_TYPE_ID", "", "Issue type id used for alert tickets.", scope=SERVICE_BOT
     ),
+    _b(
+        "JIRA_ALERT_ISSUE_TYPE_SELECTION_ENABLED",
+        True,
+        "Let the LLM select a creatable Jira issue type for each alert; safely falls back when unavailable.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
+        "JIRA_ALERT_FALLBACK_ISSUE_TYPE",
+        "Task",
+        "Creatable Jira issue type name used when alert type selection is unavailable or invalid.",
+        scope=SERVICE_BOT,
+    ),
+    _i(
+        "JIRA_ALERT_ISSUE_TYPE_CACHE_TTL_SECONDS",
+        900,
+        "Seconds Jira alert issue-type create metadata is cached in-process.",
+        scope=SERVICE_BOT,
+    ),
     _s(
         "JIRA_ALERT_REPORTER_ACCOUNT_ID",
         "",

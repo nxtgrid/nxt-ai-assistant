@@ -78,8 +78,8 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'search_issues_with_com
                                                                  'are explicitly set.'}}},
   'visible_to_customer': False},
  {'name': 'get_issue',
-  'description': 'Retrieve the full details, history, and comments of one specific Jira issue i.e. '
-                 'ticket. Use ONLY when a Ticket Key (e.g., OPS-123) is known.',
+  'description': 'Retrieve full details for one ticket. Supports Jira keys (e.g., OPS-123) and '
+                 'internal references (e.g., TKT-000123).',
   'inputSchema': {'type': 'object',
                   'properties': {'issue_key': {'type': 'string', 'description': 'Jira issue key'}},
                   'required': ['issue_key']},
@@ -108,24 +108,25 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'search_issues_with_com
   'visible_to_customer': False}]
 
 ACTION_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'add_comment',
-  'description': '[ACTION] Add a new comment to a specific Jira ticket.',
+  'description': '[ACTION] Add a new comment to a ticket (Jira or internal TKT reference).',
   'inputSchema': {'type': 'object',
                   'properties': {'issue_key': {'type': 'string'},
                                  'comment_text': {'type': 'string'}},
                   'required': ['issue_key', 'comment_text']},
   'visible_to_customer': False},
  {'name': 'get_transitions',
-  'description': '[READ-ONLY] Get available status transitions for a Jira issue. This tool only '
-                 'retrieves information, it does not change the issue status.',
+  'description': '[READ-ONLY] Get available status transitions for a ticket. Internal tickets '
+                 'support the Done transition only.',
   'inputSchema': {'type': 'object',
                   'properties': {'issue_key': {'type': 'string',
                                                'description': 'Jira issue key (e.g., PROJ-123)'}},
                   'required': ['issue_key']},
   'visible_to_customer': False},
  {'name': 'change_status',
-  'description': '[ACTION] Change the status of a Jira ticket (e.g., close, start progress, '
+  'description': '[ACTION] Change the status of a ticket (e.g., close, start progress, '
                  "reopen). Use transition names like 'Done', 'In Progress', 'To Do'. If the ticket "
-                 'is unassigned, it will be auto-assigned to the requesting user.',
+                 'is unassigned, it will be auto-assigned to the requesting user. Internal tickets '
+                 'support Done only.',
   'inputSchema': {'type': 'object',
                   'properties': {'issue_key': {'type': 'string',
                                                'description': 'Jira issue key (e.g., OPS-2148)'},

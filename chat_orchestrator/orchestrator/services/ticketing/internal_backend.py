@@ -116,6 +116,7 @@ class InternalTicketBackend:
                         "grid_name": req.grid_name,
                         "assignee_email": req.assignee_email,
                         "labels": req.labels or [],
+                        "ticket_type": req.ticket_type or "Task",
                         "source": req.source,
                     }
                 )
@@ -129,7 +130,12 @@ class InternalTicketBackend:
             raise TicketBackendError(
                 "internal ticket creation failed: insert into internal_tickets returned no row"
             )
-        return TicketResult(ref=ticket_ref, backend="internal", url=None)
+        return TicketResult(
+            ref=ticket_ref,
+            backend="internal",
+            url=None,
+            ticket_type=req.ticket_type or "Task",
+        )
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         client = self._client()
@@ -156,7 +162,7 @@ class InternalTicketBackend:
         try:
             response = (
                 client.table("internal_tickets")
-                .select("summary,status")
+                .select("summary,status,ticket_type")
                 .eq("ticket_ref", ref)
                 .limit(1)
                 .execute()
@@ -174,6 +180,7 @@ class InternalTicketBackend:
             summary=row.get("summary", ""),
             is_done=(status == "done"),
             raw_status=status,
+            ticket_type=row.get("ticket_type") or "Task",
         )
 
     async def transition_to_done(self, ref: str) -> None:

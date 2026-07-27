@@ -203,7 +203,7 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
     "tickets": CommandDefinition(
         command="tickets",
         command_type="tool",
-        description="List my open JIRA tickets",
+        description="List my open Jira tickets",
         linked_tool="jira_search_issues_with_comments",
         prompt_template=(
             "FIRST call jira_get_ticket_statistics to get 30-day ticket trends. "
@@ -231,15 +231,15 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
     "ticket": CommandDefinition(
         command="ticket",
         command_type="tool",
-        description="Get JIRA ticket details (e.g., /ticket OPS-123)",
+        description="Get ticket details (e.g., /ticket OPS-123 or /ticket TKT-000123)",
         linked_tool="jira_get_issue",
         prompt_template=(
-            "Get the full details for JIRA ticket {args}. "
+            "Get the full details for ticket {args}. It can be a Jira key or an internal TKT reference. "
             "Call the jira_get_issue tool with issue_key='{args}'. "
             "Show description, status, priority, assignee, and recent comments."
         ),
         requires_args=True,
-        args_hint="Please provide a ticket key, e.g., /ticket OPS-123",
+        args_hint="Please provide a ticket reference, e.g., /ticket OPS-123 or /ticket TKT-000123",
         exclusive_tools=["jira_get_issue"],
     ),
     "inverters_restart": CommandDefinition(
