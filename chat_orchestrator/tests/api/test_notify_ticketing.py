@@ -522,7 +522,8 @@ class TestResolveNotifyTicketAutoAmend:
         assert delivery.suppress is False
         assert delivery.reply_to_message_id == 123
         assert delivery.top_level is False
-        assert delivery.text_override.startswith("↻")
+        assert delivery.text_override == "MPPT A7 also affected (2 components)"
+        assert delivery.ticket == NotificationTicket(ref="TKT-000042", backend="internal")
 
 
 class TestResolveNotifyTicketAutoDuplicate:
@@ -772,9 +773,11 @@ class TestDeliverNotificationDelivery:
         )
 
         assert fake_telegram_send.calls[0]["text"] == (
-            "*! Warning: Inverter offline*\n\nInverter output stopped\n\n"
+            "*! Warning: Inverter offline*\n"
+            "📍 Grid: Acme Grid\n"
             "🎫 Ticket: [OPS-3124](https://jira.test/browse/OPS-3124)"
         )
+        assert "Inverter output stopped" not in fake_telegram_send.calls[0]["text"]
 
     async def test_internal_ticket_notification_uses_app_ticket_link(
         self, fake_telegram_send, monkeypatch
@@ -789,7 +792,9 @@ class TestDeliverNotificationDelivery:
             body, _target(), ticket.ref, NotificationDelivery(ticket=ticket)
         )
 
-        assert fake_telegram_send.calls[0]["text"].endswith(
+        assert fake_telegram_send.calls[0]["text"] == (
+            "*Inverter offline*\n"
+            "📍 Grid: Acme Grid\n"
             "🎫 Ticket: [TKT-00101](https://anansi.test/tickets/TKT-00101)"
         )
 
@@ -823,7 +828,7 @@ class TestDeliverNotificationDelivery:
         assert fake_telegram_send.calls[0]["text"].endswith("🎫 Ticket: *TKT-00101*")
 
     @pytest.mark.parametrize("parse_mode", [None, "HTML"])
-    async def test_ticketed_notification_escapes_body_markdown_and_forces_telegram_markdown(
+    async def test_ticketed_notification_omits_body_and_forces_telegram_markdown(
         self, fake_telegram_send, parse_mode
     ):
         from orchestrator.api.app import _deliver_notification
@@ -843,7 +848,7 @@ class TestDeliverNotificationDelivery:
 
         call = fake_telegram_send.calls[0]
         assert call["parse_mode"] == "Markdown"
-        assert "\\[runbook](https://example.test/runbook)" in call["text"]
+        assert "runbook" not in call["text"]
         assert "[OPS-3124](https://jira.test/browse/OPS-3124)" in call["text"]
 
     async def test_new_ticket_delivery_sends_full_text_no_reply(self, fake_telegram_send):
@@ -859,18 +864,26 @@ class TestDeliverNotificationDelivery:
         assert "Full alert text" in call["text"]
         assert call["reply_to_message_id"] is None
 
-    async def test_amend_delivery_sends_short_text_as_reply(self, fake_telegram_send):
+    async def test_amend_delivery_sends_linked_short_text_as_reply(
+        self, fake_telegram_send, monkeypatch
+    ):
         from orchestrator.api.app import NotificationDelivery, _deliver_notification
 
+        monkeypatch.setenv("APP_URL", "https://anansi.test")
         body = _notify_body()
         delivery = NotificationDelivery(
-            text_override="↻ TKT-000042: MPPT A7 also affected", reply_to_message_id=555
+            text_override="MPPT A7 also affected (2 components)",
+            reply_to_message_id=555,
+            ticket=NotificationTicket(ref="TKT-000042", backend="internal"),
         )
 
         await _deliver_notification(body, _target(), "TKT-000042", delivery)
 
         call = fake_telegram_send.calls[0]
-        assert call["text"] == "↻ TKT-000042: MPPT A7 also affected"
+        assert call["text"] == (
+            "↻ [TKT-000042](https://anansi.test/tickets/TKT-000042) — "
+            "MPPT A7 also affected (2 components)"
+        )
         assert call["reply_to_message_id"] == 555
 
     async def test_duplicate_suppressed_sends_nothing(self, fake_telegram_send):
@@ -883,33 +896,46 @@ class TestDeliverNotificationDelivery:
 
         assert fake_telegram_send.calls == []
 
-    async def test_rollup_delivery_sends_one_message(self, fake_telegram_send):
+    async def test_rollup_delivery_sends_linked_reply(self, fake_telegram_send, monkeypatch):
         from orchestrator.api.app import NotificationDelivery, _deliver_notification
 
+        monkeypatch.setenv("APP_URL", "https://anansi.test")
         body = _notify_body()
         delivery = NotificationDelivery(
-            text_override="↻ TKT-000042: still firing — 10 occurrences", reply_to_message_id=555
+            text_override="still firing — 10 occurrences",
+            reply_to_message_id=555,
+            ticket=NotificationTicket(ref="TKT-000042", backend="internal"),
         )
 
         await _deliver_notification(body, _target(), "TKT-000042", delivery)
 
         assert len(fake_telegram_send.calls) == 1
-        assert "still firing" in fake_telegram_send.calls[0]["text"]
+        assert fake_telegram_send.calls[0]["text"] == (
+            "↻ [TKT-000042](https://anansi.test/tickets/TKT-000042) — "
+            "still firing — 10 occurrences"
+        )
+        assert fake_telegram_send.calls[0]["reply_to_message_id"] == 555
 
     async def test_escalation_delivery_is_top_level_not_a_reply(self, fake_telegram_send):
         from orchestrator.api.app import NotificationDelivery, _deliver_notification
 
         body = _notify_body()
         delivery = NotificationDelivery(
-            text_override="🔴 4 MPPTs in Kudi affected (A3, A5, A6, A7) !",
+            text_override="4 MPPTs in Kudi affected (A3, A5, A6, A7)",
             reply_to_message_id=555,  # present but must be ignored -- top_level wins
             top_level=True,
+            ticket=NotificationTicket(
+                ref="OPS-42", backend="jira", url="https://jira.test/browse/OPS-42"
+            ),
         )
 
         await _deliver_notification(body, _target(), "TKT-000042", delivery)
 
         call = fake_telegram_send.calls[0]
-        assert call["text"].startswith("🔴")
+        assert call["text"] == (
+            "🔴 [OPS-42](https://jira.test/browse/OPS-42) — "
+            "4 MPPTs in Kudi affected (A3, A5, A6, A7)"
+        )
         assert call["reply_to_message_id"] is None
 
     async def test_none_delivery_is_unchanged_full_send(self, fake_telegram_send):
@@ -948,3 +974,38 @@ class TestDeliverNotificationDelivery:
         await _deliver_notification(body, _target(), "TKT-000001", delivery)
 
         assert recorded == [("TKT-000001", 999)]
+
+
+def test_amend_delivery_builds_factual_linked_update():
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="TKT-000042",
+        confidence=0.9,
+        decided_by="llm",
+        reason="same issue",
+        affected_key={"kind": "mppt", "key": "A7", "label": "MPPT A7"},
+        root_cause_kind=None,
+        update_message="ignored LLM wording",
+        amended_summary="",
+        candidate_refs=["TKT-000042"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="TKT-000042",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=2,
+        occurrence_count=3,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+    )
+    ticket = NotificationTicket(ref="TKT-000042", backend="internal")
+
+    delivery = _amend_delivery(decision, amendment, ticket)
+
+    assert delivery.ticket == ticket
+    assert delivery.text_override == "MPPT A7 also affected (2 components)"
+    assert delivery.reply_to_message_id == 555

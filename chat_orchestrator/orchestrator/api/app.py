@@ -970,9 +970,7 @@ async def _deliver_notification(
         return
 
     parse_mode = (body.parse_mode or "").strip() or None
-    ticketed_delivery = (
-        delivery is not None and delivery.ticket is not None and not delivery.text_override
-    )
+    ticketed_delivery = delivery is not None and delivery.ticket is not None
     if ticketed_delivery:
         # Ticket references are deliberately rendered as Telegram Markdown
         # links, so a caller-provided plain/HTML mode cannot make the link
@@ -980,7 +978,13 @@ async def _deliver_notification(
         parse_mode = "Markdown"
     raw_text = (delivery.text_override if delivery is not None and delivery.text_override else body.text)
     if ticketed_delivery:
-        raw_text = _format_ticket_notification(body, raw_text, delivery.ticket)
+        raw_text = (
+            _format_ticket_update_notification(
+                raw_text, delivery.ticket, urgent=delivery.top_level
+            )
+            if delivery.text_override
+            else _format_ticket_notification(body, delivery.ticket)
+        )
     text = raw_text
     if parse_mode and parse_mode.lower().startswith("markdown"):
         text = convert_github_to_telegram_markdown(raw_text)
@@ -1212,15 +1216,13 @@ def _ticket_notification_url(ticket: NotificationTicket) -> Optional[str]:
     return None
 
 
-def _format_ticket_notification(
-    body: "NotifyRequest", raw_text: str, ticket: NotificationTicket
-) -> str:
+def _format_ticket_notification(body: "NotifyRequest", ticket: NotificationTicket) -> str:
     """Render a newly-filed or updated ticket alert as Telegram Markdown."""
     from shared.utils.telegram_markdown import escape_markdown
 
     subject = body.alert.subject.strip() if body.alert and body.alert.subject.strip() else ""
     if not subject:
-        subject = next((line.strip() for line in raw_text.splitlines() if line.strip()), "Notification")
+        subject = _notify_ticket_subject(body)
 
     severity = body.alert.severity.strip().lower() if body.alert and body.alert.severity else ""
     if not severity:
@@ -1230,10 +1232,26 @@ def _format_ticket_notification(
     escaped_ref = escape_markdown(ticket.ref)
     ticket_link = f"[{escaped_ref}]({ticket_url})" if ticket_url else f"*{escaped_ref}*"
     urgent_prefix = "🔴 " if severity == "urgent" else ""
-    return (
-        f"{urgent_prefix}*{escape_markdown(subject)}*\n\n{escape_markdown(raw_text)}\n\n"
-        f"🎫 Ticket: {ticket_link}"
+    return "\n".join(
+        (
+            f"{urgent_prefix}*{escape_markdown(subject)}*",
+            f"📍 Grid: {escape_markdown(body.grid_name)}",
+            f"🎫 Ticket: {ticket_link}",
+        )
     )
+
+
+def _format_ticket_update_notification(
+    update: str, ticket: NotificationTicket, *, urgent: bool = False
+) -> str:
+    """Render a concise factual correlation update with its ticket reference linked."""
+    from shared.utils.telegram_markdown import escape_markdown
+
+    ticket_url = _ticket_notification_url(ticket)
+    escaped_ref = escape_markdown(ticket.ref)
+    ticket_link = f"[{escaped_ref}]({ticket_url})" if ticket_url else f"*{escaped_ref}*"
+    prefix = "🔴" if urgent else "↻"
+    return f"{prefix} {ticket_link} — {escape_markdown(update)}"
 
 
 @dataclass(frozen=True)
@@ -1260,24 +1278,19 @@ def _new_ticket_delivery(ticket: NotificationTicket) -> NotificationDelivery:
     return NotificationDelivery(record_message_id_for_ticket_ref=ticket.ref, ticket=ticket)
 
 
-def _default_update_message(decision: Any, ticket_ref: str) -> str:
-    if decision.update_message:
-        return decision.update_message
-    if decision.affected_key:
-        label = decision.affected_key.get("label") or "another component"
-        return f"{ticket_ref}: {label} also affected"
-    return f"{ticket_ref}: updated"
-
-
-def _amend_delivery(decision: Any, amendment: Any, ticket_ref: str) -> NotificationDelivery:
-    message = _default_update_message(decision, ticket_ref)
+def _amend_delivery(
+    decision: Any, amendment: Any, ticket: NotificationTicket
+) -> NotificationDelivery:
+    label = (decision.affected_key or {}).get("label") or "another component"
+    count = amendment.affected_keys_count if amendment is not None else 1
+    message = f"{label} also affected ({count} component{'s' if count != 1 else ''})"
     if amendment is not None and amendment.escalated:
-        return NotificationDelivery(text_override=f"🔴 {message}", top_level=True)
+        return NotificationDelivery(text_override=message, top_level=True, ticket=ticket)
     reply_to = amendment.telegram_message_id if amendment is not None else None
-    return NotificationDelivery(text_override=f"↻ {message}", reply_to_message_id=reply_to)
+    return NotificationDelivery(text_override=message, reply_to_message_id=reply_to, ticket=ticket)
 
 
-def _duplicate_delivery(amendment: Any, ticket_ref: str) -> NotificationDelivery:
+def _duplicate_delivery(amendment: Any, ticket: NotificationTicket) -> NotificationDelivery:
     """Silent by default (that's the whole point of "duplicate") -- except
     every ``ALERT_CORRELATION_ROLLUP_EVERY``-th occurrence, which gets one
     reply so a long-running issue doesn't vanish from the topic entirely."""
@@ -1287,9 +1300,11 @@ def _duplicate_delivery(amendment: Any, ticket_ref: str) -> NotificationDelivery
         return NotificationDelivery(suppress=True)
     rollup_every = int(fr.get("ALERT_CORRELATION_ROLLUP_EVERY"))
     if rollup_every > 0 and amendment.occurrence_count % rollup_every == 0:
-        message = f"{ticket_ref}: still firing — {amendment.occurrence_count} occurrences"
+        message = f"still firing — {amendment.occurrence_count} occurrences"
         return NotificationDelivery(
-            text_override=f"↻ {message}", reply_to_message_id=amendment.telegram_message_id
+            text_override=message,
+            reply_to_message_id=amendment.telegram_message_id,
+            ticket=ticket,
         )
     return NotificationDelivery(suppress=True)
 
@@ -1468,10 +1483,13 @@ async def _resolve_notify_ticket_auto(
                 delivery = NotificationDelivery(suppress=True)
             else:
                 ref = amendment.ticket_ref
+                ticket = NotificationTicket(
+                    ref=ref, backend=await ticket_service.get_backend_name(ref)
+                )
                 delivery = (
-                    _amend_delivery(decision, amendment, ref)
+                    _amend_delivery(decision, amendment, ticket)
                     if decision.decision == "amend"
-                    else _duplicate_delivery(amendment, ref)
+                    else _duplicate_delivery(amendment, ticket)
                 )
             return (
                 ref,
