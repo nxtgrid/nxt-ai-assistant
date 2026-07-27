@@ -17,7 +17,10 @@ import pytest
 from orchestrator.services.ticketing import jira_backend as jira_backend_module
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
 from orchestrator.services.ticketing.jira_backend import JiraTicketBackend
-from orchestrator.services.ticketing.jira_issue_types import JiraIssueTypeSelector, normalize_issue_types
+from orchestrator.services.ticketing.jira_issue_types import (
+    JiraIssueTypeSelector,
+    normalize_issue_types,
+)
 
 
 class _FakeResponse:
