@@ -1104,10 +1104,7 @@ async def _create_notify_ticket(
     ticket_service = TicketService(get_supabase_client=get_supabase_client)
 
     if summary is None:
-        first_line = next(
-            (line.strip() for line in body.text.splitlines() if line.strip()), "Notification"
-        )
-        summary = first_line[:120]
+        summary = _notify_ticket_subject(body)
     if description is None:
         description = body.text
 
@@ -1128,6 +1125,13 @@ async def _create_notify_ticket(
             content={"ok": False, "error": f"Ticket creation failed: {e}"},
         )
     return result, None
+
+
+def _notify_ticket_subject(body: "NotifyRequest") -> str:
+    """Return the supplied alert subject or a safe legacy fallback for a ticket."""
+    if body.alert and body.alert.subject.strip():
+        return body.alert.subject.strip()[:120]
+    return next((line.strip() for line in body.text.splitlines() if line.strip()), "Notification")[:120]
 
 
 async def _record_new_correlation(
@@ -1423,16 +1427,14 @@ async def _resolve_notify_ticket_auto(
                         _new_ticket_delivery(_notification_ticket_from_result(result)),
                     )
 
-                first_line = next(
-                    (line.strip() for line in body.text.splitlines() if line.strip()), "Notification"
-                )
+                summary = _notify_ticket_subject(body)
                 result, error = await _create_notify_ticket(
-                    body, target, backend_override, summary=first_line[:120], description=body.text
+                    body, target, backend_override, summary=summary, description=body.text
                 )
                 if error is not None:
                     return None, error, None, None
                 await _record_new_correlation(
-                    store, target, alert, result, decision.root_cause_kind, first_line[:120], body.text
+                    store, target, alert, result, decision.root_cause_kind, summary, body.text
                 )
                 return (
                     result.ref,

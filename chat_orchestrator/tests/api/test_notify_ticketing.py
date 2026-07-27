@@ -137,6 +137,33 @@ async def test_blank_ticket_id_uses_first_line_as_summary():
     assert req.description == "Meter offline\n\nFull details below..."
 
 
+async def test_blank_ticket_id_prefers_alert_subject_for_summary():
+    body = _notify_body(
+        ticket_id="",
+        text="Long raw alert body",
+        alert={"subject": "Inverter output stopped"},
+    )
+
+    await _resolve_notify_ticket(body, _target())
+
+    req, _ = _FakeTicketService.instances[-1].create_ticket_calls[0]
+    assert req.summary == "Inverter output stopped"
+
+
+async def test_auto_new_ticket_prefers_alert_subject_for_summary(monkeypatch):
+    monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
+    body = _notify_body(
+        ticket_id="auto",
+        text="Long raw alert body",
+        alert={"subject": "Inverter output stopped"},
+    )
+
+    await _resolve_notify_ticket_full(body, _target())
+
+    req, _ = _FakeTicketService.instances[-1].create_ticket_calls[0]
+    assert req.summary == "Inverter output stopped"
+
+
 async def test_new_ticket_delivery_keeps_backend_and_url_context():
     _FakeTicketService.instances = []
     body = _notify_body(ticket_id="")
