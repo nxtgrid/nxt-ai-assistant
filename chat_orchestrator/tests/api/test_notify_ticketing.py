@@ -15,6 +15,7 @@ import pytest
 from fastapi import BackgroundTasks
 
 from orchestrator.api.app import (
+    NotificationDelivery,
     NotificationTicket,
     NotifyRequest,
     _resolve_notify_ticket,
@@ -728,6 +729,72 @@ def _stub_chat_db_logging(monkeypatch):
 
 
 class TestDeliverNotificationDelivery:
+    async def test_ticketed_jira_notification_links_only_the_reference(self, fake_telegram_send):
+        from orchestrator.api.app import _deliver_notification
+
+        body = _notify_body(
+            text="Inverter output stopped",
+            alert={"subject": "! Warning: Inverter offline"},
+        )
+        ticket = NotificationTicket(
+            ref="OPS-3124", backend="jira", url="https://jira.test/browse/OPS-3124"
+        )
+
+        await _deliver_notification(
+            body, _target(), ticket.ref, NotificationDelivery(ticket=ticket)
+        )
+
+        assert fake_telegram_send.calls[0]["text"] == (
+            "*! Warning: Inverter offline*\n\nInverter output stopped\n\n"
+            "🎫 Ticket: [OPS-3124](https://jira.test/browse/OPS-3124)"
+        )
+
+    async def test_internal_ticket_notification_uses_app_ticket_link(
+        self, fake_telegram_send, monkeypatch
+    ):
+        from orchestrator.api.app import _deliver_notification
+
+        monkeypatch.setenv("APP_URL", "https://anansi.test/")
+        body = _notify_body(text="Inverter output stopped", alert={"subject": "Inverter offline"})
+        ticket = NotificationTicket(ref="TKT-00101", backend="internal")
+
+        await _deliver_notification(
+            body, _target(), ticket.ref, NotificationDelivery(ticket=ticket)
+        )
+
+        assert fake_telegram_send.calls[0]["text"].endswith(
+            "🎫 Ticket: [TKT-00101](https://anansi.test/tickets/TKT-00101)"
+        )
+
+    async def test_urgent_ticket_notification_uses_red_indicator(
+        self, fake_telegram_send
+    ):
+        from orchestrator.api.app import _deliver_notification
+
+        body = _notify_body(text="Grid is unreachable", alert={"subject": "! Urgent: Grid down"})
+        ticket = NotificationTicket(ref="OPS-77", backend="jira", url="https://jira.test/browse/OPS-77")
+
+        await _deliver_notification(
+            body, _target(), ticket.ref, NotificationDelivery(ticket=ticket)
+        )
+
+        assert fake_telegram_send.calls[0]["text"].startswith("🔴 *! Urgent: Grid down*")
+
+    async def test_internal_ticket_without_app_url_is_unlinked(
+        self, fake_telegram_send, monkeypatch
+    ):
+        from orchestrator.api.app import _deliver_notification
+
+        monkeypatch.delenv("APP_URL", raising=False)
+        body = _notify_body(text="Inverter output stopped", alert={"subject": "Inverter offline"})
+        ticket = NotificationTicket(ref="TKT-00101", backend="internal")
+
+        await _deliver_notification(
+            body, _target(), ticket.ref, NotificationDelivery(ticket=ticket)
+        )
+
+        assert fake_telegram_send.calls[0]["text"].endswith("🎫 Ticket: *TKT-00101*")
+
     async def test_new_ticket_delivery_sends_full_text_no_reply(self, fake_telegram_send):
         from orchestrator.api.app import NotificationDelivery, _deliver_notification
 

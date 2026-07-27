@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from urllib.parse import quote
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -25,7 +26,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from orchestrator.services.ticketing.alert_facts import AlertFacts
+from orchestrator.services.ticketing.alert_facts import AlertFacts, derive_severity
 from shared.utils.gdrive_doc_fetcher import GoogleDriveDocFetcher
 from shared.utils.logging import get_logger
 
@@ -970,6 +971,8 @@ async def _deliver_notification(
 
     parse_mode = (body.parse_mode or "").strip() or None
     raw_text = (delivery.text_override if delivery is not None and delivery.text_override else body.text)
+    if delivery is not None and delivery.ticket is not None and not delivery.text_override:
+        raw_text = _format_ticket_notification(body, raw_text, delivery.ticket)
     text = raw_text
     if parse_mode and parse_mode.lower().startswith("markdown"):
         text = convert_github_to_telegram_markdown(raw_text)
@@ -1179,6 +1182,46 @@ class NotificationTicket:
 
 def _notification_ticket_from_result(result: Any) -> NotificationTicket:
     return NotificationTicket(ref=result.ref, backend=result.backend, url=result.url)
+
+
+def _ticket_notification_url(ticket: NotificationTicket) -> Optional[str]:
+    """Return the public browse URL for a ticket, if its backend has one."""
+    if ticket.url:
+        return ticket.url
+    if ticket.backend == "internal":
+        app_url = os.getenv("APP_URL", "").rstrip("/")
+        if app_url:
+            return f"{app_url}/tickets/{quote(ticket.ref, safe='-')}"
+        return None
+    if ticket.backend == "jira":
+        jira_url = os.getenv("JIRA_BASE_URL", "").rstrip("/")
+        if jira_url:
+            return f"{jira_url}/browse/{quote(ticket.ref, safe='-')}"
+    return None
+
+
+def _format_ticket_notification(
+    body: "NotifyRequest", raw_text: str, ticket: NotificationTicket
+) -> str:
+    """Render a newly-filed or updated ticket alert as Telegram Markdown."""
+    from shared.utils.telegram_markdown import escape_markdown
+
+    subject = body.alert.subject.strip() if body.alert and body.alert.subject.strip() else ""
+    if not subject:
+        subject = next((line.strip() for line in raw_text.splitlines() if line.strip()), "Notification")
+
+    severity = body.alert.severity.strip().lower() if body.alert and body.alert.severity else ""
+    if not severity:
+        severity = derive_severity(subject)
+
+    ticket_url = _ticket_notification_url(ticket)
+    escaped_ref = escape_markdown(ticket.ref)
+    ticket_link = f"[{escaped_ref}]({ticket_url})" if ticket_url else f"*{escaped_ref}*"
+    urgent_prefix = "🔴 " if severity == "urgent" else ""
+    return (
+        f"{urgent_prefix}*{escape_markdown(subject)}*\n\n{raw_text}\n\n"
+        f"🎫 Ticket: {ticket_link}"
+    )
 
 
 @dataclass(frozen=True)
