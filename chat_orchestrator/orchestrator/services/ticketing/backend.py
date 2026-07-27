@@ -60,6 +60,25 @@ class TicketStatus(BaseModel):
     raw_status: str = ""
 
 
+class TicketSummary(BaseModel):
+    """A candidate ticket returned by ``find_open_by_grid`` for correlation.
+
+    Deliberately carries enough for the alert correlator to reason about the
+    candidate (age, current affected-component list via ``labels``/metadata
+    the caller has already merged in) without a second round-trip per
+    candidate.
+    """
+
+    ref: str
+    backend: TicketBackendName
+    summary: str
+    description: str = ""
+    status: str = ""
+    is_done: bool = False
+    created_at: Optional[str] = None
+    labels: List[str] = Field(default_factory=list)
+
+
 class TicketBackendError(RuntimeError):
     """Raised by a backend's ``create_ticket`` when ticket creation fails.
 
@@ -104,4 +123,29 @@ class TicketBackend(Protocol):
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         """Find a ticket ref already filed for this escalation mapping (dedup guard)."""
+        ...
+
+    async def update_ticket(
+        self,
+        ref: str,
+        summary: Optional[str] = None,
+        description: Optional[str] = None,
+        priority_id: Optional[str] = None,
+    ) -> bool:
+        """Update summary/description (and, for Jira, priority) of an existing ticket.
+
+        Used by alert correlation to re-render a ticket after an amend (see
+        ``correlation_render.py``). Never raises -- returns ``True``/``False``.
+        A backend that doesn't support a given field (e.g. ``priority_id`` on
+        the internal backend) silently ignores it rather than failing.
+        """
+        ...
+
+    async def find_open_by_grid(self, grid_name: str, limit: int = 20) -> List["TicketSummary"]:
+        """Find open tickets for a grid, most-recent-first (correlation candidates).
+
+        Never raises -- returns ``[]`` on any failure so a backend outage
+        degrades correlation to "no candidates found" (i.e. file a new
+        ticket) rather than a hard error.
+        """
         ...

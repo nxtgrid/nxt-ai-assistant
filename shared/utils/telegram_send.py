@@ -99,12 +99,19 @@ async def send_telegram_message_raw(
     reply_markup: Optional[Dict[str, Any]] = None,
     parse_mode: Optional[str] = "Markdown",
     topic_id: Optional[int | str] = None,
+    reply_to_message_id: Optional[int | str] = None,
 ) -> Dict[str, Any]:
     """Send a message with a plain-text retry, returning Telegram's raw response.
 
     Sends ``text`` with ``parse_mode`` (default ``"Markdown"``). If Telegram
     rejects it with a "can't parse entities" 400, the same text is resent without
     a ``parse_mode`` so the content still reaches the chat.
+
+    ``reply_to_message_id`` threads the send as a reply (used by alert
+    correlation to reply to a ticket's original alert post for an amend
+    update). Sent with ``allow_sending_without_reply: true`` so a deleted or
+    otherwise-gone parent message degrades to a plain (non-reply) send
+    instead of failing the whole request.
 
     Returns the decoded Telegram response dict. Callers that only need the
     message id should use :func:`send_telegram_message_with_fallback`; this
@@ -144,6 +151,14 @@ async def send_telegram_message_raw(
             payload["message_thread_id"] = int(topic_id)
         except (TypeError, ValueError):
             logger.warning("Ignoring invalid topic_id %r for chat %s", topic_id, chat_id)
+    if reply_to_message_id is not None and str(reply_to_message_id).strip() != "":
+        try:
+            payload["reply_to_message_id"] = int(reply_to_message_id)
+            payload["allow_sending_without_reply"] = True
+        except (TypeError, ValueError):
+            logger.warning(
+                "Ignoring invalid reply_to_message_id %r for chat %s", reply_to_message_id, chat_id
+            )
 
     try:
         result = await _post(payload)
@@ -166,6 +181,7 @@ async def send_telegram_message_with_fallback(
     reply_markup: Optional[Dict[str, Any]] = None,
     parse_mode: Optional[str] = "Markdown",
     topic_id: Optional[int | str] = None,
+    reply_to_message_id: Optional[int | str] = None,
 ) -> Optional[int]:
     """Send a message with an automatic plain-text retry on a Markdown parse error.
 
@@ -182,6 +198,7 @@ async def send_telegram_message_with_fallback(
         reply_markup=reply_markup,
         parse_mode=parse_mode,
         topic_id=topic_id,
+        reply_to_message_id=reply_to_message_id,
     )
     if not result.get("ok"):
         return None

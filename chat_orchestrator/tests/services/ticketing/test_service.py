@@ -15,7 +15,11 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from orchestrator.services.ticketing.backend import TicketCreateRequest, TicketResult
+from orchestrator.services.ticketing.backend import (
+    TicketCreateRequest,
+    TicketResult,
+    TicketSummary,
+)
 from orchestrator.services.ticketing.service import TicketService
 
 
@@ -26,8 +30,15 @@ class _FakeBackend:
         self.name = name
         self._ref = ref
         self.find_by_escalation_calls: List[str] = []
+        self.update_ticket_calls: List[tuple] = []
+        self.find_open_by_grid_calls: List[tuple] = []
+        self.find_open_by_grid_result: List[TicketSummary] = []
+        self.update_ticket_result: bool = True
 
     async def is_available(self) -> bool:
+        return True
+
+    def has_credentials(self) -> bool:
         return True
 
     async def create_ticket(self, req: TicketCreateRequest) -> TicketResult:
@@ -45,6 +56,20 @@ class _FakeBackend:
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         self.find_by_escalation_calls.append(mapping_id)
         return None
+
+    async def update_ticket(
+        self,
+        ref: str,
+        summary: Optional[str] = None,
+        description: Optional[str] = None,
+        priority_id: Optional[str] = None,
+    ) -> bool:
+        self.update_ticket_calls.append((ref, summary, description, priority_id))
+        return self.update_ticket_result
+
+    async def find_open_by_grid(self, grid_name: str, limit: int = 20) -> List[TicketSummary]:
+        self.find_open_by_grid_calls.append((grid_name, limit))
+        return self.find_open_by_grid_result
 
 
 class _FakeResponse:
@@ -271,3 +296,81 @@ class TestFindByEscalation:
 
         assert jira.find_by_escalation_calls == []
         assert internal.find_by_escalation_calls == ["mapping-5"]
+
+
+class TestUpdateTicket:
+    """update_ticket() routes by the ref's persisted backend, same as
+    add_comment/get_status/transition_to_done (see TestBackendForRef)."""
+
+    @pytest.mark.asyncio
+    async def test_routes_to_internal_when_ref_found_in_internal_tickets(self):
+        raw = _FakeRawClient()
+        raw.tables["internal_tickets"].rows = [{"ticket_ref": "TKT-000001"}]
+        jira = _FakeBackend("jira")
+        internal = _FakeBackend("internal")
+        service = _make_service(raw, jira=jira, internal=internal)
+
+        ok = await service.update_ticket("TKT-000001", summary="s", description="d")
+
+        assert ok is True
+        assert internal.update_ticket_calls == [("TKT-000001", "s", "d", None)]
+        assert jira.update_ticket_calls == []
+
+    @pytest.mark.asyncio
+    async def test_routes_to_jira_when_ref_not_in_internal_tickets(self):
+        raw = _FakeRawClient()
+        jira = _FakeBackend("jira")
+        internal = _FakeBackend("internal")
+        service = _make_service(raw, jira=jira, internal=internal)
+
+        ok = await service.update_ticket("OPS-99", priority_id="10001")
+
+        assert ok is True
+        assert jira.update_ticket_calls == [("OPS-99", None, None, "10001")]
+        assert internal.update_ticket_calls == []
+
+    @pytest.mark.asyncio
+    async def test_propagates_backend_failure(self):
+        raw = _FakeRawClient()
+        jira = _FakeBackend("jira")
+        jira.update_ticket_result = False
+        internal = _FakeBackend("internal")
+        service = _make_service(raw, jira=jira, internal=internal)
+
+        ok = await service.update_ticket("OPS-99", summary="s")
+
+        assert ok is False
+
+
+class TestFindOpenByGrid:
+    """find_open_by_grid() delegates to resolve_backend(), not _backend_for_ref
+    -- there's no single ref to route by; it's a fresh search on whichever
+    backend is currently active (see resolve_backend's own coverage in
+    test_service_resolve_backend.py for the override matrix)."""
+
+    @pytest.mark.asyncio
+    async def test_delegates_to_resolved_backend(self, monkeypatch):
+        monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "internal")
+        jira = _FakeBackend("jira")
+        internal = _FakeBackend("internal")
+        expected = [TicketSummary(ref="TKT-000001", backend="internal", summary="s")]
+        internal.find_open_by_grid_result = expected
+        service = _make_service(raw_client=None, jira=jira, internal=internal)
+
+        results = await service.find_open_by_grid("Kudi", limit=5)
+
+        assert results == expected
+        assert internal.find_open_by_grid_calls == [("Kudi", 5)]
+        assert jira.find_open_by_grid_calls == []
+
+    @pytest.mark.asyncio
+    async def test_backend_override_param_takes_precedence(self, monkeypatch):
+        monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "internal")
+        jira = _FakeBackend("jira")
+        internal = _FakeBackend("internal")
+        service = _make_service(raw_client=None, jira=jira, internal=internal)
+
+        await service.find_open_by_grid("Kudi", backend_override="jira")
+
+        assert jira.find_open_by_grid_calls == [("Kudi", 20)]
+        assert internal.find_open_by_grid_calls == []

@@ -17,12 +17,18 @@ worst a failed insert leaves an unused (harmless) sequence gap.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, List, Optional
 
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
-from .backend import TicketBackendError, TicketCreateRequest, TicketResult, TicketStatus
+from .backend import (
+    TicketBackendError,
+    TicketCreateRequest,
+    TicketResult,
+    TicketStatus,
+    TicketSummary,
+)
 
 LOGGER = get_logger(__name__)
 
@@ -210,3 +216,67 @@ class InternalTicketBackend:
 
         rows = getattr(response, "data", None) or []
         return rows[0]["ticket_ref"] if rows else None
+
+    async def update_ticket(
+        self,
+        ref: str,
+        summary: Optional[str] = None,
+        description: Optional[str] = None,
+        priority_id: Optional[str] = None,
+    ) -> bool:
+        """Update summary/description of an internal ticket.
+
+        ``priority_id`` has no equivalent on the internal backend (severity is
+        carried as a label instead, set at creation) -- silently ignored so
+        callers that pass it uniformly across both backends don't need a
+        backend-specific branch.
+        """
+        client = self._client()
+        if client is None:
+            return False
+        payload: dict[str, Any] = {}
+        if summary is not None:
+            payload["summary"] = summary
+        if description is not None:
+            payload["description"] = description
+        if not payload:
+            return True
+        try:
+            client.table("internal_tickets").update(payload).eq("ticket_ref", ref).execute()
+            return True
+        except Exception as e:
+            LOGGER.warning("Failed to update internal ticket %s: %s", ref, e)
+            return False
+
+    async def find_open_by_grid(self, grid_name: str, limit: int = 20) -> List[TicketSummary]:
+        client = self._client()
+        if client is None:
+            return []
+        try:
+            response = (
+                client.table("internal_tickets")
+                .select("*")
+                .eq("grid_name", grid_name)
+                .neq("status", "done")
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+        except Exception as e:
+            LOGGER.warning("Failed to find open internal tickets for grid %s: %s", grid_name, e)
+            return []
+
+        rows = getattr(response, "data", None) or []
+        return [
+            TicketSummary(
+                ref=row["ticket_ref"],
+                backend="internal",
+                summary=row.get("summary") or "",
+                description=row.get("description") or "",
+                status=row.get("status") or "",
+                is_done=(row.get("status") == "done"),
+                created_at=row.get("created_at"),
+                labels=row.get("labels") or [],
+            )
+            for row in rows
+        ]

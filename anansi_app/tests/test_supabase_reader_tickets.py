@@ -357,3 +357,101 @@ def test_list_tickets_returns_empty_when_no_client():
     reader.client = None
     assert reader.list_tickets() == []
     assert reader.get_ticket_detail("INT-1") is None
+
+
+# ---------------------------------------------------------------------------
+# Alert correlation surfacing (Task 11) -- ticket_correlations /
+# ticket_correlation_events left-joined onto the list/detail views.
+# ---------------------------------------------------------------------------
+
+
+def _seed_with_correlation() -> dict[str, list[dict]]:
+    seed = _seed()
+    seed["ticket_correlations"] = [
+        {
+            "ticket_ref": "INT-1",
+            "grid_name": "GridA",
+            "affected_keys": [
+                {"kind": "mppt", "key": "A3", "label": "MPPT A3", "first_seen": "t1", "last_seen": "t2", "count": 2},
+                {"kind": "mppt", "key": "A7", "label": "MPPT A7", "first_seen": "t3", "last_seen": "t3", "count": 1},
+            ],
+            "occurrence_count": 5,
+            "root_cause_kind": "grid_off",
+            "escalated_at": "2026-07-20T12:00:00",
+            "description_base": "Please check VRM.",
+        }
+    ]
+    seed["ticket_correlation_events"] = [
+        {
+            "ticket_ref": "INT-1",
+            "decision": "new",
+            "decided_by": "no_candidates",
+            "confidence": None,
+            "reason": "no open candidates",
+            "signature": "sig-a",
+            "created_at": "2026-07-20T09:00:00",
+        },
+        {
+            "ticket_ref": "INT-1",
+            "decision": "amend",
+            "decided_by": "llm",
+            "confidence": 0.9,
+            "reason": "same root cause",
+            "signature": "sig-a",
+            "created_at": "2026-07-20T10:00:00",
+        },
+    ]
+    return seed
+
+
+def _reader_with_correlation() -> SupabaseReader:
+    reader = SupabaseReader.__new__(SupabaseReader)
+    reader.client = _FakeClient(_seed_with_correlation())
+    return reader
+
+
+def test_list_tickets_attaches_correlation_summary():
+    rows = {r["ticket_ref"]: r for r in _reader_with_correlation().list_tickets()}
+
+    assert rows["INT-1"]["affected_keys_count"] == 2
+    assert rows["INT-1"]["occurrence_count"] == 5
+    assert rows["INT-1"]["root_cause_kind"] == "grid_off"
+    assert rows["INT-1"]["escalated"] is True
+
+
+def test_list_tickets_defaults_when_no_correlation_row():
+    rows = {r["ticket_ref"]: r for r in _reader_with_correlation().list_tickets()}
+
+    assert rows["INT-2"]["affected_keys_count"] == 0
+    assert rows["INT-2"]["occurrence_count"] is None
+    assert rows["INT-2"]["root_cause_kind"] is None
+    assert rows["INT-2"]["escalated"] is False
+
+
+def test_list_tickets_correlation_absent_entirely_still_works():
+    """A deployment (or a ticket) with no ticket_correlations rows at all
+    must render exactly as it did before this feature existed."""
+    rows = {r["ticket_ref"]: r for r in _reader().list_tickets()}
+    assert rows["INT-1"]["affected_keys_count"] == 0
+    assert rows["INT-1"]["escalated"] is False
+
+
+def test_get_ticket_detail_includes_correlation_and_events():
+    detail = _reader_with_correlation().get_ticket_detail("INT-1")
+
+    assert detail is not None
+    assert detail["correlation"] is not None
+    assert len(detail["correlation"]["affected_keys"]) == 2
+    assert detail["correlation"]["root_cause_kind"] == "grid_off"
+
+    events = detail["correlation_events"]
+    assert [e["decision"] for e in events] == ["new", "amend"]
+    assert events[0]["created_at"] <= events[1]["created_at"]  # chronological
+
+
+def test_get_ticket_detail_correlation_none_when_absent():
+    detail = _reader().get_ticket_detail("INT-1")
+
+    assert detail is not None
+    assert detail["correlation"] is None
+    assert detail["correlation_events"] == []
