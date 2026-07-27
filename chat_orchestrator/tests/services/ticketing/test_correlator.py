@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -23,11 +23,9 @@ from orchestrator.services.ticketing.backend import TicketStatus, TicketSummary
 from orchestrator.services.ticketing.correlator import (
     AlertCorrelator,
     CandidateSummary,
-    CorrelationDecision,
     _apply_guardrails,
     _parse_llm_response,
 )
-
 
 # ---------------------------------------------------------------------------
 # Pure-function tests: JSON parsing + guardrails

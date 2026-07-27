@@ -10,7 +10,7 @@ than imported, to keep this test file independent of that one's internals).
 from __future__ import annotations
 
 import json as json_module
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pytest
 
