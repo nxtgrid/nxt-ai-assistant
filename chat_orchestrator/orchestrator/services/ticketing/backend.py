@@ -10,6 +10,7 @@ rewiring is a later task -- see ``service.py`` module docstring).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -57,6 +58,19 @@ class TicketResult(BaseModel):
     backend: TicketBackendName
     url: Optional[str] = None
     ticket_type: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TicketCreateOutcome:
+    """A fail-open notify-ticket creation result.
+
+    ``result`` is absent only when both the configured primary backend and any
+    permitted internal fallback could not persist the alert.
+    """
+
+    result: Optional[TicketResult]
+    error: Optional[str] = None
+    fallback_used: bool = False
 
 
 class TicketStatus(BaseModel):

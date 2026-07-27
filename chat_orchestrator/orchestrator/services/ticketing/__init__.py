@@ -8,6 +8,7 @@ backend implementations for direct use in tests/DI.
 from .backend import (
     TicketBackend,
     TicketBackendError,
+    TicketCreateOutcome,
     TicketCreateRequest,
     TicketResult,
     TicketStatus,
@@ -19,6 +20,7 @@ from .service import TicketService
 __all__ = [
     "TicketBackend",
     "TicketBackendError",
+    "TicketCreateOutcome",
     "TicketCreateRequest",
     "TicketResult",
     "TicketStatus",
