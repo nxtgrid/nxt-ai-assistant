@@ -137,6 +137,7 @@ class JiraIssueTypeSelector:
         summary: str,
         description: str,
         requested_type: Optional[str] = None,
+        operational_context: Optional[Dict[str, Any]] = None,
     ) -> Optional[IssueTypeSelection]:
         types = await self.available_types()
         if not types:
@@ -155,6 +156,8 @@ class JiraIssueTypeSelector:
             f"Catalogue: {json.dumps(catalogue)}\n"
             f"Alert summary: {summary}\nAlert details: {description[:4000]}"
         )
+        if operational_context:
+            prompt += f"\nLive grid telemetry: {json.dumps(operational_context, default=str)}"
         try:
             # Keep LLM providers lazy: every ticket service imports this
             # module, while only a configured Jira alert creation needs an

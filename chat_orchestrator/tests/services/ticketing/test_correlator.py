@@ -424,6 +424,60 @@ class TestSignatureDuplicate:
         assert decision.decided_by == "llm"
         assert len(gateway.calls) == 1
 
+    @pytest.mark.asyncio
+    async def test_live_facts_are_added_only_when_correlation_calls_the_llm(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        gateway = _FakeGateway(text=json.dumps({"decision": "new", "confidence": 0.9}))
+        correlator, store, ts, _gw = _make_correlator(gateway=gateway)
+        store.correlations.append(
+            {
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "signatures": [],
+                "affected_keys": [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ts.statuses["TKT-1"] = TicketStatus(summary="Existing issue", is_done=False)
+        calls = 0
+
+        async def get_live_facts():
+            nonlocal calls
+            calls += 1
+            return {"live_inverter_output_kw": 2.4}
+
+        await correlator.decide("Kudi", _mppt_alert(), get_live_facts=get_live_facts)
+
+        prompt_messages, _options = gateway.calls[0]
+        prompt_text = "\n".join(message.text or "" for message in prompt_messages)
+        assert '"live_inverter_output_kw": 2.4' in prompt_text
+        assert calls == 1
+
+    @pytest.mark.asyncio
+    async def test_exact_duplicate_does_not_fetch_live_facts(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert()
+        correlator, store, ts, _gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "signatures": [alert.signature],
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ts.statuses["TKT-1"] = TicketStatus(summary="Existing issue", is_done=False)
+
+        async def unexpected_live_facts():
+            raise AssertionError("silent duplicate must not fetch live telemetry")
+
+        decision = await correlator.decide("Kudi", alert, get_live_facts=unexpected_live_facts)
+
+        assert decision.decision == "duplicate"
+
 
 class TestLiveStatusConfirmation:
     @pytest.mark.asyncio

@@ -368,6 +368,7 @@ class JiraTicketBackend:
             summary=req.summary,
             description=req.description,
             requested_type=req.ticket_type,
+            operational_context=req.llm_context,
         )
         return selection or self._fallback_alert_issue_type(profile)
 

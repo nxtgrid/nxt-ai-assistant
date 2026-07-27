@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from orchestrator.services.ticketing.backend import (
+    TicketBackendError,
     TicketCreateRequest,
     TicketResult,
     TicketSummary,
@@ -34,6 +35,8 @@ class _FakeBackend:
         self.find_open_by_grid_calls: List[tuple] = []
         self.find_open_by_grid_result: List[TicketSummary] = []
         self.update_ticket_result: bool = True
+        self.create_error: Optional[Exception] = None
+        self.create_calls: List[TicketCreateRequest] = []
 
     async def is_available(self) -> bool:
         return True
@@ -42,6 +45,9 @@ class _FakeBackend:
         return True
 
     async def create_ticket(self, req: TicketCreateRequest) -> TicketResult:
+        self.create_calls.append(req)
+        if self.create_error is not None:
+            raise self.create_error
         return TicketResult(ref=self._ref, backend=self.name, url=None)
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
@@ -203,6 +209,56 @@ class TestCreateTicketStamping:
         result = await service.create_ticket(req)
 
         assert result.ref == "OPS-7"  # no exception propagated
+
+
+class TestNotifyTicketFallback:
+    @pytest.mark.asyncio
+    async def test_jira_failure_creates_internal_ticket_once(self):
+        jira = _FakeBackend("jira", ref="OPS-42")
+        jira.create_error = TicketBackendError("Jira unavailable")
+        internal = _FakeBackend("internal", ref="TKT-000101")
+        service = _make_service(raw_client=None, jira=jira, internal=internal)
+
+        outcome = await service.create_ticket_with_internal_fallback(
+            TicketCreateRequest(summary="! Urgent: Grid down"), backend_override="jira"
+        )
+
+        assert outcome.result == TicketResult(ref="TKT-000101", backend="internal", url=None)
+        assert outcome.fallback_used is True
+        assert outcome.error is None
+        assert len(jira.create_calls) == 1
+        assert len(internal.create_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_double_failure_returns_error_without_raising(self):
+        jira = _FakeBackend("jira")
+        jira.create_error = TicketBackendError("Jira unavailable")
+        internal = _FakeBackend("internal")
+        internal.create_error = TicketBackendError("internal unavailable")
+        service = _make_service(raw_client=None, jira=jira, internal=internal)
+
+        outcome = await service.create_ticket_with_internal_fallback(
+            TicketCreateRequest(summary="! Urgent: Grid down"), backend_override="jira"
+        )
+
+        assert outcome.result is None
+        assert outcome.fallback_used is True
+        assert outcome.error == "Jira: Jira unavailable; internal: internal unavailable"
+
+    @pytest.mark.asyncio
+    async def test_primary_internal_failure_is_not_retried(self):
+        internal = _FakeBackend("internal")
+        internal.create_error = TicketBackendError("internal unavailable")
+        service = _make_service(raw_client=None, internal=internal)
+
+        outcome = await service.create_ticket_with_internal_fallback(
+            TicketCreateRequest(summary="! Urgent: Grid down"), backend_override="internal"
+        )
+
+        assert outcome.result is None
+        assert outcome.fallback_used is False
+        assert outcome.error == "internal unavailable"
+        assert len(internal.create_calls) == 1
 
 
 class TestBackendForRef:

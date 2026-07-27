@@ -37,6 +37,54 @@ from shared.utils.geo import parse_location_geom
 
 
 class ClientGridStatusMixin:
+    async def get_live_inverter_output(self, grid_name: str) -> Optional[float]:
+        """Return fresh VRM inverter output in kW, or ``None`` when unavailable.
+
+        This intentionally performs no fuzzy grid lookup and no full-status
+        enrichment: notification callers have already resolved a canonical grid
+        name and need a small, best-effort live observation only.
+        """
+        try:
+            auth_service = get_auth_service()
+            pool = await auth_service._get_db_pool()
+            async with pool.acquire() as conn:
+                grid_row = await conn.fetchrow(
+                    """
+                    SELECT generation_external_site_id
+                    FROM grids
+                    WHERE LOWER(name) = LOWER($1)
+                      AND is_hidden_from_reporting IS NOT TRUE
+                      AND deleted_at IS NULL
+                    LIMIT 1
+                    """,
+                    grid_name,
+                )
+            if not grid_row or not grid_row["generation_external_site_id"]:
+                logger.info("No VRM site configured for urgent alert grid %r", grid_name)
+                return None
+
+            vrm_platform = VRMPlatform()
+            await vrm_platform.initialize()
+            voltage = await vrm_platform.get_current_inverter_voltage(
+                str(grid_row["generation_external_site_id"])
+            )
+            if not voltage or getattr(voltage, "error", None):
+                return None
+
+            data_timestamp = getattr(voltage, "data_timestamp", None)
+            if not data_timestamp:
+                return None
+            now = datetime.now(data_timestamp.tzinfo) if data_timestamp.tzinfo else datetime.utcnow()
+            if now - data_timestamp > timedelta(minutes=30):
+                logger.info("Stale VRM output for urgent alert grid %r", grid_name)
+                return None
+
+            output_kw = getattr(voltage, "total_power_kw", None)
+            return float(output_kw) if output_kw is not None else None
+        except Exception:
+            logger.warning("Live VRM output fetch failed for %s", grid_name, exc_info=True)
+            return None
+
     async def get_grid_status(
         self,
         organization_id: int,

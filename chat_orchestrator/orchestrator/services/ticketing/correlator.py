@@ -67,6 +67,7 @@ class CandidateSummary(BaseModel):
     occurrence_count: int = 1
     status: str = ""
     signatures: List[str] = Field(default_factory=list)
+    severity: str = ""
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class CorrelationDecision:
     candidate_refs: List[str]
     llm_raw: Optional[str]
     needs_root_cause_ticket: bool = False
+    ticket_severity: str = ""
 
 
 def _parse_llm_response(raw: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -224,6 +226,7 @@ def _apply_guardrails(
         candidate_refs=candidate_refs,
         llm_raw=llm_raw,
         needs_root_cause_ticket=needs_root_cause_ticket,
+        ticket_severity=by_ref[ticket_ref].severity,
     )
 
 
@@ -371,6 +374,7 @@ class AlertCorrelator:
         alert: AlertFacts,
         dedup_key: Optional[str] = None,
         backend_override: Optional[str] = None,
+        get_live_facts: Optional[Callable[[], Awaitable[Dict[str, Any]]]] = None,
     ) -> CorrelationDecision:
         if dedup_key:
             prior = await self._store.get_by_dedup_key(dedup_key)
@@ -388,6 +392,7 @@ class AlertCorrelator:
                     candidate_refs=[],
                     llm_raw=None,
                     needs_root_cause_ticket=False,
+                    ticket_severity=prior.get("ticket_severity") or "",
                 )
 
         if not fr.get("ALERT_CORRELATION_ENABLED"):
@@ -431,13 +436,15 @@ class AlertCorrelator:
                 candidate_refs=[c.ref for c in candidates],
                 llm_raw=None,
                 needs_root_cause_ticket=False,
+                ticket_severity=duplicate.severity,
             )
             return await self._finalize(grid_name, alert, dedup_key, decision)
 
         candidate_refs = [c.ref for c in candidates]
         try:
             raw = await asyncio.wait_for(
-                self._call_llm(grid_name, alert, candidates), timeout=self._timeout_seconds
+                self._call_llm(grid_name, alert, candidates, get_live_facts=get_live_facts),
+                timeout=self._timeout_seconds,
             )
         except Exception as e:
             return await self._finalize(
@@ -524,6 +531,7 @@ class AlertCorrelator:
                 occurrence_count=row.get("occurrence_count") or 1,
                 status=row.get("status") or "",
                 signatures=row.get("signatures") or [],
+                severity=row.get("severity") or "",
             )
 
         for summary in backend_summaries:
@@ -553,7 +561,11 @@ class AlertCorrelator:
         return confirmed[: self._max_candidates]
 
     async def _call_llm(
-        self, grid_name: str, alert: AlertFacts, candidates: List[CandidateSummary]
+        self,
+        grid_name: str,
+        alert: AlertFacts,
+        candidates: List[CandidateSummary],
+        get_live_facts: Optional[Callable[[], Awaitable[Dict[str, Any]]]] = None,
     ) -> Optional[str]:
         instructions = self._get_correlation_instructions()
         system_instructions = (
@@ -562,6 +574,13 @@ class AlertCorrelator:
             else str(instructions)
         )
         grid_facts = await self._get_grid_operational_context(grid_name)
+        if get_live_facts is not None:
+            try:
+                live_facts = await get_live_facts()
+            except Exception:
+                LOGGER.warning("Live telemetry context failed for grid %r", grid_name, exc_info=True)
+                live_facts = {"live_inverter_output": "unavailable"}
+            grid_facts = {**grid_facts, "live_telemetry": live_facts}
         rag_query = f"{alert.subject}\n{alert.details}".strip()
         rag_snippets = await self._get_rag_context(rag_query)
 

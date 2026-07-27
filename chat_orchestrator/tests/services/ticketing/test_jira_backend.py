@@ -10,6 +10,7 @@ are queued per (method, url-substring) and each fake response supports the
 from __future__ import annotations
 
 import json as json_module
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
@@ -18,6 +19,7 @@ from orchestrator.services.ticketing import jira_backend as jira_backend_module
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
 from orchestrator.services.ticketing.jira_backend import JiraTicketBackend
 from orchestrator.services.ticketing.jira_issue_types import (
+    JiraIssueType,
     JiraIssueTypeSelector,
     normalize_issue_types,
 )
@@ -153,6 +155,44 @@ class TestAlertIssueTypeMetadata:
 
         assert JiraIssueTypeSelector.fallback(types, "task").issue_type.id == "1"
         assert JiraIssueTypeSelector.fallback(types, "Bug") is None
+
+    @pytest.mark.asyncio
+    async def test_selector_includes_live_context_without_changing_description(self):
+        class RecordingGateway:
+            def __init__(self):
+                self.messages = []
+
+            async def generate(self, messages, _options):
+                self.messages = messages
+
+                class Result:
+                    text = '{"issue_type_id":"1","reason":"output is zero"}'
+
+                return Result()
+
+        gateway = RecordingGateway()
+        selector = JiraIssueTypeSelector(
+            base_url="https://example.atlassian.net",
+            headers={},
+            project_key="OPS",
+            model="fake-model",
+            get_session=lambda: None,
+            gateway=gateway,
+        )
+        selector._cached_types = [JiraIssueType(id="1", name="Task")]
+        selector._cached_at = time.monotonic()
+
+        result = await selector.select(
+            summary="! Urgent: Grid down",
+            description="Original alert text",
+            operational_context={"live_inverter_output_kw": 0.0},
+        )
+
+        assert result is not None
+        assert result.issue_type.id == "1"
+        prompt = gateway.messages[0].text or ""
+        assert "Original alert text" in prompt
+        assert '"live_inverter_output_kw": 0.0' in prompt
 
 
 class TestIsAvailable:

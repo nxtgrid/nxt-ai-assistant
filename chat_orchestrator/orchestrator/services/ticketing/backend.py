@@ -10,7 +10,8 @@ rewiring is a later task -- see ``service.py`` module docstring).
 
 from __future__ import annotations
 
-from typing import List, Literal, Optional, Protocol, runtime_checkable
+from dataclasses import dataclass
+from typing import Any, Dict, List, Literal, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
@@ -44,6 +45,9 @@ class TicketCreateRequest(BaseModel):
     # A normalized type name for internal tickets, or a Jira issue type id
     # selected from the configured project's create metadata.
     ticket_type: Optional[str] = None
+    # Extra context for LLM-only ticket decisions (for example Jira issue-type
+    # selection). It is never persisted in Jira or internal ticket fields.
+    llm_context: Dict[str, Any] = Field(default_factory=dict)
     source: TicketSourceLiteral = "escalation"
 
 
@@ -54,6 +58,19 @@ class TicketResult(BaseModel):
     backend: TicketBackendName
     url: Optional[str] = None
     ticket_type: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class TicketCreateOutcome:
+    """A fail-open notify-ticket creation result.
+
+    ``result`` is absent only when both the configured primary backend and any
+    permitted internal fallback could not persist the alert.
+    """
+
+    result: Optional[TicketResult]
+    error: Optional[str] = None
+    fallback_used: bool = False
 
 
 class TicketStatus(BaseModel):

@@ -399,6 +399,13 @@ _FLAGS: List[Flag] = [
         scope=SERVICE_BOT,
     ),
     _i(
+        "URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS",
+        3,
+        "Maximum seconds to wait for the one live VRM inverter-output lookup before "
+        "reporting it as unavailable.",
+        scope=SERVICE_BOT,
+    ),
+    _i(
         "ALERT_CORRELATION_LOOKBACK_HOURS",
         168,
         "How far back to look for open candidate tickets on a grid.",

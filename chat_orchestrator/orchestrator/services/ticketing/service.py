@@ -17,6 +17,8 @@ from shared.utils.logging import get_logger
 
 from .backend import (
     TicketBackend,
+    TicketBackendError,
+    TicketCreateOutcome,
     TicketCreateRequest,
     TicketResult,
     TicketStatus,
@@ -194,6 +196,38 @@ class TicketService:
                 req.escalation_mapping_id, result.ref, result.backend
             )
         return result
+
+    async def create_ticket_with_internal_fallback(
+        self, req: TicketCreateRequest, backend_override: Optional[str] = None
+    ) -> TicketCreateOutcome:
+        """Create a notify ticket, retrying internal only after Jira fails.
+
+        This deliberately resolves the primary backend once. A successful
+        internal primary stays a normal internal creation; it is not retried.
+        """
+        primary = await self.resolve_backend(override=backend_override)
+        try:
+            result = await primary.create_ticket(req)
+        except TicketBackendError as primary_error:
+            if primary.name != "jira":
+                return TicketCreateOutcome(result=None, error=str(primary_error))
+            try:
+                result = await self._internal.create_ticket(req)
+            except TicketBackendError as internal_error:
+                return TicketCreateOutcome(
+                    result=None,
+                    error=f"Jira: {primary_error}; internal: {internal_error}",
+                    fallback_used=True,
+                )
+            if req.escalation_mapping_id:
+                await self._stamp_escalation_mapping(
+                    req.escalation_mapping_id, result.ref, result.backend
+                )
+            return TicketCreateOutcome(result=result, fallback_used=True)
+
+        if req.escalation_mapping_id:
+            await self._stamp_escalation_mapping(req.escalation_mapping_id, result.ref, result.backend)
+        return TicketCreateOutcome(result=result)
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         backend = await self._backend_for_ref(ref)
