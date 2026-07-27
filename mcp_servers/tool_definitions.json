@@ -358,13 +358,13 @@
       },
       {
         "name": "get_issue",
-        "description": "Retrieve the full details, history, and comments of one specific Jira issue i.e. ticket. Use ONLY when a Ticket Key (e.g., OPS-123) is known.",
+        "description": "Retrieve full details for one ticket. Supports Jira keys (e.g., OPS-123) and internal references (e.g., TKT-000123).",
         "inputSchema": {
           "type": "object",
           "properties": {
             "issue_key": {
               "type": "string",
-              "description": "Jira issue key"
+              "description": "Ticket reference (Jira key or internal TKT reference)"
             }
           },
           "required": [
@@ -410,7 +410,7 @@
       },
       {
         "name": "add_comment",
-        "description": "[ACTION] Add a new comment to a specific Jira ticket.",
+        "description": "[ACTION] Add a new comment to a ticket (Jira or internal TKT reference).",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -430,13 +430,13 @@
       },
       {
         "name": "get_transitions",
-        "description": "[READ-ONLY] Get available status transitions for a Jira issue. This tool only retrieves information, it does not change the issue status.",
+        "description": "[READ-ONLY] Get available status transitions for a ticket. Internal tickets support the Done transition only.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "issue_key": {
               "type": "string",
-              "description": "Jira issue key (e.g., PROJ-123)"
+              "description": "Ticket reference (Jira key or internal TKT reference)"
             }
           },
           "required": [
@@ -447,13 +447,13 @@
       },
       {
         "name": "change_status",
-        "description": "[ACTION] Change the status of a Jira ticket (e.g., close, start progress, reopen). Use transition names like 'Done', 'In Progress', 'To Do'. If the ticket is unassigned, it will be auto-assigned to the requesting user.",
+        "description": "[ACTION] Change the status of a ticket (e.g., close, start progress, reopen). Internal tickets support Done only.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "issue_key": {
               "type": "string",
-              "description": "Jira issue key (e.g., OPS-2148)"
+              "description": "Ticket reference (Jira key or internal TKT reference)"
             },
             "transition": {
               "type": "string",

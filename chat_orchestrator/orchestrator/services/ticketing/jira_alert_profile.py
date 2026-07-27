@@ -139,6 +139,7 @@ def build_alert_issue_fields(
     grid_option_id: Optional[str],
     grid_name: Optional[str],
     extra_labels: Optional[List[str]] = None,
+    issue_type_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the Jira ``{"fields": {...}}`` body for a new alert ticket.
 
@@ -167,7 +168,7 @@ def build_alert_issue_fields(
     fields_out: Dict[str, Any] = {
         "project": {"id": profile.project_id},
         "summary": summary,
-        "issuetype": {"id": profile.issue_type_id},
+        "issuetype": {"id": issue_type_id or profile.issue_type_id},
         "reporter": {"id": profile.reporter_account_id},
         "labels": labels,
         "description": _doc(description),

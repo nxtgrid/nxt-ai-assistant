@@ -160,6 +160,7 @@ CREATE TABLE IF NOT EXISTS internal_tickets (
     grid_name               text,
     summary                 text NOT NULL,
     description             text,
+    ticket_type             text,
     status                  text NOT NULL DEFAULT 'open'
                             CHECK (status IN ('open','in_progress','done')),
     assignee_email          text,

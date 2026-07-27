@@ -101,6 +101,7 @@ class _InternalTicketsTable:
                 "grid_name": self._payload.get("grid_name"),
                 "summary": self._payload.get("summary"),
                 "description": self._payload.get("description"),
+                "ticket_type": self._payload.get("ticket_type"),
                 "assignee_email": self._payload.get("assignee_email"),
                 "labels": self._payload.get("labels") or [],
                 "source": self._payload.get("source") or "escalation",
@@ -211,6 +212,8 @@ class TestCreateTicket:
         assert result.url is None
         assert result.ref == "TKT-000001"
         assert fake.tickets[0]["summary"] == "Customer needs help"
+        assert fake.tickets[0]["ticket_type"] == "Task"
+        assert result.ticket_type == "Task"
 
     @pytest.mark.asyncio
     async def test_sequential_refs_increment(self):
@@ -261,6 +264,17 @@ class TestCreateTicket:
         assert insert_call["labels"] == ["escalation-abc"]
         assert insert_call["source"] == "escalation"
         assert insert_call["ticket_ref"] == "TKT-000001"
+
+    @pytest.mark.asyncio
+    async def test_persists_requested_ticket_type(self):
+        backend, fake = _make_backend()
+
+        result = await backend.create_ticket(
+            TicketCreateRequest(summary="s", ticket_type="Electricity Service Disruption")
+        )
+
+        assert fake.tickets[0]["ticket_type"] == "Electricity Service Disruption"
+        assert result.ticket_type == "Electricity Service Disruption"
 
     @pytest.mark.asyncio
     async def test_raises_when_no_client(self):
@@ -331,6 +345,7 @@ class TestGetStatus:
         assert status.summary == "s"
         assert status.is_done is False
         assert status.raw_status == "open"
+        assert status.ticket_type == "Task"
 
     @pytest.mark.asyncio
     async def test_none_for_unknown_ref(self):

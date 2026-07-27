@@ -41,6 +41,9 @@ class TicketCreateRequest(BaseModel):
     session_id: Optional[str] = None
     customer_chat_id: Optional[str] = None
     customer_topic_id: Optional[str] = None
+    # A normalized type name for internal tickets, or a Jira issue type id
+    # selected from the configured project's create metadata.
+    ticket_type: Optional[str] = None
     source: TicketSourceLiteral = "escalation"
 
 
@@ -50,6 +53,7 @@ class TicketResult(BaseModel):
     ref: str
     backend: TicketBackendName
     url: Optional[str] = None
+    ticket_type: Optional[str] = None
 
 
 class TicketStatus(BaseModel):
@@ -58,6 +62,7 @@ class TicketStatus(BaseModel):
     summary: str
     is_done: bool
     raw_status: str = ""
+    ticket_type: Optional[str] = None
 
 
 class TicketSummary(BaseModel):

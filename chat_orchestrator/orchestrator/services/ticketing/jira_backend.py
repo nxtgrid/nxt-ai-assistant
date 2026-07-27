@@ -34,6 +34,7 @@ from .jira_alert_profile import (
     load_alert_ticket_profile,
     resolve_or_create_grid_option,
 )
+from .jira_issue_types import IssueTypeSelection, JiraIssueType, JiraIssueTypeSelector
 
 LOGGER = get_logger(__name__)
 
@@ -189,6 +190,7 @@ class JiraTicketBackend:
         # Cached (TTL) health probe state for is_available().
         self._probe_cache_ok: bool = False
         self._probe_cache_time: float = 0.0
+        self._alert_type_selector: Optional[JiraIssueTypeSelector] = None
 
     # ------------------------------------------------------------------
     # TicketBackend Protocol
@@ -244,7 +246,7 @@ class JiraTicketBackend:
             raise TicketBackendError(f"Jira ticket creation failed: {result.get('error')}")
         key = result["key"]
         url = f"{self._jira_base_url}/browse/{key}" if self._jira_base_url else None
-        return TicketResult(ref=key, backend="jira", url=url)
+        return TicketResult(ref=key, backend="jira", url=url, ticket_type=self._jira_issue_type)
 
     async def _create_alert_jira_ticket(
         self, req: TicketCreateRequest, profile: AlertTicketProfile
@@ -265,6 +267,8 @@ class JiraTicketBackend:
                 get_session=_get_jira_session,
             )
 
+        selection = await self._select_alert_issue_type(req, profile)
+        issue_type_id = selection.issue_type.id if selection else profile.issue_type_id
         payload = build_alert_issue_fields(
             profile,
             summary=req.summary,
@@ -272,7 +276,49 @@ class JiraTicketBackend:
             grid_option_id=grid_option_id,
             grid_name=req.grid_name,
             extra_labels=req.labels or None,
+            issue_type_id=issue_type_id,
         )
+
+        # A custom profile field may exist on the legacy type but not on the
+        # selected type. Never send it blindly; Jira rejects unknown fields.
+        # If the selected type has required fields we cannot fill, retrying the
+        # configured fallback is safer than filing a malformed issue.
+        if selection and not self._alert_payload_supported(payload["fields"], selection.issue_type):
+            fallback = self._fallback_alert_issue_type(profile)
+            if fallback is not None and self._alert_payload_supported(
+                build_alert_issue_fields(
+                    profile,
+                    summary=req.summary,
+                    description=req.description,
+                    grid_option_id=grid_option_id,
+                    grid_name=req.grid_name,
+                    extra_labels=req.labels or None,
+                    issue_type_id=fallback.issue_type.id,
+                )["fields"],
+                fallback.issue_type,
+            ):
+                selection = fallback
+                payload = build_alert_issue_fields(
+                    profile,
+                    summary=req.summary,
+                    description=req.description,
+                    grid_option_id=grid_option_id,
+                    grid_name=req.grid_name,
+                    extra_labels=req.labels or None,
+                    issue_type_id=selection.issue_type.id,
+                )
+            else:
+                # Compatibility contract: retain the legacy configured type
+                # if Jira metadata cannot prove a safe fallback.
+                selection = None
+                payload = build_alert_issue_fields(
+                    profile,
+                    summary=req.summary,
+                    description=req.description,
+                    grid_option_id=grid_option_id,
+                    grid_name=req.grid_name,
+                    extra_labels=req.labels or None,
+                )
 
         url = f"{self._jira_base_url}/rest/api/3/issue"
         try:
@@ -285,7 +331,12 @@ class JiraTicketBackend:
                     key = result.get("key")
                     url_out = f"{self._jira_base_url}/browse/{key}" if self._jira_base_url else None
                     LOGGER.info("Created alert Jira ticket: %s", key)
-                    return TicketResult(ref=key, backend="jira", url=url_out)
+                    return TicketResult(
+                        ref=key,
+                        backend="jira",
+                        url=url_out,
+                        ticket_type=(selection.issue_type.name if selection else profile.issue_type_id),
+                    )
                 body = await response.text()
                 raise TicketBackendError(
                     f"Alert Jira ticket creation failed: HTTP {response.status}: {body}"
@@ -294,6 +345,57 @@ class JiraTicketBackend:
             raise
         except Exception as e:
             raise TicketBackendError(f"Alert Jira ticket creation failed: {e}") from e
+
+    def _alert_selector(self, profile: AlertTicketProfile) -> JiraIssueTypeSelector:
+        if self._alert_type_selector is None:
+            self._alert_type_selector = JiraIssueTypeSelector(
+                base_url=self._jira_base_url,
+                headers=self._jira_auth_headers(),
+                project_key=profile.project_key,
+                model=fr.get("ALERT_CORRELATION_MODEL"),
+                cache_ttl_seconds=float(fr.get("JIRA_ALERT_ISSUE_TYPE_CACHE_TTL_SECONDS")),
+                get_session=_get_jira_session,
+            )
+        return self._alert_type_selector
+
+    async def _select_alert_issue_type(
+        self, req: TicketCreateRequest, profile: AlertTicketProfile
+    ) -> Optional[IssueTypeSelection]:
+        if not fr.get("JIRA_ALERT_ISSUE_TYPE_SELECTION_ENABLED"):
+            return None
+        selector = self._alert_selector(profile)
+        selection = await selector.select(
+            summary=req.summary,
+            description=req.description,
+            requested_type=req.ticket_type,
+        )
+        return selection or self._fallback_alert_issue_type(profile)
+
+    def _fallback_alert_issue_type(
+        self, profile: AlertTicketProfile
+    ) -> Optional[IssueTypeSelection]:
+        selector = self._alert_selector(profile)
+        fallback = selector.fallback(
+            selector._cached_types, fr.get("JIRA_ALERT_FALLBACK_ISSUE_TYPE")
+        )
+        if fallback is not None:
+            return fallback
+        for issue_type in selector._cached_types:
+            if issue_type.id == profile.issue_type_id:
+                return IssueTypeSelection(issue_type, "legacy", "legacy alert profile type")
+        return None
+
+    @staticmethod
+    def _alert_payload_supported(fields: Dict[str, Any], issue_type: JiraIssueType) -> bool:
+        # An empty field contract means Jira did not provide enough metadata
+        # to make a safety claim; use the legacy profile instead.
+        if not issue_type.fields:
+            return False
+        permitted = set(issue_type.fields)
+        standard = {"project", "summary", "issuetype", "description", "labels"}
+        if any(name not in permitted and name not in standard for name in fields):
+            return False
+        return all(name in fields for name in issue_type.required_fields)
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         # `public` is accepted for Protocol parity with the internal backend
@@ -368,11 +470,13 @@ class JiraTicketBackend:
         profile is configured -- every ticket the alert-ticket path files
         gets the label unconditionally.
         """
-        if not self._jira_base_url or not self._jira_project_key:
+        profile = load_alert_ticket_profile()
+        project_key = profile.project_key or self._jira_project_key
+        if not self._jira_base_url or not project_key:
             return []
         slug = _slugify_grid(grid_name)
         jql = (
-            f'project = "{self._jira_project_key}" AND statusCategory != Done '
+            f'project = "{project_key}" AND statusCategory != Done '
             f'AND labels = "grid-{slug}" ORDER BY created DESC'
         )
         url = f"{self._jira_base_url}/rest/api/3/issue/search"
