@@ -48,14 +48,17 @@ boundary and converted to unavailable, with structured logs for diagnostics.
 
 After `/chat/notify` resolves the canonical `GridNotificationTarget`, it builds
 one immutable alert context. The context carries the canonical incoming
-subject, incoming severity, and the single live-output result. It is reused by
-all later steps; a request never issues a second VRM read merely to render
-Telegram.
+subject, incoming severity, and a lazily evaluated, request-local live-output
+lookup. The first LLM decision or actual urgent Telegram delivery that needs
+the observation resolves and caches it; all later consumers reuse that result.
+An exact duplicate that remains silent never resolves the lookup.
 
-For `ticket_id="auto"`, live output is obtained before `AlertCorrelator`
-assembles its LLM prompt. The observation is added to its operational facts as
-live telemetry. Jira's issue-type-selection LLM receives the same context as
-separate decision input. This allows models to make better correlation,
+For `ticket_id="auto"`, live output is obtained immediately before
+`AlertCorrelator` assembles an LLM prompt. The deterministic duplicate
+pre-check runs first, so it can suppress a silent re-fire without telemetry
+I/O. The observation is added to the LLM's operational facts as live telemetry.
+Jira's issue-type-selection LLM receives the same cached context as separate
+decision input. This allows models to make better correlation,
 amendment, and issue-type choices without copying an unverified telemetry line
 into the persisted ticket body.
 
