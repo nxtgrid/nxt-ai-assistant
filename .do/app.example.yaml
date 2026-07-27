@@ -33,6 +33,11 @@ envs:
     value: "INFO"
     scope: RUN_TIME
 
+  # Canonical public URL of the Anansi app
+  - key: APP_URL
+    value: "https://your-app.example.com"
+    scope: RUN_TIME
+
   # Chat Database (Supabase) - legacy name still used by some components
   - key: SUPABASE_URL
     value: "${SUPABASE_URL}"
@@ -467,9 +472,6 @@ services:
       timeout_seconds: 10
 
     envs:
-      - key: APP_URL
-        value: "https://your-app.example.com"
-        scope: RUN_TIME
       # Internal URL for scheduled command execution
       - key: CHAT_ORCHESTRATOR_URL
         value: "${chat-orchestrator.PRIVATE_URL}"

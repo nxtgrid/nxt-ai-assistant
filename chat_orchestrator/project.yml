@@ -40,6 +40,9 @@ services:
       - key: API_KEY
         scope: RUN_TIME
         value: ${API_KEY}
+      - key: APP_URL
+        scope: RUN_TIME
+        value: ${APP_URL}
       - key: SUPABASE_URL
         scope: RUN_TIME
         value: ${SUPABASE_URL}
