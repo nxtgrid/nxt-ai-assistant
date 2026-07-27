@@ -48,6 +48,9 @@ class TestRegistryIntegrity:
         assert fr.get("JIRA_ENABLED", env={"JIRA_ENABLED": "false"}) is False
         assert fr.get("LAYOUT_POLE_SPACING_M", env={"LAYOUT_POLE_SPACING_M": "30"}) == 30.0
 
+    def test_urgent_live_output_timeout_defaults_to_three_seconds(self):
+        assert fr.get("URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS", env={}) == 3
+
 
 # --------------------------------------------------------------------------- #
 # Generated example file is current

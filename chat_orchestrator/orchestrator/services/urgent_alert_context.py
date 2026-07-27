@@ -61,7 +61,9 @@ class UrgentAlertContext:
     _output_lookup: LiveOutputLookup = field(repr=False)
 
     def is_incoming_urgent(self) -> bool:
-        return self.incoming_severity == "urgent"
+        # Structured severity is preferred, but a stale/mislabelled incoming
+        # value must not downgrade an explicitly urgent subject line.
+        return self.incoming_severity == "urgent" or derive_severity(self.subject) == "urgent"
 
     async def output_kw(self) -> Optional[float]:
         return await self._output_lookup.get()
@@ -89,9 +91,13 @@ def build_urgent_alert_context(
 ) -> UrgentAlertContext:
     """Build alert context without making telemetry I/O until it is needed."""
     if read_output is None:
-        from mcp_servers.servers.customer_server.client import customer_client
+        async def read_output(grid_name: str) -> Optional[float]:
+            # The MCP package has a separate import root in production.  Keep
+            # that import inside the lazy reader so non-urgent alerts and
+            # silent duplicates neither depend on nor initialize it.
+            from mcp_servers.servers.customer_server.client import customer_client
 
-        read_output = customer_client.get_live_inverter_output
+            return await customer_client.get_live_inverter_output(grid_name)
 
     normalized_subject = subject.strip() or "Notification"
     normalized_severity = (incoming_severity or derive_severity(normalized_subject)).strip().lower()

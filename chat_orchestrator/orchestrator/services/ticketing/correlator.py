@@ -67,6 +67,7 @@ class CandidateSummary(BaseModel):
     occurrence_count: int = 1
     status: str = ""
     signatures: List[str] = Field(default_factory=list)
+    severity: str = ""
 
 
 @dataclass(frozen=True)
@@ -85,6 +86,7 @@ class CorrelationDecision:
     candidate_refs: List[str]
     llm_raw: Optional[str]
     needs_root_cause_ticket: bool = False
+    ticket_severity: str = ""
 
 
 def _parse_llm_response(raw: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -224,6 +226,7 @@ def _apply_guardrails(
         candidate_refs=candidate_refs,
         llm_raw=llm_raw,
         needs_root_cause_ticket=needs_root_cause_ticket,
+        ticket_severity=by_ref[ticket_ref].severity,
     )
 
 
@@ -389,6 +392,7 @@ class AlertCorrelator:
                     candidate_refs=[],
                     llm_raw=None,
                     needs_root_cause_ticket=False,
+                    ticket_severity=prior.get("ticket_severity") or "",
                 )
 
         if not fr.get("ALERT_CORRELATION_ENABLED"):
@@ -432,6 +436,7 @@ class AlertCorrelator:
                 candidate_refs=[c.ref for c in candidates],
                 llm_raw=None,
                 needs_root_cause_ticket=False,
+                ticket_severity=duplicate.severity,
             )
             return await self._finalize(grid_name, alert, dedup_key, decision)
 
@@ -526,6 +531,7 @@ class AlertCorrelator:
                 occurrence_count=row.get("occurrence_count") or 1,
                 status=row.get("status") or "",
                 signatures=row.get("signatures") or [],
+                severity=row.get("severity") or "",
             )
 
         for summary in backend_summaries:

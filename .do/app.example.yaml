@@ -413,6 +413,11 @@ services:
         value: "gemini-2.5-flash-lite"
         scope: RUN_TIME
 
+      # Urgent /chat/notify live inverter-output lookup budget
+      - key: URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS
+        value: "3"
+        scope: RUN_TIME
+
       # Mini App Forms (Telegram WebApp popup)
       - key: MINI_APP_BASE_URL
         value: "https://your-app.example.com/mini-app/"

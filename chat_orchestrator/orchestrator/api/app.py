@@ -7,6 +7,7 @@ handler.main() function for deployment on App Platform.
 
 # Import the serverless handler
 import asyncio
+import dataclasses
 import os
 import signal
 import sys
@@ -27,6 +28,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from orchestrator.services.ticketing.alert_facts import AlertFacts, derive_severity
+from orchestrator.services.urgent_alert_context import (
+    UrgentAlertContext,
+    build_urgent_alert_context,
+)
 from shared.utils.gdrive_doc_fetcher import GoogleDriveDocFetcher
 from shared.utils.logging import get_logger
 
@@ -971,6 +976,17 @@ async def _deliver_notification(
 
     parse_mode = (body.parse_mode or "").strip() or None
     ticketed_delivery = delivery is not None and delivery.ticket is not None
+    alert_context = (
+        delivery.alert_context
+        if delivery is not None and delivery.alert_context is not None
+        else _build_notify_alert_context(body, target)
+    )
+    ticket_summary = delivery.ticket_summary if delivery is not None else ""
+    stored_ticket_severity = delivery.stored_ticket_severity if delivery is not None else ""
+    urgent = _is_effectively_urgent(alert_context, ticket_summary, stored_ticket_severity)
+    if delivery is not None and delivery.top_level:
+        urgent = True
+    live_output_line = await alert_context.telegram_output_line() if urgent else None
     if ticketed_delivery:
         # Ticket references are deliberately rendered as Telegram Markdown
         # links, so a caller-provided plain/HTML mode cannot make the link
@@ -980,11 +996,15 @@ async def _deliver_notification(
     if ticketed_delivery:
         raw_text = (
             _format_ticket_update_notification(
-                raw_text, delivery.ticket, urgent=delivery.top_level
+                raw_text, delivery.ticket, urgent=urgent, live_output_line=live_output_line
             )
             if delivery.text_override
-            else _format_ticket_notification(body, delivery.ticket)
+            else _format_ticket_notification(
+                body, delivery.ticket, urgent=urgent, live_output_line=live_output_line
+            )
         )
+    elif live_output_line:
+        raw_text = f"{raw_text.rstrip()}\n{live_output_line}"
     text = raw_text
     if parse_mode and parse_mode.lower().startswith("markdown"):
         text = convert_github_to_telegram_markdown(raw_text)
@@ -1092,17 +1112,18 @@ async def _create_notify_ticket(
     backend_override: str,
     summary: Optional[str] = None,
     description: Optional[str] = None,
-) -> "tuple[Optional[Any], Optional[JSONResponse]]":
+    alert_context: Optional[UrgentAlertContext] = None,
+) -> "tuple[Optional[Any], Optional[str]]":
     """File a new notify-originated ticket. Shared by the plain ``ticket_id=""``
     path and every ``"auto"`` fallback (flag off, lock timeout, correlation
     failure, decided "new") -- all of them file exactly the same way.
 
-    Returns ``(TicketResult, None)`` on success or ``(None, response)`` on
-    failure (500 -- ticket creation failing is the one /notify-ticketing
-    failure mode that must reach the caller, same as before this task).
+    Returns ``(TicketResult, None)`` on success or ``(None, error)`` when
+    neither backend can create a ticket.  Callers must still forward the base
+    alert to Telegram; a ticketing outage is not allowed to lose an alert.
     """
     from orchestrator.services.supabase_client import get_supabase_client
-    from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
+    from orchestrator.services.ticketing.backend import TicketCreateRequest
     from orchestrator.services.ticketing.service import TicketService
 
     ticket_service = TicketService(get_supabase_client=get_supabase_client)
@@ -1112,23 +1133,46 @@ async def _create_notify_ticket(
     if description is None:
         description = body.text
 
+    # Internal ticket creation has no LLM consumer. Inspect the primary so
+    # both an explicit `jira` override and `auto`→Jira receive live facts
+    # before the Jira type selector runs, while an internal primary avoids a
+    # needless telemetry lookup. TicketService resolves again for the actual
+    # create so a transient health-check error remains fail-open.
+    llm_context: Dict[str, Any] = {}
+    if alert_context is not None:
+        try:
+            primary_backend = await ticket_service.resolve_backend(override=backend_override)
+            if primary_backend.name == "jira":
+                llm_context = await alert_context.llm_facts()
+        except Exception:
+            logger.warning(
+                "Notify: unable to resolve ticket backend before telemetry enrichment",
+                exc_info=True,
+            )
     try:
-        result = await ticket_service.create_ticket(
+        outcome = await ticket_service.create_ticket_with_internal_fallback(
             TicketCreateRequest(
                 summary=summary,
                 description=description,
                 grid_name=target.grid_name,
                 source="notify",
+                llm_context=llm_context,
             ),
             backend_override=backend_override,
         )
-    except TicketBackendError as e:
-        logger.error("Notify: ticket creation failed source=%s: %s", body.source, e)
-        return None, JSONResponse(
-            status_code=500,
-            content={"ok": False, "error": f"Ticket creation failed: {e}"},
+    except Exception as exc:
+        logger.exception("Notify: ticket creation crashed source=%s", body.source)
+        return None, f"Ticket creation failed: {exc}"
+
+    if outcome.result is None:
+        error = outcome.error or "Ticket creation failed in both configured backends"
+        logger.error("Notify: ticket creation failed source=%s: %s", body.source, error)
+        return None, f"Ticket creation failed: {error}"
+    if outcome.fallback_used:
+        logger.warning(
+            "Notify: Jira ticket creation failed; created internal fallback %s", outcome.result.ref
         )
-    return result, None
+    return outcome.result, None
 
 
 def _notify_ticket_subject(body: "NotifyRequest") -> str:
@@ -1228,7 +1272,13 @@ def _ticket_notification_link(ticket: NotificationTicket) -> str:
     return f"[{escaped_ref}]({safe_url})"
 
 
-def _format_ticket_notification(body: "NotifyRequest", ticket: NotificationTicket) -> str:
+def _format_ticket_notification(
+    body: "NotifyRequest",
+    ticket: NotificationTicket,
+    *,
+    urgent: Optional[bool] = None,
+    live_output_line: Optional[str] = None,
+) -> str:
     """Render a newly-filed or updated ticket alert as Telegram Markdown."""
     from shared.utils.telegram_markdown import escape_markdown
 
@@ -1236,30 +1286,31 @@ def _format_ticket_notification(body: "NotifyRequest", ticket: NotificationTicke
     if not subject:
         subject = _notify_ticket_subject(body)
 
-    severity = body.alert.severity.strip().lower() if body.alert and body.alert.severity else ""
-    if not severity:
-        severity = derive_severity(subject)
-
     ticket_link = _ticket_notification_link(ticket)
-    urgent_prefix = "🔴 " if severity == "urgent" else ""
-    return "\n".join(
-        (
-            f"{urgent_prefix}*{escape_markdown(subject)}*",
-            f"📍 Grid: {escape_markdown(body.grid_name)}",
-            f"🎫 Ticket: {ticket_link}",
-        )
-    )
+    if urgent is None:
+        severity = body.alert.severity.strip().lower() if body.alert and body.alert.severity else ""
+        urgent = (severity or derive_severity(subject)) == "urgent"
+    lines = [f"{'🔴 ' if urgent else ''}*{escape_markdown(subject)}*"]
+    if live_output_line:
+        lines.append(live_output_line)
+    lines.extend((f"📍 Grid: {escape_markdown(body.grid_name)}", f"🎫 Ticket: {ticket_link}"))
+    return "\n".join(lines)
 
 
 def _format_ticket_update_notification(
-    update: str, ticket: NotificationTicket, *, urgent: bool = False
+    update: str,
+    ticket: NotificationTicket,
+    *,
+    urgent: bool = False,
+    live_output_line: Optional[str] = None,
 ) -> str:
     """Render a concise factual correlation update with its ticket reference linked."""
     from shared.utils.telegram_markdown import escape_markdown
 
     ticket_link = _ticket_notification_link(ticket)
     prefix = "🔴" if urgent else "↻"
-    return f"{prefix} {ticket_link} — {escape_markdown(update)}"
+    message = f"{prefix} {ticket_link} — {escape_markdown(update)}"
+    return f"{message}\n{live_output_line}" if live_output_line else message
 
 
 @dataclass(frozen=True)
@@ -1277,13 +1328,62 @@ class NotificationDelivery:
     top_level: bool = False  # escalation: force a fresh (non-reply) post
     record_message_id_for_ticket_ref: Optional[str] = None
     ticket: Optional[NotificationTicket] = None
+    alert_context: Optional[UrgentAlertContext] = None
+    ticket_summary: str = ""
+    stored_ticket_severity: str = ""
 
 
-def _new_ticket_delivery(ticket: NotificationTicket) -> NotificationDelivery:
+def _build_notify_alert_context(
+    body: "NotifyRequest", target: "GridNotificationTarget"
+) -> UrgentAlertContext:
+    """Create a lazy context without performing telemetry I/O."""
+    severity = body.alert.severity if body.alert and body.alert.severity else ""
+    return build_urgent_alert_context(
+        subject=_notify_ticket_subject(body),
+        incoming_severity=severity,
+        grid_name=target.grid_name,
+    )
+
+
+def _is_effectively_urgent(
+    context: UrgentAlertContext, ticket_summary: str = "", stored_ticket_severity: str = ""
+) -> bool:
+    return bool(
+        context.is_incoming_urgent()
+        or derive_severity(ticket_summary) == "urgent"
+        or stored_ticket_severity.strip().lower() == "urgent"
+    )
+
+
+def _new_ticket_delivery(
+    ticket: NotificationTicket,
+    alert_context: Optional[UrgentAlertContext] = None,
+    ticket_summary: str = "",
+) -> NotificationDelivery:
     """A freshly-filed ticket (plain "new", flag-off, or any fallback path)
     posts the alert in full, unthreaded, and remembers the resulting
     message_id against the ticket so a later amend can reply to it."""
-    return NotificationDelivery(record_message_id_for_ticket_ref=ticket.ref, ticket=ticket)
+    return NotificationDelivery(
+        record_message_id_for_ticket_ref=ticket.ref,
+        ticket=ticket,
+        alert_context=alert_context,
+        ticket_summary=ticket_summary,
+    )
+
+
+def _ticket_failure_delivery(alert_context: UrgentAlertContext) -> NotificationDelivery:
+    """A terse unlinked fallback alert when every ticket backend is unavailable."""
+    return NotificationDelivery(text_override=alert_context.subject, alert_context=alert_context)
+
+
+async def _ticket_summary(ticket_service: Any, ticket_ref: str) -> str:
+    """Read a ticket's current summary without letting a status outage block delivery."""
+    try:
+        status = await ticket_service.get_status(ticket_ref)
+        return status.summary if status is not None else ""
+    except Exception:
+        logger.warning("Notify: failed to read current ticket summary for %r", ticket_ref, exc_info=True)
+        return ""
 
 
 def _amend_delivery(
@@ -1318,7 +1418,10 @@ def _duplicate_delivery(amendment: Any, ticket: NotificationTicket) -> Notificat
 
 
 async def _resolve_notify_ticket_auto(
-    body: "NotifyRequest", target: "GridNotificationTarget", backend_override: str
+    body: "NotifyRequest",
+    target: "GridNotificationTarget",
+    backend_override: str,
+    alert_context: UrgentAlertContext,
 ) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
     """``ticket_id == "auto"``: smart alert correlation (see
     docs/superpowers/plans/2026-07-27-smart-alert-correlation-notify.md).
@@ -1332,14 +1435,16 @@ async def _resolve_notify_ticket_auto(
     from shared.config import flag_registry as fr
 
     if not fr.get("ALERT_CORRELATION_ENABLED"):
-        result, error = await _create_notify_ticket(body, target, backend_override)
+        result, error = await _create_notify_ticket(
+            body, target, backend_override, alert_context=alert_context
+        )
         if error is not None:
-            return None, error, None, None
+            return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
         return (
             result.ref,
             None,
             {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "flag_off"},
-            _new_ticket_delivery(_notification_ticket_from_result(result)),
+            _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
         )
 
     from orchestrator.services.supabase_client import get_supabase_client
@@ -1366,14 +1471,16 @@ async def _resolve_notify_ticket_auto(
                 "Notify: grid-correlation lock timeout for %r -- filing plain ticket",
                 target.grid_name,
             )
-            result, error = await _create_notify_ticket(body, target, backend_override)
+            result, error = await _create_notify_ticket(
+                body, target, backend_override, alert_context=alert_context
+            )
             if error is not None:
-                return None, error, None, None
+                return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
             return (
                 result.ref,
                 None,
                 {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(_notification_ticket_from_result(result)),
+                _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
             )
 
         store = CorrelationStore(get_client=_raw_supabase_client)
@@ -1382,7 +1489,11 @@ async def _resolve_notify_ticket_auto(
 
         try:
             decision = await correlator.decide(
-                target.grid_name, alert, dedup_key=body.dedup_key, backend_override=backend_override
+                target.grid_name,
+                alert,
+                dedup_key=body.dedup_key,
+                backend_override=backend_override,
+                get_live_facts=alert_context.llm_facts,
             )
         except Exception:
             logger.exception(
@@ -1392,14 +1503,16 @@ async def _resolve_notify_ticket_auto(
             decision = None
 
         if decision is None:
-            result, error = await _create_notify_ticket(body, target, backend_override)
+            result, error = await _create_notify_ticket(
+                body, target, backend_override, alert_context=alert_context
+            )
             if error is not None:
-                return None, error, None, None
+                return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
             return (
                 result.ref,
                 None,
                 {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(_notification_ticket_from_result(result)),
+                _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
             )
 
         try:
@@ -1421,15 +1534,18 @@ async def _resolve_notify_ticket_auto(
                         or "Filed automatically to group alerts sharing this root cause."
                     )
                     result, error = await _create_notify_ticket(
-                        body, target, backend_override, summary=root_summary, description=root_description
+                        body,
+                        target,
+                        backend_override,
+                        summary=root_summary,
+                        description=root_description,
+                        alert_context=alert_context,
                     )
                     if error is not None:
-                        return None, error, None, None
+                        return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
                     await _record_new_correlation(
                         store, target, alert, result, decision.root_cause_kind, root_summary, root_description
                     )
-                    import dataclasses
-
                     await apply_amendment(
                         store=store,
                         ticket_service=ticket_service,
@@ -1447,15 +1563,24 @@ async def _resolve_notify_ticket_auto(
                             "confidence": decision.confidence,
                             "decided_by": decision.decided_by,
                         },
-                        _new_ticket_delivery(_notification_ticket_from_result(result)),
+                        _new_ticket_delivery(
+                            _notification_ticket_from_result(result),
+                            alert_context,
+                            root_summary,
+                        ),
                     )
 
                 summary = _notify_ticket_subject(body)
                 result, error = await _create_notify_ticket(
-                    body, target, backend_override, summary=summary, description=body.text
+                    body,
+                    target,
+                    backend_override,
+                    summary=summary,
+                    description=body.text,
+                    alert_context=alert_context,
                 )
                 if error is not None:
-                    return None, error, None, None
+                    return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
                 await _record_new_correlation(
                     store, target, alert, result, decision.root_cause_kind, summary, body.text
                 )
@@ -1468,7 +1593,7 @@ async def _resolve_notify_ticket_auto(
                         "confidence": decision.confidence,
                         "decided_by": decision.decided_by,
                     },
-                    _new_ticket_delivery(_notification_ticket_from_result(result)),
+                    _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
                 )
 
             # amend (onto an existing ticket) or duplicate.
@@ -1488,7 +1613,11 @@ async def _resolve_notify_ticket_auto(
                 # rather than risk a misdirected/noisy post.
                 await ticket_service.add_comment(decision.ticket_ref, body.text, public=False)
                 ref = decision.ticket_ref
-                delivery = NotificationDelivery(suppress=True)
+                delivery = NotificationDelivery(
+                    suppress=True,
+                    alert_context=alert_context,
+                    stored_ticket_severity=decision.ticket_severity,
+                )
             else:
                 ref = amendment.ticket_ref
                 ticket = NotificationTicket(
@@ -1498,6 +1627,12 @@ async def _resolve_notify_ticket_auto(
                     _amend_delivery(decision, amendment, ticket)
                     if decision.decision == "amend"
                     else _duplicate_delivery(amendment, ticket)
+                )
+                delivery = dataclasses.replace(
+                    delivery,
+                    alert_context=alert_context,
+                    ticket_summary=await _ticket_summary(ticket_service, ref),
+                    stored_ticket_severity=decision.ticket_severity,
                 )
             return (
                 ref,
@@ -1515,19 +1650,23 @@ async def _resolve_notify_ticket_auto(
                 "Notify: correlation execution raised for grid %r -- filing plain ticket",
                 target.grid_name,
             )
-            result, error = await _create_notify_ticket(body, target, backend_override)
+            result, error = await _create_notify_ticket(
+                body, target, backend_override, alert_context=alert_context
+            )
             if error is not None:
-                return None, error, None, None
+                return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
             return (
                 result.ref,
                 None,
                 {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(_notification_ticket_from_result(result)),
+                _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
             )
 
 
 async def _resolve_notify_ticket_full(
-    body: "NotifyRequest", target: "GridNotificationTarget"
+    body: "NotifyRequest",
+    target: "GridNotificationTarget",
+    alert_context: Optional[UrgentAlertContext] = None,
 ) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
     """Resolve ``body.ticket_id`` into a ticket ref per the /notify ticketing contract.
 
@@ -1550,6 +1689,9 @@ async def _resolve_notify_ticket_full(
     escalations) -- so Grafana/n8n/VRM alerts never land in the Jira OPS
     project unless an operator explicitly opts them into 'auto'.
     """
+    if alert_context is None:
+        alert_context = _build_notify_alert_context(body, target)
+
     if body.ticket_id is None:
         return None, None, None, None
 
@@ -1559,14 +1701,16 @@ async def _resolve_notify_ticket_full(
     normalized = body.ticket_id.strip().lower()
 
     if body.ticket_id == "":
-        result, error = await _create_notify_ticket(body, target, backend_override)
+        result, error = await _create_notify_ticket(
+            body, target, backend_override, alert_context=alert_context
+        )
         if error is not None:
-            return None, error, None, None
+            return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
         ticket = _notification_ticket_from_result(result)
-        return ticket.ref, None, None, _new_ticket_delivery(ticket)
+        return ticket.ref, None, None, _new_ticket_delivery(ticket, alert_context)
 
     if normalized == "auto":
-        return await _resolve_notify_ticket_auto(body, target, backend_override)
+        return await _resolve_notify_ticket_auto(body, target, backend_override, alert_context)
 
     # Populated ticket_id: comment on (and optionally close) an existing ticket.
     from orchestrator.services.supabase_client import get_supabase_client
@@ -1574,14 +1718,29 @@ async def _resolve_notify_ticket_full(
 
     ticket_service = TicketService(get_supabase_client=get_supabase_client)
     ticket_ref = body.ticket_id
-    status = await ticket_service.get_status(ticket_ref)
+    try:
+        status = await ticket_service.get_status(ticket_ref)
+    except Exception as exc:
+        logger.exception("Notify: ticket lookup failed for %r", ticket_ref)
+        return (
+            None,
+            None,
+            {"ticket_error": f"Ticket lookup failed: {exc}"},
+            _ticket_failure_delivery(alert_context),
+        )
     if status is None:
         logger.warning("Notify: unresolvable ticket_id=%r (source=%s)", ticket_ref, body.source)
         return None, JSONResponse(
             status_code=404,
             content={"ok": False, "error": f"Unknown or unresolvable ticket_id: {ticket_ref!r}"},
         ), None, None
-    commented = await ticket_service.add_comment(ticket_ref, body.text, public=False)
+    ticket_error: Optional[str] = None
+    try:
+        commented = await ticket_service.add_comment(ticket_ref, body.text, public=False)
+    except Exception as exc:
+        logger.exception("Notify: ticket comment failed for %r", ticket_ref)
+        commented = False
+        ticket_error = f"Ticket update failed: {exc}"
     if not commented:
         logger.warning(
             "Notify: add_comment reported failure for ticket_ref=%r (source=%s)",
@@ -1589,12 +1748,20 @@ async def _resolve_notify_ticket_full(
             body.source,
         )
     if body.close:
-        await ticket_service.transition_to_done(ticket_ref)
+        try:
+            await ticket_service.transition_to_done(ticket_ref)
+        except Exception as exc:
+            logger.exception("Notify: ticket close failed for %r", ticket_ref)
+            ticket_error = ticket_error or f"Ticket close failed: {exc}"
     ticket = NotificationTicket(
         ref=ticket_ref,
         backend=await ticket_service.get_backend_name(ticket_ref),
     )
-    return ticket_ref, None, None, NotificationDelivery(ticket=ticket)
+    return ticket_ref, None, ({"ticket_error": ticket_error} if ticket_error else None), NotificationDelivery(
+        ticket=ticket,
+        alert_context=alert_context,
+        ticket_summary=status.summary,
+    )
 
 
 async def _resolve_notify_ticket(
@@ -1676,7 +1843,10 @@ async def handle_notify(
     # resolution above: a 404/500 must reach the caller, not be dropped in the
     # background. body.ticket_id is None -> ticket_ref stays None -> the
     # response below is byte-identical to today's passthrough-only behavior.
-    ticket_ref, error_response, extra, delivery = await _resolve_notify_ticket_full(body, target)
+    alert_context = _build_notify_alert_context(body, target)
+    ticket_ref, error_response, extra, delivery = await _resolve_notify_ticket_full(
+        body, target, alert_context
+    )
     if error_response is not None:
         return error_response
 

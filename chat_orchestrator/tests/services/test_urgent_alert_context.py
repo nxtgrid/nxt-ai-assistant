@@ -3,12 +3,46 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import sys
 from pathlib import Path
 
 import pytest
 
 from orchestrator.services.urgent_alert_context import build_urgent_alert_context
+
+
+def test_live_context_defers_the_default_mcp_import_until_lookup(monkeypatch):
+    """A non-urgent alert must not even import the telemetry client."""
+    original_import = builtins.__import__
+
+    def fail_mcp_import(name, *args, **kwargs):
+        if name.startswith("mcp_servers"):
+            raise AssertionError("telemetry client was imported eagerly")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_mcp_import)
+
+    context = build_urgent_alert_context(
+        subject="! Warning: Component changed",
+        grid_name="Acme Grid",
+    )
+
+    assert context.is_incoming_urgent() is False
+
+
+def test_subject_urgency_wins_over_a_lower_structured_severity():
+    async def read_output(_grid_name: str) -> float | None:
+        return 1.0
+
+    context = build_urgent_alert_context(
+        subject="! Urgent: Grid down",
+        incoming_severity="warning",
+        grid_name="Acme Grid",
+        read_output=read_output,
+    )
+
+    assert context.is_incoming_urgent() is True
 
 
 @pytest.mark.asyncio

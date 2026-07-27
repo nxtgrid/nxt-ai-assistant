@@ -22,9 +22,10 @@ from orchestrator.api.app import (
     _resolve_notify_ticket_full,
     handle_notify,
 )
-from orchestrator.services.ticketing.backend import TicketBackendError, TicketResult, TicketStatus
+from orchestrator.services.ticketing.backend import TicketCreateOutcome, TicketResult, TicketStatus
 from orchestrator.services.ticketing.correlation_render import AmendmentResult
 from orchestrator.services.ticketing.correlator import CorrelationDecision
+from orchestrator.services.urgent_alert_context import build_urgent_alert_context
 from shared.auth.auth_service import GridNotificationTarget
 
 
@@ -52,6 +53,18 @@ class _FakeTicketService:
         if self.create_error:
             raise self.create_error
         return self.create_result
+
+    async def create_ticket_with_internal_fallback(self, req, backend_override=None):
+        self.create_ticket_calls.append((req, backend_override))
+        if self.create_error:
+            return TicketCreateOutcome(result=None, error=str(self.create_error), fallback_used=True)
+        return TicketCreateOutcome(result=self.create_result)
+
+    async def resolve_backend(self, override=None):
+        class _Backend:
+            name = "internal" if override == "internal" else "jira"
+
+        return _Backend()
 
     async def get_status(self, ref: str):
         return self.get_status_return
@@ -92,6 +105,22 @@ def _notify_body(**overrides: Any) -> NotifyRequest:
     defaults: Dict[str, Any] = dict(source="grafana", grid_name="Acme Grid", text="Meter offline")
     defaults.update(overrides)
     return NotifyRequest(**defaults)
+
+
+def _live_context(output_kw: Optional[float]):
+    async def read_output(_grid_name: str) -> Optional[float]:
+        return output_kw
+
+    return build_urgent_alert_context(
+        subject="! Urgent: Grid down",
+        incoming_severity="urgent",
+        grid_name="Acme Grid",
+        read_output=read_output,
+    )
+
+
+async def _return_live_output(output_kw: float) -> float:
+    return output_kw
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +179,17 @@ async def test_blank_ticket_id_prefers_alert_subject_for_summary():
     assert req.summary == "Inverter output stopped"
 
 
+async def test_jira_ticket_type_selection_receives_live_output_context(monkeypatch):
+    monkeypatch.setenv("NOTIFY_TICKETS_BACKEND", "jira")
+    body = _notify_body(ticket_id="", alert={"subject": "! Urgent: Grid down"})
+
+    await _resolve_notify_ticket_full(body, _target(), _live_context(0.0))
+
+    req, backend_override = _FakeTicketService.instances[-1].create_ticket_calls[0]
+    assert backend_override == "jira"
+    assert req.llm_context == {"live_inverter_output_kw": 0.0}
+
+
 async def test_auto_new_ticket_prefers_alert_subject_for_summary(monkeypatch):
     monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
     body = _notify_body(
@@ -203,18 +243,22 @@ async def test_blank_ticket_id_ignores_close_flag():
     assert svc.transition_to_done_calls == []
 
 
-async def test_blank_ticket_id_creation_failure_returns_500(monkeypatch):
+async def test_blank_ticket_id_creation_failure_is_fail_open(monkeypatch):
     body = _notify_body(ticket_id="")
 
-    async def _boom(self, req, backend_override=None):
-        raise TicketBackendError("both backends down")
+    async def _both_backends_down(self, req, backend_override=None):
+        return TicketCreateOutcome(result=None, error="both backends down", fallback_used=True)
 
-    monkeypatch.setattr(_FakeTicketService, "create_ticket", _boom)
-    ref, error = await _resolve_notify_ticket(body, _target())
+    monkeypatch.setattr(
+        _FakeTicketService, "create_ticket_with_internal_fallback", _both_backends_down
+    )
+    ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
 
     assert ref is None
-    assert error is not None
-    assert error.status_code == 500
+    assert error is None
+    assert extra == {"ticket_error": "Ticket creation failed: both backends down"}
+    assert delivery is not None
+    assert delivery.text_override == "Meter offline"
 
 
 async def test_populated_ticket_id_appends_comment():
@@ -332,6 +376,35 @@ async def test_handle_notify_create_ticket_returns_ref_in_response(monkeypatch):
     assert content == {"ok": True, "ticket_ref": "TKT-000001"}
 
 
+async def test_handle_notify_still_sends_when_all_ticket_backends_fail(
+    monkeypatch, fake_telegram_send
+):
+    monkeypatch.setattr("shared.auth.get_auth_service", lambda: _FakeAuthService(_target()))
+
+    async def _both_backends_down(self, req, backend_override=None):
+        return TicketCreateOutcome(result=None, error="both backends down", fallback_used=True)
+
+    monkeypatch.setattr(
+        _FakeTicketService, "create_ticket_with_internal_fallback", _both_backends_down
+    )
+    background_tasks = BackgroundTasks()
+    response = await handle_notify(
+        _FakeRequest(headers={"X-Notify-Secret": "test-secret"}),
+        _notify_body(ticket_id="", alert={"subject": "! Urgent: Grid down"}),
+        background_tasks,
+    )
+
+    import json
+
+    assert response.status_code == 202
+    assert json.loads(response.body) == {
+        "ok": True,
+        "ticket_error": "Ticket creation failed: both backends down",
+    }
+    await background_tasks()
+    assert fake_telegram_send.calls[0]["text"].startswith("! Urgent: Grid down")
+
+
 async def test_handle_notify_unknown_ticket_returns_404_before_scheduling_delivery(monkeypatch):
     monkeypatch.setattr(
         "shared.auth.get_auth_service", lambda: _FakeAuthService(_target())
@@ -370,7 +443,9 @@ class _FakeCorrelator:
         self.decide_calls: List[tuple] = []
         _FakeCorrelator.instances.append(self)
 
-    async def decide(self, grid_name, alert, dedup_key=None, backend_override=None):
+    async def decide(
+        self, grid_name, alert, dedup_key=None, backend_override=None, get_live_facts=None
+    ):
         self.decide_calls.append((grid_name, alert, dedup_key, backend_override))
         if _FakeCorrelator.raise_error:
             raise _FakeCorrelator.raise_error
@@ -502,7 +577,9 @@ class TestResolveNotifyTicketAutoAmend:
             decided_by="llm",
             affected_key={"kind": "mppt", "key": "A7", "label": "MPPT A7"},
         )
-        body = _notify_body(ticket_id="auto")
+        body = _notify_body(
+            ticket_id="auto", alert={"subject": "! Warning: Multiple MPPTs offline"}
+        )
 
         ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
 
@@ -584,7 +661,9 @@ class TestResolveNotifyTicketAutoRootCauseFirst:
             needs_root_cause_ticket=True,
             affected_key={"kind": "mppt", "key": "A7", "label": "MPPT A7"},
         )
-        body = _notify_body(ticket_id="auto")
+        body = _notify_body(
+            ticket_id="auto", alert={"subject": "! Warning: Multiple MPPTs offline"}
+        )
 
         ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
 
@@ -604,6 +683,7 @@ class TestResolveNotifyTicketAutoRootCauseFirst:
         assert delivery is not None
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
         assert delivery.reply_to_message_id is None
+        assert delivery.ticket_summary.startswith("! Urgent: Acme Grid root cause")
 
 
 class TestResolveNotifyTicketAutoFailureModes:
@@ -647,21 +727,22 @@ class TestResolveNotifyTicketAutoFailureModes:
         assert delivery is not None
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
 
-    async def test_ticket_creation_failure_still_returns_500(self, monkeypatch):
+    async def test_ticket_creation_failure_still_delivers_base_alert(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
         body = _notify_body(ticket_id="auto")
 
-        async def _boom(self, req, backend_override=None):
-            raise TicketBackendError("both backends down")
+        async def _both_backends_down(self, req, backend_override=None):
+            return TicketCreateOutcome(result=None, error="both backends down", fallback_used=True)
 
-        monkeypatch.setattr(_FakeTicketService, "create_ticket", _boom)
+        monkeypatch.setattr(
+            _FakeTicketService, "create_ticket_with_internal_fallback", _both_backends_down
+        )
         ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
 
         assert ref is None
-        assert extra is None
-        assert delivery is None
-        assert error is not None
-        assert error.status_code == 500
+        assert error is None
+        assert extra == {"ticket_error": "Ticket creation failed: both backends down"}
+        assert delivery is not None
 
 
 class TestHandleNotifyAutoResponseShape:
@@ -826,6 +907,73 @@ class TestDeliverNotificationDelivery:
 
         assert fake_telegram_send.calls[0]["text"].startswith("🔴 *! Urgent: Grid down*")
 
+    async def test_urgent_ticket_notification_includes_cached_live_output(
+        self, fake_telegram_send
+    ):
+        from orchestrator.api.app import _deliver_notification
+
+        body = _notify_body(text="Grid is unreachable", alert={"subject": "! Urgent: Grid down"})
+        ticket = NotificationTicket(ref="OPS-77", backend="jira", url="https://jira.test/browse/OPS-77")
+
+        await _deliver_notification(
+            body,
+            _target(),
+            ticket.ref,
+            NotificationDelivery(ticket=ticket, alert_context=_live_context(2.4)),
+        )
+
+        assert "⚡ Live output: 2.4 kW" in fake_telegram_send.calls[0]["text"]
+
+    async def test_warning_update_to_urgent_ticket_includes_unavailable_output(
+        self, fake_telegram_send
+    ):
+        from orchestrator.api.app import _deliver_notification
+
+        body = _notify_body(text="A component changed", alert={"subject": "! Warning: Component changed"})
+        ticket = NotificationTicket(ref="TKT-1", backend="internal")
+
+        await _deliver_notification(
+            body,
+            _target(),
+            ticket.ref,
+            NotificationDelivery(
+                ticket=ticket,
+                alert_context=_live_context(None),
+                ticket_summary="! Urgent: Grid down",
+            ),
+        )
+
+        text = fake_telegram_send.calls[0]["text"]
+        assert text.startswith("🔴 ")
+        assert "⚡ Live output: unavailable" in text
+
+    async def test_warning_promoted_to_urgent_root_cause_uses_live_output(
+        self, fake_telegram_send
+    ):
+        from orchestrator.api.app import _deliver_notification
+
+        body = _notify_body(
+            text="Multiple components changed",
+            alert={"subject": "! Warning: Multiple MPPTs offline"},
+        )
+        ticket = NotificationTicket(ref="TKT-2", backend="internal")
+        delivery = NotificationDelivery(
+            ticket=ticket,
+            alert_context=build_urgent_alert_context(
+                subject="! Warning: Multiple MPPTs offline",
+                incoming_severity="warning",
+                grid_name="Acme Grid",
+                read_output=lambda _grid_name: _return_live_output(3.1),
+            ),
+            ticket_summary="! Urgent: Acme Grid root cause (grid_off)",
+        )
+
+        await _deliver_notification(body, _target(), ticket.ref, delivery)
+
+        text = fake_telegram_send.calls[0]["text"]
+        assert text.startswith("🔴 *! Warning: Multiple MPPTs offline*")
+        assert "⚡ Live output: 3.1 kW" in text
+
     async def test_internal_ticket_without_app_url_is_unlinked(
         self, fake_telegram_send, monkeypatch
     ):
@@ -938,6 +1086,7 @@ class TestDeliverNotificationDelivery:
             text_override="4 MPPTs in Kudi affected (A3, A5, A6, A7)",
             reply_to_message_id=555,  # present but must be ignored -- top_level wins
             top_level=True,
+            alert_context=_live_context(None),
             ticket=NotificationTicket(
                 ref="OPS-42", backend="jira", url="https://jira.test/browse/OPS-42"
             ),
@@ -948,7 +1097,8 @@ class TestDeliverNotificationDelivery:
         call = fake_telegram_send.calls[0]
         assert call["text"] == (
             "🔴 [OPS-42](https://jira.test/browse/OPS-42) — "
-            "4 MPPTs in Kudi affected (A3, A5, A6, A7)"
+            "4 MPPTs in Kudi affected (A3, A5, A6, A7)\n"
+            "⚡ Live output: unavailable"
         )
         assert call["reply_to_message_id"] is None
 
