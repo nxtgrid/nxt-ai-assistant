@@ -56,6 +56,37 @@ _TRUTHY = {"true", "1", "yes", "on"}
 
 
 @dataclass(frozen=True)
+class Group:
+    """A settings-page section. Order in :data:`GROUPS` is render order."""
+
+    id: str
+    title: str
+    description: str
+
+
+# Ordered by how often an operator touches the group. There is deliberately no
+# catch-all: an unknown group id fails the registry test rather than silently
+# collecting unrelated flags, which is how the previous prefix-matching
+# `_section_of` accumulated 24 unrelated flags in one section.
+GROUPS: tuple[Group, ...] = (
+    Group("bot_control", "Bot Control", "Master switch and core request handling."),
+    Group("models", "AI Models & Providers", "Which model answers, and how it generates."),
+    Group("conversation", "Conversation Experience", "Threading, context, and chat interaction."),
+    Group("ticketing", "Escalations & Ticketing", "Where escalations and alerts are filed."),
+    Group("alerts", "Alerts & Notifications", "Inbound /notify and outbound Telegram targets."),
+    Group("tools", "Tools & Integrations", "Which MCP servers and tools the bot may use."),
+    Group("knowledge", "Knowledge & RAG", "Retrieval-augmented generation."),
+    Group("grafana", "Grafana Dashboards", "Dashboard and panel exposure as tools."),
+    Group("layout", "Site Layout Engine", "Geometry and sizing for generated site layouts."),
+    Group("documents", "Documents & Templates", "Google Doc, Slides, Sheet and Drive ids."),
+    Group("access", "Access Control", "Who may use the admin app and staff tools."),
+    Group("connections", "Connections & Credentials", "External services this deployment talks to."),
+    Group("metrics", "Metrics & Scheduling", "Scheduled collection jobs."),
+    Group("deployment", "Deployment", "Platform values set outside this app."),
+)
+
+
+@dataclass(frozen=True)
 class Flag:
     """Declarative description of a single tunable env var.
 
@@ -77,6 +108,25 @@ class Flag:
             dictionary (routing-only or deployment-level flags).
         document: If False the flag is omitted from the generated example file
             (e.g. large machine-managed JSON blobs).
+        group: Settings-page section id, drawn from :data:`GROUPS`.
+        label: Human label for the settings UI; falls back to ``name`` via
+            :attr:`display_label` when unset.
+        choices: When set, the settings UI renders a select restricted to these
+            values instead of free text, and a value outside this set is
+            rejected on save.
+        advanced: If True the flag is collapsed under "Show advanced" within
+            its group instead of always visible.
+        restart_required: If True, changing this flag needs a bot restart to
+            take effect; the settings UI offers "Save & Restart" instead of
+            "Save" when any changed flag sets this.
+        depends_on: Name of a boolean flag this one (or its whole group, when
+            every flag in a group shares the same value here) is inert without.
+            The settings UI hides a dependent flag/group while the dependency
+            is false.
+        minimum: Inclusive lower bound for INT/FLOAT flags (UI + save validation).
+        maximum: Inclusive upper bound for INT/FLOAT flags (UI + save validation).
+        set_via: For read-only flags, a short hint about where an operator sets
+            this value (e.g. "Set in the DigitalOcean console.").
     """
 
     name: str
@@ -89,6 +139,15 @@ class Flag:
     required: bool = False
     show_in_settings: bool = True
     document: bool = True
+    group: str = "bot_control"
+    label: str = ""
+    choices: Optional[tuple[str, ...]] = None
+    advanced: bool = False
+    restart_required: bool = False
+    depends_on: Optional[str] = None
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    set_via: Optional[str] = None
 
     def coerce(self, raw: Optional[str]) -> Any:
         """Coerce a raw string (or None) to this flag's typed value."""
@@ -110,6 +169,11 @@ class Flag:
     def default_str(self) -> str:
         """The default rendered as an environment-string."""
         return _as_str(self.default)
+
+    @property
+    def display_label(self) -> str:
+        """Human label for the settings UI, falling back to the env var name."""
+        return self.label or self.name
 
 
 def _as_str(value: Any) -> str:
@@ -646,6 +710,16 @@ def service_specific_settings() -> Dict[str, str]:
 def non_editable_settings() -> set[str]:
     """Names that must never be written back to the deployment (read-only)."""
     return {f.name for f in FLAGS.values() if not f.editable}
+
+
+def groups() -> tuple[Group, ...]:
+    """Ordered settings-page sections."""
+    return GROUPS
+
+
+def flags_in_group(group_id: str) -> List[Flag]:
+    """Flags declared for ``group_id``, in registration order."""
+    return [flag for flag in FLAGS.values() if flag.group == group_id]
 
 
 def settings_defaults(env: Optional[Mapping[str, str]] = None) -> Dict[str, Any]:

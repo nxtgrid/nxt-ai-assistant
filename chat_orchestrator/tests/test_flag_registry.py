@@ -246,3 +246,57 @@ class TestBackends:
 def test_validate_required_reports_missing():
     # No flags are required today, so an empty env is valid.
     assert fr.validate_required(env={}) == []
+
+
+# --------------------------------------------------------------------------- #
+# UI metadata (settings-page groups, labels, choices, bounds)
+# --------------------------------------------------------------------------- #
+class TestFlagUIMetadata:
+    def test_group_ids_are_all_known(self):
+        known = {group.id for group in fr.GROUPS}
+        for name, flag in fr.FLAGS.items():
+            assert flag.group in known, f"{name} has unknown group {flag.group!r}"
+
+    def test_groups_have_unique_ids_and_are_ordered(self):
+        ids = [group.id for group in fr.GROUPS]
+        assert len(ids) == len(set(ids))
+        assert ids[0] == "bot_control", "Bot Control must render first"
+
+    def test_flags_in_group_returns_registration_order(self):
+        names = [flag.name for flag in fr.flags_in_group("bot_control")]
+        assert names[0] == "BOT_ENABLED"
+
+    def test_display_label_falls_back_to_name(self):
+        assert fr.FLAGS["BOT_ENABLED"].display_label == "BOT_ENABLED"
+
+    def test_choices_always_contain_the_default(self):
+        for name, flag in fr.FLAGS.items():
+            if flag.choices:
+                assert flag.default_str in flag.choices, (
+                    f"{name} default {flag.default_str!r} is not among {flag.choices}"
+                )
+
+    def test_depends_on_targets_an_existing_bool_flag(self):
+        for name, flag in fr.FLAGS.items():
+            if flag.depends_on is None:
+                continue
+            target = fr.FLAGS.get(flag.depends_on)
+            assert target is not None, f"{name} depends on unknown flag {flag.depends_on}"
+            assert target.type is fr.FlagType.BOOL, (
+                f"{name} depends on {flag.depends_on}, which is not a boolean"
+            )
+
+    def test_numeric_defaults_are_inside_declared_bounds(self):
+        for name, flag in fr.FLAGS.items():
+            if flag.type not in (fr.FlagType.INT, fr.FlagType.FLOAT):
+                continue
+            value = flag.coerce(flag.default_str)
+            if flag.minimum is not None:
+                assert value >= flag.minimum, f"{name} default below minimum"
+            if flag.maximum is not None:
+                assert value <= flag.maximum, f"{name} default above maximum"
+
+    def test_read_only_flags_explain_where_to_set_them(self):
+        for name, flag in fr.FLAGS.items():
+            if not flag.editable and flag.show_in_settings:
+                assert flag.set_via, f"{name} is read-only but has no set_via hint"
