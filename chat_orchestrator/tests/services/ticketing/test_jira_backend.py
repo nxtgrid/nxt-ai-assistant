@@ -174,6 +174,25 @@ def _queue_createmeta_with_required_grid(fake_session: FakeJiraSession) -> None:
     )
 
 
+def _queue_createmeta_with_optional_priority(fake_session: FakeJiraSession) -> None:
+    _queue_createmeta(
+        fake_session,
+        "OPS",
+        [
+            {
+                "id": "task-id",
+                "name": "Task",
+                "fields": {
+                    "priority": {
+                        "name": "Priority",
+                        "required": False,
+                    }
+                },
+            }
+        ],
+    )
+
+
 def _stub_type_selector_to_choose(monkeypatch: pytest.MonkeyPatch, issue_type_id: str) -> None:
     async def select(_self, *, candidate_types, **_kwargs):
         issue_type = next(item for item in candidate_types if item.id == issue_type_id)
@@ -189,6 +208,15 @@ def _posted_fields(fake_session: FakeJiraSession) -> Dict[str, Any]:
 
 def _notify_request() -> TicketCreateRequest:
     return TicketCreateRequest(summary="Grid down", description="0 kW", source="notify")
+
+
+def _urgent_notify_request() -> TicketCreateRequest:
+    return TicketCreateRequest(
+        summary="Grid down",
+        description="0 kW",
+        severity="urgent",
+        source="notify",
+    )
 
 
 class TestHasCredentials:
@@ -395,6 +423,61 @@ class TestCreateTicket:
         await _make_backend().create_ticket(TicketCreateRequest(summary="Help", grid_name="Ogheye"))
 
         assert _posted_fields(fake_session)["customfield_grid"] == {"id": "ogheye-option"}
+
+    @pytest.mark.asyncio
+    async def test_urgent_jira_ticket_uses_discovered_highest_priority(self, fake_session):
+        _queue_createmeta_with_optional_priority(fake_session)
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/priority",
+            _FakeResponse(
+                200,
+                [{"id": "1", "name": "High"}, {"id": "2", "name": "Highest"}],
+            ),
+        )
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-9"}))
+
+        await _make_backend().create_ticket(_urgent_notify_request())
+
+        assert _posted_fields(fake_session)["priority"] == {"id": "2"}
+
+    @pytest.mark.asyncio
+    async def test_priority_lookup_failure_does_not_block_urgent_ticket(self, fake_session):
+        _queue_createmeta_with_optional_priority(fake_session)
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/priority",
+            _FakeResponse(503, text_data="temporarily unavailable"),
+        )
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-10"}))
+
+        result = await _make_backend().create_ticket(_urgent_notify_request())
+
+        assert result.ref == "OPS-10"
+        assert "priority" not in _posted_fields(fake_session)
+
+    @pytest.mark.asyncio
+    async def test_urgent_ticket_omits_priority_when_issue_type_cannot_create_it(
+        self, fake_session
+    ):
+        _queue_createmeta_with_only("Task", fake_session, project_key="OPS")
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-12"}))
+
+        result = await _make_backend().create_ticket(_urgent_notify_request())
+
+        assert result.ref == "OPS-12"
+        assert "priority" not in _posted_fields(fake_session)
+        assert not any("/rest/api/3/priority" in url for _method, url, _kwargs in fake_session.calls)
+
+    @pytest.mark.asyncio
+    async def test_non_urgent_jira_ticket_does_not_request_or_set_priority(self, fake_session):
+        _queue_createmeta_with_only("Task", fake_session, project_key="OPS")
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-11"}))
+
+        await _make_backend().create_ticket(_notify_request())
+
+        assert "priority" not in _posted_fields(fake_session)
+        assert not any("/rest/api/3/priority" in url for _method, url, _kwargs in fake_session.calls)
 
     @pytest.mark.asyncio
     async def test_raises_without_posting_when_no_compatible_type_exists(self, fake_session):
@@ -604,6 +687,40 @@ class TestUpdateTicket:
 
         _method, _url, kwargs = fake_session.calls[-1]
         assert kwargs["json"]["fields"]["priority"] == {"id": "10001"}
+
+    @pytest.mark.asyncio
+    async def test_highest_priority_sentinel_is_resolved_before_update(self, fake_session):
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/priority",
+            _FakeResponse(200, [{"id": "2", "name": "hIGHeSt"}]),
+        )
+        fake_session.queue("PUT", "/rest/api/3/issue/OPS-42", _FakeResponse(204, text_data=""))
+        backend = _make_backend()
+
+        assert await backend.update_ticket(
+            "OPS-42", summary="urgent update", priority_id="highest"
+        )
+
+        _method, _url, kwargs = fake_session.calls[-1]
+        assert kwargs["json"]["fields"]["priority"] == {"id": "2"}
+
+    @pytest.mark.asyncio
+    async def test_failed_highest_lookup_still_updates_without_priority(self, fake_session):
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/priority",
+            _FakeResponse(200, [{"id": "1", "name": "High"}]),
+        )
+        fake_session.queue("PUT", "/rest/api/3/issue/OPS-42", _FakeResponse(204, text_data=""))
+        backend = _make_backend()
+
+        assert await backend.update_ticket(
+            "OPS-42", summary="urgent update", priority_id="highest"
+        )
+
+        _method, _url, kwargs = fake_session.calls[-1]
+        assert set(kwargs["json"]["fields"]) == {"summary"}
 
     @pytest.mark.asyncio
     async def test_omits_unset_fields(self, fake_session):

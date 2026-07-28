@@ -179,6 +179,18 @@ async def test_blank_ticket_id_prefers_alert_subject_for_summary():
     assert req.summary == "Inverter output stopped"
 
 
+async def test_structured_urgent_severity_is_carried_to_ticket_creation():
+    body = _notify_body(
+        ticket_id="",
+        alert={"subject": "Grid down", "severity": "urgent"},
+    )
+
+    await _resolve_notify_ticket(body, _target())
+
+    req, _ = _FakeTicketService.instances[-1].create_ticket_calls[0]
+    assert req.severity == "urgent"
+
+
 async def test_jira_ticket_type_selection_receives_live_output_context(monkeypatch):
     monkeypatch.setenv("NOTIFY_TICKETS_BACKEND", "jira")
     body = _notify_body(ticket_id="", alert={"subject": "! Urgent: Grid down"})

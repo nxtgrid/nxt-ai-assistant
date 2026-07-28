@@ -52,6 +52,7 @@ def _get_jira_session() -> aiohttp.ClientSession:
 _jira_orgs_cache: List[Dict[str, Any]] = []
 _jira_orgs_cache_time: float = 0.0
 _JIRA_ORGS_TTL: float = 1800.0  # 30 minutes
+_URGENT_ALERT_SUMMARY = re.compile(r"^\s*!\s*urgent\s*:", re.IGNORECASE)
 
 
 def _adf_to_text(adf: Any, _depth: int = 0, _max_depth: int = 50) -> str:
@@ -250,6 +251,17 @@ class JiraTicketBackend:
         payload = build_issue_payload(context, selection.issue_type)
         if payload is None:
             raise TicketBackendError("Jira selected an incompatible issue type")
+        is_urgent_alert = (
+            req.source == "notify"
+            and (
+                req.severity.strip().casefold() == "urgent"
+                or bool(_URGENT_ALERT_SUMMARY.match(req.summary))
+            )
+        )
+        if is_urgent_alert and selection.issue_type.field("priority") is not None:
+            highest_priority_id = await self.resolve_priority_id("highest")
+            if highest_priority_id is not None:
+                payload["fields"]["priority"] = {"id": highest_priority_id}
         return await self._post_issue_payload(payload, selection)
 
     def _type_selector(self) -> JiraIssueTypeSelector:
@@ -366,7 +378,9 @@ class JiraTicketBackend:
         if description is not None:
             fields["description"] = _text_to_adf(description)
         if priority_id is not None:
-            fields["priority"] = {"id": priority_id}
+            resolved_priority_id = await self.resolve_priority_id(priority_id)
+            if resolved_priority_id is not None:
+                fields["priority"] = {"id": resolved_priority_id}
         if not fields:
             return True
 
@@ -387,6 +401,48 @@ class JiraTicketBackend:
         except Exception:
             LOGGER.warning("Error updating Jira issue %s", ref, exc_info=True)
             return False
+
+    async def resolve_priority_id(self, priority_id: str) -> Optional[str]:
+        """Resolve the ``highest`` sentinel from Jira's live priority catalogue.
+
+        Explicit Jira ids pass through unchanged. Catalogue failures and a
+        missing standard ``Highest`` entry return ``None`` so priority remains
+        an optional field and can never block filing or updating a ticket.
+        """
+        if priority_id.strip().casefold() != "highest":
+            return priority_id
+        if not self._jira_base_url:
+            return None
+
+        url = f"{self._jira_base_url}/rest/api/3/priority"
+        try:
+            session = _get_jira_session()
+            async with session.get(
+                url,
+                headers=self._jira_auth_headers(),
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as response:
+                if response.status != 200:
+                    LOGGER.warning(
+                        "Failed to discover Jira Highest priority: HTTP %s",
+                        response.status,
+                    )
+                    return None
+                priorities = await response.json()
+        except Exception:
+            LOGGER.warning("Failed to discover Jira Highest priority", exc_info=True)
+            return None
+
+        if not isinstance(priorities, list):
+            return None
+        for priority in priorities:
+            if not isinstance(priority, dict):
+                continue
+            if str(priority.get("name") or "").strip().casefold() != "highest":
+                continue
+            resolved_id = priority.get("id")
+            return str(resolved_id) if resolved_id is not None else None
+        return None
 
     async def find_open_by_grid(self, grid_name: str, limit: int = 20) -> List[TicketSummary]:
         """Search for open issues carrying this grid's ``grid-<slug>`` label.

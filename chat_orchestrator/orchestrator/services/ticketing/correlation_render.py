@@ -11,10 +11,10 @@ the ticket backend: nothing here ever reads Jira ADF back.
 ``apply_amendment`` is the orchestration that runs after ``AlertCorrelator``
 decides "amend" or "duplicate": merge the new affected key (amend only),
 bump the occurrence counter (both), re-render and push to the ticket backend
-(amend only), and auto-escalate once the affected-component count crosses
-``ALERT_CORRELATION_ESCALATE_AFTER``. Telegram delivery itself is Task 10's
-concern -- this only returns the correlation's stored Telegram targets so
-the caller (the ``/notify`` handler) can act on them.
+(amend only), and escalate the first urgent severity increase. Telegram
+delivery itself is Task 10's concern -- this only returns the correlation's
+stored Telegram targets so the caller (the ``/notify`` handler) can act on
+them.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
 from .alert_facts import AlertFacts
@@ -45,6 +44,9 @@ _KIND_LABELS = {
 }
 
 _MAX_KEYS_SHOWN = 6
+_SEVERITY_PREFIX = re.compile(
+    r"^\s*!\s*(?:urgent|warning)\s*:\s*", re.IGNORECASE
+)
 
 
 def _pluralize_kind(kind: str, count: int) -> str:
@@ -67,6 +69,14 @@ def _severity_marker(summary_base: str) -> str:
     return ""
 
 
+def _apply_incoming_severity(summary: str, severity: str) -> str:
+    if severity.strip().casefold() != "urgent":
+        return summary
+    if _SEVERITY_PREFIX.match(summary):
+        return _SEVERITY_PREFIX.sub("! Urgent: ", summary, count=1)
+    return f"! Urgent: {summary}".rstrip()
+
+
 def render_summary(correlation: Dict[str, Any], alert: AlertFacts, llm_summary: str) -> str:
     """Recompute a ticket's summary from its current affected-keys state.
 
@@ -81,7 +91,8 @@ def render_summary(correlation: Dict[str, Any], alert: AlertFacts, llm_summary: 
     total_keys = len(affected_keys)
 
     if total_keys < 2:
-        return (llm_summary or correlation.get("summary_base") or "").strip()
+        summary = (llm_summary or correlation.get("summary_base") or "").strip()
+        return _apply_incoming_severity(summary, alert.severity)
 
     kind_groups: Dict[str, List[str]] = {}
     for entry in affected_keys:
@@ -92,7 +103,11 @@ def render_summary(correlation: Dict[str, Any], alert: AlertFacts, llm_summary: 
     if not keys:
         return (llm_summary or correlation.get("summary_base") or "").strip()
 
-    severity = _severity_marker(correlation.get("summary_base") or "")
+    severity = (
+        "! Urgent: "
+        if alert.severity.strip().casefold() == "urgent"
+        else _severity_marker(correlation.get("summary_base") or "")
+    )
     grid_name = correlation.get("grid_name", "")
     label = _pluralize_kind(dominant_kind, len(keys))
 
@@ -160,8 +175,6 @@ async def apply_amendment(
     alert: AlertFacts,
     decision: CorrelationDecision,
     raw_text: str,
-    escalate_after: Optional[int] = None,
-    escalated_priority_id: Optional[str] = None,
 ) -> Optional[AmendmentResult]:
     """Execute an "amend" or "duplicate" correlation decision against ``ticket_ref``.
 
@@ -170,8 +183,8 @@ async def apply_amendment(
     suppression rather than a ticket update. "amend" merges the new affected
     key, re-renders summary/description from the post-merge state, pushes
     that to the ticket backend, appends the raw alert as a comment, and
-    auto-escalates (priority bump + a "🔴 " summary prefix) the first time
-    the affected-component count reaches ``escalate_after``.
+    escalates (Highest priority + a "🔴 " summary prefix) the first time an
+    incoming urgent alert raises the stored ticket's severity.
 
     Returns ``None`` if the correlation row can't be loaded (e.g. a store
     outage between ``AlertCorrelator.decide()`` and here) -- the caller must
@@ -179,10 +192,6 @@ async def apply_amendment(
     the ticket itself was already filed/exists, so nothing is lost, only the
     amend's side effects are skipped for this alert).
     """
-    escalate_after = (
-        escalate_after if escalate_after is not None else int(fr.get("ALERT_CORRELATION_ESCALATE_AFTER"))
-    )
-
     await store.bump_occurrence(ticket_ref)
 
     if decision.decision == "amend" and decision.affected_key:
@@ -218,19 +227,43 @@ async def apply_amendment(
     new_description = render_description(correlation)
 
     affected_count = len(correlation.get("affected_keys") or [])
-    escalate_now = affected_count >= escalate_after and not correlation.get("escalated_at")
-    final_summary = f"🔴 {new_summary}" if escalate_now else new_summary
+    severity_increased_to_urgent = (
+        alert.severity.strip().casefold() == "urgent"
+        and decision.ticket_severity.strip().casefold() != "urgent"
+    )
+    # Severity is the source of truth. A legacy count-based ``escalated_at``
+    # marker must not prevent the first warning-to-urgent priority promotion.
+    escalate_now = severity_increased_to_urgent
+    remains_escalated = bool(correlation.get("escalated_at"))
+    final_summary = f"🔴 {new_summary}" if escalate_now or remains_escalated else new_summary
+    effective_severity = (
+        "urgent"
+        if any(
+            severity.strip().casefold() == "urgent"
+            for severity in (
+                str(correlation.get("severity") or ""),
+                decision.ticket_severity,
+                alert.severity,
+            )
+        )
+        else (alert.severity or decision.ticket_severity or correlation.get("severity") or "")
+    )
 
     await ticket_service.update_ticket(
         ticket_ref,
         summary=final_summary,
         description=new_description,
-        priority_id=escalated_priority_id if escalate_now else None,
+        priority_id="highest" if escalate_now else None,
     )
     if raw_text:
         await ticket_service.add_comment(ticket_ref, raw_text, public=False)
 
-    await store.record_amendment(ticket_ref, summary_current=final_summary, escalated=escalate_now)
+    await store.record_amendment(
+        ticket_ref,
+        summary_current=final_summary,
+        severity=effective_severity,
+        escalated=escalate_now,
+    )
 
     return AmendmentResult(
         ticket_ref=ticket_ref,

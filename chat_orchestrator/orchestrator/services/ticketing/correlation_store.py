@@ -136,14 +136,20 @@ class CorrelationStore:
         return rows[0] if rows else None
 
     async def record_amendment(
-        self, ticket_ref: str, *, summary_current: str, escalated: bool = False
+        self,
+        ticket_ref: str,
+        *,
+        summary_current: str,
+        severity: Optional[str] = None,
+        escalated: bool = False,
     ) -> bool:
-        """Persist the freshly-rendered summary (and, on first crossing the
-        escalation threshold, ``escalated_at``) after an amend executes."""
+        """Persist rendered state after an amendment executes."""
         client = self._client()
         if client is None:
             return False
         payload: Dict[str, Any] = {"summary_current": summary_current}
+        if severity:
+            payload["severity"] = severity
         if escalated:
             payload["escalated_at"] = datetime.now(timezone.utc).isoformat()
         try:

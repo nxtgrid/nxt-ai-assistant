@@ -631,6 +631,28 @@ class TestRecordAmendment:
         assert fake.tables["ticket_correlations"][0]["escalated_at"] is not None
 
     @pytest.mark.asyncio
+    async def test_urgent_amendment_persists_effective_severity(self):
+        store, fake = _make_store()
+        fake.tables["ticket_correlations"] = [
+            {
+                "ticket_ref": "TKT-1",
+                "summary_current": "old",
+                "severity": "warning",
+                "escalated_at": None,
+            }
+        ]
+
+        ok = await store.record_amendment(
+            "TKT-1",
+            summary_current="🔴 ! Urgent: issue",
+            severity="urgent",
+            escalated=True,
+        )
+
+        assert ok is True
+        assert fake.tables["ticket_correlations"][0]["severity"] == "urgent"
+
+    @pytest.mark.asyncio
     async def test_false_on_error(self):
         fake = FakeRawClient()
         fake.raise_on_execute["ticket_correlations"] = RuntimeError("down")

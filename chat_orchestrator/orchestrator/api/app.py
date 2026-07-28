@@ -1157,6 +1157,7 @@ async def _create_notify_ticket(
                 grid_name=target.grid_name,
                 source="notify",
                 llm_context=llm_context,
+                severity=body.alert.severity if body.alert is not None else "",
             ),
             backend_override=backend_override,
         )
