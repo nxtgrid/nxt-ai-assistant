@@ -191,3 +191,18 @@ async def test_transition_to_done_by_ref_updates_canonical_ticket_state():
     assert (table, mode, filters) == ("tickets", "update", [("id", "ticket-1")])
     assert payload["status"] == "done"
     assert payload["resolved_at"]
+
+
+@pytest.mark.asyncio
+async def test_update_by_ref_updates_canonical_summary_and_description():
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "TKT-1", "backend": "internal",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+    }]
+
+    await TicketRepository(client=client).update_by_ref("TKT-1", summary="Grid restored")
+
+    assert client.calls[-1] == (
+        "tickets", "update", {"summary": "Grid restored"}, [("id", "ticket-1")]
+    )

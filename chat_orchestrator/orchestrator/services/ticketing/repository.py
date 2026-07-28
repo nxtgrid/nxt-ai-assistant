@@ -181,3 +181,19 @@ class TicketRepository:
             raise TicketRepositoryError(f"failed to close canonical ticket: {exc}") from exc
         if not getattr(response, "data", None):
             raise TicketRepositoryError("canonical ticket close returned no row")
+
+    async def update_by_ref(
+        self, ref: str, *, summary: str | None = None, description: str | None = None
+    ) -> None:
+        payload = {key: value for key, value in {"summary": summary, "description": description}.items() if value is not None}
+        if not payload:
+            return
+        ticket = await self.get_by_ref(ref)
+        if ticket is None:
+            raise TicketRepositoryError(f"cannot update: unknown ticket ref {ref}")
+        try:
+            response = self._raw_client().table("tickets").update(payload).eq("id", ticket.id).execute()
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to update canonical ticket: {exc}") from exc
+        if not getattr(response, "data", None):
+            raise TicketRepositoryError("canonical ticket update returned no row")
