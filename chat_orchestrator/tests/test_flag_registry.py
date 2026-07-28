@@ -68,12 +68,16 @@ def test_generated_env_example_is_current():
 
 
 def test_documented_flags_appear_in_example():
-    text = GENERATED_EXAMPLE.read_text(encoding="utf-8")
+    # Matched as whole lines, not substrings: "API_KEY=" is also a suffix of
+    # "OPENROUTER_API_KEY=", which a naive `in` check would false-positive on.
+    lines = set(GENERATED_EXAMPLE.read_text(encoding="utf-8").splitlines())
     for name, flag in fr.FLAGS.items():
+        expected_value = "" if flag.secret else flag.default_str
+        present = f"{name}={expected_value}" in lines
         if flag.document:
-            assert f"{name}=" in text, f"{name} should be documented in flags.env.example"
+            assert present, f"{name} should be documented in flags.env.example"
         else:
-            assert f"{name}=" not in text, f"{name} should be excluded from flags.env.example"
+            assert not present, f"{name} should be excluded from flags.env.example"
 
 
 def test_registry_has_no_jira_alert_profile_flags():
@@ -104,11 +108,14 @@ def test_alert_settings_expose_only_operational_deployment_choices():
 # --------------------------------------------------------------------------- #
 class TestSettingsServiceConsistency:
     # The exact read-only set the settings service historically hardcoded.
+    # GEMINI_MAX_OUTPUT_TOKENS was historically read-only for no discoverable
+    # reason and was made editable by the settings-ux-redesign (it disagreed
+    # with the orchestrator's own bounds, so the settings page couldn't reach
+    # the documented behaviour) -- it is deliberately absent from this set now.
     HISTORICAL_DO_NOT_SAVE = {
         "ESCALATION_TELEGRAM_CHAT_ID",
         "DEBUG_TELEGRAM_CHAT_ID",
         "EMBEDDING_MODEL",
-        "GEMINI_MAX_OUTPUT_TOKENS",
         "GEMINI_LITE_MAX_OUTPUT_TOKENS",
         "CUSTOMER_SUPPORT_DOC_ID",
         "STAFF_SUPPORT_DOC_ID",
@@ -135,10 +142,20 @@ class TestSettingsServiceConsistency:
         assert "JIRA_ENABLED" not in ss
         assert "MAX_TOOL_ROUNDS" not in ss
 
-    def test_settings_defaults_excludes_routing_only_flags(self):
+    def test_settings_defaults_includes_deployment_flags_as_read_only(self):
+        # DEFAULT_TIMEZONE / STAFF_ORG_ID / SETTINGS_BACKEND / SETTINGS_FILE were
+        # hidden entirely (show_in_settings=False), so an operator debugging why
+        # settings weren't persisting couldn't see which backend was active. The
+        # settings-ux-redesign made them visible, read-only Deployment entries.
         defaults = fr.settings_defaults(env={})
-        for hidden in ("DEFAULT_TIMEZONE", "STAFF_ORG_ID", "SETTINGS_BACKEND"):
-            assert hidden not in defaults
+        for visible_read_only in (
+            "DEFAULT_TIMEZONE",
+            "STAFF_ORG_ID",
+            "SETTINGS_BACKEND",
+            "SETTINGS_FILE",
+        ):
+            assert visible_read_only in defaults
+            assert fr.FLAGS[visible_read_only].editable is False
         # but real UI flags are present and typed
         assert defaults["JIRA_ENABLED"] is True
         assert defaults["MAX_TOOL_ROUNDS"] == 5
@@ -246,3 +263,141 @@ class TestBackends:
 def test_validate_required_reports_missing():
     # No flags are required today, so an empty env is valid.
     assert fr.validate_required(env={}) == []
+
+
+# --------------------------------------------------------------------------- #
+# UI metadata (settings-page groups, labels, choices, bounds)
+# --------------------------------------------------------------------------- #
+class TestFlagUIMetadata:
+    def test_group_ids_are_all_known(self):
+        known = {group.id for group in fr.GROUPS}
+        for name, flag in fr.FLAGS.items():
+            assert flag.group in known, f"{name} has unknown group {flag.group!r}"
+
+    def test_groups_have_unique_ids_and_are_ordered(self):
+        ids = [group.id for group in fr.GROUPS]
+        assert len(ids) == len(set(ids))
+        assert ids[0] == "bot_control", "Bot Control must render first"
+
+    def test_flags_in_group_returns_registration_order(self):
+        names = [flag.name for flag in fr.flags_in_group("bot_control")]
+        assert names[0] == "BOT_ENABLED"
+
+    def test_display_label_falls_back_to_name(self):
+        assert fr.FLAGS["BOT_ENABLED"].display_label == "BOT_ENABLED"
+
+    def test_choices_always_contain_the_default(self):
+        for name, flag in fr.FLAGS.items():
+            if flag.choices:
+                assert flag.default_str in flag.choices, (
+                    f"{name} default {flag.default_str!r} is not among {flag.choices}"
+                )
+
+    def test_depends_on_targets_an_existing_bool_flag(self):
+        for name, flag in fr.FLAGS.items():
+            if flag.depends_on is None:
+                continue
+            target = fr.FLAGS.get(flag.depends_on)
+            assert target is not None, f"{name} depends on unknown flag {flag.depends_on}"
+            assert target.type is fr.FlagType.BOOL, (
+                f"{name} depends on {flag.depends_on}, which is not a boolean"
+            )
+
+    def test_numeric_defaults_are_inside_declared_bounds(self):
+        for name, flag in fr.FLAGS.items():
+            if flag.type not in (fr.FlagType.INT, fr.FlagType.FLOAT):
+                continue
+            value = flag.coerce(flag.default_str)
+            if flag.minimum is not None:
+                assert value >= flag.minimum, f"{name} default below minimum"
+            if flag.maximum is not None:
+                assert value <= flag.maximum, f"{name} default above maximum"
+
+    def test_read_only_flags_explain_where_to_set_them(self):
+        for name, flag in fr.FLAGS.items():
+            if not flag.editable and flag.show_in_settings:
+                assert flag.set_via, f"{name} is read-only but has no set_via hint"
+
+
+# --------------------------------------------------------------------------- #
+# Newly registered flags: registering must not change runtime behaviour
+# --------------------------------------------------------------------------- #
+class TestNewlyRegisteredFlagsMatchTheirConsumers:
+    """Registering a flag must not change runtime behaviour.
+
+    Each expected value here was read from the module that actually consumes the
+    variable. If a consumer's default changes, this test fails and the registry
+    gets updated with it -- which is the drift these assertions exist to stop.
+    """
+
+    EXPECTED = {
+        "AGENT_MAX_ACTIONS_PER_WAKE": 10,
+        "AGENT_MAX_TOOL_ROUNDS": 5,
+        "LOOP_DETECTION_ENABLED": True,
+        "LOOP_DETECTION_THRESHOLD": 2,
+        "MULTI_SITE_MAX_CONCURRENCY": 5,
+        "STARTUP_RECOVERY_ENABLED": True,
+        "JIRA_SWEEP_ENABLED": True,
+        "JIRA_ISSUE_TYPE": "Task",
+        "METRICS_TIMEZONE": "UTC",
+        "AFTER_HOURS_START_HOUR": 19,
+        "GEMINI_THINKING_BUDGET": 4096,
+        "GEMINI_AGENT_PRO_MODEL": "gemini-2.5-pro",
+        "THREAD_CLASSIFIER_MODEL": "gemini-2.5-flash-lite",
+        "GOOGLE_SEARCH_GROUNDING": True,
+        "GRAFANA_ACTIONS_ENABLED": False,
+        "GRAFANA_QUERY_TIMEOUT": 180,
+        "GRAFANA_METADATA_TIMEOUT": 30,
+        "GRAFANA_VARIABLE_TIMEOUT": 60,
+        "ORGANIZATION_NAME": "the operator",
+        "DOC_CODE_PREFIX": "DOC",
+        "STAFF_ORG_NAME": "Staff",
+        "MANAGED_GENERATION_COLUMN": "is_generation_managed_by_nxt_grid",
+        "LAYOUT_KW_PER_HOUSEHOLD": 0.0,
+        "LAYOUT_MAX_BRIDGE_DISTANCE_M": 200.0,
+        "LAYOUT_PATH_REDUNDANCY_DISTANCE_M": 22.5,
+        "LAYOUT_PATH_WEIGHT_PENALTY": 3.0,
+        "LAYOUT_PLANT_CONNECT_DISTANCE_M": 150.0,
+        "LAYOUT_PLANT_CONNECT_K": 5,
+        "LAYOUT_POWER_FACTOR": 0.95,
+        "LAYOUT_ROAD_CLIP_BUFFER_M": 100.0,
+        "LAYOUT_WATERWAY_BUFFER_M": 200.0,
+    }
+
+    def test_each_new_flag_keeps_its_consumer_default(self):
+        for name, expected in self.EXPECTED.items():
+            assert name in fr.FLAGS, f"{name} is not registered"
+            assert fr.get(name, env={}) == expected, name
+
+    def test_every_mcp_server_has_a_write_gate(self):
+        for server in fr.MCP_SERVER_NAMES:
+            name = f"{server.upper()}_ACTIONS_ENABLED"
+            assert name in fr.FLAGS, f"{name} missing -- write gating is invisible"
+            assert fr.FLAGS[name].group == "tools"
+
+    def test_after_hours_timezone_defaults_to_empty_not_utc(self):
+        # The consumer falls back to DEFAULT_TIMEZONE at read time; baking "UTC"
+        # into the registry would silently override a deployment's own timezone.
+        assert fr.get("AFTER_HOURS_TIMEZONE", env={}) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Registry values must match the orchestrator that actually runs
+# --------------------------------------------------------------------------- #
+class TestRegistryMatchesOrchestratorDefaults:
+    """The settings page must not display a value the orchestrator ignores."""
+
+    def test_fallback_model_matches_the_orchestrator(self):
+        assert fr.get("GEMINI_FALLBACK_MODEL", env={}) == "gemini-2.5-flash-lite"
+
+    def test_deep_thinking_model_matches_the_orchestrator(self):
+        assert fr.get("GEMINI_DEEP_THINKING_MODEL", env={}) == "gemini-pro-latest"
+
+    def test_temperature_is_editable(self):
+        # Rendered read-only at 0.2 while the orchestrator treats empty as "use
+        # the model default" -- an operator could not reach the documented
+        # behaviour from the UI at all.
+        assert fr.FLAGS["GEMINI_TEMPERATURE"].editable is True
+
+    def test_main_max_output_tokens_is_editable(self):
+        assert fr.FLAGS["GEMINI_MAX_OUTPUT_TOKENS"].editable is True

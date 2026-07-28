@@ -295,13 +295,20 @@ def test_openrouter_route_fallbacks_follow_selected_main_model_provider():
 
 
 def test_common_generation_controls_have_provider_neutral_labels():
-    assert settings_page._flag_label("GEMINI_MODEL") == "MAIN_MODEL"
-    assert settings_page._flag_label("GEMINI_FALLBACK_MODEL") == "FALLBACK_MODEL"
-    assert settings_page._flag_label("GEMINI_DEEP_THINKING_MODEL") == "DEEP_THINKING_MODEL"
-    assert settings_page._flag_label("GEMINI_TEMPERATURE") == "TEMPERATURE"
-    assert settings_page._flag_label("GEMINI_MAX_OUTPUT_TOKENS", disabled=True) == (
-        "MAIN_MAX_OUTPUT_TOKENS  (read-only)"
+    # Labels moved from a page-local _MODEL_LABELS table onto the registry
+    # (Flag.label / display_label) in the settings-ux-redesign, and read-only
+    # status is now conveyed by a set_via hint under RenderMode.READ_ONLY
+    # rather than a "(read-only)" suffix baked into the label itself.
+    from shared.config import flag_registry as fr
+
+    assert fr.FLAGS["GEMINI_MODEL"].display_label == "Main model"
+    assert fr.FLAGS["GEMINI_FALLBACK_MODEL"].display_label == "Fallback model"
+    assert fr.FLAGS["GEMINI_DEEP_THINKING_MODEL"].display_label == "Deep-thinking model"
+    assert fr.FLAGS["GEMINI_TEMPERATURE"].display_label == "Temperature"
+    assert fr.FLAGS["GEMINI_MAX_OUTPUT_TOKENS"].display_label == "Main model max output tokens"
+    assert fr.FLAGS["GEMINI_MAX_OUTPUT_TOKENS"].editable is True
+    assert fr.FLAGS["GEMINI_LITE_MAX_OUTPUT_TOKENS"].display_label == (
+        "Lite model max output tokens"
     )
-    assert settings_page._flag_label("GEMINI_LITE_MAX_OUTPUT_TOKENS", disabled=True) == (
-        "LITE_MAX_OUTPUT_TOKENS  (read-only)"
-    )
+    assert fr.FLAGS["GEMINI_LITE_MAX_OUTPUT_TOKENS"].editable is False
+    assert fr.FLAGS["GEMINI_LITE_MAX_OUTPUT_TOKENS"].set_via
