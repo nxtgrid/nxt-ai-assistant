@@ -348,12 +348,12 @@ class TestMergeAffectedKey:
         )
 
         assert updated is not None
-        assert len(updated) == 1
-        assert updated[0]["kind"] == "mppt"
-        assert updated[0]["key"] == "A3"
-        assert updated[0]["count"] == 1
-        assert updated[0]["first_seen"] == "2026-01-01T00:00:00Z"
-        assert updated[0]["last_seen"] == "2026-01-01T00:00:00Z"
+        assert len(updated.affected_keys) == 1
+        assert updated.affected_keys[0]["kind"] == "mppt"
+        assert updated.affected_keys[0]["key"] == "A3"
+        assert updated.affected_keys[0]["count"] == 1
+        assert updated.affected_keys[0]["first_seen"] == "2026-01-01T00:00:00Z"
+        assert updated.affected_keys[0]["last_seen"] == "2026-01-01T00:00:00Z"
 
     @pytest.mark.asyncio
     async def test_idempotent_bumps_existing_key(self):
@@ -379,10 +379,11 @@ class TestMergeAffectedKey:
             "TKT-1", kind="mppt", key="A3", label="MPPT A3", occurred_at="2026-01-02T00:00:00Z"
         )
 
-        assert len(updated) == 1
-        assert updated[0]["count"] == 2
-        assert updated[0]["first_seen"] == "2026-01-01T00:00:00Z"
-        assert updated[0]["last_seen"] == "2026-01-02T00:00:00Z"
+        assert updated is not None
+        assert len(updated.affected_keys) == 1
+        assert updated.affected_keys[0]["count"] == 2
+        assert updated.affected_keys[0]["first_seen"] == "2026-01-01T00:00:00Z"
+        assert updated.affected_keys[0]["last_seen"] == "2026-01-02T00:00:00Z"
 
     @pytest.mark.asyncio
     async def test_adds_new_component_alongside_existing(self):
@@ -401,8 +402,9 @@ class TestMergeAffectedKey:
             "TKT-1", kind="mppt", key="A7", label="MPPT A7", occurred_at="2026-01-02T00:00:00Z"
         )
 
-        assert len(updated) == 2
-        assert {u["key"] for u in updated} == {"A3", "A7"}
+        assert updated is not None
+        assert len(updated.affected_keys) == 2
+        assert {u["key"] for u in updated.affected_keys} == {"A3", "A7"}
 
     @pytest.mark.asyncio
     async def test_signature_appended_when_new(self):
@@ -430,6 +432,65 @@ class TestMergeAffectedKey:
         store, _ = _make_store(fake)
 
         assert await store.merge_affected_key("TKT-1", kind="mppt", key="A3", label="MPPT A3") is None
+
+
+class TestMergeAffectedKeyReportsNovelty:
+    @pytest.mark.asyncio
+    async def test_new_key_reports_added_true(self):
+        store, fake = _make_store()
+        fake.tables["ticket_correlations"] = [
+            {"ticket_ref": "TKT-1", "affected_keys": [], "signatures": []}
+        ]
+
+        merge = await store.merge_affected_key(
+            "TKT-1", kind="mppt", key="A7", label="MPPT A7", signature="sig-a"
+        )
+
+        assert merge is not None
+        assert merge.added is True
+        assert [e["key"] for e in merge.affected_keys] == ["A7"]
+
+    @pytest.mark.asyncio
+    async def test_existing_key_reports_added_false_and_bumps_count(self):
+        store, fake = _make_store()
+        fake.tables["ticket_correlations"] = [
+            {
+                "ticket_ref": "TKT-1",
+                "affected_keys": [
+                    {"kind": "mppt", "key": "A7", "label": "MPPT A7", "count": 1}
+                ],
+                "signatures": ["sig-a"],
+            }
+        ]
+
+        merge = await store.merge_affected_key(
+            "TKT-1", kind="mppt", key="A7", label="MPPT A7", signature="sig-a"
+        )
+
+        assert merge is not None
+        assert merge.added is False
+        assert merge.affected_keys[0]["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_case_differing_key_is_not_a_new_component(self):
+        store, fake = _make_store()
+        fake.tables["ticket_correlations"] = [
+            {
+                "ticket_ref": "TKT-1",
+                "affected_keys": [
+                    {"kind": "mppt", "key": "IYYY", "label": "MPPT IYYY", "count": 1}
+                ],
+                "signatures": [],
+            }
+        ]
+
+        merge = await store.merge_affected_key(
+            "TKT-1", kind="MPPT", key="iyyy", label="MPPT iyyy"
+        )
+
+        assert merge is not None
+        assert merge.added is False
+        assert len(merge.affected_keys) == 1
 
 
 class TestBumpOccurrence:

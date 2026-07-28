@@ -647,6 +647,7 @@ class TestResolveNotifyTicketAutoAmend:
             telegram_chat_id="-100555",
             telegram_topic_id="42",
             telegram_message_id=123,
+            component_added=True,
         )
         _FakeCorrelator.decision_to_return = _decision(
             decision="amend",
@@ -1445,6 +1446,7 @@ def test_amend_delivery_names_new_component_and_distinct_total():
         telegram_chat_id="-100555",
         telegram_topic_id="42",
         telegram_message_id=555,
+        component_added=True,
     )
     ticket = NotificationTicket(ref="TKT-000042", backend="internal")
 
@@ -1453,6 +1455,114 @@ def test_amend_delivery_names_new_component_and_distinct_total():
     assert delivery.ticket == ticket
     assert delivery.text_override == "Added MPPT A7 (2 affected components)"
     assert delivery.reply_to_message_id == 555
+
+
+def test_amend_delivery_is_silent_when_no_component_was_added():
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3352",
+        confidence=0.9,
+        decided_by="llm",
+        reason="same root cause",
+        affected_key={"kind": "mppt", "key": "J47M", "label": "MPPT J47M"},
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3352"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3352",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=16,
+        occurrence_count=42,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+        component_added=False,
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3352", backend="jira")
+    )
+
+    assert delivery.suppress is True
+    assert delivery.text_override is None
+
+
+def test_amend_delivery_never_announces_a_nameless_component():
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3353",
+        confidence=0.9,
+        decided_by="llm",
+        reason="grid level",
+        affected_key=None,
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3353"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3353",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=0,
+        occurrence_count=9,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+        component_added=False,
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3353", backend="jira")
+    )
+
+    assert delivery.suppress is True
+
+
+def test_amend_delivery_posts_escalation_without_a_component_add():
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3353",
+        confidence=0.9,
+        decided_by="llm",
+        reason="urgent now",
+        affected_key=None,
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3353"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3353",
+        decision="amend",
+        escalated=True,
+        affected_keys_count=0,
+        occurrence_count=9,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+        component_added=False,
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3353", backend="jira")
+    )
+
+    assert delivery.suppress is False
+    assert delivery.top_level is True
+    assert delivery.text_override == "Escalated to urgent"
 
 
 def test_duplicate_delivery_is_silent():

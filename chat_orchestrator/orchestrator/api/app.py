@@ -1390,10 +1390,27 @@ async def _ticket_summary(ticket_service: Any, ticket_ref: str) -> str:
 def _amend_delivery(
     decision: Any, amendment: Any, ticket: NotificationTicket
 ) -> NotificationDelivery:
-    label = (decision.affected_key or {}).get("label") or "another component"
-    count = amendment.affected_keys_count if amendment is not None else 1
-    message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
-    if amendment is not None and amendment.escalated:
+    """Post only what an operator needs to act on.
+
+    An amend that merely re-listed a component already on the ticket changed
+    nothing operationally -- the ticket still records the occurrence and the
+    raw alert comment, but Telegram stays quiet. Only a component genuinely
+    joining the ticket, or an escalation, is worth a message.
+    """
+    escalated = bool(amendment is not None and amendment.escalated)
+    component_added = bool(amendment is not None and amendment.component_added)
+
+    if not (component_added or escalated):
+        return NotificationDelivery(suppress=True)
+
+    if component_added:
+        label = (decision.affected_key or {}).get("label") or "a new component"
+        count = amendment.affected_keys_count if amendment is not None else 1
+        message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
+    else:
+        message = "Escalated to urgent"
+
+    if escalated:
         return NotificationDelivery(text_override=message, top_level=True, ticket=ticket)
     reply_to = amendment.telegram_message_id if amendment is not None else None
     return NotificationDelivery(text_override=message, reply_to_message_id=reply_to, ticket=ticket)
@@ -1627,7 +1644,9 @@ async def _resolve_notify_ticket_auto(
                 delivery = dataclasses.replace(
                     delivery,
                     alert_context=alert_context,
-                    ticket_summary=await _ticket_summary(ticket_service, ref),
+                    ticket_summary=(
+                        "" if delivery.suppress else await _ticket_summary(ticket_service, ref)
+                    ),
                     stored_ticket_severity=decision.ticket_severity,
                 )
             return (

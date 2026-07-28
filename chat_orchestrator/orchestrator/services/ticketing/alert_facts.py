@@ -141,6 +141,19 @@ def derive_signature(
     return hashlib.sha1(material.encode("utf-8")).hexdigest()[:16]
 
 
+def same_component(entry: Dict[str, Any], kind: str, key: str) -> bool:
+    """Component identity, compared case-insensitively.
+
+    Derived keys come from a regex over alert text; merged keys can come from
+    the correlation LLM. The two must compare equal or the same component is
+    stored twice and every re-fire looks novel.
+    """
+    return (
+        str(entry.get("kind") or "").strip().casefold() == (kind or "").strip().casefold()
+        and str(entry.get("key") or "").strip().casefold() == (key or "").strip().casefold()
+    )
+
+
 def enrich_alert_facts(alert: AlertFacts, grid_name: str) -> AlertFacts:
     """Fill in blank severity/component/signature/fired_at fields.
 
