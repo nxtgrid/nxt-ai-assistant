@@ -169,3 +169,15 @@ class TicketRepository:
             raise TicketRepositoryError(f"failed to add canonical ticket comment: {exc}") from exc
         if not getattr(response, "data", None):
             raise TicketRepositoryError("canonical ticket comment write returned no row")
+
+    async def transition_to_done_by_ref(self, ref: str) -> None:
+        ticket = await self.get_by_ref(ref)
+        if ticket is None:
+            raise TicketRepositoryError(f"cannot close: unknown ticket ref {ref}")
+        payload = {"status": "done", "resolved_at": datetime.now(timezone.utc).isoformat()}
+        try:
+            response = self._raw_client().table("tickets").update(payload).eq("id", ticket.id).execute()
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to close canonical ticket: {exc}") from exc
+        if not getattr(response, "data", None):
+            raise TicketRepositoryError("canonical ticket close returned no row")

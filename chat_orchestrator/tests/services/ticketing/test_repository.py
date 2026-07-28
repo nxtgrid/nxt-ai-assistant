@@ -175,3 +175,19 @@ async def test_add_comment_by_ref_uses_the_canonical_ticket_id():
         {"ticket_id": "ticket-1", "body": "Investigating", "author": None,
          "is_public": False, "source": "staff"}, [],
     )
+
+
+@pytest.mark.asyncio
+async def test_transition_to_done_by_ref_updates_canonical_ticket_state():
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "TKT-1", "backend": "internal",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+    }]
+
+    await TicketRepository(client=client).transition_to_done_by_ref("TKT-1")
+
+    table, mode, payload, filters = client.calls[-1]
+    assert (table, mode, filters) == ("tickets", "update", [("id", "ticket-1")])
+    assert payload["status"] == "done"
+    assert payload["resolved_at"]
