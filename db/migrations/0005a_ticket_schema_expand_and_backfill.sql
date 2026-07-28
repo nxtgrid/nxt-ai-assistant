@@ -166,6 +166,210 @@ CREATE TRIGGER trg_tickets_updated_at
     BEFORE UPDATE ON tickets
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
 
+-- Backfill canonical ticket identity first.  The two inserts intentionally
+-- give internal-ticket evidence precedence over mappings and correlations.
+INSERT INTO tickets (
+    ticket_ref, backend, created_via, provisioning_state, status, backend_status,
+    summary, description, organization_id, grid_name, assignee_email, labels,
+    created_at, activated_at, updated_at, resolved_at, backend_synced_at
+)
+SELECT
+    legacy.ticket_ref,
+    'internal',
+    CASE WHEN legacy.source = 'notify' THEN 'notification' ELSE 'escalation' END,
+    'active',
+    legacy.status,
+    legacy.status,
+    legacy.summary,
+    legacy.description,
+    legacy.organization_id,
+    legacy.grid_name,
+    legacy.assignee_email,
+    coalesce(legacy.labels, '[]'::jsonb),
+    coalesce(legacy.created_at, now()),
+    coalesce(legacy.created_at, now()),
+    coalesce(legacy.updated_at, now()),
+    legacy.resolved_at,
+    coalesce(legacy.updated_at, now())
+FROM internal_tickets legacy
+ON CONFLICT (ticket_ref) WHERE ticket_ref IS NOT NULL DO NOTHING;
+
+INSERT INTO tickets (
+    ticket_ref, backend, created_via, provisioning_state, status, backend_status,
+    summary, description, organization_id, grid_name, labels,
+    created_at, activated_at, updated_at, resolved_at, backend_synced_at
+)
+SELECT
+    candidate.ticket_ref,
+    candidate.backend,
+    candidate.created_via,
+    'active',
+    candidate.status,
+    candidate.backend_status,
+    candidate.summary,
+    candidate.description,
+    candidate.organization_id,
+    candidate.grid_name,
+    candidate.labels,
+    candidate.created_at,
+    candidate.created_at,
+    candidate.updated_at,
+    candidate.resolved_at,
+    NULL
+FROM (
+    SELECT
+        coalesce(mapping.ticket_ref, mapping.jira_ticket_key) AS ticket_ref,
+        'jira'::text AS backend,
+        'escalation'::text AS created_via,
+        CASE WHEN mapping.resolved_at IS NULL THEN 'open' ELSE 'done' END AS status,
+        NULL::text AS backend_status,
+        coalesce(mapping.question_text, mapping.reason, coalesce(mapping.ticket_ref, mapping.jira_ticket_key)) AS summary,
+        mapping.question_text AS description,
+        mapping.organization_id,
+        NULL::text AS grid_name,
+        '[]'::jsonb AS labels,
+        coalesce(mapping.created_at, now()) AS created_at,
+        coalesce(mapping.created_at, now()) AS updated_at,
+        mapping.resolved_at
+    FROM escalation_mappings mapping
+    WHERE coalesce(mapping.ticket_ref, mapping.jira_ticket_key) IS NOT NULL
+
+    UNION ALL
+
+    SELECT
+        correlation.ticket_ref,
+        coalesce(correlation.ticket_backend, 'jira') AS backend,
+        CASE
+            WHEN EXISTS (
+                SELECT 1 FROM ticket_correlation_events event_row
+                WHERE event_row.ticket_ref = correlation.ticket_ref
+                  AND event_row.source = 'notify'
+            ) THEN 'notification'
+            WHEN EXISTS (
+                SELECT 1 FROM ticket_correlation_events event_row
+                WHERE event_row.ticket_ref = correlation.ticket_ref
+                  AND event_row.decision = 'amend'
+                  AND event_row.candidate_refs ? correlation.ticket_ref
+            ) THEN 'adopted'
+            ELSE 'legacy'
+        END AS created_via,
+        CASE WHEN correlation.status = 'done' THEN 'done' ELSE 'open' END AS status,
+        NULL::text AS backend_status,
+        coalesce(correlation.summary_current, correlation.summary_base, correlation.ticket_ref) AS summary,
+        correlation.description_base AS description,
+        correlation.organization_id,
+        correlation.grid_name,
+        '[]'::jsonb AS labels,
+        coalesce(correlation.created_at, now()) AS created_at,
+        coalesce(correlation.updated_at, correlation.created_at, now()) AS updated_at,
+        NULL::timestamptz AS resolved_at
+    FROM ticket_correlations correlation
+) candidate
+WHERE candidate.ticket_ref IS NOT NULL
+ON CONFLICT (ticket_ref) WHERE ticket_ref IS NOT NULL DO NOTHING;
+
+INSERT INTO escalations (
+    id, chat_session_id, thread_id, ticket_id, state,
+    customer_username, customer_email, org_hashtag, reason, action_type,
+    question_text, created_at, resolved_at
+)
+SELECT
+    mapping.id,
+    session_row.id,
+    mapping.thread_id,
+    ticket_row.id,
+    CASE
+        WHEN mapping.resolved_at IS NOT NULL OR NOT coalesce(mapping.is_active, true) THEN 'resolved'
+        WHEN ticket_row.id IS NOT NULL THEN 'tracked'
+        ELSE 'open'
+    END,
+    mapping.customer_username,
+    mapping.customer_email,
+    mapping.org_hashtag,
+    mapping.reason,
+    mapping.action_type,
+    mapping.question_text,
+    coalesce(mapping.created_at, now()),
+    mapping.resolved_at
+FROM escalation_mappings mapping
+JOIN chat_sessions session_row ON session_row.session_id = mapping.session_id
+LEFT JOIN tickets ticket_row
+    ON ticket_row.ticket_ref = coalesce(mapping.ticket_ref, mapping.jira_ticket_key)
+ON CONFLICT (id) DO UPDATE
+SET ticket_id = EXCLUDED.ticket_id,
+    state = EXCLUDED.state,
+    resolved_at = EXCLUDED.resolved_at;
+
+INSERT INTO ticket_comments (ticket_id, author, body, is_public, source, created_at)
+SELECT
+    ticket_row.id,
+    legacy.author,
+    legacy.body,
+    coalesce(legacy.is_public, false),
+    CASE WHEN legacy.source IN ('customer', 'staff', 'notify', 'system') THEN legacy.source ELSE 'staff' END,
+    coalesce(legacy.created_at, now())
+FROM internal_ticket_comments legacy
+JOIN tickets ticket_row ON ticket_row.ticket_ref = legacy.ticket_ref
+WHERE NOT EXISTS (
+    SELECT 1 FROM ticket_comments existing
+    WHERE existing.ticket_id = ticket_row.id
+      AND existing.body = legacy.body
+      AND existing.created_at = coalesce(legacy.created_at, now())
+);
+
+UPDATE chat_messages message_row
+SET ticket_id = ticket_row.id
+FROM tickets ticket_row
+WHERE message_row.ticket_id IS NULL
+  AND message_row.metadata ->> 'ticket_ref' = ticket_row.ticket_ref;
+
+UPDATE ticket_correlations correlation
+SET ticket_id = ticket_row.id
+FROM tickets ticket_row
+WHERE correlation.ticket_id IS NULL
+  AND correlation.ticket_ref = ticket_row.ticket_ref;
+
+UPDATE ticket_correlation_events event_row
+SET ticket_id = ticket_row.id
+FROM tickets ticket_row
+WHERE event_row.ticket_id IS NULL
+  AND event_row.ticket_ref = ticket_row.ticket_ref;
+
+INSERT INTO message_deliveries (
+    ticket_id, purpose, channel, external_chat_id, external_topic_id,
+    external_message_id, sent_at
+)
+SELECT
+    ticket_row.id,
+    'notification',
+    'telegram',
+    correlation.telegram_chat_id,
+    correlation.telegram_topic_id,
+    correlation.telegram_message_id,
+    coalesce(correlation.created_at, now())
+FROM ticket_correlations correlation
+JOIN tickets ticket_row ON ticket_row.id = correlation.ticket_id
+WHERE correlation.telegram_chat_id IS NOT NULL
+  AND correlation.telegram_message_id IS NOT NULL
+ON CONFLICT (channel, external_chat_id, external_message_id) DO NOTHING;
+
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM tickets
+        WHERE provisioning_state = 'active'
+          AND (ticket_ref IS NULL OR backend IS NULL OR activated_at IS NULL)
+    ) THEN
+        RAISE EXCEPTION 'canonical active ticket invariant failed';
+    END IF;
+    IF EXISTS (
+        SELECT ticket_ref FROM tickets WHERE ticket_ref IS NOT NULL
+        GROUP BY ticket_ref HAVING count(*) > 1
+    ) THEN
+        RAISE EXCEPTION 'canonical ticket reference uniqueness invariant failed';
+    END IF;
+END $$;
+
 -- Keep the canonical model complete while an older application release may
 -- still write the legacy relations.  These one-way triggers disappear in the
 -- contract migration once all runtime writers use repositories.
