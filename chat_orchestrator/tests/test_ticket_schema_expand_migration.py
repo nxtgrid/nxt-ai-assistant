@@ -200,6 +200,8 @@ def test_expand_migration_is_transactional_and_non_destructive():
     assert "sync_legacy_escalation" in sql
     assert "trg_legacy_internal_ticket_to_ticket" in sql
     assert "trg_legacy_escalation_to_escalation" in sql
+    assert "INSERT INTO escalations (" in sql
+    assert "VALUES (" in sql
 
     assert "DROP TABLE internal_tickets" not in sql
     assert "DROP TABLE escalation_mappings" not in sql

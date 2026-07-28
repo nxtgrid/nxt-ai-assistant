@@ -422,17 +422,34 @@ $$;
 
 CREATE OR REPLACE FUNCTION sync_legacy_escalation()
 RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE
+    canonical_session_id uuid;
+    canonical_ticket_id uuid;
 BEGIN
+    SELECT id INTO canonical_session_id
+    FROM chat_sessions
+    WHERE session_id = NEW.session_id;
+
+    -- A legacy mapping without its source session cannot satisfy the canonical
+    -- foreign key.  Leave it for the contract migration's validation instead
+    -- of making an old writer fail during the compatibility window.
+    IF canonical_session_id IS NULL THEN
+        RETURN NEW;
+    END IF;
+
+    SELECT id INTO canonical_ticket_id
+    FROM tickets
+    WHERE ticket_ref = coalesce(NEW.ticket_ref, NEW.jira_ticket_key);
+
     INSERT INTO escalations (
         id, chat_session_id, thread_id, ticket_id, state,
         customer_username, customer_email, org_hashtag, reason, action_type,
         question_text, created_at, resolved_at
-    )
-    SELECT
+    ) VALUES (
         NEW.id,
-        session_row.id,
+        canonical_session_id,
         NEW.thread_id,
-        ticket_row.id,
+        canonical_ticket_id,
         CASE
             WHEN NEW.resolved_at IS NOT NULL THEN 'resolved'
             WHEN coalesce(NEW.is_active, true) THEN 'open'
@@ -446,10 +463,7 @@ BEGIN
         NEW.question_text,
         coalesce(NEW.created_at, now()),
         NEW.resolved_at
-    FROM chat_sessions session_row
-    LEFT JOIN tickets ticket_row
-        ON ticket_row.ticket_ref = coalesce(NEW.ticket_ref, NEW.jira_ticket_key)
-    WHERE session_row.session_id = NEW.session_id
+    )
     ON CONFLICT (id) DO UPDATE
     SET thread_id = EXCLUDED.thread_id,
         ticket_id = EXCLUDED.ticket_id,
