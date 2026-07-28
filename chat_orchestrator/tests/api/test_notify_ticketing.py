@@ -614,6 +614,46 @@ class TestResolveNotifyTicketAutoAmend:
         assert delivery.text_override == "Added MPPT A7 (2 affected components)"
         assert delivery.ticket == NotificationTicket(ref="TKT-000042", backend="internal")
 
+    async def test_replayed_amendment_uses_silent_executor_result(
+        self, fake_apply_amendment, monkeypatch
+    ):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="TKT-000042",
+            decision="duplicate",
+            escalated=False,
+            affected_keys_count=2,
+            occurrence_count=3,
+            telegram_chat_id="-100555",
+            telegram_topic_id="42",
+            telegram_message_id=123,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="amend",
+            ticket_ref="TKT-000042",
+            confidence=0.9,
+            decided_by="replay",
+            ticket_severity="urgent",
+        )
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(
+            _notify_body(
+                ticket_id="auto",
+                alert={
+                    "subject": "! Urgent: Multiple MPPTs offline",
+                    "severity": "urgent",
+                },
+            ),
+            _target(),
+        )
+
+        assert error is None
+        assert ref == "TKT-000042"
+        assert extra["decided_by"] == "replay"
+        assert delivery is not None
+        assert delivery.suppress is True
+
 
 class TestResolveNotifyTicketAutoDuplicate:
     async def test_duplicate_decision_returns_existing_ref_without_new_ticket(
@@ -719,13 +759,20 @@ class TestResolveNotifyTicketAutoFailureModes:
 
     async def test_lock_timeout_falls_back_to_plain_create(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        monkeypatch.setenv("ALERT_CORRELATION_TIMEOUT_SECONDS", "999")
 
         from contextlib import asynccontextmanager
 
         import orchestrator.api.app as app_module
+        from orchestrator.services.ticketing.correlation_rules import (
+            DEFAULT_CORRELATION_POLICY,
+        )
+
+        observed_timeout_seconds: list[float] = []
 
         @asynccontextmanager
         async def _never_available(grid_name, timeout_seconds):
+            observed_timeout_seconds.append(timeout_seconds)
             yield False
 
         monkeypatch.setattr(app_module, "_acquire_grid_correlation_lock", _never_available)
@@ -736,6 +783,9 @@ class TestResolveNotifyTicketAutoFailureModes:
         assert error is None
         assert ref == "TKT-000001"
         assert extra["decided_by"] == "fallback"
+        assert observed_timeout_seconds == [
+            DEFAULT_CORRELATION_POLICY.llm_timeout_seconds
+        ]
         assert delivery is not None
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
 

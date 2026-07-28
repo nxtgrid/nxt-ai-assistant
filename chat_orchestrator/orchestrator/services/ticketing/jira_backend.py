@@ -235,6 +235,19 @@ class JiraTicketBackend:
             grid_label = f"grid-{_slugify_grid(req.grid_name)}"
             if grid_label not in labels:
                 labels.append(grid_label)
+        is_urgent_alert = (
+            req.source == "notify"
+            and (
+                req.severity.strip().casefold() == "urgent"
+                or bool(_URGENT_ALERT_SUMMARY.match(req.summary))
+            )
+        )
+        available_types = await self._type_selector().available_types()
+        highest_priority_id = None
+        if is_urgent_alert and any(
+            issue_type.field("priority") is not None for issue_type in available_types
+        ):
+            highest_priority_id = await self.resolve_priority_id("highest")
         context = JiraCreateContext(
             project_key=self._jira_project_key,
             summary=req.summary,
@@ -243,25 +256,15 @@ class JiraTicketBackend:
             grid_name=req.grid_name,
             assignee_account_id=assignee_account_id,
             organization_id=organization_id,
+            priority_id=highest_priority_id,
         )
-        compatible = compatible_issue_types(context, await self._type_selector().available_types())
+        compatible = compatible_issue_types(context, available_types)
         selection = await self._choose_issue_type(req, compatible)
         if selection is None:
             raise TicketBackendError("Jira cannot supply a compatible issue type")
         payload = build_issue_payload(context, selection.issue_type)
         if payload is None:
             raise TicketBackendError("Jira selected an incompatible issue type")
-        is_urgent_alert = (
-            req.source == "notify"
-            and (
-                req.severity.strip().casefold() == "urgent"
-                or bool(_URGENT_ALERT_SUMMARY.match(req.summary))
-            )
-        )
-        if is_urgent_alert and selection.issue_type.field("priority") is not None:
-            highest_priority_id = await self.resolve_priority_id("highest")
-            if highest_priority_id is not None:
-                payload["fields"]["priority"] = {"id": highest_priority_id}
         return await self._post_issue_payload(payload, selection)
 
     def _type_selector(self) -> JiraIssueTypeSelector:

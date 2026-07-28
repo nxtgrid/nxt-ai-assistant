@@ -398,9 +398,23 @@ class AlertCorrelator:
         if dedup_key:
             prior = await self._store.get_by_dedup_key(dedup_key)
             if prior:
+                ticket_ref = prior.get("ticket_ref")
+                ticket_severity = prior.get("ticket_severity") or ""
+                if ticket_ref:
+                    try:
+                        correlation = await self._store.get_correlation(ticket_ref)
+                    except Exception:
+                        LOGGER.warning(
+                            "Failed to load durable severity for replayed ticket %r",
+                            ticket_ref,
+                            exc_info=True,
+                        )
+                    else:
+                        if correlation is not None:
+                            ticket_severity = correlation.get("severity") or ticket_severity
                 return CorrelationDecision(
                     decision=prior.get("decision", "new"),
-                    ticket_ref=prior.get("ticket_ref"),
+                    ticket_ref=ticket_ref,
                     confidence=prior.get("confidence"),
                     decided_by="replay",
                     reason=prior.get("reason") or "replayed prior decision (dedup_key match)",
@@ -411,7 +425,7 @@ class AlertCorrelator:
                     candidate_refs=[],
                     llm_raw=None,
                     needs_root_cause_ticket=False,
-                    ticket_severity=prior.get("ticket_severity") or "",
+                    ticket_severity=ticket_severity,
                 )
 
         if not fr.get("ALERT_CORRELATION_ENABLED"):

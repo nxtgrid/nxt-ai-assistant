@@ -186,12 +186,33 @@ async def apply_amendment(
     escalates (Highest priority + a "🔴 " summary prefix) the first time an
     incoming urgent alert raises the stored ticket's severity.
 
-    Returns ``None`` if the correlation row can't be loaded (e.g. a store
-    outage between ``AlertCorrelator.decide()`` and here) -- the caller must
-    treat that the same as any other correlation failure (log and move on;
-    the ticket itself was already filed/exists, so nothing is lost, only the
-    amend's side effects are skipped for this alert).
+    Returns ``None`` if a non-urgent amendment's correlation row can't be
+    loaded (e.g. a store outage between ``AlertCorrelator.decide()`` and
+    here). Urgent amendments still apply their summary and dynamic Highest
+    priority directly to the existing backend ticket, so a Jira-discovered
+    candidate from before correlation-store cutover cannot lose escalation.
     """
+    if (
+        decision.decided_by == "replay"
+        and alert.severity.strip().casefold() == "urgent"
+        and decision.ticket_severity.strip().casefold() == "urgent"
+    ):
+        correlation = await store.get_correlation(ticket_ref)
+        if (
+            correlation is not None
+            and str(correlation.get("severity") or "").strip().casefold() == "urgent"
+        ):
+            return AmendmentResult(
+                ticket_ref=ticket_ref,
+                decision="duplicate",
+                escalated=False,
+                affected_keys_count=len(correlation.get("affected_keys") or []),
+                occurrence_count=int(correlation.get("occurrence_count") or 1),
+                telegram_chat_id=correlation.get("telegram_chat_id"),
+                telegram_topic_id=correlation.get("telegram_topic_id"),
+                telegram_message_id=correlation.get("telegram_message_id"),
+            )
+
     await store.bump_occurrence(ticket_ref)
 
     if decision.decision == "amend" and decision.affected_key:
@@ -204,6 +225,37 @@ async def apply_amendment(
 
     correlation = await store.get_correlation(ticket_ref)
     if correlation is None:
+        if (
+            decision.decision == "amend"
+            and alert.severity.strip().casefold() == "urgent"
+        ):
+            summary = (
+                decision.amended_summary or alert.subject or decision.update_message
+            ).strip()
+            urgent_summary = _apply_incoming_severity(summary, alert.severity)
+            final_summary = (
+                urgent_summary
+                if urgent_summary.startswith("🔴")
+                else f"🔴 {urgent_summary}".rstrip()
+            )
+            await ticket_service.update_ticket(
+                ticket_ref,
+                summary=final_summary,
+                description=None,
+                priority_id="highest",
+            )
+            if raw_text:
+                await ticket_service.add_comment(ticket_ref, raw_text, public=False)
+            return AmendmentResult(
+                ticket_ref=ticket_ref,
+                decision="amend",
+                escalated=True,
+                affected_keys_count=0,
+                occurrence_count=1,
+                telegram_chat_id=None,
+                telegram_topic_id=None,
+                telegram_message_id=None,
+            )
         LOGGER.warning(
             "apply_amendment: correlation row for %r not found after merge -- "
             "skipping render/ticket-update side effects",

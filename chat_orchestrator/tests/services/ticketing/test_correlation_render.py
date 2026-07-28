@@ -388,6 +388,36 @@ class TestApplyAmendmentAmend:
         assert ticket_service.update_calls[0]["priority_id"] is None
 
     @pytest.mark.asyncio
+    async def test_replayed_persisted_urgent_amendment_is_silent(self):
+        correlation = _correlation(
+            severity="urgent",
+            escalated_at="2026-01-01T00:00:00Z",
+        )
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(subject="! Urgent: MPPT A7 in Kudi !", severity="urgent")
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            alert=alert,
+            decision=_amend_decision(
+                decided_by="replay",
+                ticket_severity="urgent",
+            ),
+            raw_text="same retried alert",
+        )
+
+        assert result is not None
+        assert result.decision == "duplicate"
+        assert store.bump_occurrence_calls == []
+        assert store.merge_calls == []
+        assert store.record_amendment_calls == []
+        assert ticket_service.update_calls == []
+        assert ticket_service.comment_calls == []
+
+    @pytest.mark.asyncio
     async def test_urgent_increase_promotes_despite_legacy_count_escalation_marker(self):
         correlation = _correlation(
             severity="warning",
@@ -426,6 +456,42 @@ class TestApplyAmendmentAmend:
 
         assert result is None
         assert ticket_service.update_calls == []
+
+    @pytest.mark.asyncio
+    async def test_urgent_jira_only_candidate_updates_without_correlation_row(self):
+        store = _FakeStore(correlation=None)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(
+            subject="Inverter outage in Kudi",
+            severity="urgent",
+        )
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="OPS-42",
+            alert=alert,
+            decision=_amend_decision(
+                ticket_ref="OPS-42",
+                ticket_severity="warning",
+                amended_summary="Kudi inverter outage",
+            ),
+            raw_text="urgent raw text",
+        )
+
+        assert result is not None
+        assert result.escalated is True
+        assert ticket_service.update_calls == [
+            {
+                "ref": "OPS-42",
+                "summary": "🔴 ! Urgent: Kudi inverter outage",
+                "description": None,
+                "priority_id": "highest",
+            }
+        ]
+        assert ticket_service.comment_calls == [
+            {"ref": "OPS-42", "body": "urgent raw text", "public": False}
+        ]
 
 
 class TestApplyAmendmentDuplicate:

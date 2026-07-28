@@ -193,6 +193,25 @@ def _queue_createmeta_with_optional_priority(fake_session: FakeJiraSession) -> N
     )
 
 
+def _queue_createmeta_with_required_priority(fake_session: FakeJiraSession) -> None:
+    _queue_createmeta(
+        fake_session,
+        "OPS",
+        [
+            {
+                "id": "task-id",
+                "name": "Task",
+                "fields": {
+                    "priority": {
+                        "name": "Priority",
+                        "required": True,
+                    }
+                },
+            }
+        ],
+    )
+
+
 def _stub_type_selector_to_choose(monkeypatch: pytest.MonkeyPatch, issue_type_id: str) -> None:
     async def select(_self, *, candidate_types, **_kwargs):
         issue_type = next(item for item in candidate_types if item.id == issue_type_id)
@@ -439,6 +458,24 @@ class TestCreateTicket:
 
         await _make_backend().create_ticket(_urgent_notify_request())
 
+        assert _posted_fields(fake_session)["priority"] == {"id": "2"}
+
+    @pytest.mark.asyncio
+    async def test_urgent_jira_ticket_can_satisfy_required_priority(self, fake_session):
+        _queue_createmeta_with_required_priority(fake_session)
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/priority",
+            _FakeResponse(
+                200,
+                [{"id": "1", "name": "High"}, {"id": "2", "name": "Highest"}],
+            ),
+        )
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-13"}))
+
+        result = await _make_backend().create_ticket(_urgent_notify_request())
+
+        assert result.ref == "OPS-13"
         assert _posted_fields(fake_session)["priority"] == {"id": "2"}
 
     @pytest.mark.asyncio

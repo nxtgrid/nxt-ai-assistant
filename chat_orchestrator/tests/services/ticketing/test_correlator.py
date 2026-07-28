@@ -244,6 +244,12 @@ class _FakeStore:
     async def get_by_dedup_key(self, dedup_key: str) -> Optional[Dict[str, Any]]:
         return self.events.get(dedup_key)
 
+    async def get_correlation(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
+        return next(
+            (row for row in self.correlations if row["ticket_ref"] == ticket_ref),
+            None,
+        )
+
     async def open_candidates_for_grid(self, grid_name, since_iso, limit=15):
         return [
             row
@@ -422,6 +428,14 @@ class TestDedupReplay:
     @pytest.mark.asyncio
     async def test_replays_prior_decision_without_new_io(self):
         correlator, store, _ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "severity": "urgent",
+            }
+        )
         store.events["dk-1"] = {
             "decision": "amend",
             "ticket_ref": "TKT-1",
@@ -435,6 +449,7 @@ class TestDedupReplay:
         assert decision.decision == "amend"
         assert decision.ticket_ref == "TKT-1"
         assert decision.decided_by == "replay"
+        assert decision.ticket_severity == "urgent"
         assert gateway.calls == []  # no LLM call for a replay
 
 

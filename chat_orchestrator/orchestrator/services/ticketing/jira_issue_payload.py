@@ -21,6 +21,7 @@ class JiraCreateContext:
     grid_name: str | None = None
     assignee_account_id: str | None = None
     organization_id: str | None = None
+    priority_id: str | None = None
 
 
 _STANDARD_FIELDS = {"project", "summary", "description", "issuetype", "labels"}
@@ -73,6 +74,8 @@ def build_issue_payload(
             value = fields[field.id]
         elif field.id == "assignee" and context.assignee_account_id:
             value = {"accountId": context.assignee_account_id}
+        elif field.id == "priority" and context.priority_id:
+            value = {"id": context.priority_id}
         elif _field_name(field) in _ORGANIZATION_FIELD_NAMES and context.organization_id:
             value = {"id": context.organization_id}
         elif _field_name(field) == "grid":
