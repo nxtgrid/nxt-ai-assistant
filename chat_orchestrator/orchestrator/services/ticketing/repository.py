@@ -143,3 +143,29 @@ class TicketRepository:
             raw_status=ticket.status,
             ticket_type=ticket.ticket_type,
         )
+
+    async def add_comment_by_ref(
+        self,
+        ref: str,
+        body: str,
+        *,
+        author: str | None = None,
+        is_public: bool = False,
+        source: Literal["customer", "staff", "notify", "jira", "system"] = "staff",
+    ) -> None:
+        ticket = await self.get_by_ref(ref)
+        if ticket is None:
+            raise TicketRepositoryError(f"cannot add comment: unknown ticket ref {ref}")
+        payload = {
+            "ticket_id": ticket.id,
+            "body": body,
+            "author": author,
+            "is_public": is_public,
+            "source": source,
+        }
+        try:
+            response = self._raw_client().table("ticket_comments").insert(payload).execute()
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to add canonical ticket comment: {exc}") from exc
+        if not getattr(response, "data", None):
+            raise TicketRepositoryError("canonical ticket comment write returned no row")

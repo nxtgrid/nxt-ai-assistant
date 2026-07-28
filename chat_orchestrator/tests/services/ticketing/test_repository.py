@@ -158,3 +158,20 @@ async def test_get_status_by_ref_reads_the_canonical_ticket_projection():
     assert status.summary == "Grid down"
     assert status.is_done is True
     assert status.ticket_type == "Task"
+
+
+@pytest.mark.asyncio
+async def test_add_comment_by_ref_uses_the_canonical_ticket_id():
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "TKT-1", "backend": "internal",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+    }]
+
+    await TicketRepository(client=client).add_comment_by_ref("TKT-1", "Investigating")
+
+    assert client.calls[-1] == (
+        "ticket_comments", "insert",
+        {"ticket_id": "ticket-1", "body": "Investigating", "author": None,
+         "is_public": False, "source": "staff"}, [],
+    )
