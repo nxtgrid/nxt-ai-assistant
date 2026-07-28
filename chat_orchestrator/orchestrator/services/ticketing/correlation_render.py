@@ -175,6 +175,9 @@ async def apply_amendment(
     alert: AlertFacts,
     decision: CorrelationDecision,
     raw_text: str,
+    grid_name: str = "",
+    telegram_chat_id: Optional[str] = None,
+    telegram_topic_id: Optional[str] = None,
 ) -> Optional[AmendmentResult]:
     """Execute an "amend" or "duplicate" correlation decision against ``ticket_ref``.
 
@@ -246,14 +249,67 @@ async def apply_amendment(
             )
             if raw_text:
                 await ticket_service.add_comment(ticket_ref, raw_text, public=False)
+            seeded_affected_count = 0
+            if grid_name:
+                affected_key = decision.affected_key or (
+                    {
+                        "kind": alert.component_kind,
+                        "key": alert.component_key,
+                        "label": alert.component_label,
+                    }
+                    if alert.component_kind and alert.component_key
+                    else None
+                )
+                affected_keys = (
+                    [
+                        {
+                            **affected_key,
+                            "first_seen": alert.fired_at,
+                            "last_seen": alert.fired_at,
+                            "count": 1,
+                        }
+                    ]
+                    if affected_key is not None
+                    else []
+                )
+                seeded_affected_count = len(affected_keys)
+                try:
+                    seeded = await store.upsert_correlation(
+                        ticket_ref=ticket_ref,
+                        ticket_backend=await ticket_service.get_backend_name(ticket_ref),
+                        grid_name=grid_name,
+                        organization_id=None,
+                        root_cause_kind=decision.root_cause_kind,
+                        primary_signature=alert.signature or "",
+                        signatures=[alert.signature] if alert.signature else [],
+                        affected_keys=affected_keys,
+                        summary_base=final_summary,
+                        description_base=raw_text,
+                        severity="urgent",
+                        telegram_chat_id=telegram_chat_id,
+                        telegram_topic_id=telegram_topic_id,
+                    )
+                    if seeded:
+                        await store.record_amendment(
+                            ticket_ref,
+                            summary_current=final_summary,
+                            severity="urgent",
+                            escalated=True,
+                        )
+                except Exception:
+                    LOGGER.warning(
+                        "apply_amendment: failed to seed Jira-only correlation row for %r",
+                        ticket_ref,
+                        exc_info=True,
+                    )
             return AmendmentResult(
                 ticket_ref=ticket_ref,
                 decision="amend",
                 escalated=True,
-                affected_keys_count=0,
+                affected_keys_count=seeded_affected_count,
                 occurrence_count=1,
-                telegram_chat_id=None,
-                telegram_topic_id=None,
+                telegram_chat_id=telegram_chat_id,
+                telegram_topic_id=telegram_topic_id,
                 telegram_message_id=None,
             )
         LOGGER.warning(

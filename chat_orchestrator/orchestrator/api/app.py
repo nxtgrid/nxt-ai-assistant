@@ -1543,6 +1543,9 @@ async def _resolve_notify_ticket_auto(
                         alert=alert,
                         decision=dataclasses.replace(decision, ticket_ref=result.ref),
                         raw_text=body.text,
+                        grid_name=target.grid_name,
+                        telegram_chat_id=target.chat_id,
+                        telegram_topic_id=target.topic_id,
                     )
                     return (
                         result.ref,
@@ -1594,6 +1597,9 @@ async def _resolve_notify_ticket_auto(
                 alert=alert,
                 decision=decision,
                 raw_text=body.text,
+                grid_name=target.grid_name,
+                telegram_chat_id=target.chat_id,
+                telegram_topic_id=target.topic_id,
             )
             if amendment is None:
                 # Correlation row vanished between decide() and here (store

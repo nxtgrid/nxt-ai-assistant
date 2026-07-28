@@ -40,6 +40,7 @@ class _FakeTicketService:
         self.init_kwargs = kwargs
         self.create_ticket_calls: List[tuple] = []
         self.add_comment_calls: List[tuple] = []
+        self.update_ticket_calls: List[Dict[str, Any]] = []
         self.transition_to_done_calls: List[str] = []
         self.get_status_return: Optional[TicketStatus] = TicketStatus(
             summary="s", is_done=False
@@ -74,6 +75,23 @@ class _FakeTicketService:
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         self.add_comment_calls.append((ref, body, public))
+        return True
+
+    async def update_ticket(
+        self,
+        ref: str,
+        summary: Optional[str] = None,
+        description: Optional[str] = None,
+        priority_id: Optional[str] = None,
+    ) -> bool:
+        self.update_ticket_calls.append(
+            {
+                "ref": ref,
+                "summary": summary,
+                "description": description,
+                "priority_id": priority_id,
+            }
+        )
         return True
 
     async def transition_to_done(self, ref: str) -> None:
@@ -653,6 +671,159 @@ class TestResolveNotifyTicketAutoAmend:
         assert extra["decided_by"] == "replay"
         assert delivery is not None
         assert delivery.suppress is True
+
+    async def test_jira_only_urgent_amendment_replay_is_durably_silent(
+        self, fake_telegram_send, monkeypatch
+    ):
+        from orchestrator.api import app as app_module
+
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _FakeTicketService.backend_for_ref = "jira"
+
+        class _PersistentStore:
+            def __init__(self) -> None:
+                self.correlation: Optional[Dict[str, Any]] = None
+
+            async def get_correlation(self, ticket_ref):
+                return self.correlation
+
+            async def bump_occurrence(self, ticket_ref, occurred_at=None):
+                if self.correlation is not None:
+                    self.correlation["occurrence_count"] += 1
+                return self.correlation is not None
+
+            async def merge_affected_key(self, *args, **kwargs):
+                return None
+
+            async def upsert_correlation(self, **kwargs):
+                self.correlation = {
+                    **kwargs,
+                    "summary_current": kwargs["summary_base"],
+                    "occurrence_count": 1,
+                    "escalated_at": None,
+                }
+                return True
+
+            async def record_amendment(
+                self,
+                ticket_ref,
+                *,
+                summary_current,
+                severity=None,
+                escalated=False,
+            ):
+                assert self.correlation is not None
+                self.correlation["summary_current"] = summary_current
+                self.correlation["severity"] = severity
+                if escalated:
+                    self.correlation["escalated_at"] = "now"
+                return True
+
+        store = _PersistentStore()
+
+        class _TwoPassCorrelator:
+            calls: List[Optional[str]] = []
+
+            def __init__(self, store, ticket_service):
+                self.store = store
+
+            async def decide(
+                self,
+                grid_name,
+                alert,
+                dedup_key=None,
+                backend_override=None,
+                get_live_facts=None,
+            ):
+                self.calls.append(dedup_key)
+                if len(self.calls) == 1:
+                    return _decision(
+                        decision="amend",
+                        ticket_ref="OPS-42",
+                        confidence=0.9,
+                        decided_by="llm",
+                        affected_key={
+                            "kind": "inverter",
+                            "key": "INV-1",
+                            "label": "Inverter INV-1",
+                        },
+                        amended_summary="Kudi inverter outage",
+                        ticket_severity="warning",
+                    )
+                correlation = await self.store.get_correlation("OPS-42")
+                return _decision(
+                    decision="amend",
+                    ticket_ref="OPS-42",
+                    confidence=0.9,
+                    decided_by="replay",
+                    ticket_severity=(
+                        str(correlation.get("severity") or "")
+                        if correlation is not None
+                        else ""
+                    ),
+                )
+
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+            lambda get_client=None: store,
+        )
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlator.AlertCorrelator",
+            _TwoPassCorrelator,
+        )
+        body = _notify_body(
+            ticket_id="auto",
+            dedup_key="jira-urgent-1",
+            text="urgent raw text",
+            alert={
+                "subject": "Inverter outage in Kudi",
+                "severity": "urgent",
+                "component_kind": "inverter",
+                "component_key": "INV-1",
+                "component_label": "Inverter INV-1",
+            },
+        )
+        alert_context = _live_context(3.1)
+
+        first_ref, first_error, _first_extra, first_delivery = (
+            await _resolve_notify_ticket_full(body, _target(), alert_context)
+        )
+        await app_module._deliver_notification(
+            body,
+            _target(),
+            first_ref,
+            first_delivery,
+        )
+        second_ref, second_error, _second_extra, second_delivery = (
+            await _resolve_notify_ticket_full(body, _target(), alert_context)
+        )
+        await app_module._deliver_notification(
+            body,
+            _target(),
+            second_ref,
+            second_delivery,
+        )
+
+        services = _FakeTicketService.instances
+        update_calls = [
+            call for service in services for call in service.update_ticket_calls
+        ]
+        comment_calls = [
+            call for service in services for call in service.add_comment_calls
+        ]
+        assert first_error is None
+        assert second_error is None
+        assert _TwoPassCorrelator.calls == ["jira-urgent-1", "jira-urgent-1"]
+        assert update_calls == [
+            {
+                "ref": "OPS-42",
+                "summary": "🔴 ! Urgent: Kudi inverter outage",
+                "description": None,
+                "priority_id": "highest",
+            }
+        ]
+        assert comment_calls == [("OPS-42", "urgent raw text", False)]
+        assert len(fake_telegram_send.calls) == 1
 
 
 class TestResolveNotifyTicketAutoDuplicate:

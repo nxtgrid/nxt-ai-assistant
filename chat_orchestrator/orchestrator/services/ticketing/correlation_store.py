@@ -228,9 +228,12 @@ class CorrelationStore:
         telegram_chat_id: Optional[str],
         telegram_topic_id: Optional[str],
     ) -> bool:
-        """Create (or, on a retry, update) the correlation row for a
-        newly-filed ticket. Upserts on ``ticket_ref`` so a retried "new"
-        decision is idempotent rather than erroring on the UNIQUE constraint."""
+        """Create (or, on a retry, update) a ticket's correlation row.
+
+        This seeds both newly-filed tickets and externally discovered tickets
+        the first time correlation amends them. Upserting on ``ticket_ref``
+        makes either path idempotent at the UNIQUE constraint.
+        """
         client = self._client()
         if client is None:
             return False
