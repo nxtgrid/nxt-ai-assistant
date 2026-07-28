@@ -127,29 +127,19 @@ class TicketService:
     async def _backend_for_ref(self, ref: str) -> TicketBackend:
         """Route by the ref's *persisted* backend, not current availability.
 
-        A Jira ticket filed before an outage must still be read as Jira when
-        Jira comes back, and an internal ticket must stay internal -- so this
-        checks whether ``ref`` exists in ``internal_tickets`` rather than
-        re-running ``resolve_backend()``.
+        The canonical ``tickets`` record is the only authority.  In
+        particular, a ticket reference is not a backend discriminator: Jira
+        project keys are deployment-specific and internal prefixes are
+        configurable.
         """
-        raw = self._raw_client()
-        if raw is not None:
-            try:
-                response = (
-                    raw.table("internal_tickets")
-                    .select("ticket_ref")
-                    .eq("ticket_ref", ref)
-                    .limit(1)
-                    .execute()
-                )
-                rows = getattr(response, "data", None) or []
-                if rows:
-                    return self._internal
-            except Exception:
-                LOGGER.warning(
-                    "ticket service: internal_tickets lookup failed for ref %s", ref, exc_info=True
-                )
-        return self._jira
+        ticket = await self._tickets.get_by_ref(ref)
+        if ticket is None or ticket.backend is None:
+            raise TicketBackendError(f"no canonical ticket backend recorded for ref {ref}")
+        if ticket.backend == "internal":
+            return self._internal
+        if ticket.backend == "jira":
+            return self._jira
+        raise TicketBackendError(f"unsupported canonical ticket backend for ref {ref}")
 
     # ------------------------------------------------------------------
     # Escalation-mapping stamping
