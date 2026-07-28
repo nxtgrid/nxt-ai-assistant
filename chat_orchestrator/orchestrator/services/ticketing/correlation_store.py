@@ -227,30 +227,6 @@ class CorrelationStore:
             return []
         return getattr(response, "data", None) or []
 
-    async def get_by_signature(
-        self, grid_name: str, signature: str, limit: int = 5
-    ) -> List[Dict[str, Any]]:
-        """Open correlation rows on this grid whose ``signatures`` array
-        already contains ``signature`` -- the deterministic pre-pass'
-        exact-shape match (rung 2 of the decision pipeline)."""
-        client = self._client()
-        if client is None:
-            return []
-        try:
-            response = (
-                client.table("ticket_correlations")
-                .select("*")
-                .eq("grid_name", grid_name)
-                .eq("status", "open")
-                .contains("signatures", [signature])
-                .limit(limit)
-                .execute()
-            )
-        except Exception as e:
-            LOGGER.warning("correlation store: get_by_signature(%s) failed: %s", grid_name, e)
-            return []
-        return getattr(response, "data", None) or []
-
     async def upsert_correlation(
         self,
         *,

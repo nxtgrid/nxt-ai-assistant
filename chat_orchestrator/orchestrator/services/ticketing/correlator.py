@@ -17,7 +17,11 @@ Decision pipeline (cheapest/safest first -- most alerts never reach the LLM):
 2. No open candidates for the grid -> "new".
 3. An open candidate already has this alert's exact ``(signature,
    component_key)`` pair -> deterministic "duplicate", never touches the LLM.
-4. Otherwise, ask the LLM, then run its response through
+4. For an alert with no identifiable component, an open candidate already
+   carrying this alert's exact ``signature`` -> deterministic "duplicate",
+   never touches the LLM (there is no component key that could make it a
+   distinct affected component).
+5. Otherwise, ask the LLM, then run its response through
    ``_apply_guardrails`` -- which can force "new" (unknown ref, low
    confidence, unparseable response), downgrade "duplicate" to "amend" (no
    signature overlap and not a confident "same_issue"), or flag
@@ -254,6 +258,22 @@ def _find_signature_duplicate(
     return None
 
 
+def _find_signature_only_duplicate(
+    candidates: List[CandidateSummary], alert: AlertFacts
+) -> Optional[CandidateSummary]:
+    """Rung 4: for an alert with no identifiable component, an open candidate
+    carrying this exact signature *is* the same alert re-firing -- there is no
+    component key that could make it a distinct affected component. Without
+    this, identical grid-level and unparsed-device alerts depend entirely on an
+    LLM judgment that falls back to "new" (a duplicate ticket) on any hiccup."""
+    if not alert.signature or alert.component_kind:
+        return None
+    for candidate in candidates:
+        if alert.signature in (candidate.signatures or []):
+            return candidate
+    return None
+
+
 def _is_urgent_severity_increase(incoming: str, existing: str) -> bool:
     return (
         incoming.strip().casefold() == "urgent"
@@ -450,21 +470,38 @@ class AlertCorrelator:
                 _fallback_decision("no open candidates for grid", [], decided_by="no_candidates"),
             )
 
-        duplicate = _find_signature_duplicate(candidates, alert)
+        duplicate = _find_signature_duplicate(candidates, alert) or (
+            _find_signature_only_duplicate(candidates, alert)
+        )
         if duplicate is not None:
             severity_increased = _is_urgent_severity_increase(
                 alert.severity, duplicate.severity
             )
+            # alert.component_kind is truthy only for matches found via
+            # _find_signature_duplicate (component-keyed); a keyless match can
+            # only have come from _find_signature_only_duplicate, which
+            # requires component_kind to be empty.
+            keyed_match = bool(alert.component_kind)
+            if keyed_match:
+                reason = (
+                    "urgent severity increase on an exact signature+component match"
+                    if severity_increased
+                    else "exact signature+component match against an open ticket"
+                )
+            else:
+                reason = (
+                    "urgent severity increase on an exact signature match "
+                    "(grid-level alert, no equipment key)"
+                    if severity_increased
+                    else "exact signature match against an open ticket "
+                    "(grid-level alert, no equipment key)"
+                )
             decision = CorrelationDecision(
                 decision="amend" if severity_increased else "duplicate",
                 ticket_ref=duplicate.ref,
                 confidence=1.0,
                 decided_by="signature",
-                reason=(
-                    "urgent severity increase on an exact signature+component match"
-                    if severity_increased
-                    else "exact signature+component match against an open ticket"
-                ),
+                reason=reason,
                 affected_key={
                     "kind": alert.component_kind,
                     "key": alert.component_key,

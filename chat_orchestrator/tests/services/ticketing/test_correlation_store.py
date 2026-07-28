@@ -226,37 +226,6 @@ class TestOpenCandidatesForGrid:
         assert await store.open_candidates_for_grid("Kudi", since_iso="2026-01-01") == []
 
 
-class TestGetBySignature:
-    @pytest.mark.asyncio
-    async def test_finds_open_ticket_with_signature(self):
-        store, fake = _make_store()
-        fake.tables["ticket_correlations"] = [
-            {"ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": ["sig-a", "sig-b"]},
-            {"ticket_ref": "TKT-2", "grid_name": "Kudi", "status": "open", "signatures": ["sig-c"]},
-        ]
-
-        results = await store.get_by_signature("Kudi", "sig-a")
-
-        assert [r["ticket_ref"] for r in results] == ["TKT-1"]
-
-    @pytest.mark.asyncio
-    async def test_empty_when_no_match(self):
-        store, fake = _make_store()
-        fake.tables["ticket_correlations"] = [
-            {"ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": ["sig-c"]},
-        ]
-
-        assert await store.get_by_signature("Kudi", "sig-a") == []
-
-    @pytest.mark.asyncio
-    async def test_empty_on_error(self):
-        fake = FakeRawClient()
-        fake.raise_on_execute["ticket_correlations"] = RuntimeError("down")
-        store, _ = _make_store(fake)
-
-        assert await store.get_by_signature("Kudi", "sig-a") == []
-
-
 class TestUpsertCorrelation:
     @pytest.mark.asyncio
     async def test_creates_new_row(self):

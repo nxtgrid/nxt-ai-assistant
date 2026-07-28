@@ -713,6 +713,69 @@ class TestSignatureDuplicate:
         assert gateway.calls == []
 
 
+class TestKeylessSignatureDuplicate:
+    @pytest.mark.asyncio
+    async def test_identical_keyless_alert_is_a_duplicate_without_the_llm(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = enrich_alert_facts(
+            AlertFacts(
+                subject=(
+                    "! Urgent: Turn off Combiner: ALERT - 'Okpokunou': "
+                    "'#26 - Charger terminal overheated' on 'Combiner Box 4' !"
+                ),
+                severity="urgent",
+            ),
+            grid_name="Okpokunou",
+        )
+        correlator, store, _ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "OPS-3363",
+                "grid_name": "Okpokunou",
+                "status": "open",
+                "severity": "urgent",
+                "signatures": [alert.signature],
+                "affected_keys": [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        decision = await correlator.decide("Okpokunou", alert)
+
+        assert decision.decision == "duplicate"
+        assert decision.ticket_ref == "OPS-3363"
+        assert decision.decided_by == "signature"
+        assert gateway.calls == []
+        # No component was involved in this match -- the audit reason must
+        # not claim a component match happened.
+        assert "component" not in decision.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_keyless_signature_match_still_escalates_on_urgency(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = enrich_alert_facts(
+            AlertFacts(subject="! Urgent: Grid outage in Okpokunou !", severity="urgent"),
+            grid_name="Okpokunou",
+        )
+        correlator, store, _ts, _gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "OPS-3363",
+                "grid_name": "Okpokunou",
+                "status": "open",
+                "severity": "warning",
+                "signatures": [alert.signature],
+                "affected_keys": [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        decision = await correlator.decide("Okpokunou", alert)
+
+        assert decision.decision == "amend"
+        assert decision.ticket_ref == "OPS-3363"
+
+
 class TestLiveStatusConfirmation:
     @pytest.mark.asyncio
     async def test_done_candidate_dropped_and_store_corrected(self, monkeypatch):
