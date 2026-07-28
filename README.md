@@ -533,25 +533,53 @@ Response
 
 ### Environment Variables
 
-#### Required (All Components)
+Two kinds of configuration exist. **Credentials and connection strings** (API
+keys, database URLs, OAuth secrets) come from the host environment — set them
+in your platform's env var UI or a local `.env` and they are never written
+back. **Operator-tunable flags** (feature toggles, model choices, timeouts,
+layout parameters) live in [`shared/config/flag_registry.py`](shared/config/flag_registry.py),
+are documented in the generated [`shared/config/flags.env.example`](shared/config/flags.env.example),
+and are normally set through the anansi_app Settings page rather than by
+editing the environment directly.
+
+The settings page's own Deployment Readiness panel reports exactly what a
+given environment is still missing, grouped by capability rather than by
+variable name. The tiers below are what it checks, in the order a new
+deployment typically reaches them:
+
+#### Tier 0 — the settings page loads (local development)
+```bash
+GRID_DESIGN_DEV_NO_AUTH=1   # bypasses Google OAuth entirely — never set this in production
+```
+Nothing else is required to boot `anansi_app` and reach `/settings` locally.
+
+#### Tier 0′ — the settings page loads, with real admin login
+```bash
+GOOGLE_CLIENT_ID=your-oauth-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-oauth-client-secret
+AUTH_REDIRECT_URI=http://localhost:8501/oauth2callback
+ALLOWED_VIEWER_EMAILS=admin@example.com
+```
+
+#### Tier 1 — settings changes persist
+Nothing further: the portable env-file backend writes `.env.settings` and
+changes apply on the next process restart. To drive a live DigitalOcean app
+spec instead (redeploys on save):
+```bash
+DIGITALOCEAN_APP_ID=your-do-app-id
+DIGITALOCEAN_API_TOKEN=your-do-api-token
+```
+
+#### Tier 2 — the bot answers messages
 ```bash
 GOOGLE_API_KEY=your-gemini-api-key
-LLM_PROVIDER=gemini
-CHAT_DB_URL=https://your-project.supabase.co
-CHAT_DB_SERVICE_KEY=your-service-role-key
-```
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+CHAT_DB_URL=https://your-project.supabase.co        # or SUPABASE_URL
+CHAT_DB_SERVICE_KEY=your-service-role-key           # or SUPABASE_KEY
+API_KEY=your-orchestrator-api-key
+SESSION_ID_SECRET=generate-a-random-secret
 
-#### System Instructions (Chat Orchestrator)
-```bash
-GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
-CUSTOMER_SUPPORT_DOC_ID=1abc123xyz456
-STAFF_SUPPORT_DOC_ID=1def789uvw012
-EXPERT_INSTRUCTIONS_DOC_ID=1ghi456jkl789  # Expert definitions
-```
-
-#### Authentication (Chat Orchestrator)
-```bash
-# Option A: Direct PostgreSQL (Recommended)
+# Authentication — Option A: direct PostgreSQL (recommended)
 AUTH_DB_DIRECT_CONNECTION=true
 AUTH_DB_HOST=db.your-auth-project.supabase.co
 AUTH_DB_PORT=6543
@@ -559,38 +587,44 @@ AUTH_DB_NAME=postgres
 AUTH_DB_USER=readonly_user
 AUTH_DB_PASSWORD=your_password
 AUTH_DB_SSL_MODE=require
-
-# Option B: Supabase Client
+# Option B: Supabase client
 # AUTH_SUPABASE_URL=https://your-auth-project.supabase.co
 # AUTH_SUPABASE_KEY=your_auth_service_key
+
+# System instructions
+GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
+CUSTOMER_SUPPORT_DOC_ID=1abc123xyz456
+STAFF_SUPPORT_DOC_ID=1def789uvw012
+EXPERT_INSTRUCTIONS_DOC_ID=1ghi456jkl789  # Expert definitions
 ```
 
-#### RAG Pipeline (Optional)
+#### Tier 3 — per-integration (all optional; configurable from the Settings page)
 ```bash
-# GitHub
+# Jira (escalations; without these, escalations still post to Telegram and
+# are tracked in the internal ticket ledger)
+JIRA_BASE_URL=https://your-domain.atlassian.net
+JIRA_USERNAME=your-email@example.com
+JIRA_API_TOKEN=your-api-token
+
+# Grafana (dashboard/panel tools)
+GRAFANA_URL=http://localhost:3000
+GRAFANA_USERNAME=admin
+GRAFANA_PASSWORD=your-grafana-password
+
+# POST /chat/notify (Grafana / n8n / VRM passthrough)
+NOTIFY_SHARED_SECRET=your-shared-secret
+
+# RAG pipeline
 GITHUB_TOKEN=ghp_your-token
 GITHUB_REPO=owner/repo
-
-# Telegram
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=abc123...
 ```
 
-#### MCP Tools (Optional)
-```bash
-# Timescale
-TIMESCALE_CONNECTION_STRING=postgresql://user:pass@host:5432/db  # pragma: allowlist secret
-
-# JIRA
-JIRA_DOMAIN=your-domain.atlassian.net
-JIRA_EMAIL=your-email@example.com
-JIRA_API_TOKEN=your-api-token
-
-# Action Flags
-SUPABASE_ACTIONS_ENABLED=true
-TIMESCALE_ACTIONS_ENABLED=true
-JIRA_ACTIONS_ENABLED=true
-```
+Every other tunable (which MCP servers are enabled, model choices, layout
+geometry, RAG toggles, and the read/write gate per MCP server) has a sensible
+default and is listed in full, with descriptions, in
+[`shared/config/flags.env.example`](shared/config/flags.env.example).
 
 #### Ticket backend (Jira-optional escalations)
 
