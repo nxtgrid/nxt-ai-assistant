@@ -1,4 +1,4 @@
-"""Jira alert issue-type discovery and guarded LLM selection.
+"""Jira issue-type discovery and guarded LLM selection.
 
 The selector never lets a model invent an issue type: it receives the
 project's current create metadata and may return only an advertised id.  A
@@ -207,7 +207,7 @@ class JiraIssueTypeSelector:
             prompt += f"\nLive grid telemetry: {json.dumps(operational_context, default=str)}"
         try:
             # Keep LLM providers lazy: every ticket service imports this
-            # module, while only a configured Jira alert creation needs an
+            # module, while only a configured Jira ticket creation needs an
             # LLM gateway.
             from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
 

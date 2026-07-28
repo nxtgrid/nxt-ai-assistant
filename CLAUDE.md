@@ -19,9 +19,9 @@ problems that only `pre-commit run --all-files` catches:
   lints it once it's tracked. Fixes surface only after force-adding.
 
 Hit this exactly on the `feature/alert-correlation-notify` branch (PR #25):
-7 new test files (`test_alert_facts.py`, `test_correlation_render.py`,
+6 new test files (`test_alert_facts.py`, `test_correlation_render.py`,
 `test_correlation_rules.py`, `test_correlation_store.py`, `test_correlator.py`,
-`test_jira_alert_profile.py`, `shared/tests/test_telegram_send.py`) were
+`shared/tests/test_telegram_send.py`) were
 written, passed locally, and were reported as committed/pushed — but a plain
 `git add <path>` had silently dropped all of them from the commit. The PR's
 initial CI run showed all-green because the missing suites just weren't part

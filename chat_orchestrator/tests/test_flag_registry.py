@@ -76,6 +76,15 @@ def test_documented_flags_appear_in_example():
             assert f"{name}=" not in text, f"{name} should be excluded from flags.env.example"
 
 
+def test_registry_has_no_jira_alert_profile_flags():
+    assert not [name for name in fr.FLAGS if name.startswith("JIRA_ALERT_")]
+
+
+def test_generated_env_example_has_no_jira_alert_profile_block():
+    rendered = fr.render_env_example()
+    assert "JIRA_ALERT_" not in rendered
+
+
 # --------------------------------------------------------------------------- #
 # Settings-service consistency (guards the migration away from hardcoded sets)
 # --------------------------------------------------------------------------- #

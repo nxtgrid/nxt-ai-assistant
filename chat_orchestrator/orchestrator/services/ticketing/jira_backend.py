@@ -1,11 +1,9 @@
-"""Jira ticket backend.
+"""Jira ``TicketBackend`` implementation using live create metadata.
 
-The Jira REST helpers here are moved out of ``EscalationService`` verbatim
-(same HTTP calls, same payload shapes, same fallback/retry behavior) so they
-can be used through the ``TicketBackend`` Protocol instead of being inline
-methods on the escalation service. ``escalation_service.py`` itself is left
-untouched for now -- a later task rewires it to call through
-``TicketService`` instead of these methods directly.
+Ticket creation fetches the configured project's creatable issue types,
+selects only a type whose required fields can be populated safely, and builds
+the request from that metadata. This keeps ticket creation on one
+project-derived path rather than relying on a separate alert profile.
 """
 
 from __future__ import annotations
@@ -146,8 +144,8 @@ def _text_to_adf(text: str) -> Dict[str, Any]:
 def _slugify_grid(grid_name: str) -> str:
     """Lowercase, alnum-and-hyphen slug used for the backend-independent
     ``grid-<slug>`` label -- lets ``find_open_by_grid`` locate a grid's open
-    tickets by label alone, without depending on the alert-ticket Jira
-    profile's custom grid field being configured."""
+    tickets by label alone, without depending on a project-specific custom
+    grid field."""
     slug = re.sub(r"[^a-z0-9]+", "-", grid_name.strip().lower()).strip("-")
     return slug or "unknown"
 
