@@ -16,7 +16,6 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from orchestrator.services.ticketing.backend import (
-    BackendTicketResult,
     TicketBackendError,
     TicketCreateRequest,
     TicketResult,
@@ -265,6 +264,29 @@ class TestCreateTicketStamping:
 
 class TestNotifyTicketFallback:
     @pytest.mark.asyncio
+    async def test_jira_fallback_activates_the_original_canonical_intent(self):
+        repository = _FakeTicketRepository()
+        jira = _FakeBackend("jira")
+        jira.create_error = TicketBackendError("Jira unavailable")
+        internal = _FakeBackend("internal", ref="TKT-000101")
+        service = _make_service(
+            raw_client=None, jira=jira, internal=internal, ticket_repository=repository
+        )
+
+        outcome = await service.create_ticket_with_internal_fallback(
+            TicketCreateRequest(summary="Grid down", source="notify"), backend_override="jira"
+        )
+
+        assert outcome.result is not None
+        assert outcome.result.ticket_id == "ticket-1"
+        assert repository.calls == [
+            ("intent", "notification", "Grid down"),
+            ("backend", "ticket-1", "jira"),
+            ("backend", "ticket-1", "internal"),
+            ("activate", "ticket-1", "TKT-000101", "internal"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_jira_failure_creates_internal_ticket_once(self):
         jira = _FakeBackend("jira", ref="OPS-42")
         jira.create_error = TicketBackendError("Jira unavailable")
@@ -275,7 +297,9 @@ class TestNotifyTicketFallback:
             TicketCreateRequest(summary="! Urgent: Grid down"), backend_override="jira"
         )
 
-        assert outcome.result == TicketResult(ref="TKT-000101", backend="internal", url=None)
+        assert outcome.result == TicketResult(
+            ref="TKT-000101", backend="internal", url=None, ticket_id="ticket-1"
+        )
         assert outcome.fallback_used is True
         assert outcome.error is None
         assert len(jira.create_calls) == 1

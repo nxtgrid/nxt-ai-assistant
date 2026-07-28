@@ -212,13 +212,17 @@ class TicketService:
         This deliberately resolves the primary backend once. A successful
         internal primary stays a normal internal creation; it is not retried.
         """
+        created_via = "notification" if req.source == "notify" else "escalation"
+        intent = await self._tickets.create_intent(req, created_via=created_via)
         primary = await self.resolve_backend(override=backend_override)
+        await self._tickets.set_pending_backend(intent.id, primary.name)
         try:
             result = await primary.create_ticket(req)
         except TicketBackendError as primary_error:
             if primary.name != "jira":
                 return TicketCreateOutcome(result=None, error=str(primary_error))
             try:
+                await self._tickets.set_pending_backend(intent.id, "internal")
                 result = await self._internal.create_ticket(req)
             except TicketBackendError as internal_error:
                 return TicketCreateOutcome(
@@ -226,15 +230,19 @@ class TicketService:
                     error=f"Jira: {primary_error}; internal: {internal_error}",
                     fallback_used=True,
                 )
+            await self._tickets.activate(intent.id, result)
+            canonical_result = result.model_copy(update={"ticket_id": intent.id})
             if req.escalation_mapping_id:
                 await self._stamp_escalation_mapping(
                     req.escalation_mapping_id, result.ref, result.backend
                 )
-            return TicketCreateOutcome(result=result, fallback_used=True)
+            return TicketCreateOutcome(result=canonical_result, fallback_used=True)
 
+        await self._tickets.activate(intent.id, result)
+        canonical_result = result.model_copy(update={"ticket_id": intent.id})
         if req.escalation_mapping_id:
             await self._stamp_escalation_mapping(req.escalation_mapping_id, result.ref, result.backend)
-        return TicketCreateOutcome(result=result)
+        return TicketCreateOutcome(result=canonical_result)
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         backend = await self._backend_for_ref(ref)
