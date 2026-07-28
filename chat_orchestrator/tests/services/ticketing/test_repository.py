@@ -141,3 +141,20 @@ async def test_get_by_ref_returns_the_persisted_backend_instead_of_inferring_it(
 
     assert record is not None
     assert record.backend == "jira"
+
+
+@pytest.mark.asyncio
+async def test_get_status_by_ref_reads_the_canonical_ticket_projection():
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "TKT-1", "backend": "internal",
+        "summary": "Grid down", "ticket_type": "Task", "status": "done",
+        "created_via": "notification", "provisioning_state": "active",
+    }]
+
+    status = await TicketRepository(client=client).get_status_by_ref("TKT-1")
+
+    assert status is not None
+    assert status.summary == "Grid down"
+    assert status.is_done is True
+    assert status.ticket_type == "Task"

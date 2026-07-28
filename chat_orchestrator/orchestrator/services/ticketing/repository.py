@@ -7,7 +7,7 @@ from typing import Any, Callable, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from .backend import BackendTicketResult, TicketCreateRequest
+from .backend import BackendTicketResult, TicketCreateRequest, TicketStatus
 
 
 class TicketRepositoryError(RuntimeError):
@@ -132,3 +132,14 @@ class TicketRepository:
 
         rows = getattr(response, "data", None) or []
         return TicketRecord.model_validate(rows[0]) if rows else None
+
+    async def get_status_by_ref(self, ref: str) -> TicketStatus | None:
+        ticket = await self.get_by_ref(ref)
+        if ticket is None:
+            return None
+        return TicketStatus(
+            summary=ticket.summary,
+            is_done=ticket.status == "done",
+            raw_status=ticket.status,
+            ticket_type=ticket.ticket_type,
+        )
