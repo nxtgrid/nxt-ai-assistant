@@ -635,43 +635,17 @@ The response for `ticket_id="auto"` adds `decision` (`"new"|"amend"|"duplicate"`
 **Fail-open guarantee:** every failure mode — the LLM timing out or erroring, an unparseable response, a correlation-store outage, a per-grid lock timeout — falls back to filing a plain new ticket (`decided_by="fallback"`), the same as `ticket_id=""`. Correlation only ever adds grouping on top; it can never cause an alert to be dropped.
 
 ```bash
-# Master switch. Off: ticket_id="auto" behaves exactly like "" (plain create).
-ALERT_CORRELATION_ENABLED=false
+# Choose the Jira project used when the Jira backend is selected.
+JIRA_PROJECT_KEY=OPS
 
-# Model used for the new/amend/duplicate decision.
-ALERT_CORRELATION_MODEL=gemini-2.5-flash
+# Keep /chat/notify alerts internal by default; select auto to use healthy Jira.
+NOTIFY_TICKETS_BACKEND=internal
 
-# Google Doc with operator-editable correlation rules (root-cause grouping
-# heuristics, component taxonomy, examples). Falls back to the bundled
-# chat_orchestrator/instructions/alert_correlation_instructions.md, then to a
-# minimal built-in string, if unset/unreachable.
-ALERT_CORRELATION_DOC_ID=
-
-# Below this LLM confidence, an amend/duplicate is forced back to "new".
-ALERT_CORRELATION_MIN_CONFIDENCE=0.75
-
-# Budget (seconds) for the LLM call + per-grid lock acquisition combined.
-ALERT_CORRELATION_TIMEOUT_SECONDS=12
-
-# How far back (hours) to look for open candidate tickets on a grid.
-ALERT_CORRELATION_LOOKBACK_HOURS=168
-
-# Max candidate tickets included in the correlation LLM prompt.
-ALERT_CORRELATION_MAX_CANDIDATES=15
-
-# Affected-component count before a ticket is auto-escalated (priority bump +
-# a fresh, non-reply Telegram post instead of a quiet reply).
-ALERT_CORRELATION_ESCALATE_AFTER=3
-
-# Deprecated duplicate roll-up interval. Duplicates never send Telegram.
-ALERT_CORRELATION_ROLLUP_EVERY=0
-
-# Staff email used for permission-filtered RAG context during correlation.
-# Blank disables RAG for correlation, independent of the general rag__enabled flag.
-ALERT_CORRELATION_RAG_IDENTITY=
+# Leave correlation enabled. Set false only to bypass it and file a plain ticket.
+ALERT_CORRELATION_ENABLED=true
 ```
 
-**Jira metadata and type choice:** when Jira is the resolved backend (`NOTIFY_TICKETS_BACKEND=auto` and Jira healthy), `/notify` fetches the configured project's live create metadata and asks the LLM to choose only from its creatable issue types. The selected type is used only when every required field can be populated safely from the request and metadata; otherwise the service falls back to the configured `JIRA_ISSUE_TYPE`, then the first compatible type. This keeps Jira ticket creation on one project-derived path without per-project field settings.
+**Alert setup:** set `JIRA_PROJECT_KEY`, choose `NOTIFY_TICKETS_BACKEND`, and leave `ALERT_CORRELATION_ENABLED` enabled unless you intentionally need the plain-ticket bypass. When Jira is selected but its project has no compatible issue type, `/notify` fails open to an internal `TKT-*` ticket.
 
 **Concurrency caveat:** correlation serializes decisions per grid with an in-process `asyncio.Lock`, which is correct for the current single-process deployment (`chat_orchestrator/Dockerfile` runs `uvicorn` with no `--workers`). At `instance_count > 1` (or with `--workers`), this stops serializing across processes — several alerts for the same grid arriving at once across instances can still each see "no open candidate" and file separate tickets. A distributed lease table is the documented follow-up (see the plan's "Concurrency" section); don't scale this endpoint horizontally without addressing it first.
 
@@ -680,7 +654,6 @@ ALERT_CORRELATION_RAG_IDENTITY=
 - **Disable ticketing into Jira** (keep correlation): `NOTIFY_TICKETS_BACKEND=internal` — alert tickets stay in `internal_tickets`/`ticket_correlations`, never reach the Jira project.
 - **Disable the endpoint entirely**: `NOTIFY_ENDPOINT_ENABLED=false` — `/notify` 503s.
 - **Inspect a decision**: the `ticket_correlation_events` table (or the ticket's "Decision history" section on its admin Tickets page detail view) has every decision, `decided_by`, confidence, and reason for a ticket_ref.
-- **Bust the rules-doc cache** after editing `ALERT_CORRELATION_DOC_ID`'s Google Doc: call `orchestrator.services.artifacts_provider.clear_gdoc_cache()` (same 1-hour-TTL cache every other Google-Doc-backed instructions surface uses) or wait out the TTL.
 
 ### Getting Google Doc IDs
 

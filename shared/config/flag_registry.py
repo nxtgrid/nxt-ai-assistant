@@ -371,70 +371,11 @@ _FLAGS: List[Flag] = [
         "exactly like '' (plain create) -- the kill switch can never drop an alert.",
         scope=SERVICE_BOT,
     ),
-    _s(
-        "ALERT_CORRELATION_MODEL",
-        "gemini-2.5-flash",
-        "Model used for the new-vs-amend-vs-duplicate correlation decision.",
-        scope=SERVICE_BOT,
-    ),
-    _s(
-        "ALERT_CORRELATION_DOC_ID",
-        "",
-        "Google Doc id holding operator-editable alert correlation rules. Falls back "
-        "to the bundled alert_correlation_instructions.md when unset/unreachable.",
-        scope=SERVICE_BOT,
-    ),
-    _f(
-        "ALERT_CORRELATION_MIN_CONFIDENCE",
-        0.75,
-        "Minimum LLM confidence to accept an amend/duplicate decision; below this the "
-        "alert is filed as a new ticket instead.",
-        scope=SERVICE_BOT,
-    ),
-    _i(
-        "ALERT_CORRELATION_TIMEOUT_SECONDS",
-        12,
-        "Budget (seconds) for the correlation LLM call and per-grid lock acquisition "
-        "combined; exceeding it falls back to filing a new ticket.",
-        scope=SERVICE_BOT,
-    ),
     _i(
         "URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS",
         3,
         "Maximum seconds to wait for the one live VRM inverter-output lookup before "
         "reporting it as unavailable.",
-        scope=SERVICE_BOT,
-    ),
-    _i(
-        "ALERT_CORRELATION_LOOKBACK_HOURS",
-        168,
-        "How far back to look for open candidate tickets on a grid.",
-        scope=SERVICE_BOT,
-    ),
-    _i(
-        "ALERT_CORRELATION_MAX_CANDIDATES",
-        15,
-        "Maximum number of candidate tickets included in the correlation LLM prompt.",
-        scope=SERVICE_BOT,
-    ),
-    _i(
-        "ALERT_CORRELATION_ESCALATE_AFTER",
-        3,
-        "Number of distinct affected components on one ticket before it is "
-        "auto-escalated (priority bump + fresh top-level Telegram post).",
-        scope=SERVICE_BOT,
-    ),
-    _i(
-        "ALERT_CORRELATION_ROLLUP_EVERY",
-        0,
-        "Deprecated duplicate roll-up interval; 0 keeps every duplicate silent.",
-        scope=SERVICE_BOT,
-    ),
-    _s(
-        "ALERT_CORRELATION_RAG_IDENTITY",
-        "",
-        "Staff email used for permission-filtered RAG context during correlation. "
-        "Blank disables RAG lookup for correlation (independent of rag__enabled).",
         scope=SERVICE_BOT,
     ),
     # --- Expert workflow / interaction ------------------------------------

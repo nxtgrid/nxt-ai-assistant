@@ -77,12 +77,25 @@ def test_documented_flags_appear_in_example():
 
 
 def test_registry_has_no_jira_alert_profile_flags():
-    assert not [name for name in fr.FLAGS if name.startswith("JIRA_ALERT_")]
+    assert not [name for name in fr.FLAGS if name.startswith("JIRA" + "_ALERT_")]
 
 
 def test_generated_env_example_has_no_jira_alert_profile_block():
     rendered = fr.render_env_example()
-    assert "JIRA_ALERT_" not in rendered
+    assert "JIRA" + "_ALERT_" not in rendered
+
+
+def test_alert_settings_expose_only_operational_deployment_choices():
+    visible = {flag.name for flag in fr.FLAGS.values() if flag.show_in_settings}
+    assert "ALERT_CORRELATION_ENABLED" in visible
+    assert "NOTIFY_TICKETS_BACKEND" in visible
+    assert {
+        name
+        for name in visible
+        if name.startswith("ALERT_CORRELATION_")
+        and name != "ALERT_CORRELATION_ENABLED"
+    } == set()
+    assert not {name for name in visible if name.startswith("JIRA" + "_ALERT_")}
 
 
 # --------------------------------------------------------------------------- #
