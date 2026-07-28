@@ -1,5 +1,7 @@
 # MCP Core
-mcp>=1.0.0
+# The low-level servers use Server.list_tools()/call_tool(), retained in v1.
+# Keep v2 migration explicit rather than letting CI resolve an incompatible SDK.
+mcp>=1.27,<2
 
 # Database drivers
 psycopg[binary]>=3.1.0

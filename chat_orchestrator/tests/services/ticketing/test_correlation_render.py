@@ -86,6 +86,19 @@ class TestRenderSummary:
 
         assert result.startswith("! Urgent:")
 
+    def test_urgent_severity_increase_replaces_warning_marker(self):
+        correlation = _correlation(
+            affected_keys=[
+                {"kind": "mppt", "key": "A3", "label": "MPPT A3"},
+                {"kind": "mppt", "key": "A7", "label": "MPPT A7"},
+            ],
+        )
+        alert = AlertFacts(component_kind="mppt", severity="urgent")
+
+        result = render_summary(correlation, alert, llm_summary="")
+
+        assert result.startswith("! Urgent:")
+
     def test_truncates_long_key_list(self):
         keys = [
             {"kind": "mppt", "key": f"A{i}", "label": f"MPPT A{i}", "first_seen": "t", "last_seen": "t", "count": 1}
@@ -193,10 +206,26 @@ class _FakeStore:
     async def get_correlation(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
         return self.correlation
 
-    async def record_amendment(self, ticket_ref: str, *, summary_current: str, escalated: bool = False) -> bool:
+    async def record_amendment(
+        self,
+        ticket_ref: str,
+        *,
+        summary_current: str,
+        severity: Optional[str] = None,
+        escalated: bool = False,
+    ) -> bool:
         self.record_amendment_calls.append(
-            {"ticket_ref": ticket_ref, "summary_current": summary_current, "escalated": escalated}
+            {
+                "ticket_ref": ticket_ref,
+                "summary_current": summary_current,
+                "severity": severity,
+                "escalated": escalated,
+            }
         )
+        if self.correlation is not None and severity:
+            self.correlation["severity"] = severity
+        if self.correlation is not None and escalated:
+            self.correlation["escalated_at"] = "now"
         return True
 
 
@@ -230,12 +259,56 @@ def _amend_decision(**overrides: Any) -> CorrelationDecision:
         candidate_refs=["TKT-1"],
         llm_raw="{}",
         needs_root_cause_ticket=False,
+        ticket_severity="warning",
     )
     defaults.update(overrides)
     return CorrelationDecision(**defaults)
 
 
 class TestApplyAmendmentAmend:
+    @pytest.mark.asyncio
+    async def test_new_affected_equipment_updates_ticket_without_count_escalation(self):
+        correlation = _correlation(
+            affected_keys=[
+                {
+                    "kind": "mppt",
+                    "key": key,
+                    "label": f"MPPT {key}",
+                    "first_seen": "t",
+                    "last_seen": "t",
+                    "count": 1,
+                }
+                for key in ("A3", "A4", "A5")
+            ]
+        )
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !", severity="warning")
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            alert=alert,
+            decision=_amend_decision(),
+            raw_text="raw notify text",
+        )
+
+        assert result is not None
+        assert result.decision == "amend"
+        assert result.escalated is False
+        assert result.affected_keys_count == 4
+        assert not ticket_service.update_calls[0]["summary"].startswith("🔴")
+        assert ticket_service.update_calls[0]["priority_id"] is None
+        assert store.record_amendment_calls == [
+            {
+                "ticket_ref": "TKT-1",
+                "summary_current": ticket_service.update_calls[0]["summary"],
+                "severity": "warning",
+                "escalated": False,
+            }
+        ]
+
     @pytest.mark.asyncio
     async def test_merges_key_updates_ticket_and_comments(self):
         correlation = _correlation()
@@ -250,7 +323,6 @@ class TestApplyAmendmentAmend:
             alert=alert,
             decision=_amend_decision(),
             raw_text="raw notify text",
-            escalate_after=5,
         )
 
         assert result is not None
@@ -265,36 +337,32 @@ class TestApplyAmendmentAmend:
         assert store.record_amendment_calls[0]["escalated"] is False
 
     @pytest.mark.asyncio
-    async def test_escalates_when_threshold_crossed(self):
-        correlation = _correlation(
-            affected_keys=[
-                {"kind": "mppt", "key": "A3", "label": "MPPT A3", "first_seen": "t", "last_seen": "t", "count": 1},
-                {"kind": "mppt", "key": "A5", "label": "MPPT A5", "first_seen": "t", "last_seen": "t", "count": 1},
-            ]
-        )
+    async def test_first_urgent_severity_increase_escalates_to_highest(self):
+        correlation = _correlation()
         store = _FakeStore(correlation=correlation)
         ticket_service = _FakeTicketService()
-        alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !")
+        alert = AlertFacts(subject="! Urgent: MPPT A7 in Kudi !", severity="urgent")
 
         result = await apply_amendment(
             store=store,
             ticket_service=ticket_service,
             ticket_ref="TKT-1",
             alert=alert,
-            decision=_amend_decision(),
+            decision=_amend_decision(ticket_severity="warning"),
             raw_text="raw text",
-            escalate_after=3,  # merge brings count from 2 -> 3, crossing the threshold
-            escalated_priority_id="prio-escalated",
         )
 
         assert result.escalated is True
         assert ticket_service.update_calls[0]["summary"].startswith("🔴")
-        assert ticket_service.update_calls[0]["priority_id"] == "prio-escalated"
+        assert ticket_service.update_calls[0]["priority_id"] == "highest"
         assert store.record_amendment_calls[0]["escalated"] is True
+        assert store.record_amendment_calls[0]["severity"] == "urgent"
+        assert correlation["severity"] == "urgent"
 
     @pytest.mark.asyncio
-    async def test_no_re_escalation_once_already_escalated(self):
+    async def test_already_urgent_ticket_keeps_marker_without_priority_update(self):
         correlation = _correlation(
+            severity="urgent",
             escalated_at="2026-01-01T00:00:00Z",
             affected_keys=[
                 {"kind": "mppt", "key": "A3", "label": "MPPT A3", "first_seen": "t", "last_seen": "t", "count": 1},
@@ -304,20 +372,72 @@ class TestApplyAmendmentAmend:
         )
         store = _FakeStore(correlation=correlation)
         ticket_service = _FakeTicketService()
-        alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !")
+        alert = AlertFacts(subject="! Urgent: MPPT A7 in Kudi !", severity="urgent")
 
         result = await apply_amendment(
             store=store,
             ticket_service=ticket_service,
             ticket_ref="TKT-1",
             alert=alert,
-            decision=_amend_decision(),
+            decision=_amend_decision(ticket_severity="urgent"),
             raw_text="raw text",
-            escalate_after=3,
         )
 
         assert result.escalated is False
-        assert not ticket_service.update_calls[0]["summary"].startswith("🔴")
+        assert ticket_service.update_calls[0]["summary"].startswith("🔴")
+        assert ticket_service.update_calls[0]["priority_id"] is None
+
+    @pytest.mark.asyncio
+    async def test_replayed_persisted_urgent_amendment_is_silent(self):
+        correlation = _correlation(
+            severity="urgent",
+            escalated_at="2026-01-01T00:00:00Z",
+        )
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(subject="! Urgent: MPPT A7 in Kudi !", severity="urgent")
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            alert=alert,
+            decision=_amend_decision(
+                decided_by="replay",
+                ticket_severity="urgent",
+            ),
+            raw_text="same retried alert",
+        )
+
+        assert result is not None
+        assert result.decision == "duplicate"
+        assert store.bump_occurrence_calls == []
+        assert store.merge_calls == []
+        assert store.record_amendment_calls == []
+        assert ticket_service.update_calls == []
+        assert ticket_service.comment_calls == []
+
+    @pytest.mark.asyncio
+    async def test_urgent_increase_promotes_despite_legacy_count_escalation_marker(self):
+        correlation = _correlation(
+            severity="warning",
+            escalated_at="2026-01-01T00:00:00Z",
+        )
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(subject="! Urgent: MPPT A7 in Kudi !", severity="urgent")
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            alert=alert,
+            decision=_amend_decision(ticket_severity="warning"),
+            raw_text="raw text",
+        )
+
+        assert result.escalated is True
+        assert ticket_service.update_calls[0]["priority_id"] == "highest"
 
     @pytest.mark.asyncio
     async def test_returns_none_when_correlation_missing(self):
@@ -336,6 +456,42 @@ class TestApplyAmendmentAmend:
 
         assert result is None
         assert ticket_service.update_calls == []
+
+    @pytest.mark.asyncio
+    async def test_urgent_jira_only_candidate_updates_without_correlation_row(self):
+        store = _FakeStore(correlation=None)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(
+            subject="Inverter outage in Kudi",
+            severity="urgent",
+        )
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="OPS-42",
+            alert=alert,
+            decision=_amend_decision(
+                ticket_ref="OPS-42",
+                ticket_severity="warning",
+                amended_summary="Kudi inverter outage",
+            ),
+            raw_text="urgent raw text",
+        )
+
+        assert result is not None
+        assert result.escalated is True
+        assert ticket_service.update_calls == [
+            {
+                "ref": "OPS-42",
+                "summary": "🔴 ! Urgent: Kudi inverter outage",
+                "description": None,
+                "priority_id": "highest",
+            }
+        ]
+        assert ticket_service.comment_calls == [
+            {"ref": "OPS-42", "body": "urgent raw text", "public": False}
+        ]
 
 
 class TestApplyAmendmentDuplicate:

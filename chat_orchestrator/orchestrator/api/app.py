@@ -1157,6 +1157,7 @@ async def _create_notify_ticket(
                 grid_name=target.grid_name,
                 source="notify",
                 llm_context=llm_context,
+                severity=body.alert.severity if body.alert is not None else "",
             ),
             backend_override=backend_override,
         )
@@ -1436,6 +1437,9 @@ async def _resolve_notify_ticket_auto(
     from orchestrator.services.supabase_client import get_supabase_client
     from orchestrator.services.ticketing.alert_facts import enrich_alert_facts
     from orchestrator.services.ticketing.correlation_render import apply_amendment
+    from orchestrator.services.ticketing.correlation_rules import (
+        DEFAULT_CORRELATION_POLICY,
+    )
     from orchestrator.services.ticketing.correlation_store import CorrelationStore
     from orchestrator.services.ticketing.correlator import AlertCorrelator
     from orchestrator.services.ticketing.service import TicketService
@@ -1449,7 +1453,7 @@ async def _resolve_notify_ticket_auto(
         base_alert = AlertFacts(subject=first_line, details=body.text)
     alert = enrich_alert_facts(base_alert, grid_name=target.grid_name)
 
-    timeout_seconds = float(fr.get("ALERT_CORRELATION_TIMEOUT_SECONDS"))
+    timeout_seconds = DEFAULT_CORRELATION_POLICY.llm_timeout_seconds
 
     async with _acquire_grid_correlation_lock(target.grid_name, timeout_seconds) as acquired:
         if not acquired:
@@ -1539,6 +1543,9 @@ async def _resolve_notify_ticket_auto(
                         alert=alert,
                         decision=dataclasses.replace(decision, ticket_ref=result.ref),
                         raw_text=body.text,
+                        grid_name=target.grid_name,
+                        telegram_chat_id=target.chat_id,
+                        telegram_topic_id=target.topic_id,
                     )
                     return (
                         result.ref,
@@ -1590,6 +1597,9 @@ async def _resolve_notify_ticket_auto(
                 alert=alert,
                 decision=decision,
                 raw_text=body.text,
+                grid_name=target.grid_name,
+                telegram_chat_id=target.chat_id,
+                telegram_topic_id=target.topic_id,
             )
             if amendment is None:
                 # Correlation row vanished between decide() and here (store
@@ -1611,7 +1621,7 @@ async def _resolve_notify_ticket_auto(
                 )
                 delivery = (
                     _amend_delivery(decision, amendment, ticket)
-                    if decision.decision == "amend"
+                    if amendment.decision == "amend"
                     else _duplicate_delivery(amendment, ticket)
                 )
                 delivery = dataclasses.replace(

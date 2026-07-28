@@ -1,13 +1,11 @@
 <!--
-  FALLBACK INSTRUCTIONS FILE
-  Used when ALERT_CORRELATION_DOC_ID environment variable is not set, or
-  the configured Google Doc is unreachable.
+  APPLICATION-VERSIONED CORRELATION POLICY
+  This bundled file is the sole instruction source for alert correlation.
 
-  These are the operator-editable rules AlertCorrelator (correlator.py)
-  sends to the LLM alongside the incoming alert, the grid's deterministic
-  operational facts, and its open ticket candidates. Edit this file (or the
-  Google Doc, once configured) to tune correlation behavior without a code
-  change -- same mechanism as customer_instructions.md / staff_instructions.md.
+  AlertCorrelator (correlator.py) sends these reviewed rules to the LLM
+  alongside the incoming alert, deterministic grid facts, and open ticket
+  candidates. Policy changes are made here and shipped with an application
+  version; deployments cannot override them with a Google Doc or RAG context.
 -->
 
 # System Instructions

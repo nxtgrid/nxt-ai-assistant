@@ -136,14 +136,20 @@ class CorrelationStore:
         return rows[0] if rows else None
 
     async def record_amendment(
-        self, ticket_ref: str, *, summary_current: str, escalated: bool = False
+        self,
+        ticket_ref: str,
+        *,
+        summary_current: str,
+        severity: Optional[str] = None,
+        escalated: bool = False,
     ) -> bool:
-        """Persist the freshly-rendered summary (and, on first crossing the
-        escalation threshold, ``escalated_at``) after an amend executes."""
+        """Persist rendered state after an amendment executes."""
         client = self._client()
         if client is None:
             return False
         payload: Dict[str, Any] = {"summary_current": summary_current}
+        if severity:
+            payload["severity"] = severity
         if escalated:
             payload["escalated_at"] = datetime.now(timezone.utc).isoformat()
         try:
@@ -222,9 +228,12 @@ class CorrelationStore:
         telegram_chat_id: Optional[str],
         telegram_topic_id: Optional[str],
     ) -> bool:
-        """Create (or, on a retry, update) the correlation row for a
-        newly-filed ticket. Upserts on ``ticket_ref`` so a retried "new"
-        decision is idempotent rather than erroring on the UNIQUE constraint."""
+        """Create (or, on a retry, update) a ticket's correlation row.
+
+        This seeds both newly-filed tickets and externally discovered tickets
+        the first time correlation amends them. Upserting on ``ticket_ref``
+        makes either path idempotent at the UNIQUE constraint.
+        """
         client = self._client()
         if client is None:
             return False

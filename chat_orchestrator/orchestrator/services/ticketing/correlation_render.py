@@ -11,10 +11,10 @@ the ticket backend: nothing here ever reads Jira ADF back.
 ``apply_amendment`` is the orchestration that runs after ``AlertCorrelator``
 decides "amend" or "duplicate": merge the new affected key (amend only),
 bump the occurrence counter (both), re-render and push to the ticket backend
-(amend only), and auto-escalate once the affected-component count crosses
-``ALERT_CORRELATION_ESCALATE_AFTER``. Telegram delivery itself is Task 10's
-concern -- this only returns the correlation's stored Telegram targets so
-the caller (the ``/notify`` handler) can act on them.
+(amend only), and escalate the first urgent severity increase. Telegram
+delivery itself is Task 10's concern -- this only returns the correlation's
+stored Telegram targets so the caller (the ``/notify`` handler) can act on
+them.
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
 from .alert_facts import AlertFacts
@@ -45,6 +44,9 @@ _KIND_LABELS = {
 }
 
 _MAX_KEYS_SHOWN = 6
+_SEVERITY_PREFIX = re.compile(
+    r"^\s*!\s*(?:urgent|warning)\s*:\s*", re.IGNORECASE
+)
 
 
 def _pluralize_kind(kind: str, count: int) -> str:
@@ -67,6 +69,14 @@ def _severity_marker(summary_base: str) -> str:
     return ""
 
 
+def _apply_incoming_severity(summary: str, severity: str) -> str:
+    if severity.strip().casefold() != "urgent":
+        return summary
+    if _SEVERITY_PREFIX.match(summary):
+        return _SEVERITY_PREFIX.sub("! Urgent: ", summary, count=1)
+    return f"! Urgent: {summary}".rstrip()
+
+
 def render_summary(correlation: Dict[str, Any], alert: AlertFacts, llm_summary: str) -> str:
     """Recompute a ticket's summary from its current affected-keys state.
 
@@ -81,7 +91,8 @@ def render_summary(correlation: Dict[str, Any], alert: AlertFacts, llm_summary: 
     total_keys = len(affected_keys)
 
     if total_keys < 2:
-        return (llm_summary or correlation.get("summary_base") or "").strip()
+        summary = (llm_summary or correlation.get("summary_base") or "").strip()
+        return _apply_incoming_severity(summary, alert.severity)
 
     kind_groups: Dict[str, List[str]] = {}
     for entry in affected_keys:
@@ -92,7 +103,11 @@ def render_summary(correlation: Dict[str, Any], alert: AlertFacts, llm_summary: 
     if not keys:
         return (llm_summary or correlation.get("summary_base") or "").strip()
 
-    severity = _severity_marker(correlation.get("summary_base") or "")
+    severity = (
+        "! Urgent: "
+        if alert.severity.strip().casefold() == "urgent"
+        else _severity_marker(correlation.get("summary_base") or "")
+    )
     grid_name = correlation.get("grid_name", "")
     label = _pluralize_kind(dominant_kind, len(keys))
 
@@ -160,8 +175,9 @@ async def apply_amendment(
     alert: AlertFacts,
     decision: CorrelationDecision,
     raw_text: str,
-    escalate_after: Optional[int] = None,
-    escalated_priority_id: Optional[str] = None,
+    grid_name: str = "",
+    telegram_chat_id: Optional[str] = None,
+    telegram_topic_id: Optional[str] = None,
 ) -> Optional[AmendmentResult]:
     """Execute an "amend" or "duplicate" correlation decision against ``ticket_ref``.
 
@@ -170,23 +186,35 @@ async def apply_amendment(
     suppression rather than a ticket update. "amend" merges the new affected
     key, re-renders summary/description from the post-merge state, pushes
     that to the ticket backend, appends the raw alert as a comment, and
-    auto-escalates (priority bump + a "🔴 " summary prefix) the first time
-    the affected-component count reaches ``escalate_after``.
+    escalates (Highest priority + a "🔴 " summary prefix) the first time an
+    incoming urgent alert raises the stored ticket's severity.
 
-    Returns ``None`` if the correlation row can't be loaded (e.g. a store
-    outage between ``AlertCorrelator.decide()`` and here) -- the caller must
-    treat that the same as any other correlation failure (log and move on;
-    the ticket itself was already filed/exists, so nothing is lost, only the
-    amend's side effects are skipped for this alert).
+    Returns ``None`` if a non-urgent amendment's correlation row can't be
+    loaded (e.g. a store outage between ``AlertCorrelator.decide()`` and
+    here). Urgent amendments still apply their summary and dynamic Highest
+    priority directly to the existing backend ticket, so a Jira-discovered
+    candidate from before correlation-store cutover cannot lose escalation.
     """
-    escalate_after = (
-        escalate_after if escalate_after is not None else int(fr.get("ALERT_CORRELATION_ESCALATE_AFTER"))
-    )
-    escalated_priority_id = (
-        escalated_priority_id
-        if escalated_priority_id is not None
-        else (fr.get("JIRA_ALERT_ESCALATED_PRIORITY_ID") or None)
-    )
+    if (
+        decision.decided_by == "replay"
+        and alert.severity.strip().casefold() == "urgent"
+        and decision.ticket_severity.strip().casefold() == "urgent"
+    ):
+        correlation = await store.get_correlation(ticket_ref)
+        if (
+            correlation is not None
+            and str(correlation.get("severity") or "").strip().casefold() == "urgent"
+        ):
+            return AmendmentResult(
+                ticket_ref=ticket_ref,
+                decision="duplicate",
+                escalated=False,
+                affected_keys_count=len(correlation.get("affected_keys") or []),
+                occurrence_count=int(correlation.get("occurrence_count") or 1),
+                telegram_chat_id=correlation.get("telegram_chat_id"),
+                telegram_topic_id=correlation.get("telegram_topic_id"),
+                telegram_message_id=correlation.get("telegram_message_id"),
+            )
 
     await store.bump_occurrence(ticket_ref)
 
@@ -200,6 +228,90 @@ async def apply_amendment(
 
     correlation = await store.get_correlation(ticket_ref)
     if correlation is None:
+        if (
+            decision.decision == "amend"
+            and alert.severity.strip().casefold() == "urgent"
+        ):
+            summary = (
+                decision.amended_summary or alert.subject or decision.update_message
+            ).strip()
+            urgent_summary = _apply_incoming_severity(summary, alert.severity)
+            final_summary = (
+                urgent_summary
+                if urgent_summary.startswith("🔴")
+                else f"🔴 {urgent_summary}".rstrip()
+            )
+            await ticket_service.update_ticket(
+                ticket_ref,
+                summary=final_summary,
+                description=None,
+                priority_id="highest",
+            )
+            if raw_text:
+                await ticket_service.add_comment(ticket_ref, raw_text, public=False)
+            seeded_affected_count = 0
+            if grid_name:
+                affected_key = decision.affected_key or (
+                    {
+                        "kind": alert.component_kind,
+                        "key": alert.component_key,
+                        "label": alert.component_label,
+                    }
+                    if alert.component_kind and alert.component_key
+                    else None
+                )
+                affected_keys = (
+                    [
+                        {
+                            **affected_key,
+                            "first_seen": alert.fired_at,
+                            "last_seen": alert.fired_at,
+                            "count": 1,
+                        }
+                    ]
+                    if affected_key is not None
+                    else []
+                )
+                seeded_affected_count = len(affected_keys)
+                try:
+                    seeded = await store.upsert_correlation(
+                        ticket_ref=ticket_ref,
+                        ticket_backend=await ticket_service.get_backend_name(ticket_ref),
+                        grid_name=grid_name,
+                        organization_id=None,
+                        root_cause_kind=decision.root_cause_kind,
+                        primary_signature=alert.signature or "",
+                        signatures=[alert.signature] if alert.signature else [],
+                        affected_keys=affected_keys,
+                        summary_base=final_summary,
+                        description_base=raw_text,
+                        severity="urgent",
+                        telegram_chat_id=telegram_chat_id,
+                        telegram_topic_id=telegram_topic_id,
+                    )
+                    if seeded:
+                        await store.record_amendment(
+                            ticket_ref,
+                            summary_current=final_summary,
+                            severity="urgent",
+                            escalated=True,
+                        )
+                except Exception:
+                    LOGGER.warning(
+                        "apply_amendment: failed to seed Jira-only correlation row for %r",
+                        ticket_ref,
+                        exc_info=True,
+                    )
+            return AmendmentResult(
+                ticket_ref=ticket_ref,
+                decision="amend",
+                escalated=True,
+                affected_keys_count=seeded_affected_count,
+                occurrence_count=1,
+                telegram_chat_id=telegram_chat_id,
+                telegram_topic_id=telegram_topic_id,
+                telegram_message_id=None,
+            )
         LOGGER.warning(
             "apply_amendment: correlation row for %r not found after merge -- "
             "skipping render/ticket-update side effects",
@@ -223,19 +335,43 @@ async def apply_amendment(
     new_description = render_description(correlation)
 
     affected_count = len(correlation.get("affected_keys") or [])
-    escalate_now = affected_count >= escalate_after and not correlation.get("escalated_at")
-    final_summary = f"🔴 {new_summary}" if escalate_now else new_summary
+    severity_increased_to_urgent = (
+        alert.severity.strip().casefold() == "urgent"
+        and decision.ticket_severity.strip().casefold() != "urgent"
+    )
+    # Severity is the source of truth. A legacy count-based ``escalated_at``
+    # marker must not prevent the first warning-to-urgent priority promotion.
+    escalate_now = severity_increased_to_urgent
+    remains_escalated = bool(correlation.get("escalated_at"))
+    final_summary = f"🔴 {new_summary}" if escalate_now or remains_escalated else new_summary
+    effective_severity = (
+        "urgent"
+        if any(
+            severity.strip().casefold() == "urgent"
+            for severity in (
+                str(correlation.get("severity") or ""),
+                decision.ticket_severity,
+                alert.severity,
+            )
+        )
+        else (alert.severity or decision.ticket_severity or correlation.get("severity") or "")
+    )
 
     await ticket_service.update_ticket(
         ticket_ref,
         summary=final_summary,
         description=new_description,
-        priority_id=escalated_priority_id if escalate_now else None,
+        priority_id="highest" if escalate_now else None,
     )
     if raw_text:
         await ticket_service.add_comment(ticket_ref, raw_text, public=False)
 
-    await store.record_amendment(ticket_ref, summary_current=final_summary, escalated=escalate_now)
+    await store.record_amendment(
+        ticket_ref,
+        summary_current=final_summary,
+        severity=effective_severity,
+        escalated=escalate_now,
+    )
 
     return AmendmentResult(
         ticket_ref=ticket_ref,

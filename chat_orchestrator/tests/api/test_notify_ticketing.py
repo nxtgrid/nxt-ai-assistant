@@ -22,9 +22,15 @@ from orchestrator.api.app import (
     _resolve_notify_ticket_full,
     handle_notify,
 )
-from orchestrator.services.ticketing.backend import TicketCreateOutcome, TicketResult, TicketStatus
+from orchestrator.services.ticketing.backend import (
+    TicketBackendError,
+    TicketCreateOutcome,
+    TicketResult,
+    TicketStatus,
+)
 from orchestrator.services.ticketing.correlation_render import AmendmentResult
 from orchestrator.services.ticketing.correlator import CorrelationDecision
+from orchestrator.services.ticketing.service import TicketService
 from orchestrator.services.urgent_alert_context import build_urgent_alert_context
 from shared.auth.auth_service import GridNotificationTarget
 
@@ -40,6 +46,7 @@ class _FakeTicketService:
         self.init_kwargs = kwargs
         self.create_ticket_calls: List[tuple] = []
         self.add_comment_calls: List[tuple] = []
+        self.update_ticket_calls: List[Dict[str, Any]] = []
         self.transition_to_done_calls: List[str] = []
         self.get_status_return: Optional[TicketStatus] = TicketStatus(
             summary="s", is_done=False
@@ -74,6 +81,23 @@ class _FakeTicketService:
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         self.add_comment_calls.append((ref, body, public))
+        return True
+
+    async def update_ticket(
+        self,
+        ref: str,
+        summary: Optional[str] = None,
+        description: Optional[str] = None,
+        priority_id: Optional[str] = None,
+    ) -> bool:
+        self.update_ticket_calls.append(
+            {
+                "ref": ref,
+                "summary": summary,
+                "description": description,
+                "priority_id": priority_id,
+            }
+        )
         return True
 
     async def transition_to_done(self, ref: str) -> None:
@@ -177,6 +201,18 @@ async def test_blank_ticket_id_prefers_alert_subject_for_summary():
 
     req, _ = _FakeTicketService.instances[-1].create_ticket_calls[0]
     assert req.summary == "Inverter output stopped"
+
+
+async def test_structured_urgent_severity_is_carried_to_ticket_creation():
+    body = _notify_body(
+        ticket_id="",
+        alert={"subject": "Grid down", "severity": "urgent"},
+    )
+
+    await _resolve_notify_ticket(body, _target())
+
+    req, _ = _FakeTicketService.instances[-1].create_ticket_calls[0]
+    assert req.severity == "urgent"
 
 
 async def test_jira_ticket_type_selection_receives_live_output_context(monkeypatch):
@@ -374,6 +410,48 @@ async def test_handle_notify_create_ticket_returns_ref_in_response(monkeypatch):
 
     content = json.loads(response.body)
     assert content == {"ok": True, "ticket_ref": "TKT-000001"}
+
+
+async def test_handle_notify_falls_open_to_internal_when_jira_has_no_compatible_type(
+    monkeypatch,
+):
+    class _JiraWithoutCompatibleType:
+        name = "jira"
+
+        def has_credentials(self):
+            return True
+
+        async def create_ticket(self, _request):
+            raise TicketBackendError("Jira cannot supply a compatible issue type")
+
+    class _InternalFallback:
+        name = "internal"
+
+        async def create_ticket(self, _request):
+            return TicketResult(ref="TKT-000002", backend="internal", url=None)
+
+    service = TicketService(
+        jira_backend=_JiraWithoutCompatibleType(),
+        internal_backend=_InternalFallback(),
+    )
+    monkeypatch.setenv("JIRA_PROJECT_KEY", "OPS")
+    monkeypatch.setenv("NOTIFY_TICKETS_BACKEND", "jira")
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.service.TicketService",
+        lambda **_kwargs: service,
+    )
+    monkeypatch.setattr("shared.auth.get_auth_service", lambda: _FakeAuthService(_target()))
+
+    response = await handle_notify(
+        _FakeRequest(headers={"X-Notify-Secret": "test-secret"}),
+        _notify_body(ticket_id="", alert={"subject": "Grid down"}),
+        BackgroundTasks(),
+    )
+
+    import json
+
+    assert response.status_code == 202
+    assert json.loads(response.body)["ticket_ref"].startswith("TKT-")
 
 
 async def test_handle_notify_still_sends_when_all_ticket_backends_fail(
@@ -602,6 +680,199 @@ class TestResolveNotifyTicketAutoAmend:
         assert delivery.text_override == "Added MPPT A7 (2 affected components)"
         assert delivery.ticket == NotificationTicket(ref="TKT-000042", backend="internal")
 
+    async def test_replayed_amendment_uses_silent_executor_result(
+        self, fake_apply_amendment, monkeypatch
+    ):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="TKT-000042",
+            decision="duplicate",
+            escalated=False,
+            affected_keys_count=2,
+            occurrence_count=3,
+            telegram_chat_id="-100555",
+            telegram_topic_id="42",
+            telegram_message_id=123,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="amend",
+            ticket_ref="TKT-000042",
+            confidence=0.9,
+            decided_by="replay",
+            ticket_severity="urgent",
+        )
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(
+            _notify_body(
+                ticket_id="auto",
+                alert={
+                    "subject": "! Urgent: Multiple MPPTs offline",
+                    "severity": "urgent",
+                },
+            ),
+            _target(),
+        )
+
+        assert error is None
+        assert ref == "TKT-000042"
+        assert extra["decided_by"] == "replay"
+        assert delivery is not None
+        assert delivery.suppress is True
+
+    async def test_jira_only_urgent_amendment_replay_is_durably_silent(
+        self, fake_telegram_send, monkeypatch
+    ):
+        from orchestrator.api import app as app_module
+
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _FakeTicketService.backend_for_ref = "jira"
+
+        class _PersistentStore:
+            def __init__(self) -> None:
+                self.correlation: Optional[Dict[str, Any]] = None
+
+            async def get_correlation(self, ticket_ref):
+                return self.correlation
+
+            async def bump_occurrence(self, ticket_ref, occurred_at=None):
+                if self.correlation is not None:
+                    self.correlation["occurrence_count"] += 1
+                return self.correlation is not None
+
+            async def merge_affected_key(self, *args, **kwargs):
+                return None
+
+            async def upsert_correlation(self, **kwargs):
+                self.correlation = {
+                    **kwargs,
+                    "summary_current": kwargs["summary_base"],
+                    "occurrence_count": 1,
+                    "escalated_at": None,
+                }
+                return True
+
+            async def record_amendment(
+                self,
+                ticket_ref,
+                *,
+                summary_current,
+                severity=None,
+                escalated=False,
+            ):
+                assert self.correlation is not None
+                self.correlation["summary_current"] = summary_current
+                self.correlation["severity"] = severity
+                if escalated:
+                    self.correlation["escalated_at"] = "now"
+                return True
+
+        store = _PersistentStore()
+
+        class _TwoPassCorrelator:
+            calls: List[Optional[str]] = []
+
+            def __init__(self, store, ticket_service):
+                self.store = store
+
+            async def decide(
+                self,
+                grid_name,
+                alert,
+                dedup_key=None,
+                backend_override=None,
+                get_live_facts=None,
+            ):
+                self.calls.append(dedup_key)
+                if len(self.calls) == 1:
+                    return _decision(
+                        decision="amend",
+                        ticket_ref="OPS-42",
+                        confidence=0.9,
+                        decided_by="llm",
+                        affected_key={
+                            "kind": "inverter",
+                            "key": "INV-1",
+                            "label": "Inverter INV-1",
+                        },
+                        amended_summary="Kudi inverter outage",
+                        ticket_severity="warning",
+                    )
+                correlation = await self.store.get_correlation("OPS-42")
+                return _decision(
+                    decision="amend",
+                    ticket_ref="OPS-42",
+                    confidence=0.9,
+                    decided_by="replay",
+                    ticket_severity=(
+                        str(correlation.get("severity") or "")
+                        if correlation is not None
+                        else ""
+                    ),
+                )
+
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+            lambda get_client=None: store,
+        )
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlator.AlertCorrelator",
+            _TwoPassCorrelator,
+        )
+        body = _notify_body(
+            ticket_id="auto",
+            dedup_key="jira-urgent-1",
+            text="urgent raw text",
+            alert={
+                "subject": "Inverter outage in Kudi",
+                "severity": "urgent",
+                "component_kind": "inverter",
+                "component_key": "INV-1",
+                "component_label": "Inverter INV-1",
+            },
+        )
+        alert_context = _live_context(3.1)
+
+        first_ref, first_error, _first_extra, first_delivery = (
+            await _resolve_notify_ticket_full(body, _target(), alert_context)
+        )
+        await app_module._deliver_notification(
+            body,
+            _target(),
+            first_ref,
+            first_delivery,
+        )
+        second_ref, second_error, _second_extra, second_delivery = (
+            await _resolve_notify_ticket_full(body, _target(), alert_context)
+        )
+        await app_module._deliver_notification(
+            body,
+            _target(),
+            second_ref,
+            second_delivery,
+        )
+
+        services = _FakeTicketService.instances
+        update_calls = [
+            call for service in services for call in service.update_ticket_calls
+        ]
+        comment_calls = [
+            call for service in services for call in service.add_comment_calls
+        ]
+        assert first_error is None
+        assert second_error is None
+        assert _TwoPassCorrelator.calls == ["jira-urgent-1", "jira-urgent-1"]
+        assert update_calls == [
+            {
+                "ref": "OPS-42",
+                "summary": "🔴 ! Urgent: Kudi inverter outage",
+                "description": None,
+                "priority_id": "highest",
+            }
+        ]
+        assert comment_calls == [("OPS-42", "urgent raw text", False)]
+        assert len(fake_telegram_send.calls) == 1
+
 
 class TestResolveNotifyTicketAutoDuplicate:
     async def test_duplicate_decision_returns_existing_ref_without_new_ticket(
@@ -711,9 +982,15 @@ class TestResolveNotifyTicketAutoFailureModes:
         from contextlib import asynccontextmanager
 
         import orchestrator.api.app as app_module
+        from orchestrator.services.ticketing.correlation_rules import (
+            DEFAULT_CORRELATION_POLICY,
+        )
+
+        observed_timeout_seconds: list[float] = []
 
         @asynccontextmanager
         async def _never_available(grid_name, timeout_seconds):
+            observed_timeout_seconds.append(timeout_seconds)
             yield False
 
         monkeypatch.setattr(app_module, "_acquire_grid_correlation_lock", _never_available)
@@ -724,6 +1001,9 @@ class TestResolveNotifyTicketAutoFailureModes:
         assert error is None
         assert ref == "TKT-000001"
         assert extra["decided_by"] == "fallback"
+        assert observed_timeout_seconds == [
+            DEFAULT_CORRELATION_POLICY.llm_timeout_seconds
+        ]
         assert delivery is not None
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
 
@@ -1175,10 +1455,9 @@ def test_amend_delivery_names_new_component_and_distinct_total():
     assert delivery.reply_to_message_id == 555
 
 
-def test_duplicate_delivery_is_silent_even_at_rollup_boundary(monkeypatch):
+def test_duplicate_delivery_is_silent():
     from orchestrator.api.app import _duplicate_delivery
 
-    monkeypatch.setenv("ALERT_CORRELATION_ROLLUP_EVERY", "10")
     amendment = AmendmentResult(
         ticket_ref="OPS-42",
         decision="duplicate",

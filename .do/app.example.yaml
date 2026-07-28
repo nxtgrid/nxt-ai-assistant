@@ -401,6 +401,14 @@ services:
       - key: JIRA_ISSUE_TYPE
         value: "Support"
         scope: RUN_TIME
+      # /chat/notify ticketing: keep alerts internal unless Jira is intentionally selected.
+      - key: NOTIFY_TICKETS_BACKEND
+        value: "internal"
+        scope: RUN_TIME
+      # Set false only to bypass alert correlation; ticketing remains fail-open.
+      - key: ALERT_CORRELATION_ENABLED
+        value: "true"
+        scope: RUN_TIME
 
       # Response Verification (LLM-as-judge for customer mode)
       - key: VERIFICATION_ENABLED
@@ -416,11 +424,6 @@ services:
       # Urgent /chat/notify live inverter-output lookup budget
       - key: URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS
         value: "3"
-        scope: RUN_TIME
-
-      # Deprecated duplicate roll-up interval; duplicates always stay Telegram-silent.
-      - key: ALERT_CORRELATION_ROLLUP_EVERY
-        value: "0"
         scope: RUN_TIME
 
       # Mini App Forms (Telegram WebApp popup)

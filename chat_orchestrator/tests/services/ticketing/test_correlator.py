@@ -18,8 +18,10 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
+from orchestrator.services.ticketing import correlator as correlator_module
 from orchestrator.services.ticketing.alert_facts import AlertFacts, enrich_alert_facts
 from orchestrator.services.ticketing.backend import TicketStatus, TicketSummary
+from orchestrator.services.ticketing.correlation_rules import CorrelationPolicy
 from orchestrator.services.ticketing.correlator import (
     AlertCorrelator,
     CandidateSummary,
@@ -102,6 +104,25 @@ class TestApplyGuardrails:
 
         assert decision.decision == "duplicate"
         assert decision.ticket_ref == "TKT-1"
+
+    def test_urgent_refire_of_warning_candidate_becomes_material_amend(self):
+        parsed = {
+            "decision": "duplicate",
+            "ticket_ref": "TKT-1",
+            "confidence": 0.9,
+            "relationship": "same_issue",
+        }
+        decision = _apply_guardrails(
+            parsed,
+            [_candidate(severity="warning", signatures=["sig-a"])],
+            min_confidence=0.75,
+            llm_raw="{}",
+            alert_signature="sig-a",
+            alert_severity="urgent",
+        )
+
+        assert decision.decision == "amend"
+        assert "severity" in decision.reason
 
     def test_unknown_ref_forces_new(self):
         parsed = {"decision": "amend", "ticket_ref": "TKT-999", "confidence": 0.9}
@@ -223,6 +244,12 @@ class _FakeStore:
     async def get_by_dedup_key(self, dedup_key: str) -> Optional[Dict[str, Any]]:
         return self.events.get(dedup_key)
 
+    async def get_correlation(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
+        return next(
+            (row for row in self.correlations if row["ticket_ref"] == ticket_ref),
+            None,
+        )
+
     async def open_candidates_for_grid(self, grid_name, since_iso, limit=15):
         return [
             row
@@ -313,10 +340,102 @@ def _mppt_alert(subject="! Warning: MPPT A3 in Kudi seems to perform lower !", *
     return enrich_alert_facts(alert, grid_name="Kudi")
 
 
+class TestVersionedPolicy:
+    @pytest.mark.asyncio
+    async def test_injected_policy_limits_the_candidates_sent_to_the_model(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        store = _FakeStore()
+        ticket_service = _FakeTicketService()
+        gateway = _FakeGateway(text=json.dumps({"decision": "new", "confidence": 0.9}))
+        for ref in ("TKT-1", "TKT-2"):
+            store.correlations.append(
+                {
+                    "ticket_ref": ref,
+                    "grid_name": "Kudi",
+                    "status": "open",
+                    "signatures": [],
+                    "affected_keys": [],
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+            ticket_service.statuses[ref] = TicketStatus(summary=ref, is_done=False)
+
+        correlator = AlertCorrelator(
+            store=store,
+            ticket_service=ticket_service,
+            gateway=gateway,
+            model="fake-model",
+            policy=CorrelationPolicy(
+                confidence_floor=0.75,
+                llm_timeout_seconds=5,
+                open_candidate_window_hours=24,
+                maximum_candidate_count=1,
+            ),
+            get_correlation_instructions=lambda: {"system_instructions": "rules"},
+            get_rag_context=_no_rag,
+            get_grid_operational_context=_no_grid_facts,
+        )
+
+        await correlator.decide("Kudi", _mppt_alert())
+
+        prompt_messages, _options = gateway.calls[0]
+        prompt_text = "\n".join(message.text or "" for message in prompt_messages)
+        assert "TKT-1" in prompt_text
+        assert "TKT-2" not in prompt_text
+
+    @pytest.mark.asyncio
+    async def test_default_model_comes_from_application_settings(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        monkeypatch.setattr(
+            correlator_module,
+            "get_settings",
+            lambda: type(
+                "_Settings",
+                (),
+                {"gemini": type("_Gemini", (), {"model": "application-primary"})()},
+            )(),
+        )
+        store = _FakeStore()
+        ticket_service = _FakeTicketService()
+        gateway = _FakeGateway(text=json.dumps({"decision": "new", "confidence": 0.9}))
+        correlator = AlertCorrelator(
+            store=store,
+            ticket_service=ticket_service,
+            gateway=gateway,
+            get_correlation_instructions=lambda: {"system_instructions": "rules"},
+            get_rag_context=_no_rag,
+            get_grid_operational_context=_no_grid_facts,
+        )
+        store.correlations.append(
+            {
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "signatures": [],
+                "affected_keys": [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ticket_service.statuses["TKT-1"] = TicketStatus(summary="TKT-1", is_done=False)
+
+        await correlator.decide("Kudi", _mppt_alert())
+
+        _messages, options = gateway.calls[0]
+        assert options.model == "application-primary"
+
+
 class TestDedupReplay:
     @pytest.mark.asyncio
     async def test_replays_prior_decision_without_new_io(self):
         correlator, store, _ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "severity": "urgent",
+            }
+        )
         store.events["dk-1"] = {
             "decision": "amend",
             "ticket_ref": "TKT-1",
@@ -330,6 +449,7 @@ class TestDedupReplay:
         assert decision.decision == "amend"
         assert decision.ticket_ref == "TKT-1"
         assert decision.decided_by == "replay"
+        assert decision.ticket_severity == "urgent"
         assert gateway.calls == []  # no LLM call for a replay
 
 
@@ -386,6 +506,63 @@ class TestSignatureDuplicate:
         assert decision.ticket_ref == "TKT-1"
         assert decision.decided_by == "signature"
         assert gateway.calls == []  # deterministic rung -- never reaches the LLM
+
+    @pytest.mark.asyncio
+    async def test_urgent_refire_of_warning_ticket_is_a_material_amend(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert(
+            subject="! Urgent: MPPT A3 in Kudi seems to perform lower !",
+            severity="urgent",
+        )
+        correlator, store, ticket_service, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "severity": "warning",
+                "signatures": [alert.signature],
+                "affected_keys": [
+                    {"kind": "mppt", "key": "A3", "label": "MPPT A3"}
+                ],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ticket_service.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "amend"
+        assert decision.ticket_severity == "warning"
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_urgent_refire_after_ticket_is_urgent_is_silent_duplicate(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert(
+            subject="! Urgent: MPPT A3 in Kudi seems to perform lower !",
+            severity="urgent",
+        )
+        correlator, store, ticket_service, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "severity": "urgent",
+                "signatures": [alert.signature],
+                "affected_keys": [
+                    {"kind": "mppt", "key": "A3", "label": "MPPT A3"}
+                ],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ticket_service.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "duplicate"
+        assert gateway.calls == []
 
     @pytest.mark.asyncio
     async def test_same_signature_different_key_is_not_a_signature_duplicate(self, monkeypatch):

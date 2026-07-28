@@ -40,6 +40,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from orchestrator.config.settings import get_settings
 from shared.config import flag_registry as fr
 from shared.llm import GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
@@ -136,6 +137,7 @@ def _apply_guardrails(
     min_confidence: float,
     llm_raw: Optional[str],
     alert_signature: Optional[str] = None,
+    alert_severity: str = "",
 ) -> CorrelationDecision:
     """Turn a parsed LLM response into a safe ``CorrelationDecision``.
 
@@ -192,7 +194,12 @@ def _apply_guardrails(
             f"confidence {confidence!r} below minimum {min_confidence}", candidate_refs, llm_raw
         )
 
-    if decision == "duplicate":
+    if decision == "duplicate" and _is_urgent_severity_increase(
+        alert_severity, by_ref[ticket_ref].severity
+    ):
+        decision = "amend"
+        reason = reason or "urgent severity increase makes this alert a material amendment"
+    elif decision == "duplicate":
         relationship = parsed.get("relationship")
         candidate = by_ref[ticket_ref]
         signature_overlap = bool(alert_signature) and alert_signature in (candidate.signatures or [])
@@ -245,6 +252,13 @@ def _find_signature_duplicate(
             if entry.get("kind") == alert.component_kind and entry.get("key") == alert.component_key:
                 return candidate
     return None
+
+
+def _is_urgent_severity_increase(incoming: str, existing: str) -> bool:
+    return (
+        incoming.strip().casefold() == "urgent"
+        and existing.strip().casefold() != "urgent"
+    )
 
 
 def _age_hours(created_at: Optional[str], now: datetime) -> Optional[float]:
@@ -329,6 +343,7 @@ class AlertCorrelator:
         ticket_service: Any,
         gateway: Any = None,
         model: Optional[str] = None,
+        policy: correlation_rules.CorrelationPolicy = correlation_rules.DEFAULT_CORRELATION_POLICY,
         min_confidence: Optional[float] = None,
         timeout_seconds: Optional[float] = None,
         lookback_hours: Optional[int] = None,
@@ -339,7 +354,7 @@ class AlertCorrelator:
     ) -> None:
         self._store = store
         self._ticket_service = ticket_service
-        self._model = model or fr.get("ALERT_CORRELATION_MODEL")
+        self._model = model if model is not None else get_settings().gemini.model
 
         if gateway is not None:
             self._gateway = gateway
@@ -349,16 +364,20 @@ class AlertCorrelator:
             self._gateway = get_default_generation_gateway(default_model=self._model)
 
         self._min_confidence = (
-            min_confidence if min_confidence is not None else float(fr.get("ALERT_CORRELATION_MIN_CONFIDENCE"))
+            min_confidence if min_confidence is not None else policy.confidence_floor
         )
         self._timeout_seconds = (
-            timeout_seconds if timeout_seconds is not None else float(fr.get("ALERT_CORRELATION_TIMEOUT_SECONDS"))
+            timeout_seconds if timeout_seconds is not None else policy.llm_timeout_seconds
         )
         self._lookback_hours = (
-            lookback_hours if lookback_hours is not None else int(fr.get("ALERT_CORRELATION_LOOKBACK_HOURS"))
+            lookback_hours
+            if lookback_hours is not None
+            else policy.open_candidate_window_hours
         )
         self._max_candidates = (
-            max_candidates if max_candidates is not None else int(fr.get("ALERT_CORRELATION_MAX_CANDIDATES"))
+            max_candidates
+            if max_candidates is not None
+            else policy.maximum_candidate_count
         )
         self._get_correlation_instructions = (
             get_correlation_instructions or correlation_rules.get_correlation_instructions
@@ -379,9 +398,23 @@ class AlertCorrelator:
         if dedup_key:
             prior = await self._store.get_by_dedup_key(dedup_key)
             if prior:
+                ticket_ref = prior.get("ticket_ref")
+                ticket_severity = prior.get("ticket_severity") or ""
+                if ticket_ref:
+                    try:
+                        correlation = await self._store.get_correlation(ticket_ref)
+                    except Exception:
+                        LOGGER.warning(
+                            "Failed to load durable severity for replayed ticket %r",
+                            ticket_ref,
+                            exc_info=True,
+                        )
+                    else:
+                        if correlation is not None:
+                            ticket_severity = correlation.get("severity") or ticket_severity
                 return CorrelationDecision(
                     decision=prior.get("decision", "new"),
-                    ticket_ref=prior.get("ticket_ref"),
+                    ticket_ref=ticket_ref,
                     confidence=prior.get("confidence"),
                     decided_by="replay",
                     reason=prior.get("reason") or "replayed prior decision (dedup_key match)",
@@ -392,7 +425,7 @@ class AlertCorrelator:
                     candidate_refs=[],
                     llm_raw=None,
                     needs_root_cause_ticket=False,
-                    ticket_severity=prior.get("ticket_severity") or "",
+                    ticket_severity=ticket_severity,
                 )
 
         if not fr.get("ALERT_CORRELATION_ENABLED"):
@@ -419,12 +452,19 @@ class AlertCorrelator:
 
         duplicate = _find_signature_duplicate(candidates, alert)
         if duplicate is not None:
+            severity_increased = _is_urgent_severity_increase(
+                alert.severity, duplicate.severity
+            )
             decision = CorrelationDecision(
-                decision="duplicate",
+                decision="amend" if severity_increased else "duplicate",
                 ticket_ref=duplicate.ref,
                 confidence=1.0,
                 decided_by="signature",
-                reason="exact signature+component match against an open ticket",
+                reason=(
+                    "urgent severity increase on an exact signature+component match"
+                    if severity_increased
+                    else "exact signature+component match against an open ticket"
+                ),
                 affected_key={
                     "kind": alert.component_kind,
                     "key": alert.component_key,
@@ -432,7 +472,7 @@ class AlertCorrelator:
                 },
                 root_cause_kind=duplicate.root_cause_kind,
                 update_message="",
-                amended_summary="",
+                amended_summary=alert.subject if severity_increased else "",
                 candidate_refs=[c.ref for c in candidates],
                 llm_raw=None,
                 needs_root_cause_ticket=False,
@@ -469,6 +509,7 @@ class AlertCorrelator:
             min_confidence=self._min_confidence,
             llm_raw=raw,
             alert_signature=alert.signature,
+            alert_severity=alert.severity,
         )
         return await self._finalize(grid_name, alert, dedup_key, decision)
 

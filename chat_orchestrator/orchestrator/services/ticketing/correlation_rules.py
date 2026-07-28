@@ -1,28 +1,16 @@
-"""Operator-editable alert correlation rules + supporting context lookups.
+"""Versioned alert-correlation policy and supporting operational context.
 
-Feeds the ``AlertCorrelator`` (correlator.py) prompt with three independent
-context sources, each following the same "degrade, never fail" contract as
-the rest of the correlation pipeline:
-
-- ``get_correlation_instructions()`` -- the rules doc itself (Google Doc,
-  falling back to a bundled file, falling back to a minimal built-in string).
-- ``get_rag_context()`` -- permission-filtered RAG snippets, opt-in via
-  ``ALERT_CORRELATION_RAG_IDENTITY`` (independent of the general
-  ``rag__enabled`` flag being *also* on).
-- ``get_grid_operational_context()`` -- deterministic grid facts
-  (``is_hps_on``, DCU status) from the auth DB -- what lets the model reason
-  e.g. "grid has been OFF for 41h -> this MPPT alert is a child".
-
-None of these ever raise: a bad Google Doc, RAG being disabled/misconfigured,
-or an auth-DB error all just mean less context in the prompt, never a
-failed correlation decision.
+The LLM instructions and safety bounds in this module ship with the
+application. Deployments may disable correlation with the kill switch, but
+cannot silently substitute different grouping rules, confidence bounds, or
+prompt limits.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -37,34 +25,34 @@ _MINIMAL_FALLBACK_INSTRUCTIONS = (
 )
 
 
-def get_correlation_instructions(doc_id: Optional[str] = None) -> Dict[str, str]:
-    """Operator-editable alert correlation rules, as a sections dict.
+@dataclass(frozen=True)
+class CorrelationPolicy:
+    """Application-versioned safety bounds for one correlation decision."""
 
-    Priority: Google Doc (``ALERT_CORRELATION_DOC_ID``) -> bundled
-    ``alert_correlation_instructions.md`` -> a minimal built-in string.
+    confidence_floor: float = 0.75
+    llm_timeout_seconds: float = 12
+    open_candidate_window_hours: int = 168
+    maximum_candidate_count: int = 15
+
+
+DEFAULT_CORRELATION_POLICY = CorrelationPolicy()
+
+
+def get_correlation_instructions() -> Dict[str, str]:
+    """Load the bundled correlation rules, with a minimal packaging fallback.
+
+    There is intentionally no document id or other deployment override: rule
+    changes are reviewed and versioned with the application.
     """
-    from orchestrator.services.artifacts_provider import ArtifactsProvider
     from orchestrator.services.instructions_provider import _load_fallback_instructions
 
-    resolved_doc_id = doc_id if doc_id is not None else (fr.get("ALERT_CORRELATION_DOC_ID") or "")
     sections: Optional[Dict[str, str]] = None
-    if resolved_doc_id:
-        try:
-            sections = ArtifactsProvider()._fetch_google_doc_sections(resolved_doc_id)
-        except Exception:
-            LOGGER.warning(
-                "Failed to fetch alert correlation doc %s", resolved_doc_id, exc_info=True
-            )
-            sections = None
-
-    if not sections:
-        try:
-            sections = _load_fallback_instructions("alert_correlation_instructions.md")
-        except Exception:
-            LOGGER.warning(
-                "Failed to load bundled alert_correlation_instructions.md", exc_info=True
-            )
-            sections = None
+    try:
+        sections = _load_fallback_instructions("alert_correlation_instructions.md")
+    except Exception:
+        LOGGER.warning(
+            "Failed to load bundled alert_correlation_instructions.md", exc_info=True
+        )
 
     if not sections:
         sections = {"system_instructions": _MINIMAL_FALLBACK_INSTRUCTIONS}
@@ -75,32 +63,8 @@ def get_correlation_instructions(doc_id: Optional[str] = None) -> Dict[str, str]
 async def get_rag_context(
     query: str, limit: Optional[int] = None, rag_provider: Any = None
 ) -> List[str]:
-    """Permission-filtered RAG snippets for the correlation prompt.
-
-    No-op (returns ``[]``) when ``rag__enabled`` is false or
-    ``ALERT_CORRELATION_RAG_IDENTITY`` is blank -- correlation must work with
-    RAG entirely absent.
-    """
-    if not fr.get("rag__enabled"):
-        return []
-    identity = (fr.get("ALERT_CORRELATION_RAG_IDENTITY") or "").strip()
-    if not identity:
-        return []
-    if not query.strip():
-        return []
-
-    try:
-        if rag_provider is None:
-            from orchestrator.services.rag_provider import RAGProvider
-
-            rag_provider = RAGProvider()
-        effective_limit = limit if limit is not None else fr.get("rag__top_k")
-        return await rag_provider.retrieve_as_text(
-            query=query, user_email=identity, limit=effective_limit
-        )
-    except Exception:
-        LOGGER.warning("Alert correlation RAG lookup failed", exc_info=True)
-        return []
+    """Reserved versioned-policy hook; external RAG context is currently disabled."""
+    return []
 
 
 async def get_grid_operational_context(

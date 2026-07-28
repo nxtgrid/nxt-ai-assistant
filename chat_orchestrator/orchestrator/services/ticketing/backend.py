@@ -48,6 +48,9 @@ class TicketCreateRequest(BaseModel):
     # Extra context for LLM-only ticket decisions (for example Jira issue-type
     # selection). It is never persisted in Jira or internal ticket fields.
     llm_context: Dict[str, Any] = Field(default_factory=dict)
+    # Normalized alert severity for backend behavior such as Jira's optional
+    # Highest-priority mapping. Empty for non-alert callers.
+    severity: str = ""
     source: TicketSourceLiteral = "escalation"
 
 
