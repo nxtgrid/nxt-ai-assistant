@@ -22,9 +22,15 @@ from orchestrator.api.app import (
     _resolve_notify_ticket_full,
     handle_notify,
 )
-from orchestrator.services.ticketing.backend import TicketCreateOutcome, TicketResult, TicketStatus
+from orchestrator.services.ticketing.backend import (
+    TicketBackendError,
+    TicketCreateOutcome,
+    TicketResult,
+    TicketStatus,
+)
 from orchestrator.services.ticketing.correlation_render import AmendmentResult
 from orchestrator.services.ticketing.correlator import CorrelationDecision
+from orchestrator.services.ticketing.service import TicketService
 from orchestrator.services.urgent_alert_context import build_urgent_alert_context
 from shared.auth.auth_service import GridNotificationTarget
 
@@ -404,6 +410,48 @@ async def test_handle_notify_create_ticket_returns_ref_in_response(monkeypatch):
 
     content = json.loads(response.body)
     assert content == {"ok": True, "ticket_ref": "TKT-000001"}
+
+
+async def test_handle_notify_falls_open_to_internal_when_jira_has_no_compatible_type(
+    monkeypatch,
+):
+    class _JiraWithoutCompatibleType:
+        name = "jira"
+
+        def has_credentials(self):
+            return True
+
+        async def create_ticket(self, _request):
+            raise TicketBackendError("Jira cannot supply a compatible issue type")
+
+    class _InternalFallback:
+        name = "internal"
+
+        async def create_ticket(self, _request):
+            return TicketResult(ref="TKT-000002", backend="internal", url=None)
+
+    service = TicketService(
+        jira_backend=_JiraWithoutCompatibleType(),
+        internal_backend=_InternalFallback(),
+    )
+    monkeypatch.setenv("JIRA_PROJECT_KEY", "OPS")
+    monkeypatch.setenv("NOTIFY_TICKETS_BACKEND", "jira")
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.service.TicketService",
+        lambda **_kwargs: service,
+    )
+    monkeypatch.setattr("shared.auth.get_auth_service", lambda: _FakeAuthService(_target()))
+
+    response = await handle_notify(
+        _FakeRequest(headers={"X-Notify-Secret": "test-secret"}),
+        _notify_body(ticket_id="", alert={"subject": "Grid down"}),
+        BackgroundTasks(),
+    )
+
+    import json
+
+    assert response.status_code == 202
+    assert json.loads(response.body)["ticket_ref"].startswith("TKT-")
 
 
 async def test_handle_notify_still_sends_when_all_ticket_backends_fail(
@@ -930,7 +978,6 @@ class TestResolveNotifyTicketAutoFailureModes:
 
     async def test_lock_timeout_falls_back_to_plain_create(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
-        monkeypatch.setenv("ALERT_CORRELATION_TIMEOUT_SECONDS", "999")
 
         from contextlib import asynccontextmanager
 
@@ -1434,10 +1481,9 @@ def test_amend_delivery_names_new_component_and_distinct_total():
     assert delivery.reply_to_message_id == 555
 
 
-def test_duplicate_delivery_is_silent_even_at_rollup_boundary(monkeypatch):
+def test_duplicate_delivery_is_silent():
     from orchestrator.api.app import _duplicate_delivery
 
-    monkeypatch.setenv("ALERT_CORRELATION_ROLLUP_EVERY", "10")
     amendment = AmendmentResult(
         ticket_ref="OPS-42",
         decision="duplicate",

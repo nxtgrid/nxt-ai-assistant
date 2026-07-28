@@ -181,6 +181,9 @@ envs:
   - key: METRICS_SCHEDULE_HOUR
     value: "9"
     scope: RUN_TIME
+  - key: METRICS_TIMEZONE
+    value: "UTC"
+    scope: RUN_TIME
 
   # Grafana
   - key: GRAFANA_URL
@@ -218,6 +221,9 @@ envs:
   # Admin UI
   - key: ALLOWED_VIEWER_EMAILS
     value: "admin@example.com"
+    scope: RUN_TIME
+  - key: STAFF_ORG_NAME
+    value: "Staff"
     scope: RUN_TIME
   - key: DEFAULT_BROADCAST_GROUPS
     value: ""
@@ -401,6 +407,19 @@ services:
       - key: JIRA_ISSUE_TYPE
         value: "Support"
         scope: RUN_TIME
+      # /chat/notify ticketing: keep alerts internal unless Jira is intentionally selected.
+      - key: NOTIFY_TICKETS_BACKEND
+        value: "internal"
+        scope: RUN_TIME
+      # Set false only to bypass alert correlation; ticketing remains fail-open.
+      - key: ALERT_CORRELATION_ENABLED
+        value: "true"
+        scope: RUN_TIME
+
+      # After-hours escalation handling begins at this hour (0-23).
+      - key: AFTER_HOURS_START_HOUR
+        value: "19"
+        scope: RUN_TIME
 
       # Response Verification (LLM-as-judge for customer mode)
       - key: VERIFICATION_ENABLED
@@ -416,11 +435,6 @@ services:
       # Urgent /chat/notify live inverter-output lookup budget
       - key: URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS
         value: "3"
-        scope: RUN_TIME
-
-      # Deprecated duplicate roll-up interval; duplicates always stay Telegram-silent.
-      - key: ALERT_CORRELATION_ROLLUP_EVERY
-        value: "0"
         scope: RUN_TIME
 
       # Mini App Forms (Telegram WebApp popup)

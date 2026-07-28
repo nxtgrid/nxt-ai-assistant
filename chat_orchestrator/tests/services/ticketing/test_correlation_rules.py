@@ -12,11 +12,6 @@ from orchestrator.services.ticketing import correlation_rules
 
 class TestGetCorrelationInstructions:
     def test_correlation_instructions_are_loaded_from_the_bundled_file(self, monkeypatch):
-        monkeypatch.setenv("ALERT_CORRELATION_DOC_ID", "ignored-doc")
-        monkeypatch.setattr(
-            "orchestrator.services.artifacts_provider.ArtifactsProvider._fetch_google_doc_sections",
-            lambda self, doc_id: {"system_instructions": "from deployment override"},
-        )
         monkeypatch.setattr(
             "orchestrator.services.instructions_provider._load_fallback_instructions",
             lambda filename: {"system_instructions": "from bundled file"},
@@ -52,7 +47,6 @@ class TestGetRagContext:
         self, monkeypatch
     ):
         monkeypatch.setenv("rag__enabled", "true")
-        monkeypatch.setenv("ALERT_CORRELATION_RAG_IDENTITY", "staff@example.com")
         calls: List[Dict[str, Any]] = []
 
         class _FakeRagProvider:

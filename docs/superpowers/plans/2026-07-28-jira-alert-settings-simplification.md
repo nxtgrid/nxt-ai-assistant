@@ -412,9 +412,13 @@ Expected: PASS; no removed key is visible/documented, a Jira-incompatible alert 
 
 - [ ] **Step 6: Run final static and full test verification**
 
-Run: `rg 'JIRA_ALERT_|ALERT_CORRELATION_(MODEL|DOC_ID|MIN_CONFIDENCE|TIMEOUT_SECONDS|LOOKBACK_HOURS|MAX_CANDIDATES|ESCALATE_AFTER|ROLLUP_EVERY|RAG_IDENTITY)|customfield_10057|JIRA_GRID_FALLBACK_OPTION_ID' . -g '!docs/superpowers/specs/*' -g '!docs/superpowers/plans/*'`
+Run: `rg 'JIRA_ALERT_|ALERT_CORRELATION_(MODEL|DOC_ID|MIN_CONFIDENCE|TIMEOUT_SECONDS|LOOKBACK_HOURS|MAX_CANDIDATES|ESCALATE_AFTER|ROLLUP_EVERY|RAG_IDENTITY)' . -g '!docs/superpowers/specs/*' -g '!docs/superpowers/plans/*'`
 
-Expected: no production, test, generated-example, or README references.
+Expected: no production, test, generated-example, or README references. Then run: `rg 'customfield_10057|JIRA_GRID_FALLBACK_OPTION_ID' chat_orchestrator/orchestrator/services/ticketing`.
+
+Expected: no active ticketing-backend reference. Legacy customer-escalation and
+MCP Jira integrations are outside this alert-ticketing settings cleanup; they
+must not be changed merely to satisfy this scan.
 
 Run: `cd chat_orchestrator && ruff check orchestrator tests && pytest -q`
 

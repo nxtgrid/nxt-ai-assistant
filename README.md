@@ -533,25 +533,53 @@ Response
 
 ### Environment Variables
 
-#### Required (All Components)
+Two kinds of configuration exist. **Credentials and connection strings** (API
+keys, database URLs, OAuth secrets) come from the host environment — set them
+in your platform's env var UI or a local `.env` and they are never written
+back. **Operator-tunable flags** (feature toggles, model choices, timeouts,
+layout parameters) live in [`shared/config/flag_registry.py`](shared/config/flag_registry.py),
+are documented in the generated [`shared/config/flags.env.example`](shared/config/flags.env.example),
+and are normally set through the anansi_app Settings page rather than by
+editing the environment directly.
+
+The settings page's own Deployment Readiness panel reports exactly what a
+given environment is still missing, grouped by capability rather than by
+variable name. The tiers below are what it checks, in the order a new
+deployment typically reaches them:
+
+#### Tier 0 — the settings page loads (local development)
+```bash
+GRID_DESIGN_DEV_NO_AUTH=1   # bypasses Google OAuth entirely — never set this in production
+```
+Nothing else is required to boot `anansi_app` and reach `/settings` locally.
+
+#### Tier 0′ — the settings page loads, with real admin login
+```bash
+GOOGLE_CLIENT_ID=your-oauth-client-id.apps.googleusercontent.com
+GOOGLE_CLIENT_SECRET=your-oauth-client-secret
+AUTH_REDIRECT_URI=http://localhost:8501/oauth2callback
+ALLOWED_VIEWER_EMAILS=admin@example.com
+```
+
+#### Tier 1 — settings changes persist
+Nothing further: the portable env-file backend writes `.env.settings` and
+changes apply on the next process restart. To drive a live DigitalOcean app
+spec instead (redeploys on save):
+```bash
+DIGITALOCEAN_APP_ID=your-do-app-id
+DIGITALOCEAN_API_TOKEN=your-do-api-token
+```
+
+#### Tier 2 — the bot answers messages
 ```bash
 GOOGLE_API_KEY=your-gemini-api-key
-LLM_PROVIDER=gemini
-CHAT_DB_URL=https://your-project.supabase.co
-CHAT_DB_SERVICE_KEY=your-service-role-key
-```
+TELEGRAM_BOT_TOKEN=your-telegram-bot-token
+CHAT_DB_URL=https://your-project.supabase.co        # or SUPABASE_URL
+CHAT_DB_SERVICE_KEY=your-service-role-key           # or SUPABASE_KEY
+API_KEY=your-orchestrator-api-key
+SESSION_ID_SECRET=generate-a-random-secret
 
-#### System Instructions (Chat Orchestrator)
-```bash
-GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
-CUSTOMER_SUPPORT_DOC_ID=1abc123xyz456
-STAFF_SUPPORT_DOC_ID=1def789uvw012
-EXPERT_INSTRUCTIONS_DOC_ID=1ghi456jkl789  # Expert definitions
-```
-
-#### Authentication (Chat Orchestrator)
-```bash
-# Option A: Direct PostgreSQL (Recommended)
+# Authentication — Option A: direct PostgreSQL (recommended)
 AUTH_DB_DIRECT_CONNECTION=true
 AUTH_DB_HOST=db.your-auth-project.supabase.co
 AUTH_DB_PORT=6543
@@ -559,38 +587,44 @@ AUTH_DB_NAME=postgres
 AUTH_DB_USER=readonly_user
 AUTH_DB_PASSWORD=your_password
 AUTH_DB_SSL_MODE=require
-
-# Option B: Supabase Client
+# Option B: Supabase client
 # AUTH_SUPABASE_URL=https://your-auth-project.supabase.co
 # AUTH_SUPABASE_KEY=your_auth_service_key
+
+# System instructions
+GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
+CUSTOMER_SUPPORT_DOC_ID=1abc123xyz456
+STAFF_SUPPORT_DOC_ID=1def789uvw012
+EXPERT_INSTRUCTIONS_DOC_ID=1ghi456jkl789  # Expert definitions
 ```
 
-#### RAG Pipeline (Optional)
+#### Tier 3 — per-integration (all optional; configurable from the Settings page)
 ```bash
-# GitHub
+# Jira (escalations; without these, escalations still post to Telegram and
+# are tracked in the internal ticket ledger)
+JIRA_BASE_URL=https://your-domain.atlassian.net
+JIRA_USERNAME=your-email@example.com
+JIRA_API_TOKEN=your-api-token
+
+# Grafana (dashboard/panel tools)
+GRAFANA_URL=http://localhost:3000
+GRAFANA_USERNAME=admin
+GRAFANA_PASSWORD=your-grafana-password
+
+# POST /chat/notify (Grafana / n8n / VRM passthrough)
+NOTIFY_SHARED_SECRET=your-shared-secret
+
+# RAG pipeline
 GITHUB_TOKEN=ghp_your-token
 GITHUB_REPO=owner/repo
-
-# Telegram
 TELEGRAM_API_ID=12345678
 TELEGRAM_API_HASH=abc123...
 ```
 
-#### MCP Tools (Optional)
-```bash
-# Timescale
-TIMESCALE_CONNECTION_STRING=postgresql://user:pass@host:5432/db  # pragma: allowlist secret
-
-# JIRA
-JIRA_DOMAIN=your-domain.atlassian.net
-JIRA_EMAIL=your-email@example.com
-JIRA_API_TOKEN=your-api-token
-
-# Action Flags
-SUPABASE_ACTIONS_ENABLED=true
-TIMESCALE_ACTIONS_ENABLED=true
-JIRA_ACTIONS_ENABLED=true
-```
+Every other tunable (which MCP servers are enabled, model choices, layout
+geometry, RAG toggles, and the read/write gate per MCP server) has a sensible
+default and is listed in full, with descriptions, in
+[`shared/config/flags.env.example`](shared/config/flags.env.example).
 
 #### Ticket backend (Jira-optional escalations)
 
@@ -628,50 +662,24 @@ The alert is still forwarded to Telegram in every case; `ticket_id`/`close`/`ale
 
 #### Alert correlation (`ticket_id="auto"`)
 
-One root cause (e.g. a grid stuck `OFF`/`Unknown` for hours) can otherwise produce a storm of separate tickets — every dependent MPPT/DCU alert filing its own issue. `ticket_id="auto"` groups an incoming alert against a grid's already-open tickets instead: an LLM (given the grid's deterministic operational facts, RAG context, and the candidate open tickets) decides **new** / **amend** (a different affected component of the same issue — appended to the existing ticket's affected-components list) / **duplicate** (the exact same component re-firing — silent, occurrence-counted only). See [docs/superpowers/plans/2026-07-27-smart-alert-correlation-notify.md](docs/superpowers/plans/2026-07-27-smart-alert-correlation-notify.md) for the full design.
+One root cause (e.g. a grid stuck `OFF`/`Unknown` for hours) can otherwise produce a storm of separate tickets — every dependent MPPT/DCU alert filing its own issue. `ticket_id="auto"` groups an incoming alert against a grid's already-open tickets instead: an LLM (given the grid's deterministic operational facts and the candidate open tickets) decides **new** / **amend** (a different affected component of the same issue — appended to the existing ticket's affected-components list) / **duplicate** (the exact same component re-firing — silent, occurrence-counted only). See [docs/superpowers/plans/2026-07-27-smart-alert-correlation-notify.md](docs/superpowers/plans/2026-07-27-smart-alert-correlation-notify.md) for the full design.
 
 The response for `ticket_id="auto"` adds `decision` (`"new"|"amend"|"duplicate"`), `correlated_with` (the ticket this alert was matched against, or `null` for a new ticket), `confidence`, and `decided_by` (`"replay"|"flag_off"|"no_candidates"|"signature"|"llm"|"fallback"`) alongside `ticket_ref`.
 
 **Fail-open guarantee:** every failure mode — the LLM timing out or erroring, an unparseable response, a correlation-store outage, a per-grid lock timeout — falls back to filing a plain new ticket (`decided_by="fallback"`), the same as `ticket_id=""`. Correlation only ever adds grouping on top; it can never cause an alert to be dropped.
 
 ```bash
-# Master switch. Off: ticket_id="auto" behaves exactly like "" (plain create).
-ALERT_CORRELATION_ENABLED=false
+# Choose the Jira project used when the Jira backend is selected.
+JIRA_PROJECT_KEY=OPS
 
-# Model used for the new/amend/duplicate decision.
-ALERT_CORRELATION_MODEL=gemini-2.5-flash
+# Keep /chat/notify alerts internal by default; select auto to use healthy Jira.
+NOTIFY_TICKETS_BACKEND=internal
 
-# Google Doc with operator-editable correlation rules (root-cause grouping
-# heuristics, component taxonomy, examples). Falls back to the bundled
-# chat_orchestrator/instructions/alert_correlation_instructions.md, then to a
-# minimal built-in string, if unset/unreachable.
-ALERT_CORRELATION_DOC_ID=
-
-# Below this LLM confidence, an amend/duplicate is forced back to "new".
-ALERT_CORRELATION_MIN_CONFIDENCE=0.75
-
-# Budget (seconds) for the LLM call + per-grid lock acquisition combined.
-ALERT_CORRELATION_TIMEOUT_SECONDS=12
-
-# How far back (hours) to look for open candidate tickets on a grid.
-ALERT_CORRELATION_LOOKBACK_HOURS=168
-
-# Max candidate tickets included in the correlation LLM prompt.
-ALERT_CORRELATION_MAX_CANDIDATES=15
-
-# Affected-component count before a ticket is auto-escalated (priority bump +
-# a fresh, non-reply Telegram post instead of a quiet reply).
-ALERT_CORRELATION_ESCALATE_AFTER=3
-
-# Deprecated duplicate roll-up interval. Duplicates never send Telegram.
-ALERT_CORRELATION_ROLLUP_EVERY=0
-
-# Staff email used for permission-filtered RAG context during correlation.
-# Blank disables RAG for correlation, independent of the general rag__enabled flag.
-ALERT_CORRELATION_RAG_IDENTITY=
+# Leave correlation enabled. Set false only to bypass it and file a plain ticket.
+ALERT_CORRELATION_ENABLED=true
 ```
 
-**Jira metadata and type choice:** when Jira is the resolved backend (`NOTIFY_TICKETS_BACKEND=auto` and Jira healthy), `/notify` fetches the configured project's live create metadata and asks the LLM to choose only from its creatable issue types. The selected type is used only when every required field can be populated safely from the request and metadata; otherwise the service falls back to the configured `JIRA_ISSUE_TYPE`, then the first compatible type. This keeps Jira ticket creation on one project-derived path without per-project field settings.
+**Alert setup:** set `JIRA_PROJECT_KEY`, choose `NOTIFY_TICKETS_BACKEND`, and leave `ALERT_CORRELATION_ENABLED` enabled unless you intentionally need the plain-ticket bypass. When Jira is selected but its project has no compatible issue type, `/notify` fails open to an internal `TKT-*` ticket.
 
 **Concurrency caveat:** correlation serializes decisions per grid with an in-process `asyncio.Lock`, which is correct for the current single-process deployment (`chat_orchestrator/Dockerfile` runs `uvicorn` with no `--workers`). At `instance_count > 1` (or with `--workers`), this stops serializing across processes — several alerts for the same grid arriving at once across instances can still each see "no open candidate" and file separate tickets. A distributed lease table is the documented follow-up (see the plan's "Concurrency" section); don't scale this endpoint horizontally without addressing it first.
 
@@ -680,7 +688,6 @@ ALERT_CORRELATION_RAG_IDENTITY=
 - **Disable ticketing into Jira** (keep correlation): `NOTIFY_TICKETS_BACKEND=internal` — alert tickets stay in `internal_tickets`/`ticket_correlations`, never reach the Jira project.
 - **Disable the endpoint entirely**: `NOTIFY_ENDPOINT_ENABLED=false` — `/notify` 503s.
 - **Inspect a decision**: the `ticket_correlation_events` table (or the ticket's "Decision history" section on its admin Tickets page detail view) has every decision, `decided_by`, confidence, and reason for a ticket_ref.
-- **Bust the rules-doc cache** after editing `ALERT_CORRELATION_DOC_ID`'s Google Doc: call `orchestrator.services.artifacts_provider.clear_gdoc_cache()` (same 1-hour-TTL cache every other Google-Doc-backed instructions surface uses) or wait out the TTL.
 
 ### Getting Google Doc IDs
 

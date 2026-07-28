@@ -1465,7 +1465,7 @@ class GrafanaDataClient:
             main_chart = self._build_timeseries_chart(data_values, panel, unit_label, styling)
 
         # Build watermark text layer
-        org_name = os.getenv("ORGANIZATION_NAME", "Anansi")
+        org_name = os.getenv("ORGANIZATION_NAME", "the operator")
         watermark_text = (
             f"© {org_name}.\n"
             f"Confidential to {org_name} and authorized partners.\n"
