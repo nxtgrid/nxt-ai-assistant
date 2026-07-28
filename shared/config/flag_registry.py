@@ -2,10 +2,16 @@
 
 This module is the **single source of truth** for every operator-tunable
 environment variable in Anansi (feature toggles, model knobs, layout
-parameters, MCP server enables, etc.). Credentials and connection strings
-(``GOOGLE_API_KEY``, ``AUTH_DB_*``, ``CHAT_DB_*`` …) are intentionally *not*
-registered here — those are secrets documented per-service in each
-``.env.example`` and are never managed through the settings UI.
+parameters, MCP server enables, etc.).
+
+Credentials fall into two classes. *App-owned* integration secrets
+(``GRAFANA_PASSWORD``, ``OPENROUTER_API_KEY``, ``TAVILY_API_KEY``) are
+registered editable and are set through the settings UI, which writes them to
+the deployment backend as secrets. *Host-owned* credentials and connection
+strings (``AUTH_DB_*``, ``CHAT_DB_*``, ``DIGITALOCEAN_API_TOKEN`` …) are
+registered ``editable=False, document=False`` so they can never be written
+back; they exist here only so the deployment-readiness view can report
+whether they are set.
 
 Why this exists
 ---------------
@@ -244,6 +250,48 @@ def _mcp_enable_flags() -> List[Flag]:
     ]
 
 
+def _mcp_actions_flags() -> List[Flag]:
+    """Per-server write gates ({SERVER}_ACTIONS_ENABLED).
+
+    ``mcp_servers/shared_code/config/action_flags.py`` has always honoured these
+    -- they are the read-only vs read-write switch for each server -- but they
+    were never registered, so they were invisible in the settings UI and absent
+    from the generated env example.
+    """
+    return [
+        _b(
+            f"{srv.upper()}_ACTIONS_ENABLED",
+            False,
+            f"Allow write/action tools on the {srv.replace('_', ' ')} MCP server "
+            "(read-only tools are unaffected).",
+            group="tools",
+            depends_on=f"{srv.upper()}_ENABLED",
+            advanced=True,
+        )
+        for srv in MCP_SERVER_NAMES
+    ]
+
+
+def _connection(name: str, description: str, set_via: str = "", secret: bool = True) -> Flag:
+    """A credential or endpoint this deployment depends on but does not manage.
+
+    Status-only: shown in the Connections group as configured/not configured so
+    the readiness panel can explain what a deployment is still missing. Never
+    editable, so it can never be written back to the deployment.
+    """
+    return Flag(
+        name,
+        FlagType.STR,
+        "",
+        description,
+        editable=False,
+        secret=secret,
+        document=False,
+        group="connections",
+        set_via=set_via or "Set in the deployment environment (DigitalOcean app spec or .env).",
+    )
+
+
 # ---------------------------------------------------------------------------
 # The registry. Order here is the order used when rendering the example file.
 # ---------------------------------------------------------------------------
@@ -384,6 +432,35 @@ _FLAGS: List[Flag] = [
         scope=SERVICE_BOT,
         group="models",
     ),
+    _i(
+        "GEMINI_THINKING_BUDGET",
+        4096,
+        "Thinking-token budget for Gemini 2.5 models (-1 dynamic, 0 off, >0 cap).",
+        group="models",
+        minimum=-1,
+        maximum=24576,
+        advanced=True,
+    ),
+    _s(
+        "GEMINI_AGENT_PRO_MODEL",
+        "gemini-2.5-pro",
+        "Model for complex agent tasks (analysis, multi-step reasoning).",
+        group="models",
+    ),
+    _s(
+        "THREAD_CLASSIFIER_MODEL",
+        "gemini-2.5-flash-lite",
+        "Model that assigns incoming messages to conversation threads.",
+        scope=SERVICE_BOT,
+        group="models",
+        depends_on="THREAD_DISENTANGLEMENT_ENABLED",
+    ),
+    _b(
+        "GOOGLE_SEARCH_GROUNDING",
+        True,
+        "Allow Google Search grounding for staff users.",
+        group="models",
+    ),
     # --- Conversation Experience ----------------------------------------------
     _b(
         "WORKFLOW_PARAMETER_CONFIRMATION",
@@ -481,6 +558,57 @@ _FLAGS: List[Flag] = [
         group="conversation",
         advanced=True,
     ),
+    _i(
+        "AGENT_MAX_ACTIONS_PER_WAKE",
+        10,
+        "Maximum actions a persistent agent may take in one wake cycle.",
+        scope=SERVICE_BOT,
+        group="conversation",
+        depends_on="PERSISTENT_AGENTS_ENABLED",
+        minimum=1,
+        maximum=100,
+        advanced=True,
+    ),
+    _i(
+        "AGENT_MAX_TOOL_ROUNDS",
+        5,
+        "Maximum sequential tool-call rounds inside one persistent-agent action.",
+        scope=SERVICE_BOT,
+        group="conversation",
+        depends_on="PERSISTENT_AGENTS_ENABLED",
+        minimum=1,
+        maximum=20,
+        advanced=True,
+    ),
+    _b(
+        "LOOP_DETECTION_ENABLED",
+        True,
+        "Detect and break repeated identical tool calls within a turn.",
+        scope=SERVICE_BOT,
+        group="conversation",
+        advanced=True,
+    ),
+    _i(
+        "LOOP_DETECTION_THRESHOLD",
+        2,
+        "Identical repeats before a tool call is treated as a loop.",
+        scope=SERVICE_BOT,
+        group="conversation",
+        depends_on="LOOP_DETECTION_ENABLED",
+        minimum=2,
+        maximum=10,
+        advanced=True,
+    ),
+    _i(
+        "MULTI_SITE_MAX_CONCURRENCY",
+        5,
+        "Maximum sites evaluated in parallel by multi-site workflows.",
+        scope=SERVICE_BOT,
+        group="conversation",
+        minimum=1,
+        maximum=20,
+        advanced=True,
+    ),
     # --- Escalations & Ticketing ----------------------------------------------
     _s(
         "TICKET_BACKEND_OVERRIDE",
@@ -547,6 +675,29 @@ _FLAGS: List[Flag] = [
         depends_on="ALERT_CORRELATION_ENABLED",
         advanced=True,
     ),
+    _b(
+        "JIRA_SWEEP_ENABLED",
+        True,
+        "Run the periodic Jira sweep that reconciles ticket state.",
+        scope=SERVICE_BOT,
+        group="ticketing",
+    ),
+    _s(
+        "JIRA_ISSUE_TYPE",
+        "Task",
+        "Jira issue type used for tickets when the project offers no better match.",
+        scope=SERVICE_BOT,
+        group="ticketing",
+    ),
+    _b(
+        "STARTUP_RECOVERY_ENABLED",
+        True,
+        "Scan for orphaned work on startup. Must be false when running more than "
+        "one orchestrator instance.",
+        scope=SERVICE_BOT,
+        group="ticketing",
+        advanced=True,
+    ),
     # --- Alerts & Notifications ------------------------------------------------
     _b(
         "NOTIFY_ENDPOINT_ENABLED",
@@ -572,8 +723,32 @@ _FLAGS: List[Flag] = [
         group="alerts",
         set_via="Set in the deployment environment; changing it re-points Telegram delivery.",
     ),
+    _s(
+        "NO_REPLY_CHAT_IDS",
+        "",
+        "Comma-separated Telegram chat ids the bot never replies in.",
+        scope=SERVICE_BOT,
+        group="alerts",
+    ),
+    _s(
+        "AFTER_HOURS_TIMEZONE",
+        "",
+        "Timezone for after-hours escalation logic. Empty falls back to DEFAULT_TIMEZONE.",
+        scope=SERVICE_BOT,
+        group="alerts",
+    ),
+    _i(
+        "AFTER_HOURS_START_HOUR",
+        19,
+        "Hour (0-23) when after-hours escalation handling begins.",
+        scope=SERVICE_BOT,
+        group="alerts",
+        minimum=0,
+        maximum=23,
+    ),
     # --- Tools & Integrations ---------------------------------------------------
     *_mcp_enable_flags(),
+    *_mcp_actions_flags(),
     _j(
         "MCP_DISABLED_TOOLS",
         "[]",
@@ -674,6 +849,36 @@ _FLAGS: List[Flag] = [
         group="grafana",
         depends_on="GRAFANA_ENABLED",
         set_via="Machine-managed by the Grafana indexer; use Sync Now.",
+    ),
+    _i(
+        "GRAFANA_QUERY_TIMEOUT",
+        180,
+        "Seconds allowed for a Grafana panel query.",
+        group="grafana",
+        depends_on="GRAFANA_ENABLED",
+        minimum=1,
+        maximum=600,
+        advanced=True,
+    ),
+    _i(
+        "GRAFANA_METADATA_TIMEOUT",
+        30,
+        "Seconds allowed for a Grafana metadata fetch.",
+        group="grafana",
+        depends_on="GRAFANA_ENABLED",
+        minimum=1,
+        maximum=600,
+        advanced=True,
+    ),
+    _i(
+        "GRAFANA_VARIABLE_TIMEOUT",
+        60,
+        "Seconds allowed for a Grafana variable lookup.",
+        group="grafana",
+        depends_on="GRAFANA_ENABLED",
+        minimum=1,
+        maximum=600,
+        advanced=True,
     ),
     # --- Site Layout Engine -------------------------------------------------------
     _f(
@@ -840,6 +1045,90 @@ _FLAGS: List[Flag] = [
         depends_on="GRID_DESIGN_ENABLED",
         advanced=True,
     ),
+    _f(
+        "LAYOUT_KW_PER_HOUSEHOLD",
+        0.0,
+        "Explicit kW per household. 0 lets the pipeline derive it.",
+        scope=SERVICE_BOT,
+        group="layout",
+        depends_on="GRID_DESIGN_ENABLED",
+        advanced=True,
+    ),
+    _f(
+        "LAYOUT_MAX_BRIDGE_DISTANCE_M",
+        200.0,
+        "Longest gap the distribution network may bridge (m).",
+        scope=SERVICE_BOT,
+        group="layout",
+        depends_on="GRID_DESIGN_ENABLED",
+        advanced=True,
+    ),
+    _f(
+        "LAYOUT_PATH_REDUNDANCY_DISTANCE_M",
+        22.5,
+        "Distance under which parallel road paths are treated as redundant (m).",
+        scope=SERVICE_BOT,
+        group="layout",
+        depends_on="GRID_DESIGN_ENABLED",
+        advanced=True,
+    ),
+    _f(
+        "LAYOUT_PATH_WEIGHT_PENALTY",
+        3.0,
+        "Routing penalty applied to building-adjacent paths.",
+        scope=SERVICE_BOT,
+        group="layout",
+        depends_on="GRID_DESIGN_ENABLED",
+        advanced=True,
+    ),
+    _f(
+        "LAYOUT_PLANT_CONNECT_DISTANCE_M",
+        150.0,
+        "Search radius when connecting the plant to the network (m).",
+        scope=SERVICE_BOT,
+        group="layout",
+        depends_on="GRID_DESIGN_ENABLED",
+        advanced=True,
+    ),
+    _i(
+        "LAYOUT_PLANT_CONNECT_K",
+        5,
+        "Number of candidate connection points evaluated for the plant.",
+        scope=SERVICE_BOT,
+        group="layout",
+        depends_on="GRID_DESIGN_ENABLED",
+        minimum=1,
+        advanced=True,
+    ),
+    _f(
+        "LAYOUT_POWER_FACTOR",
+        0.95,
+        "Power factor used to convert kVA to kW.",
+        scope=SERVICE_BOT,
+        group="layout",
+        depends_on="GRID_DESIGN_ENABLED",
+        minimum=0.1,
+        maximum=1.0,
+        advanced=True,
+    ),
+    _f(
+        "LAYOUT_ROAD_CLIP_BUFFER_M",
+        100.0,
+        "Buffer around the site used to clip the road network (m).",
+        scope=SERVICE_BOT,
+        group="layout",
+        depends_on="GRID_DESIGN_ENABLED",
+        advanced=True,
+    ),
+    _f(
+        "LAYOUT_WATERWAY_BUFFER_M",
+        200.0,
+        "Exclusion buffer around waterways (m).",
+        scope=SERVICE_BOT,
+        group="layout",
+        depends_on="GRID_DESIGN_ENABLED",
+        advanced=True,
+    ),
     # --- Documents & Templates -----------------------------------------------------
     _s(
         "EXPERT_INSTRUCTIONS_DOC_ID",
@@ -954,6 +1243,20 @@ _FLAGS: List[Flag] = [
         label="Staff organization id",
         set_via="Set in the deployment environment.",
     ),
+    _s(
+        "STAFF_ORG_NAME",
+        "Staff",
+        "Display name for the internal staff organization.",
+        group="access",
+    ),
+    _s(
+        "MANAGED_GENERATION_COLUMN",
+        "is_generation_managed_by_nxt_grid",
+        "Grids-table column marking operator-managed generation. Interpolated into "
+        "SQL, so use only valid PostgreSQL identifier characters.",
+        group="access",
+        advanced=True,
+    ),
     # --- Metrics & Scheduling ---------------------------------------------------------
     _b(
         "METRICS_ENABLED",
@@ -971,6 +1274,13 @@ _FLAGS: List[Flag] = [
         restart_required=True,
         minimum=0,
         maximum=23,
+    ),
+    _s(
+        "METRICS_TIMEZONE",
+        "UTC",
+        "Timezone used to schedule metrics collection.",
+        group="metrics",
+        depends_on="METRICS_ENABLED",
     ),
     # --- Deployment (read-only; set outside this app) --------------------------------
     _s(
@@ -999,6 +1309,71 @@ _FLAGS: List[Flag] = [
         editable=False,
         group="deployment",
         set_via="Set in the deployment environment.",
+    ),
+    _s(
+        "ORGANIZATION_NAME",
+        "the operator",
+        "Operator name shown in chart watermarks and equipment messages.",
+        group="deployment",
+    ),
+    _s(
+        "DOC_CODE_PREFIX",
+        "DOC",
+        "Prefix for generated document reference codes.",
+        group="deployment",
+    ),
+    # --- Connections & Credentials (status-only; never written back) -----------------
+    _connection(
+        "GOOGLE_API_KEY",
+        "Google AI Studio key for Gemini generation and embeddings.",
+    ),
+    _connection(
+        "GOOGLE_SERVICE_ACCOUNT_JSON",
+        "Service account JSON used to read Google Docs and Drive.",
+    ),
+    _connection("TELEGRAM_BOT_TOKEN", "Telegram bot token."),
+    _connection("TELEGRAM_BOT_USERNAME", "Telegram bot username.", secret=False),
+    _connection("CHAT_DB_URL", "Chat database (Supabase) URL.", secret=False),
+    _connection("CHAT_DB_SERVICE_KEY", "Chat database service-role key."),
+    _connection("AUTH_DB_HOST", "Auth database host."),
+    _connection("API_KEY", "Shared key authenticating calls to the orchestrator."),
+    _connection("SESSION_ID_SECRET", "Secret used to derive session identifiers."),
+    _connection("CHAT_ORCHESTRATOR_URL", "Orchestrator chat endpoint.", secret=False),
+    _connection(
+        "DIGITALOCEAN_APP_ID",
+        "DigitalOcean app id for the settings backend.",
+        secret=False,
+    ),
+    _connection(
+        "DIGITALOCEAN_API_TOKEN",
+        "DigitalOcean API token for the settings backend.",
+    ),
+    _connection("JIRA_BASE_URL", "Jira Cloud base URL.", secret=False),
+    _connection("JIRA_USERNAME", "Jira account email.", secret=False),
+    _connection("JIRA_API_TOKEN", "Jira API token."),
+    _connection("NOTIFY_SHARED_SECRET", "Shared secret required on POST /chat/notify."),
+    _connection(
+        "LANGFUSE_DASHBOARD_URL",
+        "Langfuse dashboard link shown in the sidebar.",
+        secret=False,
+    ),
+    # App-owned integration secrets: editable, unlike the host-owned credentials
+    # above -- an operator turns these on from the settings UI.
+    _s(
+        "OPENROUTER_API_KEY",
+        "",
+        "OpenRouter API key.",
+        scope=SERVICE_BOT,
+        group="connections",
+        secret=True,
+    ),
+    _s(
+        "TAVILY_API_KEY",
+        "",
+        "Tavily web-search key for the knowledge server.",
+        group="connections",
+        secret=True,
+        depends_on="KNOWLEDGE_ENABLED",
     ),
 ]
 

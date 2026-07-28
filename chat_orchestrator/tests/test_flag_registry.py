@@ -68,12 +68,16 @@ def test_generated_env_example_is_current():
 
 
 def test_documented_flags_appear_in_example():
-    text = GENERATED_EXAMPLE.read_text(encoding="utf-8")
+    # Matched as whole lines, not substrings: "API_KEY=" is also a suffix of
+    # "OPENROUTER_API_KEY=", which a naive `in` check would false-positive on.
+    lines = set(GENERATED_EXAMPLE.read_text(encoding="utf-8").splitlines())
     for name, flag in fr.FLAGS.items():
+        expected_value = "" if flag.secret else flag.default_str
+        present = f"{name}={expected_value}" in lines
         if flag.document:
-            assert f"{name}=" in text, f"{name} should be documented in flags.env.example"
+            assert present, f"{name} should be documented in flags.env.example"
         else:
-            assert f"{name}=" not in text, f"{name} should be excluded from flags.env.example"
+            assert not present, f"{name} should be excluded from flags.env.example"
 
 
 def test_registry_has_no_jira_alert_profile_flags():
@@ -310,3 +314,65 @@ class TestFlagUIMetadata:
         for name, flag in fr.FLAGS.items():
             if not flag.editable and flag.show_in_settings:
                 assert flag.set_via, f"{name} is read-only but has no set_via hint"
+
+
+# --------------------------------------------------------------------------- #
+# Newly registered flags: registering must not change runtime behaviour
+# --------------------------------------------------------------------------- #
+class TestNewlyRegisteredFlagsMatchTheirConsumers:
+    """Registering a flag must not change runtime behaviour.
+
+    Each expected value here was read from the module that actually consumes the
+    variable. If a consumer's default changes, this test fails and the registry
+    gets updated with it -- which is the drift these assertions exist to stop.
+    """
+
+    EXPECTED = {
+        "AGENT_MAX_ACTIONS_PER_WAKE": 10,
+        "AGENT_MAX_TOOL_ROUNDS": 5,
+        "LOOP_DETECTION_ENABLED": True,
+        "LOOP_DETECTION_THRESHOLD": 2,
+        "MULTI_SITE_MAX_CONCURRENCY": 5,
+        "STARTUP_RECOVERY_ENABLED": True,
+        "JIRA_SWEEP_ENABLED": True,
+        "JIRA_ISSUE_TYPE": "Task",
+        "METRICS_TIMEZONE": "UTC",
+        "AFTER_HOURS_START_HOUR": 19,
+        "GEMINI_THINKING_BUDGET": 4096,
+        "GEMINI_AGENT_PRO_MODEL": "gemini-2.5-pro",
+        "THREAD_CLASSIFIER_MODEL": "gemini-2.5-flash-lite",
+        "GOOGLE_SEARCH_GROUNDING": True,
+        "GRAFANA_ACTIONS_ENABLED": False,
+        "GRAFANA_QUERY_TIMEOUT": 180,
+        "GRAFANA_METADATA_TIMEOUT": 30,
+        "GRAFANA_VARIABLE_TIMEOUT": 60,
+        "ORGANIZATION_NAME": "the operator",
+        "DOC_CODE_PREFIX": "DOC",
+        "STAFF_ORG_NAME": "Staff",
+        "MANAGED_GENERATION_COLUMN": "is_generation_managed_by_nxt_grid",
+        "LAYOUT_KW_PER_HOUSEHOLD": 0.0,
+        "LAYOUT_MAX_BRIDGE_DISTANCE_M": 200.0,
+        "LAYOUT_PATH_REDUNDANCY_DISTANCE_M": 22.5,
+        "LAYOUT_PATH_WEIGHT_PENALTY": 3.0,
+        "LAYOUT_PLANT_CONNECT_DISTANCE_M": 150.0,
+        "LAYOUT_PLANT_CONNECT_K": 5,
+        "LAYOUT_POWER_FACTOR": 0.95,
+        "LAYOUT_ROAD_CLIP_BUFFER_M": 100.0,
+        "LAYOUT_WATERWAY_BUFFER_M": 200.0,
+    }
+
+    def test_each_new_flag_keeps_its_consumer_default(self):
+        for name, expected in self.EXPECTED.items():
+            assert name in fr.FLAGS, f"{name} is not registered"
+            assert fr.get(name, env={}) == expected, name
+
+    def test_every_mcp_server_has_a_write_gate(self):
+        for server in fr.MCP_SERVER_NAMES:
+            name = f"{server.upper()}_ACTIONS_ENABLED"
+            assert name in fr.FLAGS, f"{name} missing -- write gating is invisible"
+            assert fr.FLAGS[name].group == "tools"
+
+    def test_after_hours_timezone_defaults_to_empty_not_utc(self):
+        # The consumer falls back to DEFAULT_TIMEZONE at read time; baking "UTC"
+        # into the registry would silently override a deployment's own timezone.
+        assert fr.get("AFTER_HOURS_TIMEZONE", env={}) == ""
