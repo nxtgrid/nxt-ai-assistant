@@ -51,6 +51,11 @@ class _FakeQuery:
         self._payload = payload
         return self
 
+    def insert(self, payload: Dict[str, Any]) -> "_FakeQuery":
+        self._op = "insert"
+        self._payload = payload
+        return self
+
     def eq(self, col: str, value: Any) -> "_FakeQuery":
         self._filters[col] = value
         return self
@@ -62,6 +67,16 @@ class _FakeQuery:
         self._t.calls.append((self._op, dict(self._filters), self._payload))
         if self._op == "select":
             return _FakeResponse(self._t.rows_matching(self._filters))
+        if self._op == "insert":
+            row = {"id": f"ticket-{len(self._t.rows) + 1}", **(self._payload or {})}
+            self._t.rows.append(row)
+            return _FakeResponse([row])
+        if self._op == "update" and self._t.rows:
+            updated = []
+            for row in self._t.rows_matching(self._filters):
+                row.update(self._payload or {})
+                updated.append(row)
+            return _FakeResponse(updated)
         return _FakeResponse([{"id": self._filters.get("id")}])
 
 
@@ -79,12 +94,16 @@ class _FakeTable:
     def update(self, payload: Dict[str, Any]) -> _FakeQuery:
         return _FakeQuery(self, "update", payload)
 
+    def insert(self, payload: Dict[str, Any]) -> _FakeQuery:
+        return _FakeQuery(self, "insert", payload)
+
 
 class _FakeRaw:
     def __init__(self) -> None:
         self.tables: Dict[str, _FakeTable] = {
             "escalation_mappings": _FakeTable(),
             "internal_tickets": _FakeTable(),
+            "tickets": _FakeTable(),
         }
 
     def table(self, name: str) -> _FakeTable:
@@ -350,6 +369,22 @@ async def test_track_as_ticket_internal_success_leaves_jira_key_null():
     assert any(
         s["text"].startswith("Your issue is being tracked (ref: 000001).") for s in sent
     ), sent
+
+
+async def test_track_as_ticket_attaches_the_canonical_ticket_to_the_escalation():
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "mapping-abcd1234", "state": "processing"}]
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+    jira = _FakeBackend("jira", available=True, ref="OPS-100")
+    internal = _FakeBackend("internal")
+    _install_ticket_service(svc, jira, internal)
+
+    await svc.track_as_ticket(escalation_mapping=_base_mapping())
+
+    assert raw.tables["escalations"].rows == [
+        {"id": "mapping-abcd1234", "state": "tracked", "ticket_id": "ticket-1"}
+    ]
 
 
 async def test_track_as_ticket_dedup_hit_jira_writes_jira_key():

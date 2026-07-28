@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
+from orchestrator.services.escalation_repository import EscalationRepository
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
 from orchestrator.services.ticketing.service import TicketService
 from shared.utils.logging import get_logger
@@ -126,6 +127,7 @@ class EscalationService:
         # backend per TICKET_BACKEND_OVERRIDE / Jira health. Shares this service's
         # own lazy-singleton Supabase getter so both see the same client.
         self._tickets = TicketService(get_supabase_client=self._get_supabase_client)
+        self._escalations = EscalationRepository(get_client=self._get_raw_client)
 
     def is_enabled(self) -> bool:
         """Check if escalation service is properly configured."""
@@ -142,6 +144,12 @@ class EscalationService:
                 key=self._supabase_key,
             )
         return self._supabase_client
+
+    def _get_raw_client(self):
+        supabase_client = self._get_supabase_client()
+        if supabase_client is None:
+            return None
+        return supabase_client._get_client()
 
     async def escalate_to_support(
         self,
@@ -1858,6 +1866,10 @@ class EscalationService:
 
             ticket_ref = result.ref
             issue_number = ticket_ref.split("-")[-1]
+
+            if not result.ticket_id:
+                return {"success": False, "error": "canonical ticket id missing after creation"}
+            await self._escalations.attach_ticket(mapping_id, result.ticket_id)
 
             # 6+7+8. Run independent post-ticket operations concurrently.
             async def _store_jira_key():
