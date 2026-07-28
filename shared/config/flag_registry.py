@@ -1470,5 +1470,126 @@ def render_env_example() -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+# ---------------------------------------------------------------------------
+# Deployment readiness
+# ---------------------------------------------------------------------------
+# A capability is something the deployment can *do*. Operators reason about
+# "the bot cannot reply", not about a list of 40 unset variables, so readiness
+# is reported per capability with the specific missing names attached.
+
+Requirement = Any  # str, or tuple[str, ...] meaning "any one of these"
+
+
+@dataclass(frozen=True)
+class Capability:
+    key: str
+    title: str
+    description: str
+    requires: tuple[Requirement, ...]
+    severity: str = "required"  # or "recommended"
+
+
+@dataclass(frozen=True)
+class CapabilityStatus:
+    capability: Capability
+    missing: List[str]
+
+    @property
+    def satisfied(self) -> bool:
+        return not self.missing
+
+
+CAPABILITIES: tuple[Capability, ...] = (
+    Capability(
+        "admin_login",
+        "Admins can sign in",
+        "Google OAuth plus at least one allow-listed address. "
+        "GRID_DESIGN_DEV_NO_AUTH bypasses all of it for local development only.",
+        (
+            ("GOOGLE_CLIENT_ID", "AUTH_CLIENT_ID", "GRID_DESIGN_DEV_NO_AUTH"),
+            ("GOOGLE_CLIENT_SECRET", "AUTH_CLIENT_SECRET", "GRID_DESIGN_DEV_NO_AUTH"),
+            ("ALLOWED_VIEWER_EMAILS", "GRID_DESIGN_DEV_NO_AUTH"),
+        ),
+    ),
+    Capability(
+        "settings_persist",
+        "Settings changes reach the live app",
+        "Without DigitalOcean credentials, changes are written to the local "
+        "SETTINGS_FILE and apply on the next restart of this process only.",
+        ("DIGITALOCEAN_APP_ID", "DIGITALOCEAN_API_TOKEN"),
+        severity="recommended",
+    ),
+    Capability(
+        "bot_replies",
+        "The bot can answer messages",
+        "Generation, Telegram delivery, chat storage and authentication.",
+        (
+            "GOOGLE_API_KEY",
+            "TELEGRAM_BOT_TOKEN",
+            ("CHAT_DB_URL", "SUPABASE_URL"),
+            ("CHAT_DB_SERVICE_KEY", "SUPABASE_KEY"),
+            "API_KEY",
+            "SESSION_ID_SECRET",
+            ("AUTH_DB_HOST", "AUTH_SUPABASE_URL"),
+        ),
+    ),
+    Capability(
+        "system_instructions",
+        "The bot loads its instructions",
+        "Google Docs holding the customer and staff system prompts.",
+        (
+            "GOOGLE_SERVICE_ACCOUNT_JSON",
+            "CUSTOMER_SUPPORT_DOC_ID",
+            "STAFF_SUPPORT_DOC_ID",
+        ),
+    ),
+    Capability(
+        "escalations_to_jira",
+        "Escalations reach Jira",
+        "Without these, escalations still post to Telegram and are tracked in "
+        "the internal ticket ledger.",
+        ("JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_API_TOKEN", "JIRA_PROJECT_KEY"),
+        severity="recommended",
+    ),
+    Capability(
+        "grafana_tools",
+        "Grafana panels are available as tools",
+        "Needed before Sync Now can index dashboards.",
+        ("GRAFANA_URL", "GRAFANA_USERNAME", "GRAFANA_PASSWORD"),
+        severity="recommended",
+    ),
+    Capability(
+        "notify_endpoint",
+        "External systems can post alerts",
+        "POST /chat/notify for Grafana, n8n and VRM passthrough.",
+        ("NOTIFY_SHARED_SECRET",),
+        severity="recommended",
+    ),
+)
+
+
+def _is_set(name: str, source: Mapping[str, str]) -> bool:
+    return bool((source.get(name) or "").strip())
+
+
+def readiness(env: Optional[Mapping[str, str]] = None) -> List[CapabilityStatus]:
+    """Per-capability status for the deployment described by ``env``.
+
+    A requirement given as a tuple is satisfied by any one of its names, which
+    is how legacy aliases (SUPABASE_URL for CHAT_DB_URL) and bypasses
+    (GRID_DESIGN_DEV_NO_AUTH) are expressed without special cases.
+    """
+    source = env if env is not None else os.environ
+    statuses: List[CapabilityStatus] = []
+    for capability in CAPABILITIES:
+        missing: List[str] = []
+        for requirement in capability.requires:
+            names = (requirement,) if isinstance(requirement, str) else tuple(requirement)
+            if not any(_is_set(name, source) for name in names):
+                missing.append(" or ".join(names))
+        statuses.append(CapabilityStatus(capability, missing))
+    return statuses
+
+
 if __name__ == "__main__":  # pragma: no cover - CLI generator
     print(render_env_example(), end="")
