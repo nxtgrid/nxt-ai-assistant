@@ -9,9 +9,6 @@ Covers:
     jira_ticket_key.
   - get_escalation_mapping_by_ticket_ref mirroring
     get_escalation_mapping_by_jira_key.
-  - internal_tickets CRUD (get/list/update_status).
-  - internal_ticket_comments writes + get_ticket_comments' merge of
-    internal_ticket_comments with tagged chat_messages.
   - tag_message_as_ticket_comment's non-clobbering metadata merge.
 
 Uses a small fake standing in for the real Supabase (postgrest) client's
@@ -203,6 +200,17 @@ def _make_client(raw: _FakeRawClient) -> SupabaseClient:
     client = SupabaseClient(url="https://example.test", key="test-key")
     client._get_client = lambda: raw  # type: ignore[method-assign]
     return client
+
+
+def test_does_not_expose_legacy_internal_ticket_helpers():
+    for method_name in (
+        "get_internal_ticket",
+        "list_internal_tickets",
+        "update_internal_ticket_status",
+        "add_internal_ticket_comment",
+        "get_ticket_comments",
+    ):
+        assert not hasattr(SupabaseClient, method_name)
 
 
 # ---------------------------------------------------------------------------
@@ -471,10 +479,13 @@ class TestGetEscalationMappingByTicketRef:
 
 
 # ---------------------------------------------------------------------------
-# internal_tickets CRUD
+# Retired internal-ticket helper regression cases.  Keep the historical cases
+# visible until the dedicated test file is deleted after the SQL contract
+# migration; they must not run now that the public helper surface is gone.
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason="legacy Supabase internal-ticket helper surface removed")
 class TestInternalTicketsCrud:
     @pytest.mark.asyncio
     async def test_get_internal_ticket_found(self):
@@ -568,10 +579,11 @@ class TestInternalTicketsCrud:
 
 
 # ---------------------------------------------------------------------------
-# internal_ticket_comments writes + get_ticket_comments merge
+# legacy internal-ticket comments helpers
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skip(reason="legacy Supabase internal-ticket helper surface removed")
 class TestInternalTicketComments:
     @pytest.mark.asyncio
     async def test_add_internal_ticket_comment_inserts_expected_row(self):

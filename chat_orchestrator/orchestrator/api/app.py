@@ -902,8 +902,8 @@ async def _log_notification_to_chat_db(
 
     When ``ticket_ref`` is set (this notification created or updated a ticket),
     the saved message is also tagged via ``tag_message_as_ticket_comment`` so it
-    shows up in that ticket's comment timeline (``get_ticket_comments``), mirroring
-    how forwarded escalation replies are tagged.
+    can be associated with the canonical ticket timeline, mirroring how
+    forwarded escalation replies are tagged.
     """
     try:
         from orchestrator.models.schemas import ConversationMessage
