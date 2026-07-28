@@ -1523,6 +1523,38 @@ async def _resolve_notify_ticket_auto(
             )
 
         try:
+            from orchestrator.services.ticketing.correlator import _is_urgent_severity_increase
+
+            if (
+                decision.decided_by == "replay"
+                and decision.ticket_ref
+                and not _is_urgent_severity_increase(alert.severity, decision.ticket_severity)
+            ):
+                # This dedup_key was already decided, already applied to the
+                # ticket, and already posted. Re-running the amend would double
+                # the comment and the Telegram message. An urgent severity
+                # increase is the one thing that still has to get through, so it
+                # deliberately falls past this guard into the normal amend path.
+                logger.info(
+                    "Notify: replayed dedup_key for %r -- suppressing duplicate delivery",
+                    decision.ticket_ref,
+                )
+                return (
+                    decision.ticket_ref,
+                    None,
+                    {
+                        "decision": decision.decision,
+                        "correlated_with": decision.ticket_ref,
+                        "confidence": decision.confidence,
+                        "decided_by": decision.decided_by,
+                    },
+                    NotificationDelivery(
+                        suppress=True,
+                        alert_context=alert_context,
+                        stored_ticket_severity=decision.ticket_severity,
+                    ),
+                )
+
             if decision.decision == "new" or (
                 decision.decision == "amend" and decision.needs_root_cause_ticket
             ):
@@ -1553,6 +1585,8 @@ async def _resolve_notify_ticket_auto(
                     await _record_new_correlation(
                         store, target, alert, result, decision.root_cause_kind, root_summary, root_description
                     )
+                    if body.dedup_key:
+                        await store.record_event_ticket_ref(body.dedup_key, result.ref)
                     await apply_amendment(
                         store=store,
                         ticket_service=ticket_service,
@@ -1594,6 +1628,8 @@ async def _resolve_notify_ticket_auto(
                 await _record_new_correlation(
                     store, target, alert, result, decision.root_cause_kind, summary, body.text
                 )
+                if body.dedup_key:
+                    await store.record_event_ticket_ref(body.dedup_key, result.ref)
                 return (
                     result.ref,
                     None,

@@ -583,6 +583,7 @@ def _decision(**overrides: Any) -> CorrelationDecision:
         candidate_refs=[],
         llm_raw=None,
         needs_root_cause_ticket=False,
+        ticket_severity="",
     )
     defaults.update(overrides)
     return CorrelationDecision(**defaults)
@@ -873,6 +874,119 @@ class TestResolveNotifyTicketAutoAmend:
         ]
         assert comment_calls == [("OPS-42", "urgent raw text", False)]
         assert len(fake_telegram_send.calls) == 1
+
+
+class TestResolveNotifyTicketAutoReplay:
+    async def test_replayed_amend_does_not_renotify_or_recomment(
+        self, fake_apply_amendment, monkeypatch
+    ):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        calls, _result_holder = fake_apply_amendment
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="amend",
+            ticket_ref="OPS-3353",
+            confidence=0.9,
+            decided_by="replay",
+            reason="replayed prior decision (dedup_key match)",
+            affected_key=None,
+            ticket_severity="warning",
+        )
+        body = _notify_body(ticket_id="auto", dedup_key="alert-42")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "OPS-3353"
+        assert extra["decided_by"] == "replay"
+        assert delivery is not None
+        assert delivery.suppress is True
+        # The prior run already amended the ticket and already posted.
+        assert calls == []
+
+    async def test_replayed_urgent_escalation_still_applies(
+        self, fake_apply_amendment, monkeypatch
+    ):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="OPS-3353",
+            decision="amend",
+            escalated=True,
+            affected_keys_count=0,
+            occurrence_count=4,
+            telegram_chat_id="-100555",
+            telegram_topic_id="42",
+            telegram_message_id=123,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="amend",
+            ticket_ref="OPS-3353",
+            confidence=0.9,
+            decided_by="replay",
+            reason="replayed prior decision (dedup_key match)",
+            affected_key=None,
+            ticket_severity="warning",
+        )
+        body = _notify_body(
+            ticket_id="auto",
+            dedup_key="alert-42",
+            alert={"subject": "! Urgent: Grid outage", "severity": "urgent"},
+        )
+
+        ref, error, _extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "OPS-3353"
+        assert len(calls) == 1
+        assert delivery is not None
+        assert delivery.suppress is False
+        assert delivery.top_level is True
+
+    async def test_new_ticket_backfills_ticket_ref_onto_its_event_row(self, monkeypatch):
+        """Regression test for the delivery-idempotency gap a code reviewer
+        flagged in this fix: a "new" decision's ``ticket_correlation_events``
+        row is written with ``ticket_ref=None`` (nothing exists yet at
+        decide-time -- see AlertCorrelator._finalize), so without a backfill
+        a later replay of the same dedup_key would find ``ticket_ref=None``,
+        fail the replay guard's truthiness check, and file a duplicate
+        ticket. This exercises the actual app.py wiring added in
+        _resolve_notify_ticket_auto -- that it calls
+        store.record_event_ticket_ref(dedup_key, <new ticket ref>)
+        immediately after a brand-new ticket is created and correlated."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+
+        class _FakeStore:
+            def __init__(self) -> None:
+                self.upsert_calls: List[Dict[str, Any]] = []
+                self.backfill_calls: List[tuple] = []
+
+            async def upsert_correlation(self, **kwargs):
+                self.upsert_calls.append(kwargs)
+                return True
+
+            async def record_event_ticket_ref(self, dedup_key, ticket_ref):
+                self.backfill_calls.append((dedup_key, ticket_ref))
+                return True
+
+        store = _FakeStore()
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+            lambda get_client=None: store,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="new", ticket_ref=None, decided_by="no_candidates"
+        )
+        body = _notify_body(ticket_id="auto", dedup_key="alert-42")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert extra["decision"] == "new"
+        # The new ticket's ref must be backfilled onto the dedup_key's event
+        # row -- exactly once, with the ref the ticket service actually
+        # returned -- so a later replay's get_by_dedup_key() lookup finds a
+        # populated ticket_ref and the guard above can suppress correctly.
+        assert store.backfill_calls == [("alert-42", ref)]
 
 
 class TestResolveNotifyTicketAutoDuplicate:

@@ -632,6 +632,33 @@ class TestRecordEvent:
         assert ok is False
 
 
+class TestRecordEventTicketRef:
+    @pytest.mark.asyncio
+    async def test_backfills_ticket_ref_by_dedup_key(self):
+        store, fake = _make_store()
+        fake.tables["ticket_correlation_events"] = [
+            {"dedup_key": "alert-42", "ticket_ref": None, "decision": "new"}
+        ]
+
+        ok = await store.record_event_ticket_ref("alert-42", "TKT-000123")
+
+        assert ok is True
+        assert fake.tables["ticket_correlation_events"][0]["ticket_ref"] == "TKT-000123"
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_error(self):
+        fake = FakeRawClient()
+        fake.raise_on_execute["ticket_correlation_events"] = RuntimeError("down")
+        store, _ = _make_store(fake)
+
+        assert await store.record_event_ticket_ref("alert-42", "TKT-000123") is False
+
+    @pytest.mark.asyncio
+    async def test_false_when_no_client(self):
+        store = CorrelationStore(get_client=lambda: None)
+        assert await store.record_event_ticket_ref("alert-42", "TKT-000123") is False
+
+
 class TestGetCorrelation:
     @pytest.mark.asyncio
     async def test_returns_row_by_ref(self):

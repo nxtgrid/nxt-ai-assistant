@@ -126,6 +126,30 @@ class CorrelationStore:
             LOGGER.warning("correlation store: record_event failed: %s", e)
             return False
 
+    async def record_event_ticket_ref(self, dedup_key: str, ticket_ref: str) -> bool:
+        """Backfill the ticket a "new"-decided event actually produced.
+
+        ``record_event`` runs inside ``AlertCorrelator._finalize``, before the
+        ticket is created -- a "new" decision's event row is written with
+        ``ticket_ref=None`` because there's nothing to reference yet. Without
+        this backfill, a later replay of the same ``dedup_key`` finds a row
+        whose ``ticket_ref`` is still ``None``, fails the delivery-idempotency
+        guard's truthiness check, and files a second duplicate ticket.
+        """
+        client = self._client()
+        if client is None:
+            return False
+        try:
+            client.table("ticket_correlation_events").update(
+                {"ticket_ref": ticket_ref}
+            ).eq("dedup_key", dedup_key).execute()
+            return True
+        except Exception as e:
+            LOGGER.warning(
+                "correlation store: record_event_ticket_ref(%s) failed: %s", dedup_key, e
+            )
+            return False
+
     # ------------------------------------------------------------------
     # ticket_correlations
     # ------------------------------------------------------------------
