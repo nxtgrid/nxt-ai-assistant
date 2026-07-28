@@ -67,7 +67,9 @@ def test_format_time_ago():
 def test_page_only_calls_readonly_reader_methods():
     src = open(_TICKETS_PATH).read()
     db_calls = set(re.findall(r"db\.(\w+)", src))
-    assert db_calls <= {"is_configured", "list_ticket_page", "get_ticket_detail"}, db_calls
+    assert db_calls <= {
+        "is_configured", "list_ticket_page", "get_canonical_ticket_detail", "get_ticket_detail"
+    }, db_calls
 
 
 def test_page_uses_canonical_ticket_list_filters():
@@ -75,6 +77,13 @@ def test_page_uses_canonical_ticket_list_filters():
     assert "db.list_ticket_page(" in src
     assert '"created_via"' in src
     assert '"has_escalation"' in src
+
+
+def test_page_renders_only_recorded_delivery_links_with_purpose_labels():
+    src = open(_TICKETS_PATH).read()
+    assert "get_canonical_ticket_detail" in src
+    assert "Notification message" in src
+    assert "Escalation message" in src
 
 
 def test_page_has_no_mutation_control_tokens():

@@ -251,6 +251,52 @@ def test_list_ticket_page_reads_the_canonical_view_with_database_pagination():
     assert reader.client.queries == ["ticket_list_view"]
 
 
+def test_canonical_ticket_detail_reads_recorded_delivery_with_a_safe_link():
+    seed = _seed()
+    seed.update(
+        {
+            "tickets": [
+                {
+                    "id": "ticket-1", "ticket_ref": "OPS-9", "backend": "jira",
+                    "created_via": "notification", "status": "open", "summary": "Alert",
+                }
+            ],
+            "ticket_comments": [
+                {
+                    "ticket_id": "ticket-1", "source": "staff", "body": "Investigating",
+                    "author": "ops", "is_public": False, "created_at": "2026-07-24T10:00:00",
+                }
+            ],
+            "message_deliveries": [
+                {
+                    "ticket_id": "ticket-1", "purpose": "notification", "channel": "telegram",
+                    "external_chat_id": "-1001234567890", "external_message_id": 42,
+                    "sent_at": "2026-07-24T10:01:00",
+                }
+            ],
+        }
+    )
+    reader = SupabaseReader.__new__(SupabaseReader)
+    reader.client = _FakeClient(seed)
+
+    detail = reader.get_canonical_ticket_detail("ticket-1")
+
+    assert detail is not None
+    assert detail["ticket_ref"] == "OPS-9"
+    assert detail["comments"] == [
+        {
+            "source": "staff", "body": "Investigating", "author": "ops",
+            "is_public": False, "created_at": "2026-07-24T10:00:00",
+        }
+    ]
+    assert detail["deliveries"] == [
+        {
+            "purpose": "notification", "sent_at": "2026-07-24T10:01:00",
+            "message_url": "https://t.me/c/1234567890/42",
+        }
+    ]
+
+
 def test_list_tickets_unifies_both_backends():
     rows = _reader().list_tickets()
     refs = [r["ticket_ref"] for r in rows]

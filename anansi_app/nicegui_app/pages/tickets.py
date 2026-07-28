@@ -34,6 +34,12 @@ _COMMENT_SOURCE_LABELS = {
     "escalation": "🧑‍💼 Staff",
 }
 
+_DELIVERY_LABELS = {
+    "escalation": "Escalation message",
+    "notification": "Notification message",
+    "update": "Update message",
+}
+
 
 def _build_telegram_msg_link(
     escalation_chat_id: Optional[str], message_id: Optional[int]
@@ -274,7 +280,14 @@ def _ticket_row(db, ticket: dict) -> None:
         if not exp.value or loaded["done"]:
             return
         loaded["done"] = True
-        detail = await run.io_bound(lambda: db.get_ticket_detail(ticket.get("ticket_ref")))
+        ticket_id = ticket.get("id")
+        detail = await run.io_bound(
+            lambda: (
+                db.get_canonical_ticket_detail(ticket_id)
+                if ticket_id
+                else db.get_ticket_detail(ticket.get("ticket_ref"))
+            )
+        )
         _render_detail_body(body, detail or ticket)
 
     exp.on_value_change(_on_toggle)
@@ -306,6 +319,18 @@ def _render_detail_body(container, detail: dict) -> None:
         if description:
             ui.label("Description").classes("text-bold q-mt-sm")
             ui.label(description).classes("text-body2").style("white-space: pre-wrap")
+
+        deliveries = detail.get("deliveries") or []
+        if deliveries:
+            ui.label("Recorded message deliveries").classes("text-bold q-mt-sm")
+            with ui.column().classes("gap-1"):
+                for delivery in deliveries:
+                    label = _DELIVERY_LABELS.get(delivery.get("purpose"), "Message delivery")
+                    timestamp = _format_time_ago(delivery.get("sent_at"))
+                    if delivery.get("message_url"):
+                        ui.link(f"↗ {label} · {timestamp}", delivery["message_url"], new_tab=True)
+                    else:
+                        ui.label(f"{label} · {timestamp}").classes("text-caption")
 
         _correlation_section(detail)
 

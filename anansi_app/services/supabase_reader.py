@@ -49,6 +49,21 @@ def _is_group_telegram_id(telegram_id: str) -> bool:
     )
 
 
+def telegram_message_url(external_chat_id: Any, external_message_id: Any) -> Optional[str]:
+    """Return a Telegram supergroup link only for a recorded valid destination."""
+    if external_message_id is None:
+        return None
+    chat_id = str(external_chat_id or "")
+    group_id = chat_id[4:] if chat_id.startswith("-100") else ""
+    if not group_id.isdigit():
+        return None
+    try:
+        message_id = int(external_message_id)
+    except (TypeError, ValueError):
+        return None
+    return f"https://t.me/c/{group_id}/{message_id}"
+
+
 def _merge_undifferentiated_group_topics(context_list: list[dict]) -> list[dict]:
     """Merge group entries that can't be distinguished by topic name.
 
@@ -1845,6 +1860,64 @@ class SupabaseReader:
         self._attach_comment_counts(page)
         self._attach_correlation_info(page)
         return page
+
+    def get_canonical_ticket_detail(self, ticket_id: str) -> Optional[Dict[str, Any]]:
+        """Return the canonical ticket and its recorded local activity timeline."""
+        if not self.client:
+            return None
+        try:
+            ticket_response = (
+                self.client.table("tickets").select("*").eq("id", ticket_id).limit(1).execute()
+            )
+            ticket_rows = ticket_response.data or []
+            if not ticket_rows:
+                return None
+            ticket = dict(ticket_rows[0])
+            comments = (
+                self.client.table("ticket_comments")
+                .select("source, body, author, is_public, created_at")
+                .eq("ticket_id", ticket_id)
+                .order("created_at", desc=False)
+                .limit(200)
+                .execute()
+            ).data or []
+            deliveries = (
+                self.client.table("message_deliveries")
+                .select("purpose, channel, external_chat_id, external_message_id, sent_at")
+                .eq("ticket_id", ticket_id)
+                .order("sent_at", desc=False)
+                .limit(200)
+                .execute()
+            ).data or []
+        except Exception as exc:
+            logger.error("Error fetching canonical ticket detail for %s: %s", ticket_id, exc)
+            return None
+
+        ticket["comments"] = [
+            {
+                "source": comment.get("source"),
+                "body": comment.get("body"),
+                "author": comment.get("author"),
+                "is_public": comment.get("is_public"),
+                "created_at": comment.get("created_at"),
+            }
+            for comment in comments
+        ]
+        ticket["deliveries"] = [
+            {
+                "purpose": delivery.get("purpose"),
+                "sent_at": delivery.get("sent_at"),
+                "message_url": (
+                    telegram_message_url(
+                        delivery.get("external_chat_id"), delivery.get("external_message_id")
+                    )
+                    if delivery.get("channel") == "telegram"
+                    else None
+                ),
+            }
+            for delivery in deliveries
+        ]
+        return ticket
 
     def get_ticket_detail(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
         """Return a ticket's full row plus its unified, read-only comment timeline.
