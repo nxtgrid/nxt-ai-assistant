@@ -30,6 +30,7 @@ class _FakeQuery:
         self._preds = []
         self._order = None
         self._limit = None
+        self._range = None
 
     def select(self, *args, **kwargs):
         return self
@@ -57,7 +58,7 @@ class _FakeQuery:
         return self
 
     def range(self, start, end):
-        self._rows = self._rows[start : end + 1]
+        self._range = (start, end)
         return self
 
     def execute(self):
@@ -65,16 +66,22 @@ class _FakeQuery:
         if self._order is not None:
             col, desc = self._order
             rows.sort(key=lambda r: (r.get(col) is None, r.get(col)), reverse=desc)
+        total = len(rows)
+        if self._range is not None:
+            start, end = self._range
+            rows = rows[start : end + 1]
         if self._limit is not None:
             rows = rows[: self._limit]
-        return SimpleNamespace(data=rows, count=len(rows))
+        return SimpleNamespace(data=rows, count=total)
 
 
 class _FakeClient:
     def __init__(self, tables: dict[str, list[dict]]):
         self._tables = tables
+        self.queries: list[str] = []
 
     def table(self, name):
+        self.queries.append(name)
         return _FakeQuery(self._tables.get(name, []))
 
 
@@ -218,6 +225,30 @@ def _reader() -> SupabaseReader:
     reader = SupabaseReader.__new__(SupabaseReader)  # bypass real DB init
     reader.client = _FakeClient(_seed())
     return reader
+
+
+def test_list_ticket_page_reads_the_canonical_view_with_database_pagination():
+    seed = _seed()
+    seed["ticket_list_view"] = [
+        {
+            "id": "ticket-new", "ticket_ref": "OPS-9", "backend": "internal",
+            "created_via": "notification", "status": "open", "summary": "Newest",
+            "has_escalation": False, "latest_activity_at": "2026-07-24T10:00:00",
+        },
+        {
+            "id": "ticket-old", "ticket_ref": "INT-2", "backend": "internal",
+            "created_via": "escalation", "status": "open", "summary": "Older",
+            "has_escalation": True, "latest_activity_at": "2026-07-23T10:00:00",
+        },
+    ]
+    reader = SupabaseReader.__new__(SupabaseReader)
+    reader.client = _FakeClient(seed)
+
+    result = reader.list_ticket_page(page=2, page_size=1, status="open", backend="internal")
+
+    assert result.total == 2
+    assert result.items == [seed["ticket_list_view"][1]]
+    assert reader.client.queries == ["ticket_list_view"]
 
 
 def test_list_tickets_unifies_both_backends():

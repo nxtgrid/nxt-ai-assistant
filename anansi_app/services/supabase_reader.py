@@ -8,6 +8,7 @@ without any write capabilities.
 import json
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,14 @@ from services._cache_compat import cache_data
 from shared.config.db_credentials import chat_db_service_key, chat_db_url
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TicketPage:
+    """A database-paginated canonical ticket result."""
+
+    items: list[dict[str, Any]]
+    total: int
 
 
 def _resolve_telegram_chat_id(telegram_chat_id: str, source_id: str) -> str:
@@ -1720,6 +1729,50 @@ class SupabaseReader:
     #     called from NiceGUI pages via ``run.io_bound``. They are intentionally
     #     uncached (@cache_data omitted) so a status view always reflects the latest
     #     sync — freshness matters more than shaving a query on this low-traffic page.
+
+    def list_ticket_page(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        status: Optional[str] = None,
+        backend: Optional[str] = None,
+        created_via: Optional[str] = None,
+        has_escalation: Optional[bool] = None,
+        search: Optional[str] = None,
+    ) -> TicketPage:
+        """Read one canonical ticket page from the database projection."""
+        if not self.client:
+            return TicketPage(items=[], total=0)
+
+        page = max(page, 1)
+        page_size = max(page_size, 1)
+        start = (page - 1) * page_size
+        try:
+            query = self.client.table("ticket_list_view").select("*", count="exact")
+            if status:
+                query = query.eq("status", status)
+            if backend:
+                query = query.eq("backend", backend)
+            if created_via:
+                query = query.eq("created_via", created_via)
+            if has_escalation is not None:
+                query = query.eq("has_escalation", has_escalation)
+            if search:
+                escaped = search.replace("%", "\\%").replace("_", "\\_")
+                query = query.or_(f"ticket_ref.ilike.%{escaped}%,summary.ilike.%{escaped}%")
+            response = (
+                query.order("latest_activity_at", desc=True)
+                .range(start, start + page_size - 1)
+                .execute()
+            )
+        except Exception as exc:
+            logger.error("Error listing canonical tickets: %s", exc)
+            return TicketPage(items=[], total=0)
+        return TicketPage(
+            items=list(getattr(response, "data", None) or []),
+            total=getattr(response, "count", None) or 0,
+        )
 
     def list_tickets(
         self,
