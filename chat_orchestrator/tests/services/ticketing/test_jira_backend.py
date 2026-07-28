@@ -95,28 +95,100 @@ def fake_session(monkeypatch) -> FakeJiraSession:
     return session
 
 
-@pytest.fixture(autouse=True)
-def _reset_alert_grid_options_cache():
-    """jira_alert_profile.resolve_or_create_grid_option caches the grid
-    option list in-process (module-level, keyed by base_url/field/context
-    ids) -- every test here reuses the same fake base_url and field/context
-    ids, so without a reset one test's cached options would leak into the
-    next."""
-    import orchestrator.services.ticketing.jira_alert_profile as alert_profile_module
-
-    alert_profile_module._OPTIONS_CACHE.clear()
-    yield
-    alert_profile_module._OPTIONS_CACHE.clear()
-
-
-def _make_backend() -> JiraTicketBackend:
+def _make_backend(project_key: str = "OPS", issue_type: str = "Task") -> JiraTicketBackend:
     return JiraTicketBackend(
         base_url="https://example.atlassian.net",
         email="bot@example.com",
         api_token="tok",
-        project_key="OPS",
-        issue_type="Task",
+        project_key=project_key,
+        issue_type=issue_type,
     )
+
+
+def _queue_createmeta(
+    fake_session: FakeJiraSession, project_key: str, issue_types: List[Dict[str, Any]]
+) -> None:
+    fake_session.queue(
+        "GET",
+        f"/rest/api/3/issue/createmeta/{project_key}/issuetypes",
+        _FakeResponse(
+            200,
+            {
+                "values": [
+                    {"id": issue_type["id"], "name": issue_type["name"]}
+                    for issue_type in issue_types
+                ]
+            },
+        ),
+    )
+    for issue_type in issue_types:
+        fake_session.queue(
+            "GET",
+            f"/rest/api/3/issue/createmeta/{project_key}/issuetypes/{issue_type['id']}",
+            _FakeResponse(200, issue_type),
+        )
+
+
+def _queue_createmeta_with_task_and_disruption(fake_session: FakeJiraSession) -> None:
+    _queue_createmeta(
+        fake_session,
+        "OPS",
+        [
+            {"id": "task-id", "name": "Task", "fields": {}},
+            {
+                "id": "disruption-id",
+                "name": "Electricity Service Disruption",
+                "fields": {},
+            },
+        ],
+    )
+
+
+def _queue_createmeta_with_only(
+    issue_type_name: str, fake_session: FakeJiraSession, project_key: str = "NET"
+) -> None:
+    _queue_createmeta(
+        fake_session,
+        project_key,
+        [{"id": "only-type", "name": issue_type_name, "fields": {}}],
+    )
+
+
+def _queue_createmeta_with_required_grid(fake_session: FakeJiraSession) -> None:
+    _queue_createmeta(
+        fake_session,
+        "OPS",
+        [
+            {
+                "id": "grid-type",
+                "name": "Task",
+                "fields": {
+                    "customfield_grid": {
+                        "name": "Grid",
+                        "required": True,
+                        "allowedValues": [{"id": "ogheye-option", "value": "Ogheye"}],
+                    }
+                },
+            }
+        ],
+    )
+
+
+def _stub_type_selector_to_choose(monkeypatch: pytest.MonkeyPatch, issue_type_id: str) -> None:
+    async def select(_self, *, candidate_types, **_kwargs):
+        issue_type = next(item for item in candidate_types if item.id == issue_type_id)
+        return jira_backend_module.IssueTypeSelection(issue_type, "test", "test selection")
+
+    monkeypatch.setattr(JiraIssueTypeSelector, "select", select)
+
+
+def _posted_fields(fake_session: FakeJiraSession) -> Dict[str, Any]:
+    _method, _url, kwargs = next(call for call in reversed(fake_session.calls) if call[0] == "POST")
+    return kwargs["json"]["fields"]
+
+
+def _notify_request() -> TicketCreateRequest:
+    return TicketCreateRequest(summary="Grid down", description="0 kW", source="notify")
 
 
 class TestHasCredentials:
@@ -238,6 +310,7 @@ class TestIsAvailable:
 class TestCreateTicket:
     @pytest.mark.asyncio
     async def test_delegates_to_create_issue_endpoint_with_expected_payload(self, fake_session):
+        _queue_createmeta_with_only("Task", fake_session, project_key="OPS")
         fake_session.queue(
             "POST",
             "/rest/api/3/issue",
@@ -262,7 +335,7 @@ class TestCreateTicket:
         payload = kwargs["json"]
         assert payload["fields"]["project"] == {"key": "OPS"}
         assert payload["fields"]["summary"] == "Customer needs help"
-        assert payload["fields"]["issuetype"] == {"name": "Task"}
+        assert payload["fields"]["issuetype"] == {"id": "only-type"}
         assert payload["fields"]["labels"] == ["escalation-abcd1234"]
         assert payload["fields"]["description"]["content"][0]["content"][0]["text"] == (
             "Full description"
@@ -270,6 +343,7 @@ class TestCreateTicket:
 
     @pytest.mark.asyncio
     async def test_raises_ticket_backend_error_on_failure(self, fake_session):
+        _queue_createmeta_with_only("Task", fake_session, project_key="OPS")
         fake_session.queue(
             "POST",
             "/rest/api/3/issue",
@@ -280,147 +354,66 @@ class TestCreateTicket:
         with pytest.raises(TicketBackendError):
             await backend.create_ticket(TicketCreateRequest(summary="x"))
 
-
-def _set_full_alert_profile_env(monkeypatch) -> None:
-    values = {
-        "JIRA_ALERT_PROJECT_ID": "10000",
-        "JIRA_ALERT_PROJECT_KEY": "ALM",
-        "JIRA_ALERT_ISSUE_TYPE_ID": "10001",
-        "JIRA_ALERT_REPORTER_ACCOUNT_ID": "acc-1",
-        "JIRA_ALERT_LABEL": "alarm",
-        "JIRA_ALERT_GRID_FIELD_ID": "customfield_10057",
-        "JIRA_ALERT_GRID_CONTEXT_ID": "ctx-1",
-        "JIRA_ALERT_GRID_IGNORED_OPTION_ID": "10315",
-        "JIRA_ALERT_TYPE_FIELD_ID": "customfield_10060",
-        "JIRA_ALERT_TYPE_OPTION_ID": "opt-alarm-type",
-        "JIRA_ALERT_CATEGORY_FIELD_ID": "customfield_10061",
-        "JIRA_ALERT_CATEGORY_PARENT_OPTION_ID": "opt-parent",
-        "JIRA_ALERT_CATEGORY_CHILD_OPTION_ID": "opt-child",
-        "JIRA_ALERT_DATE_FIELD_ID": "customfield_10062",
-        "JIRA_ALERT_NO_GRID_PRIORITY_ID": "prio-no-grid",
-        "JIRA_ALERT_ESCALATED_PRIORITY_ID": "prio-escalated",
-    }
-    for key, value in values.items():
-        monkeypatch.setenv(key, value)
-
-
-class TestCreateTicketAlertProfile:
-    """source='notify' + a fully-configured alert profile takes over
-    create_ticket() with the n8n-parity field shape (see
-    jira_alert_profile.py); anything else keeps today's OPS/Task path
-    completely unchanged."""
-
     @pytest.mark.asyncio
-    async def test_notify_with_configured_profile_uses_alert_shape(self, fake_session, monkeypatch):
-        _set_full_alert_profile_env(monkeypatch)
-        fake_session.queue(
-            "GET",
-            "/field/customfield_10057/context/ctx-1/option",
-            _FakeResponse(200, {"values": [{"id": "500", "value": "Kudi"}]}),
-        )
-        fake_session.queue(
-            "POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "ALM-7", "id": "70007"})
-        )
-        backend = _make_backend()
-        req = TicketCreateRequest(
-            summary="! Warning: MPPT A3 in Kudi seems to perform lower !",
-            description="Please check VRM.",
-            grid_name="Kudi",
-            source="notify",
-        )
-
-        result = await backend.create_ticket(req)
-
-        assert result.ref == "ALM-7"
-        assert result.backend == "jira"
-        assert result.url == "https://example.atlassian.net/browse/ALM-7"
-
-        method, url, kwargs = fake_session.calls[-1]
-        assert method == "POST"
-        assert url == "https://example.atlassian.net/rest/api/3/issue"
-        payload = kwargs["json"]
-        assert payload["fields"]["project"] == {"id": "10000"}
-        assert payload["fields"]["customfield_10057"] == {"id": "500"}
-        assert "grid-kudi" in payload["fields"]["labels"]
-
-    @pytest.mark.asyncio
-    async def test_notify_without_configured_profile_falls_back_to_ops_task_shape(
-        self, fake_session
-    ):
-        """No JIRA_ALERT_* flags set -- source='notify' must still use the
-        existing OPS/Task path unchanged (no grid-option lookup at all)."""
-        fake_session.queue(
-            "POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-1", "id": "1"})
-        )
-        backend = _make_backend()
-        req = TicketCreateRequest(summary="x", grid_name="Kudi", source="notify")
-
-        result = await backend.create_ticket(req)
-
-        assert result.ref == "OPS-1"
-        # Only the createmeta grid-option resolution (OPS path) + issue POST --
-        # never the alert profile's field/context/option endpoint.
-        assert not any("field/customfield_10057/context" in url for _m, url, _k in fake_session.calls)
-
-    @pytest.mark.asyncio
-    async def test_escalation_source_ignores_configured_alert_profile(
+    async def test_notify_selects_a_creatable_type_from_the_generic_project(
         self, fake_session, monkeypatch
     ):
-        """Even with a fully-configured alert profile, customer escalations
-        (source='escalation', the default) must keep using the OPS/Task
-        path -- the alert profile only ever applies to source='notify'."""
-        _set_full_alert_profile_env(monkeypatch)
-        fake_session.queue(
-            "POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-2", "id": "2"})
-        )
-        backend = _make_backend()
-        req = TicketCreateRequest(summary="x", grid_name="Kudi")  # source defaults to "escalation"
+        monkeypatch.setenv("GEMINI_MODEL", "fake-model")
+        _queue_createmeta_with_task_and_disruption(fake_session)
+        _stub_type_selector_to_choose(monkeypatch, "disruption-id")
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-7"}))
 
-        result = await backend.create_ticket(req)
-
-        assert result.ref == "OPS-2"
-        assert not any(
-            "field/customfield_10057/context" in url for _m, url, _k in fake_session.calls
+        result = await _make_backend().create_ticket(
+            TicketCreateRequest(
+                summary="Grid down",
+                description="0 kW",
+                grid_name="Ogheye",
+                source="notify",
+            )
         )
+
+        assert result.ticket_type == "Electricity Service Disruption"
+        assert _posted_fields(fake_session)["issuetype"] == {"id": "disruption-id"}
+        assert "customfield_10057" not in _posted_fields(fake_session)
 
     @pytest.mark.asyncio
-    async def test_alert_shape_raises_on_creation_failure(self, fake_session, monkeypatch):
-        _set_full_alert_profile_env(monkeypatch)
-        fake_session.queue(
-            "GET",
-            "/field/customfield_10057/context/ctx-1/option",
-            _FakeResponse(200, {"values": [{"id": "500", "value": "Kudi"}]}),
-        )
-        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(500, text_data="boom"))
-        backend = _make_backend()
-        req = TicketCreateRequest(summary="x", grid_name="Kudi", source="notify")
+    async def test_notify_without_task_uses_first_compatible_creatable_type(self, fake_session):
+        _queue_createmeta_with_only("Comms Failure", fake_session)
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "NET-3"}))
 
-        with pytest.raises(TicketBackendError):
-            await backend.create_ticket(req)
+        result = await _make_backend(project_key="NET", issue_type="Task").create_ticket(
+            _notify_request()
+        )
+
+        assert result.ticket_type == "Comms Failure"
 
     @pytest.mark.asyncio
-    async def test_alert_shape_files_without_grid_field_when_resolution_fails(
-        self, fake_session, monkeypatch
-    ):
-        """Grid-option lookup failing must never hard-fail ticket creation --
-        file with the no-grid priority instead, exactly like the OPS path
-        does when a grid can't be resolved."""
-        _set_full_alert_profile_env(monkeypatch)
-        fake_session.queue(
-            "GET", "/field/customfield_10057/context/ctx-1/option", _FakeResponse(500, {})
-        )
-        fake_session.queue(
-            "POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "ALM-8", "id": "8"})
-        )
-        backend = _make_backend()
-        req = TicketCreateRequest(summary="x", grid_name="Kudi", source="notify")
+    async def test_escalation_uses_the_same_metadata_payload_builder(self, fake_session):
+        _queue_createmeta_with_required_grid(fake_session)
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-8"}))
 
-        result = await backend.create_ticket(req)
+        await _make_backend().create_ticket(TicketCreateRequest(summary="Help", grid_name="Ogheye"))
 
-        assert result.ref == "ALM-8"
-        _method, _url, kwargs = fake_session.calls[-1]
-        assert "customfield_10057" not in kwargs["json"]["fields"]
-        assert kwargs["json"]["fields"]["priority"] == {"id": "prio-no-grid"}
+        assert _posted_fields(fake_session)["customfield_grid"] == {"id": "ogheye-option"}
+
+    @pytest.mark.asyncio
+    async def test_raises_without_posting_when_no_compatible_type_exists(self, fake_session):
+        _queue_createmeta(
+            fake_session,
+            "OPS",
+            [
+                {
+                    "id": "unsupported-type",
+                    "name": "Unsupported",
+                    "fields": {"customfield_unknown": {"required": True}},
+                }
+            ],
+        )
+
+        with pytest.raises(TicketBackendError, match="compatible issue type"):
+            await _make_backend().create_ticket(TicketCreateRequest(summary="Help"))
+
+        assert not any(method == "POST" for method, _url, _kwargs in fake_session.calls)
 
 
 class TestAddComment:

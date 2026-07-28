@@ -14,10 +14,11 @@ import base64
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import aiohttp
 
+from orchestrator.config.settings import get_settings
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
@@ -28,12 +29,7 @@ from .backend import (
     TicketStatus,
     TicketSummary,
 )
-from .jira_alert_profile import (
-    AlertTicketProfile,
-    build_alert_issue_fields,
-    load_alert_ticket_profile,
-    resolve_or_create_grid_option,
-)
+from .jira_issue_payload import JiraCreateContext, build_issue_payload, compatible_issue_types
 from .jira_issue_types import IssueTypeSelection, JiraIssueType, JiraIssueTypeSelector
 
 LOGGER = get_logger(__name__)
@@ -161,10 +157,6 @@ class JiraTicketBackend:
 
     name = "jira"
 
-    # JIRA Grid field (customfield_10057) option IDs -- required select field.
-    # Fallback used when grid cannot be resolved from escalation context.
-    JIRA_GRID_FALLBACK_OPTION_ID = "10315"  # "Software"
-
     def __init__(
         self,
         base_url: Optional[str] = None,
@@ -190,7 +182,7 @@ class JiraTicketBackend:
         # Cached (TTL) health probe state for is_available().
         self._probe_cache_ok: bool = False
         self._probe_cache_time: float = 0.0
-        self._alert_type_selector: Optional[JiraIssueTypeSelector] = None
+        self._issue_type_selector: Optional[JiraIssueTypeSelector] = None
 
     # ------------------------------------------------------------------
     # TicketBackend Protocol
@@ -230,173 +222,108 @@ class JiraTicketBackend:
             return False
 
     async def create_ticket(self, req: TicketCreateRequest) -> TicketResult:
-        if req.source == "notify":
-            profile = load_alert_ticket_profile()
-            if profile.is_configured():
-                return await self._create_alert_jira_ticket(req, profile)
-        result = await self._create_jira_ticket(
+        assignee_account_id = None
+        if req.assignee_email:
+            assignee_account_id = await self._resolve_jira_account_id(
+                req.assignee_email, self._jira_auth_headers()
+            )
+        organization_id = None
+        if req.organization_short_name:
+            organization_id = await self._resolve_jira_org_id(req.organization_short_name)
+
+        labels = list(req.labels or [])
+        if req.grid_name:
+            grid_label = f"grid-{_slugify_grid(req.grid_name)}"
+            if grid_label not in labels:
+                labels.append(grid_label)
+        context = JiraCreateContext(
+            project_key=self._jira_project_key,
             summary=req.summary,
             description=req.description,
+            labels=labels,
             grid_name=req.grid_name,
-            assignee_email=req.assignee_email,
-            organization_short_name=req.organization_short_name,
-            labels=req.labels or None,
+            assignee_account_id=assignee_account_id,
+            organization_id=organization_id,
         )
-        if not result.get("success"):
-            raise TicketBackendError(f"Jira ticket creation failed: {result.get('error')}")
-        key = result["key"]
-        url = f"{self._jira_base_url}/browse/{key}" if self._jira_base_url else None
-        return TicketResult(ref=key, backend="jira", url=url, ticket_type=self._jira_issue_type)
+        compatible = compatible_issue_types(context, await self._type_selector().available_types())
+        selection = await self._choose_issue_type(req, compatible)
+        if selection is None:
+            raise TicketBackendError("Jira cannot supply a compatible issue type")
+        payload = build_issue_payload(context, selection.issue_type)
+        if payload is None:
+            raise TicketBackendError("Jira selected an incompatible issue type")
+        return await self._post_issue_payload(payload, selection)
 
-    async def _create_alert_jira_ticket(
-        self, req: TicketCreateRequest, profile: AlertTicketProfile
-    ) -> TicketResult:
-        """n8n field-parity path for ``source='notify'`` alert tickets --
-        see ``jira_alert_profile.py``. Only reached when that profile is
-        fully configured; otherwise ``create_ticket`` uses the OPS/Task path
-        exactly as it always has.
-        """
-        headers = self._jira_auth_headers()
-        grid_option_id = None
-        if req.grid_name:
-            grid_option_id = await resolve_or_create_grid_option(
+    def _type_selector(self) -> JiraIssueTypeSelector:
+        if self._issue_type_selector is None:
+            self._issue_type_selector = JiraIssueTypeSelector(
                 base_url=self._jira_base_url,
-                headers=headers,
-                profile=profile,
-                grid_name=req.grid_name,
+                headers=self._jira_auth_headers(),
+                project_key=self._jira_project_key,
+                model=get_settings().gemini.model,
                 get_session=_get_jira_session,
             )
+        return self._issue_type_selector
 
-        selection = await self._select_alert_issue_type(req, profile)
-        issue_type_id = selection.issue_type.id if selection else profile.issue_type_id
-        payload = build_alert_issue_fields(
-            profile,
-            summary=req.summary,
-            description=req.description,
-            grid_option_id=grid_option_id,
-            grid_name=req.grid_name,
-            extra_labels=req.labels or None,
-            issue_type_id=issue_type_id,
-        )
+    async def _choose_issue_type(
+        self, req: TicketCreateRequest, compatible: Sequence[JiraIssueType]
+    ) -> IssueTypeSelection | None:
+        if req.source == "notify":
+            return await self._type_selector().select(
+                summary=req.summary,
+                description=req.description,
+                requested_type=req.ticket_type,
+                operational_context=req.llm_context,
+                candidate_types=compatible,
+            ) or self._fallback_compatible_type(compatible)
+        return self._fallback_compatible_type(compatible)
 
-        # A custom profile field may exist on the legacy type but not on the
-        # selected type. Never send it blindly; Jira rejects unknown fields.
-        # If the selected type has required fields we cannot fill, retrying the
-        # configured fallback is safer than filing a malformed issue.
-        if selection and not self._alert_payload_supported(payload["fields"], selection.issue_type):
-            fallback = self._fallback_alert_issue_type(profile)
-            if fallback is not None and self._alert_payload_supported(
-                build_alert_issue_fields(
-                    profile,
-                    summary=req.summary,
-                    description=req.description,
-                    grid_option_id=grid_option_id,
-                    grid_name=req.grid_name,
-                    extra_labels=req.labels or None,
-                    issue_type_id=fallback.issue_type.id,
-                )["fields"],
-                fallback.issue_type,
-            ):
-                selection = fallback
-                payload = build_alert_issue_fields(
-                    profile,
-                    summary=req.summary,
-                    description=req.description,
-                    grid_option_id=grid_option_id,
-                    grid_name=req.grid_name,
-                    extra_labels=req.labels or None,
-                    issue_type_id=selection.issue_type.id,
+    def _fallback_compatible_type(
+        self, compatible: Sequence[JiraIssueType]
+    ) -> IssueTypeSelection | None:
+        configured_name = self._jira_issue_type.strip().casefold()
+        for issue_type in compatible:
+            if issue_type.name.strip().casefold() == configured_name:
+                return IssueTypeSelection(
+                    issue_type, "fallback", f"configured fallback {issue_type.name}"
                 )
-            else:
-                # Compatibility contract: retain the legacy configured type
-                # if Jira metadata cannot prove a safe fallback.
-                selection = None
-                payload = build_alert_issue_fields(
-                    profile,
-                    summary=req.summary,
-                    description=req.description,
-                    grid_option_id=grid_option_id,
-                    grid_name=req.grid_name,
-                    extra_labels=req.labels or None,
-                )
+        if compatible:
+            return IssueTypeSelection(compatible[0], "fallback", "first compatible type")
+        return None
 
+    async def _post_issue_payload(
+        self, payload: Dict[str, Any], selection: IssueTypeSelection
+    ) -> TicketResult:
         url = f"{self._jira_base_url}/rest/api/3/issue"
         try:
             session = _get_jira_session()
             async with session.post(
-                url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+                url,
+                json=payload,
+                headers=self._jira_auth_headers(),
+                timeout=aiohttp.ClientTimeout(total=30),
             ) as response:
-                if response.status in (200, 201):
-                    result = await response.json()
-                    key = result.get("key")
-                    url_out = f"{self._jira_base_url}/browse/{key}" if self._jira_base_url else None
-                    LOGGER.info("Created alert Jira ticket: %s", key)
-                    return TicketResult(
-                        ref=key,
-                        backend="jira",
-                        url=url_out,
-                        ticket_type=(selection.issue_type.name if selection else profile.issue_type_id),
+                if response.status not in (200, 201):
+                    body = await response.text()
+                    raise TicketBackendError(
+                        f"Jira ticket creation failed: HTTP {response.status}: {body}"
                     )
-                body = await response.text()
-                raise TicketBackendError(
-                    f"Alert Jira ticket creation failed: HTTP {response.status}: {body}"
-                )
+                result = await response.json()
         except TicketBackendError:
             raise
-        except Exception as e:
-            raise TicketBackendError(f"Alert Jira ticket creation failed: {e}") from e
+        except Exception as exc:
+            raise TicketBackendError(f"Jira ticket creation failed: {exc}") from exc
 
-    def _alert_selector(self, profile: AlertTicketProfile) -> JiraIssueTypeSelector:
-        if self._alert_type_selector is None:
-            self._alert_type_selector = JiraIssueTypeSelector(
-                base_url=self._jira_base_url,
-                headers=self._jira_auth_headers(),
-                project_key=profile.project_key,
-                model=fr.get("ALERT_CORRELATION_MODEL"),
-                cache_ttl_seconds=float(fr.get("JIRA_ALERT_ISSUE_TYPE_CACHE_TTL_SECONDS")),
-                get_session=_get_jira_session,
-            )
-        return self._alert_type_selector
-
-    async def _select_alert_issue_type(
-        self, req: TicketCreateRequest, profile: AlertTicketProfile
-    ) -> Optional[IssueTypeSelection]:
-        if not fr.get("JIRA_ALERT_ISSUE_TYPE_SELECTION_ENABLED"):
-            return None
-        selector = self._alert_selector(profile)
-        selection = await selector.select(
-            summary=req.summary,
-            description=req.description,
-            requested_type=req.ticket_type,
-            operational_context=req.llm_context,
+        key = result.get("key")
+        if not key:
+            raise TicketBackendError("Jira ticket creation failed: response has no key")
+        LOGGER.info("Created Jira ticket: %s", key)
+        return TicketResult(
+            ref=key,
+            backend="jira",
+            url=f"{self._jira_base_url}/browse/{key}" if self._jira_base_url else None,
+            ticket_type=selection.issue_type.name,
         )
-        return selection or self._fallback_alert_issue_type(profile)
-
-    def _fallback_alert_issue_type(
-        self, profile: AlertTicketProfile
-    ) -> Optional[IssueTypeSelection]:
-        selector = self._alert_selector(profile)
-        fallback = selector.fallback(
-            selector._cached_types, fr.get("JIRA_ALERT_FALLBACK_ISSUE_TYPE")
-        )
-        if fallback is not None:
-            return fallback
-        for issue_type in selector._cached_types:
-            if issue_type.id == profile.issue_type_id:
-                return IssueTypeSelection(issue_type, "legacy", "legacy alert profile type")
-        return None
-
-    @staticmethod
-    def _alert_payload_supported(fields: Dict[str, Any], issue_type: JiraIssueType) -> bool:
-        # An empty field contract means Jira did not provide enough metadata
-        # to make a safety claim; use the legacy profile instead.
-        if not issue_type.fields:
-            return False
-        permitted = set(issue_type.fields)
-        standard = {"project", "summary", "issuetype", "description", "labels"}
-        if any(name not in permitted and name not in standard for name in fields):
-            return False
-        return all(name in fields for name in issue_type.required_fields)
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         # `public` is accepted for Protocol parity with the internal backend
@@ -466,18 +393,15 @@ class JiraTicketBackend:
     async def find_open_by_grid(self, grid_name: str, limit: int = 20) -> List[TicketSummary]:
         """Search for open issues carrying this grid's ``grid-<slug>`` label.
 
-        Label-based rather than the alert-ticket profile's custom grid field
-        (see ``jira_alert_profile.py``) so this works whether or not that
-        profile is configured -- every ticket the alert-ticket path files
-        gets the label unconditionally.
+        Label-based rather than a project-specific custom grid field, so
+        every ticket created through the metadata-aware path is searchable
+        without relying on a static field configuration.
         """
-        profile = load_alert_ticket_profile()
-        project_key = profile.project_key or self._jira_project_key
-        if not self._jira_base_url or not project_key:
+        if not self._jira_base_url or not self._jira_project_key:
             return []
         slug = _slugify_grid(grid_name)
         jql = (
-            f'project = "{project_key}" AND statusCategory != Done '
+            f'project = "{self._jira_project_key}" AND statusCategory != Done '
             f'AND labels = "grid-{slug}" ORDER BY created DESC'
         )
         url = f"{self._jira_base_url}/rest/api/3/search/jql"
@@ -539,90 +463,6 @@ class JiraTicketBackend:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
-
-    async def _resolve_jira_grid_option(
-        self,
-        grid_name: Optional[str],
-        headers: Dict[str, str],
-    ) -> Dict[str, str]:
-        """Resolve a grid name to a JIRA customfield_10057 option.
-
-        Fetches allowed values from JIRA create metadata, fuzzy-matches the
-        grid name, and returns ``{"id": "<option_id>"}``.  Falls back to the
-        ``Software`` option when no match is found or when *grid_name* is None.
-        """
-        fallback = {"id": self.JIRA_GRID_FALLBACK_OPTION_ID}
-        if not grid_name:
-            return fallback
-
-        try:
-            meta_url = (
-                f"{self._jira_base_url}/rest/api/3/issue/createmeta"
-                f"/{self._jira_project_key}/issuetypes"
-            )
-            session = _get_jira_session()
-            # Find Task issue type ID
-            async with session.get(
-                meta_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status != 200:
-                    LOGGER.warning(f"Could not fetch issue types: {resp.status}")
-                    return fallback
-                type_data = await resp.json()
-
-            task_type_id = None
-            for it in type_data.get("issueTypes", type_data.get("values", [])):
-                if it.get("name") == "Task":
-                    task_type_id = it.get("id")
-                    break
-            if not task_type_id:
-                return fallback
-
-            # Fetch field metadata for Task type
-            fields_url = (
-                f"{self._jira_base_url}/rest/api/3/issue/createmeta"
-                f"/{self._jira_project_key}/issuetypes/{task_type_id}"
-            )
-            async with session.get(
-                fields_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp2:
-                if resp2.status != 200:
-                    return fallback
-                fields_data = await resp2.json()
-
-            # Find customfield_10057 and match
-            for field in fields_data.get("fields", fields_data.get("values", [])):
-                fid = field.get("fieldId", field.get("key", ""))
-                if fid == "customfield_10057":
-                    allowed = field.get("allowedValues", [])
-                    # Exact match first (case-insensitive)
-                    for opt in allowed:
-                        if opt["value"].lower() == grid_name.lower():
-                            LOGGER.info(f"Grid '{grid_name}' matched JIRA option id={opt['id']}")
-                            return {"id": opt["id"]}
-                    # Fuzzy match
-                    try:
-                        from shared.utils.grid_matcher import find_best_grid_match
-
-                        option_names = [o["value"] for o in allowed]
-                        matched, was_fuzzy, score = find_best_grid_match(
-                            grid_name, option_names, threshold=80
-                        )
-                        if matched:
-                            for opt in allowed:
-                                if opt["value"] == matched:
-                                    LOGGER.info(
-                                        f"Grid '{grid_name}' fuzzy matched to "
-                                        f"'{matched}' (score={score}%) -> id={opt['id']}"
-                                    )
-                                    return {"id": opt["id"]}
-                    except ImportError:
-                        pass
-                    LOGGER.warning(f"No JIRA grid option matched for '{grid_name}', using fallback")
-                    return fallback
-        except Exception as e:
-            LOGGER.warning(f"Error resolving JIRA grid option: {e}")
-        return fallback
 
     async def _resolve_jira_account_id(
         self,
@@ -707,149 +547,6 @@ class JiraTicketBackend:
         except Exception as e:
             LOGGER.warning("Could not resolve Jira org for '%s': %s", org_name, e)
             return None
-
-    async def _create_jira_ticket(
-        self,
-        summary: str,
-        description: str,
-        grid_name: Optional[str] = None,
-        assignee_email: Optional[str] = None,
-        organization_short_name: Optional[str] = None,
-        labels: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Create a Jira ticket.
-
-        Args:
-            summary: Ticket summary/title
-            description: Ticket description
-            grid_name: Grid name to match against JIRA options (optional)
-            assignee_email: Email to auto-assign the ticket to (optional)
-            organization_short_name: Org name for JSM Organizations field (optional)
-
-        Returns:
-            Dict with success status and ticket key
-        """
-        try:
-            headers = self._jira_auth_headers()
-            url = f"{self._jira_base_url}/rest/api/3/issue"
-
-            # Resolve grid option (required field in OPS project)
-            grid_option = await self._resolve_jira_grid_option(grid_name, headers)
-
-            # Resolve assignee account ID
-            assignee_account_id = None
-            if assignee_email:
-                assignee_account_id = await self._resolve_jira_account_id(assignee_email, headers)
-                if assignee_account_id:
-                    LOGGER.info(f"Will assign ticket to {assignee_email}")
-                else:
-                    LOGGER.debug(f"Could not resolve JIRA account for {assignee_email}")
-
-            # Build ticket payload
-            payload: Dict[str, Any] = {
-                "fields": {
-                    "project": {"key": self._jira_project_key},
-                    "summary": summary,
-                    "description": {
-                        "type": "doc",
-                        "version": 1,
-                        "content": [
-                            {
-                                "type": "paragraph",
-                                "content": [{"type": "text", "text": description}],
-                            }
-                        ],
-                    },
-                    "issuetype": {"name": self._jira_issue_type},
-                    "customfield_10057": grid_option,
-                }
-            }
-
-            if assignee_account_id:
-                payload["fields"]["assignee"] = {"accountId": assignee_account_id}
-
-            if labels:
-                payload["fields"]["labels"] = labels
-
-            # Tag the JSM Organizations field (fuzzy-match our org to Jira's org list)
-            org_field_id = os.getenv("JIRA_ORGANIZATION_FIELD_ID")
-            if organization_short_name and org_field_id:
-                jira_org_id = await self._resolve_jira_org_id(organization_short_name)
-                if jira_org_id:
-                    payload["fields"][org_field_id] = [int(jira_org_id)]
-                    LOGGER.info(
-                        "Tagged Jira org field %s=%s for org '%s'",
-                        org_field_id,
-                        jira_org_id,
-                        organization_short_name,
-                    )
-
-            LOGGER.info(f"JIRA ticket grid option: {grid_option}")
-
-            jira_sess = _get_jira_session()
-            async with jira_sess.post(
-                url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                response_text = await response.text()
-
-                if response.status in (200, 201):
-                    result: Dict[str, Any] = await response.json()
-                    jira_key = result.get("key")
-                    LOGGER.info(f"Successfully created Jira ticket: {jira_key}")
-                    return {
-                        "success": True,
-                        "key": jira_key,
-                        "id": result.get("id"),
-                    }
-
-                # Fallback: if issue type is invalid, retry with "Task"
-                if (
-                    response.status == 400
-                    and "issuetype" in response_text
-                    and payload["fields"]["issuetype"]["name"] != "Task"
-                ):
-                    LOGGER.warning(
-                        f"Issue type '{payload['fields']['issuetype']['name']}' "
-                        f"rejected, retrying with 'Task'"
-                    )
-                    payload["fields"]["issuetype"]["name"] = "Task"
-                    async with jira_sess.post(
-                        url,
-                        json=payload,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as retry_resp:
-                        retry_text = await retry_resp.text()
-                        if retry_resp.status in (200, 201):
-                            retry_result: Dict[str, Any] = await retry_resp.json()
-                            jira_key = retry_result.get("key")
-                            LOGGER.info(f"Created Jira ticket with fallback type: {jira_key}")
-                            return {
-                                "success": True,
-                                "key": jira_key,
-                                "id": retry_result.get("id"),
-                            }
-                        LOGGER.error(
-                            f"Fallback also failed: status={retry_resp.status}, "
-                            f"response={retry_text}"
-                        )
-
-                LOGGER.error(
-                    f"Failed to create Jira ticket: status={response.status}, "
-                    f"response={response_text}"
-                )
-                return {
-                    "success": False,
-                    "error": f"Jira API returned {response.status}: {response_text}",
-                }
-
-        except Exception as e:
-            LOGGER.exception(f"Error creating Jira ticket: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-            }
 
     async def _add_jira_comment(self, issue_key: str, body: str) -> bool:
         """Post a plain-text comment to an existing Jira issue. Returns True on success."""
