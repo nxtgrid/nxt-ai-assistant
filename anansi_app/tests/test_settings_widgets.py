@@ -4,6 +4,7 @@ from nicegui_app.pages.settings_widgets import (
     secret_placeholder,
     validate,
 )
+
 from shared.config import flag_registry as fr
 
 
