@@ -34,6 +34,13 @@ describes its available types and fields.
   it turns `ticket_id="auto"` into a plain alert-ticket create without dropping
   the alert.
 
+An urgent alert is the sole priority rule. When Jira is the owning backend,
+the service resolves Jira's current `Highest` priority at runtime and applies
+it to a new urgent ticket or promotes an existing ticket when an urgent
+amendment arrives. This is not a configurable project-specific priority ID;
+if Jira cannot expose a highest priority, filing and updating the ticket still
+proceed without a priority change.
+
 The existing generic `JIRA_ISSUE_TYPE` remains backward-compatible for
 non-alert Jira callers. For alert filing it is a safe fallback only; it is not
 another alert setting and is not required to be `Task` for a project that does
@@ -74,8 +81,9 @@ builder.
 2. Derive a candidate payload from the request: project key, summary,
    description, labels, and optional assignee/organisation. For a grid, inspect
    the selected type's metadata and add a matching selectable field only when
-   Jira exposes one that can be safely populated. No custom field ID or option
-   ID is embedded in application configuration.
+   Jira exposes one that can be safely populated. For an urgent alert, resolve
+   the Jira `Highest` priority dynamically and include it only when available.
+   No custom field ID or option ID is embedded in application configuration.
 3. Exclude issue types whose required fields cannot be populated by that
    payload. The LLM is given only this eligible catalogue and must return one
    advertised type ID.
@@ -96,6 +104,8 @@ Metadata and LLM selection failures are warnings with the project key and
 reason, never a reason to discard an incoming alert. The selected issue type,
 fallback source, and any omitted optional field are logged without alert text
 or credentials. Existing ticket-link and Telegram resilience remain unchanged.
+Failure to discover the highest Jira priority is handled as an omitted optional
+field, never as a ticketing failure.
 
 ## Verification
 
@@ -110,8 +120,12 @@ Focused tests will verify that:
    causing a malformed Jira request;
 5. ordinary Jira creation and `/notify` share the metadata-aware field
    builder, including safe optional grid handling;
-6. internal notify tickets still work with a configured Jira project; and
-7. removed keys no longer appear in the settings UI or generated examples.
+6. a new urgent Jira alert and an urgent amendment apply the dynamically
+   discovered highest priority, while non-urgent updates leave priority alone;
+7. an unavailable Jira priority catalogue does not block ticket creation or an
+   amendment;
+8. internal notify tickets still work with a configured Jira project; and
+9. removed keys no longer appear in the settings UI or generated examples.
 
 ## Non-goals
 

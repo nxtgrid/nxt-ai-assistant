@@ -27,7 +27,7 @@
 - Modify: `chat_orchestrator/orchestrator/services/ticketing/jira_backend.py` — route both ticket sources through the metadata-aware builder, select alert types from the configured project, and remove the n8n profile path and hard-coded Grid field fallback.
 - Delete: `chat_orchestrator/orchestrator/services/ticketing/jira_alert_profile.py` — obsolete n8n-specific profile, custom-field option management, and its cache.
 - Modify: `chat_orchestrator/orchestrator/services/ticketing/correlation_rules.py` — load only the bundled, versioned instruction file and define named correlation policy values.
-- Modify: `chat_orchestrator/orchestrator/services/ticketing/correlator.py` and `correlation_render.py` — consume the versioned policy, application primary model, and severity-based material-update logic rather than removed runtime flags.
+- Modify: `chat_orchestrator/orchestrator/services/ticketing/correlator.py`, `correlation_render.py`, and `jira_backend.py` — consume the versioned policy, application primary model, severity-based material-update logic, and dynamically resolved Jira Highest priority for urgent alerts rather than removed runtime flags.
 - Modify: `shared/config/flag_registry.py`, `shared/config/flags.env.example`, `.do/app.example.yaml`, and `README.md` — remove the deleted keys and document the minimal contract.
 - Modify/delete tests: `chat_orchestrator/tests/services/ticketing/test_jira_backend.py`, `test_jira_alert_profile.py`, `test_jira_issue_types.py` (new), `test_correlator.py`, `test_correlation_rules.py`, `test_correlation_render.py`, and `chat_orchestrator/tests/test_flag_registry.py`.
 
@@ -271,20 +271,23 @@ git add -A chat_orchestrator/orchestrator/services/ticketing/jira_alert_profile.
 git commit -m "refactor: remove jira alert profile settings"
 ```
 
-## Task 4: Version alert-correlation policy with the application
+## Task 4: Version alert-correlation policy and apply urgent highest priority
 
 **Files:**
 - Modify: `chat_orchestrator/orchestrator/services/ticketing/correlation_rules.py`
 - Modify: `chat_orchestrator/orchestrator/services/ticketing/correlator.py`
 - Modify: `chat_orchestrator/orchestrator/services/ticketing/correlation_render.py`
+- Modify: `chat_orchestrator/orchestrator/services/ticketing/jira_backend.py`
 - Modify: `chat_orchestrator/tests/services/ticketing/test_correlation_rules.py`
 - Modify: `chat_orchestrator/tests/services/ticketing/test_correlator.py`
 - Modify: `chat_orchestrator/tests/services/ticketing/test_correlation_render.py`
+- Modify: `chat_orchestrator/tests/services/ticketing/test_jira_backend.py`
 
 **Interfaces:**
 - Consumes: the bundled `alert_correlation_instructions.md` and `get_settings().gemini.model`.
 - Produces: `CorrelationPolicy` with named, tested safety bounds and `get_correlation_instructions() -> dict[str, str]` with no deployment override.
 - Produces: `apply_amendment(..., decision: CorrelationDecision) -> AmendmentResult`, where an escalation is caused by a severity increase, not an affected-component threshold.
+- Produces: `JiraTicketBackend.resolve_priority_id("highest") -> str | None`, which discovers the standard Jira Highest priority at runtime and returns `None` without raising when it is unavailable. `update_ticket(..., priority_id="highest")` resolves that sentinel before issuing the Jira update.
 
 - [ ] **Step 1: Replace external-rules/RAG tests with bundled-rules tests**
 
@@ -306,7 +309,7 @@ Expected: FAIL because the current code fetches `ALERT_CORRELATION_DOC_ID` and c
 
 - [ ] **Step 3: Define named application policy and remove external sources**
 
-In `correlation_rules.py`, define a frozen `CorrelationPolicy` containing the existing safe bounds with explanatory names (confidence floor, LLM timeout, open-candidate window, and maximum candidate count). Load only the bundled instructions, retaining the minimal fallback for a packaging/read failure. Delete Google-Doc loading and RAG retrieval. In `correlator.py`, default injectable test parameters to `DEFAULT_CORRELATION_POLICY` and `get_settings().gemini.model`; remove all `ALERT_CORRELATION_*` reads except the enabled kill switch.
+In `correlation_rules.py`, define a frozen `CorrelationPolicy` containing the existing safe bounds with explanatory names (confidence floor, LLM timeout, open-candidate window, and maximum candidate count). Load only the bundled instructions, retaining the minimal fallback for a packaging/read failure. Delete Google-Doc loading and RAG retrieval. In `correlator.py`, default injectable test parameters to `DEFAULT_CORRELATION_POLICY` and `get_settings().gemini.model`; remove all `ALERT_CORRELATION_*` reads except the enabled kill switch. In `jira_backend.py`, resolve the Jira priority catalogue only for the `"highest"` sentinel, select the entry named `Highest` case-insensitively, and omit the priority field if the lookup fails or that name is absent.
 
 - [ ] **Step 4: Write and run material-update tests**
 
@@ -322,11 +325,22 @@ async def test_first_urgent_amendment_escalates_once_without_a_priority_setting(
     result = await apply_amendment(..., decision=_amend_decision(severity="urgent"))
     assert result.escalated is True
     assert "🔴" in updated_summary
+    assert update_call["priority_id"] == "highest"
+
+@pytest.mark.asyncio
+async def test_urgent_jira_ticket_uses_discovered_highest_priority(fake_session):
+    _queue_compatible_createmeta(fake_session)
+    fake_session.queue("GET", "/rest/api/3/priority", _FakeResponse(200, [
+        {"id": "1", "name": "High"}, {"id": "2", "name": "Highest"},
+    ]))
+    fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-9"}))
+    await _make_backend().create_ticket(_urgent_notify_request())
+    assert _posted_fields(fake_session)["priority"] == {"id": "2"}
 ```
 
 Run: `cd chat_orchestrator && pytest tests/services/ticketing/test_correlator.py tests/services/ticketing/test_correlation_rules.py tests/services/ticketing/test_correlation_render.py -v`
 
-Expected: PASS; repeated duplicates are silent, a new affected component remains a material amendment, and an urgent severity increase is escalated once without a component-count or Jira-priority configuration.
+Expected: PASS; repeated duplicates are silent, a new affected component remains a material amendment, and an urgent severity increase is escalated once with Jira's dynamically discovered Highest priority. A failed priority lookup leaves the ticket operation successful.
 
 - [ ] **Step 5: Commit versioned correlation policy**
 
@@ -334,9 +348,11 @@ Expected: PASS; repeated duplicates are silent, a new affected component remains
 git add chat_orchestrator/orchestrator/services/ticketing/correlation_rules.py \
   chat_orchestrator/orchestrator/services/ticketing/correlator.py \
   chat_orchestrator/orchestrator/services/ticketing/correlation_render.py \
+  chat_orchestrator/orchestrator/services/ticketing/jira_backend.py \
   chat_orchestrator/tests/services/ticketing/test_correlation_rules.py \
   chat_orchestrator/tests/services/ticketing/test_correlator.py \
-  chat_orchestrator/tests/services/ticketing/test_correlation_render.py
+  chat_orchestrator/tests/services/ticketing/test_correlation_render.py \
+  chat_orchestrator/tests/services/ticketing/test_jira_backend.py
 git commit -m "refactor: version alert correlation policy"
 ```
 
