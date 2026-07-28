@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import aiohttp
 
@@ -21,12 +21,40 @@ LOGGER = get_logger(__name__)
 
 
 @dataclass(frozen=True)
+class JiraFieldOption:
+    """One Jira option advertised for a create-metadata field."""
+
+    id: str
+    value: str
+
+
+@dataclass(frozen=True)
+class JiraFieldDefinition:
+    """The create contract for a single Jira field."""
+
+    id: str
+    name: str
+    required: bool = False
+    allowed_values: tuple[JiraFieldOption, ...] = ()
+
+
+@dataclass(frozen=True)
 class JiraIssueType:
+    """A Jira issue type together with its complete create-field contract."""
+
     id: str
     name: str
     description: str = ""
-    required_fields: tuple[str, ...] = ()
-    fields: tuple[str, ...] = ()
+    fields: tuple[JiraFieldDefinition, ...] = ()
+
+    def field(self, field_id: str) -> Optional[JiraFieldDefinition]:
+        """Return a field by Jira's stable field ID, if it is advertised."""
+        return next((field for field in self.fields if field.id == field_id), None)
+
+    @property
+    def required_fields(self) -> tuple[str, ...]:
+        """Compatibility view of the required field IDs."""
+        return tuple(field.id for field in self.fields if field.required)
 
 
 @dataclass(frozen=True)
@@ -51,16 +79,34 @@ def normalize_issue_types(payload: Any) -> List[JiraIssueType]:
         field_map = item.get("fields") or {}
         if not isinstance(field_map, dict):
             field_map = {}
+        fields: List[JiraFieldDefinition] = []
+        for field_id, field in field_map.items():
+            if not isinstance(field, dict):
+                continue
+            allowed_values = field.get("allowedValues") or []
+            options: List[JiraFieldOption] = []
+            if isinstance(allowed_values, list):
+                for option in allowed_values:
+                    if not isinstance(option, dict) or option.get("id") is None:
+                        continue
+                    value = option.get("value")
+                    if value is None:
+                        continue
+                    options.append(JiraFieldOption(id=str(option["id"]), value=str(value)))
+            fields.append(
+                JiraFieldDefinition(
+                    id=str(field_id),
+                    name=str(field.get("name") or field_id),
+                    required=bool(field.get("required")),
+                    allowed_values=tuple(options),
+                )
+            )
         result.append(
             JiraIssueType(
                 id=str(item["id"]),
                 name=str(item["name"]),
                 description=str(item.get("description") or ""),
-                required_fields=tuple(
-                    str(field_id) for field_id, field in field_map.items()
-                    if isinstance(field, dict) and field.get("required")
-                ),
-                fields=tuple(str(field_id) for field_id in field_map),
+                fields=tuple(fields),
             )
         )
     return result
@@ -138,8 +184,9 @@ class JiraIssueTypeSelector:
         description: str,
         requested_type: Optional[str] = None,
         operational_context: Optional[Dict[str, Any]] = None,
+        candidate_types: Sequence[JiraIssueType] | None = None,
     ) -> Optional[IssueTypeSelection]:
-        types = await self.available_types()
+        types = list(candidate_types) if candidate_types is not None else await self.available_types()
         if not types:
             return None
         by_id = {item.id: item for item in types}
