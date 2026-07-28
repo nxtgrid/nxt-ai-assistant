@@ -663,8 +663,8 @@ ALERT_CORRELATION_MAX_CANDIDATES=15
 # a fresh, non-reply Telegram post instead of a quiet reply).
 ALERT_CORRELATION_ESCALATE_AFTER=3
 
-# Post one roll-up reply to the O&M topic every Nth silent "duplicate".
-ALERT_CORRELATION_ROLLUP_EVERY=10
+# Deprecated duplicate roll-up interval. Duplicates never send Telegram.
+ALERT_CORRELATION_ROLLUP_EVERY=0
 
 # Staff email used for permission-filtered RAG context during correlation.
 # Blank disables RAG for correlation, independent of the general rag__enabled flag.

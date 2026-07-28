@@ -550,11 +550,16 @@ class AlertCorrelator:
             try:
                 status = await self._ticket_service.get_status(candidate.ref)
             except Exception:
+                LOGGER.warning("Candidate status lookup raised for {!r}", candidate.ref, exc_info=True)
                 status = None
-            if status is None or status.is_done:
+            if status is not None and status.is_done:
                 if candidate.ref in store_refs:
                     await self._store.mark_closed(candidate.ref)
                 continue
+            if status is None and candidate.ref not in store_refs:
+                continue
+            if status is None:
+                LOGGER.warning("Preserving cached candidate {!r}: status unavailable", candidate.ref)
             confirmed.append(candidate)
 
         confirmed.sort(key=lambda c: c.age_hours if c.age_hours is not None else 0.0)

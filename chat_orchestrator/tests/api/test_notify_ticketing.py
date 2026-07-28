@@ -599,7 +599,7 @@ class TestResolveNotifyTicketAutoAmend:
         assert delivery.suppress is False
         assert delivery.reply_to_message_id == 123
         assert delivery.top_level is False
-        assert delivery.text_override == "MPPT A7 also affected (2 components)"
+        assert delivery.text_override == "Added MPPT A7 (2 affected components)"
         assert delivery.ticket == NotificationTicket(ref="TKT-000042", backend="internal")
 
 
@@ -1140,7 +1140,7 @@ class TestDeliverNotificationDelivery:
         assert recorded == [("TKT-000001", 999)]
 
 
-def test_amend_delivery_builds_factual_linked_update():
+def test_amend_delivery_names_new_component_and_distinct_total():
     from orchestrator.api.app import _amend_delivery
 
     decision = CorrelationDecision(
@@ -1171,5 +1171,27 @@ def test_amend_delivery_builds_factual_linked_update():
     delivery = _amend_delivery(decision, amendment, ticket)
 
     assert delivery.ticket == ticket
-    assert delivery.text_override == "MPPT A7 also affected (2 components)"
+    assert delivery.text_override == "Added MPPT A7 (2 affected components)"
     assert delivery.reply_to_message_id == 555
+
+
+def test_duplicate_delivery_is_silent_even_at_rollup_boundary(monkeypatch):
+    from orchestrator.api.app import _duplicate_delivery
+
+    monkeypatch.setenv("ALERT_CORRELATION_ROLLUP_EVERY", "10")
+    amendment = AmendmentResult(
+        ticket_ref="OPS-42",
+        decision="duplicate",
+        escalated=False,
+        affected_keys_count=1,
+        occurrence_count=10,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+    )
+
+    delivery = _duplicate_delivery(
+        amendment, NotificationTicket(ref="OPS-42", backend="jira")
+    )
+
+    assert delivery.suppress is True

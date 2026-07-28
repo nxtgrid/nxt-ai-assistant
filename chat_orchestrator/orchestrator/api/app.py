@@ -1391,7 +1391,7 @@ def _amend_delivery(
 ) -> NotificationDelivery:
     label = (decision.affected_key or {}).get("label") or "another component"
     count = amendment.affected_keys_count if amendment is not None else 1
-    message = f"{label} also affected ({count} component{'s' if count != 1 else ''})"
+    message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
     if amendment is not None and amendment.escalated:
         return NotificationDelivery(text_override=message, top_level=True, ticket=ticket)
     reply_to = amendment.telegram_message_id if amendment is not None else None
@@ -1399,21 +1399,7 @@ def _amend_delivery(
 
 
 def _duplicate_delivery(amendment: Any, ticket: NotificationTicket) -> NotificationDelivery:
-    """Silent by default (that's the whole point of "duplicate") -- except
-    every ``ALERT_CORRELATION_ROLLUP_EVERY``-th occurrence, which gets one
-    reply so a long-running issue doesn't vanish from the topic entirely."""
-    from shared.config import flag_registry as fr
-
-    if amendment is None:
-        return NotificationDelivery(suppress=True)
-    rollup_every = int(fr.get("ALERT_CORRELATION_ROLLUP_EVERY"))
-    if rollup_every > 0 and amendment.occurrence_count % rollup_every == 0:
-        message = f"still firing — {amendment.occurrence_count} occurrences"
-        return NotificationDelivery(
-            text_override=message,
-            reply_to_message_id=amendment.telegram_message_id,
-            ticket=ticket,
-        )
+    """Duplicates amend ticket history but never create Telegram noise."""
     return NotificationDelivery(suppress=True)
 
 

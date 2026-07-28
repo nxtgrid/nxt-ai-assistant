@@ -14,6 +14,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
+from loguru import logger
 
 from orchestrator.services.ticketing import jira_backend as jira_backend_module
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
@@ -563,7 +564,7 @@ class TestFindByEscalation:
     async def test_finds_ticket_by_label(self, fake_session):
         fake_session.queue(
             "GET",
-            "/rest/api/3/issue/search",
+            "/rest/api/3/search/jql",
             _FakeResponse(200, {"issues": [{"key": "OPS-42"}]}),
         )
         backend = _make_backend()
@@ -572,11 +573,14 @@ class TestFindByEscalation:
 
         assert found == "OPS-42"
         method, url, kwargs = fake_session.calls[-1]
+        assert method == "GET"
+        assert url == "https://example.atlassian.net/rest/api/3/search/jql"
         assert "escalation-abcd1234" in kwargs["params"]["jql"]
+        assert kwargs["params"]["maxResults"] == "1"
 
     @pytest.mark.asyncio
     async def test_none_when_no_issues_found(self, fake_session):
-        fake_session.queue("GET", "/rest/api/3/issue/search", _FakeResponse(200, {"issues": []}))
+        fake_session.queue("GET", "/rest/api/3/search/jql", _FakeResponse(200, {"issues": []}))
         backend = _make_backend()
 
         assert await backend.find_by_escalation("abcd1234-0000-0000-0000-000000000000") is None
@@ -649,7 +653,7 @@ class TestFindOpenByGrid:
     async def test_returns_candidates_from_search(self, fake_session):
         fake_session.queue(
             "GET",
-            "/rest/api/3/issue/search",
+            "/rest/api/3/search/jql",
             _FakeResponse(
                 200,
                 {
@@ -695,15 +699,16 @@ class TestFindOpenByGrid:
 
         method, url, kwargs = fake_session.calls[-1]
         assert method == "GET"
-        assert url == "https://example.atlassian.net/rest/api/3/issue/search"
+        assert url == "https://example.atlassian.net/rest/api/3/search/jql"
         jql = kwargs["params"]["jql"]
         assert "grid-kudi" in jql
         assert "statusCategory != Done" in jql
         assert 'project = "OPS"' in jql
+        assert kwargs["params"]["maxResults"] == "20"
 
     @pytest.mark.asyncio
     async def test_grid_name_slugified_for_label_match(self, fake_session):
-        fake_session.queue("GET", "/rest/api/3/issue/search", _FakeResponse(200, {"issues": []}))
+        fake_session.queue("GET", "/rest/api/3/search/jql", _FakeResponse(200, {"issues": []}))
         backend = _make_backend()
 
         await backend.find_open_by_grid("Kudi Grid #2 (West)")
@@ -714,11 +719,18 @@ class TestFindOpenByGrid:
     @pytest.mark.asyncio
     async def test_empty_on_error_status(self, fake_session):
         fake_session.queue(
-            "GET", "/rest/api/3/issue/search", _FakeResponse(500, text_data="boom")
+            "GET", "/rest/api/3/search/jql", _FakeResponse(410, text_data="removed")
         )
         backend = _make_backend()
+        records = []
+        handler_id = logger.add(records.append, format="{message}", level="WARNING")
 
-        assert await backend.find_open_by_grid("Kudi") == []
+        try:
+            assert await backend.find_open_by_grid("Kudi") == []
+        finally:
+            logger.remove(handler_id)
+
+        assert any("HTTP 410" in record and "removed" in record for record in records)
 
     @pytest.mark.asyncio
     async def test_empty_when_base_url_missing(self, fake_session):
