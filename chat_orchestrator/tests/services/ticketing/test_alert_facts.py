@@ -82,6 +82,40 @@ class TestDeriveComponent:
         assert kind == "mppt"
         assert key == "B1"
 
+    def test_solar_charger_mppt_with_model_between_id_and_bracket(self):
+        subject = (
+            "! Urgent: Turn off Combiner: ALERT - 'Okpokunou': "
+            "'#26 - Charger terminal overheated' on "
+            "'Solar Charger - MPPT PNXG ARTN4.50/100/10 [27]' !"
+        )
+        kind, key, label = derive_component(subject, "")
+        assert kind == "mppt"
+        assert key == "PNXG#27"
+        assert label == "MPPT PNXG#27"
+
+    def test_same_charger_id_different_instance_is_a_different_component(self):
+        first = derive_component("Solar Charger - MPPT PNXG ARTN4.50/100/10 [27]", "")
+        second = derive_component("Solar Charger - MPPT PNXG ARTN4.50/100/10 [28]", "")
+        assert first[1] != second[1]
+
+    def test_prose_mppt_mention_does_not_swallow_a_later_real_mention(self):
+        subject = "! Warning: MPPT performance issue on MPPT B1 [5] !"
+        kind, key, label = derive_component(subject, "")
+        assert kind == "mppt"
+        assert key == "B1#5"
+        assert label == "MPPT B1#5"
+
+    def test_mppt_id_without_any_bracket(self):
+        subject = "! Warning: MPPT IYYY in Ogheye seems to perform lower than other MPPTs !"
+        kind, key, label = derive_component(subject, "")
+        assert kind == "mppt"
+        assert key == "IYYY"
+        assert label == "MPPT IYYY"
+
+    def test_prose_after_mppt_is_not_treated_as_an_id(self):
+        kind, key, label = derive_component("! Warning: MPPT performance drop detected !", "")
+        assert (kind, key, label) == ("", "", "")
+
 
 class TestNormalizeSubject:
     def test_strips_marker_and_trailing_bang(self):

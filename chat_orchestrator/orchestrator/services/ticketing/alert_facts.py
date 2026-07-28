@@ -38,11 +38,32 @@ _VOLTAGE = re.compile(r"\d+(?:\.\d+)?\s*v\b", re.IGNORECASE)
 _ANY_NUMBER = re.compile(r"\d+(?:\.\d+)?")
 _WHITESPACE = re.compile(r"\s+")
 
+# n8n's original "Build Alert Actions1" pattern only matched "MPPT <id> [<x>]"
+# with the bracket adjacent to the id. Real device names put the model between
+# them ("Solar Charger - MPPT PNXG ARTN4.50/100/10 [27]") and some alerts have
+# no bracket at all, so scan for the first id-shaped token after "MPPT" and
+# keep a trailing numeric bracket as an instance discriminator.
+#
+# The (?!mppt) guard stops the bracket-scan from crossing into a second,
+# independent "mppt" mention in the same string (e.g. a prose "MPPT
+# performance issue" followed later by a real "MPPT B1 [5]") -- without it,
+# the first match's span could swallow the second, legitimate one.
+_MPPT_PATTERN = re.compile(
+    r"\bmppt\b[\s:\-]+([A-Za-z0-9]+)((?:(?!mppt)[^\[\]]){0,40}\[(\d{1,4})\])?",
+    re.IGNORECASE,
+)
 # Mirrors n8n's Build Alert Actions1 regexes exactly (see the plan's
 # "Current architecture (n8n side)" section) -- a 16-hex id is a base
 # station, a 9-digit id is a DCU.
-_MPPT_PATTERN = re.compile(r"mppt\s+([A-Za-z0-9]+)\s*\[(.*?)\]", re.IGNORECASE)
 _DCU_PATTERN = re.compile(r"dcu\s+(\d{9}|[a-fA-F0-9]{16})", re.IGNORECASE)
+
+
+def _looks_like_component_id(token: str) -> bool:
+    """An id carries a digit or is a short all-caps code -- "performance" is
+    prose that happens to follow the word MPPT, "A3"/"PNXG"/"IYYY" are ids."""
+    if any(character.isdigit() for character in token):
+        return True
+    return token.isupper() and 2 <= len(token) <= 12
 
 
 class AlertFacts(BaseModel):
@@ -85,9 +106,12 @@ def derive_component(subject: str, text: str = "") -> Tuple[str, str, str]:
     identifiable component" (e.g. a grid-level alert), not an error.
     """
     for haystack in (subject or "", text or ""):
-        mppt_match = _MPPT_PATTERN.search(haystack)
-        if mppt_match:
-            key = mppt_match.group(1)
+        for mppt_match in _MPPT_PATTERN.finditer(haystack):
+            token = mppt_match.group(1)
+            if not _looks_like_component_id(token):
+                continue
+            instance = mppt_match.group(3)
+            key = f"{token}#{instance}" if instance else token
             return "mppt", key, f"MPPT {key}"
 
         dcu_match = _DCU_PATTERN.search(haystack)
