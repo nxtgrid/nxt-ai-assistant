@@ -5,12 +5,10 @@ fluent API -- the same style as
 chat_orchestrator/tests/services/test_work_packet_service.py -- so tests can
 assert on what actually got persisted rather than just call arguments.
 
-``create_ticket`` is a two-round-trip call against the fake: first
-``.rpc("next_internal_ticket_ref", {"p_prefix": ...})`` (returns a scalar
-ref string, matching PostgREST's response shape for a non-set-returning
-SQL function), then ``.table("internal_tickets").insert({...}).execute()``
-for the actual row write -- mirroring the real
-InternalTicketBackend.create_ticket() implementation.
+``create_ticket`` only allocates a reference through
+``.rpc("next_internal_ticket_ref", {"p_prefix": ...})``.  The enclosing
+``TicketService`` owns canonical ticket intent creation and activation;
+this backend must never write the legacy ``internal_tickets`` relation.
 """
 
 from __future__ import annotations
@@ -183,6 +181,36 @@ def _make_backend(client: Optional[FakeSupabaseClient] = None):
     return backend, fake
 
 
+def _seed_ticket(
+    fake: FakeSupabaseClient,
+    *,
+    ref: str = "TKT-000001",
+    summary: str = "s",
+    description: Optional[str] = None,
+    escalation_mapping_id: Optional[str] = None,
+    grid_name: Optional[str] = None,
+    ticket_type: str = "Task",
+) -> None:
+    """Seed legacy data only for the remaining legacy-operation tests.
+
+    Creation does not seed this table: that is the regression this suite
+    protects while the other operations are migrated in the next slice.
+    """
+    fake.tickets.append(
+        {
+            "ticket_ref": ref,
+            "summary": summary,
+            "description": description,
+            "escalation_mapping_id": escalation_mapping_id,
+            "grid_name": grid_name,
+            "ticket_type": ticket_type,
+            "status": "open",
+            "created_at": f"2026-01-01T00:00:{len(fake.tickets):02d}Z",
+            "labels": [],
+        }
+    )
+
+
 class TestConstruction:
     def test_requires_client_or_getter(self):
         with pytest.raises(ValueError):
@@ -211,8 +239,8 @@ class TestCreateTicket:
         assert result.backend == "internal"
         assert result.url is None
         assert result.ref == "TKT-000001"
-        assert fake.tickets[0]["summary"] == "Customer needs help"
-        assert fake.tickets[0]["ticket_type"] == "Task"
+        assert fake.tickets == []
+        assert fake.insert_calls == []
         assert result.ticket_type == "Task"
 
     @pytest.mark.asyncio
@@ -234,7 +262,7 @@ class TestCreateTicket:
         assert result.ref == "SUP-000001"
 
     @pytest.mark.asyncio
-    async def test_passes_through_escalation_fields(self):
+    async def test_does_not_write_request_fields_to_legacy_ticket_table(self):
         backend, fake = _make_backend()
         req = TicketCreateRequest(
             summary="s",
@@ -254,16 +282,8 @@ class TestCreateTicket:
         rpc_call = fake.rpc_calls[0]
         assert set(rpc_call.keys()) == {"p_prefix"}
 
-        # Everything else flows through the plain insert().
-        insert_call = fake.insert_calls[0]
-        assert insert_call["escalation_mapping_id"] == "11111111-1111-1111-1111-111111111111"
-        assert insert_call["session_id"] == "sess-1"
-        assert insert_call["organization_id"] == 7
-        assert insert_call["grid_name"] == "MainGrid"
-        assert insert_call["assignee_email"] == "a@b.com"
-        assert insert_call["labels"] == ["escalation-abc"]
-        assert insert_call["source"] == "escalation"
-        assert insert_call["ticket_ref"] == "TKT-000001"
+        assert fake.insert_calls == []
+        assert fake.tickets == []
 
     @pytest.mark.asyncio
     async def test_persists_requested_ticket_type(self):
@@ -273,7 +293,6 @@ class TestCreateTicket:
             TicketCreateRequest(summary="s", ticket_type="Electricity Service Disruption")
         )
 
-        assert fake.tickets[0]["ticket_type"] == "Electricity Service Disruption"
         assert result.ticket_type == "Electricity Service Disruption"
 
     @pytest.mark.asyncio
@@ -292,18 +311,16 @@ class TestCreateTicket:
             await backend.create_ticket(TicketCreateRequest(summary="x"))
 
     @pytest.mark.asyncio
-    async def test_raises_when_insert_errors(self):
+    async def test_ignores_legacy_insert_errors(self):
         fake = FakeSupabaseClient()
         fake.raise_on_insert = RuntimeError("insert failed")
         backend, _ = _make_backend(fake)
 
-        with pytest.raises(TicketBackendError):
-            await backend.create_ticket(TicketCreateRequest(summary="x"))
+        result = await backend.create_ticket(TicketCreateRequest(summary="x"))
 
-        # The ref-allocation call still happened -- the failure was on the
-        # second round-trip (the insert), confirming this really exercises
-        # a two-call sequence rather than short-circuiting on the RPC.
+        assert result.ref == "TKT-000001"
         assert len(fake.rpc_calls) == 1
+        assert fake.insert_calls == []
 
 
 class TestAddComment:
@@ -337,7 +354,7 @@ class TestGetStatus:
     @pytest.mark.asyncio
     async def test_returns_status_for_existing_ticket(self):
         backend, fake = _make_backend()
-        await backend.create_ticket(TicketCreateRequest(summary="s"))
+        _seed_ticket(fake)
 
         status = await backend.get_status("TKT-000001")
 
@@ -362,7 +379,7 @@ class TestTransitionToDone:
     @pytest.mark.asyncio
     async def test_marks_ticket_done(self):
         backend, fake = _make_backend()
-        await backend.create_ticket(TicketCreateRequest(summary="s"))
+        _seed_ticket(fake)
 
         await backend.transition_to_done("TKT-000001")
 
@@ -385,9 +402,7 @@ class TestFindByEscalation:
     async def test_finds_ticket_by_mapping_id(self):
         backend, fake = _make_backend()
         mapping_id = "22222222-2222-2222-2222-222222222222"
-        await backend.create_ticket(
-            TicketCreateRequest(summary="s", escalation_mapping_id=mapping_id)
-        )
+        _seed_ticket(fake, escalation_mapping_id=mapping_id)
 
         found = await backend.find_by_escalation(mapping_id)
 
@@ -408,7 +423,7 @@ class TestUpdateTicket:
     @pytest.mark.asyncio
     async def test_updates_summary_and_description(self):
         backend, fake = _make_backend()
-        await backend.create_ticket(TicketCreateRequest(summary="orig", description="orig d"))
+        _seed_ticket(fake, summary="orig", description="orig d")
 
         ok = await backend.update_ticket(
             "TKT-000001", summary="new summary", description="new description"
@@ -422,7 +437,7 @@ class TestUpdateTicket:
     async def test_ignores_priority_id(self):
         """Internal backend has no priority concept -- must not raise or write it."""
         backend, fake = _make_backend()
-        await backend.create_ticket(TicketCreateRequest(summary="orig"))
+        _seed_ticket(fake, summary="orig")
 
         ok = await backend.update_ticket("TKT-000001", summary="s2", priority_id="10001")
 
@@ -433,7 +448,7 @@ class TestUpdateTicket:
     @pytest.mark.asyncio
     async def test_partial_update_omits_unset_fields(self):
         backend, fake = _make_backend()
-        await backend.create_ticket(TicketCreateRequest(summary="orig", description="orig d"))
+        _seed_ticket(fake, summary="orig", description="orig d")
 
         await backend.update_ticket("TKT-000001", summary="new summary only")
 
@@ -450,7 +465,7 @@ class TestUpdateTicket:
         fake = FakeSupabaseClient()
         fake.raise_on_insert = None
         backend, _ = _make_backend(fake)
-        await backend.create_ticket(TicketCreateRequest(summary="s"))
+        _seed_ticket(fake)
 
         class _RaisingTable:
             def update(self, *_a, **_k):
@@ -466,9 +481,9 @@ class TestFindOpenByGrid:
     @pytest.mark.asyncio
     async def test_returns_open_tickets_for_grid_most_recent_first(self):
         backend, fake = _make_backend()
-        await backend.create_ticket(TicketCreateRequest(summary="first", grid_name="Kudi"))
-        await backend.create_ticket(TicketCreateRequest(summary="second", grid_name="Kudi"))
-        await backend.create_ticket(TicketCreateRequest(summary="other grid", grid_name="Other"))
+        _seed_ticket(fake, summary="first", grid_name="Kudi")
+        _seed_ticket(fake, ref="TKT-000002", summary="second", grid_name="Kudi")
+        _seed_ticket(fake, ref="TKT-000003", summary="other grid", grid_name="Other")
 
         results = await backend.find_open_by_grid("Kudi")
 
@@ -479,8 +494,8 @@ class TestFindOpenByGrid:
     @pytest.mark.asyncio
     async def test_excludes_done_tickets(self):
         backend, fake = _make_backend()
-        await backend.create_ticket(TicketCreateRequest(summary="s1", grid_name="Kudi"))
-        await backend.create_ticket(TicketCreateRequest(summary="s2", grid_name="Kudi"))
+        _seed_ticket(fake, summary="s1", grid_name="Kudi")
+        _seed_ticket(fake, ref="TKT-000002", summary="s2", grid_name="Kudi")
         await backend.transition_to_done("TKT-000001")
 
         results = await backend.find_open_by_grid("Kudi")
@@ -491,7 +506,7 @@ class TestFindOpenByGrid:
     async def test_respects_limit(self):
         backend, fake = _make_backend()
         for i in range(5):
-            await backend.create_ticket(TicketCreateRequest(summary=f"s{i}", grid_name="Kudi"))
+            _seed_ticket(fake, ref=f"TKT-{i:06d}", summary=f"s{i}", grid_name="Kudi")
 
         results = await backend.find_open_by_grid("Kudi", limit=2)
 
