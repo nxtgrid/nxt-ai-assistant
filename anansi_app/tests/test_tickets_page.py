@@ -56,6 +56,14 @@ def test_backend_chip():
     assert tickets_page._backend_chip("internal") == "🗂 Internal"
 
 
+def test_ticket_origin_and_escalation_context_labels():
+    assert tickets_page._origin_label("escalation") == "🆘 Customer escalation"
+    assert tickets_page._origin_label("notification") == "🔔 Operational notification"
+    assert tickets_page._origin_label("adopted") == "↗ Adopted"
+    assert tickets_page._escalation_context_label(True) == "🆘 Escalation"
+    assert tickets_page._escalation_context_label(False) == "🔔 No escalation"
+
+
 def test_format_time_ago():
     assert tickets_page._format_time_ago(None) == "—"
     three_days = datetime.utcnow() - timedelta(days=3)

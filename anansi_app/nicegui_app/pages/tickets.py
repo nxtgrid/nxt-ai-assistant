@@ -115,6 +115,19 @@ def _backend_chip(backend: str) -> str:
     return "🎫 Jira" if backend == "jira" else "🗂 Internal"
 
 
+def _origin_label(created_via: str) -> str:
+    return {
+        "escalation": "🆘 Customer escalation",
+        "notification": "🔔 Operational notification",
+        "adopted": "↗ Adopted",
+        "legacy": "◷ Legacy",
+    }.get(created_via, "Unknown origin")
+
+
+def _escalation_context_label(has_escalation: bool) -> str:
+    return "🆘 Escalation" if has_escalation else "🔔 No escalation"
+
+
 def _status_badge(status: str) -> None:
     label = _STATUS_LABELS.get(status, status or "—")
     color = _STATUS_COLORS.get(status, "blue-grey")
@@ -258,6 +271,10 @@ def _ticket_row(db, ticket: dict) -> None:
         # Summary chips row (status badge + org/grid/customer), always visible.
         with ui.row().classes("items-center gap-3 flex-wrap"):
             _status_badge(ticket.get("status"))
+            ui.label(_origin_label(ticket.get("created_via") or "")).classes("text-caption")
+            ui.label(_escalation_context_label(bool(ticket.get("has_escalation")))).classes(
+                "text-caption"
+            )
             org = ticket.get("org_hashtag") or (
                 f"org {ticket.get('organization_id')}"
                 if ticket.get("organization_id") is not None
