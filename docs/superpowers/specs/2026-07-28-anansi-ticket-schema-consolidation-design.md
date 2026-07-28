@@ -322,11 +322,10 @@ The sole owner of direct reads and writes to:
 
 - `tickets`;
 - `ticket_comments`;
-- ticket relationships on `chat_messages`; and
-- `message_deliveries` when the owner is a ticket.
+- ticket relationships on `chat_messages`.
 
 It exposes typed create-intent, activation, adoption, status projection,
-comment, delivery, list, detail, and reconciliation methods.
+comment, list, detail, and reconciliation methods.
 
 ### `TicketService`
 
@@ -336,9 +335,15 @@ the persisted `tickets.backend`.
 
 ### `EscalationRepository`
 
-The sole owner of `escalations` and escalation-owned delivery receipts. Atomic
-claims become a state transition from `open` to `processing`. Success moves to
-`tracked`; failure returns to `open`; intentional closure moves to `resolved`.
+The sole owner of `escalations`. Atomic claims become a state transition from
+`open` to `processing`. Success moves to `tracked`; failure returns to `open`;
+intentional closure moves to `resolved`.
+
+### `DeliveryRepository`
+
+The sole owner of `message_deliveries`. Ticketing, escalation, and notification
+services call its typed idempotent `record`, `attach_ticket`, and reply-target
+queries rather than writing delivery rows themselves.
 
 ### `CorrelationStore`
 
