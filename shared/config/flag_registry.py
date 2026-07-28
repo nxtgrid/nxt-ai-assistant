@@ -426,8 +426,8 @@ _FLAGS: List[Flag] = [
     ),
     _i(
         "ALERT_CORRELATION_ROLLUP_EVERY",
-        10,
-        "Post a roll-up reply to the O&M topic every Nth silent duplicate occurrence.",
+        0,
+        "Deprecated duplicate roll-up interval; 0 keeps every duplicate silent.",
         scope=SERVICE_BOT,
     ),
     _s(

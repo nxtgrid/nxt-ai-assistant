@@ -418,6 +418,11 @@ services:
         value: "3"
         scope: RUN_TIME
 
+      # Deprecated duplicate roll-up interval; duplicates always stay Telegram-silent.
+      - key: ALERT_CORRELATION_ROLLUP_EVERY
+        value: "0"
+        scope: RUN_TIME
+
       # Mini App Forms (Telegram WebApp popup)
       - key: MINI_APP_BASE_URL
         value: "https://your-app.example.com/mini-app/"
