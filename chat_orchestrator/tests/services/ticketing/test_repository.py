@@ -1,0 +1,101 @@
+"""Contract tests for the canonical ticket repository."""
+
+from __future__ import annotations
+
+import pytest
+
+from orchestrator.services.ticketing.backend import TicketCreateRequest
+from orchestrator.services.ticketing.repository import TicketRepository
+
+
+class _Response:
+    def __init__(self, data):
+        self.data = data
+
+
+class _Query:
+    def __init__(self, client, table):
+        self.client = client
+        self.table_name = table
+        self.payload = None
+        self.filters = []
+        self.mode = "select"
+
+    def insert(self, payload):
+        self.mode = "insert"
+        self.payload = payload
+        return self
+
+    def update(self, payload):
+        self.mode = "update"
+        self.payload = payload
+        return self
+
+    def select(self, *_args):
+        return self
+
+    def eq(self, column, value):
+        self.filters.append((column, value))
+        return self
+
+    def limit(self, _limit):
+        return self
+
+    def execute(self):
+        self.client.calls.append((self.table_name, self.mode, self.payload, self.filters))
+        if self.mode == "insert":
+            row = {"id": "ticket-1", **self.payload}
+            self.client.rows.append(row)
+            return _Response([row])
+        if self.mode == "update":
+            row = {"id": "ticket-1", **self.payload}
+            return _Response([row])
+        return _Response([])
+
+
+class _Client:
+    def __init__(self):
+        self.calls = []
+        self.rows = []
+
+    def table(self, name):
+        return _Query(self, name)
+
+
+@pytest.mark.asyncio
+async def test_create_intent_persists_a_pending_backend_neutral_ticket():
+    client = _Client()
+    repository = TicketRepository(client=client)
+
+    result = await repository.create_intent(
+        TicketCreateRequest(
+            summary="Grid down",
+            description="details",
+            organization_id=7,
+            grid_name="Grid A",
+            labels=["alert"],
+        ),
+        created_via="notification",
+    )
+
+    assert result.id == "ticket-1"
+    assert result.provisioning_state == "pending"
+    assert client.calls == [
+        (
+            "tickets",
+            "insert",
+            {
+                "summary": "Grid down",
+                "description": "details",
+                "organization_id": 7,
+                "grid_name": "Grid A",
+                "assignee_email": None,
+                "ticket_type": None,
+                "labels": ["alert"],
+                "created_via": "notification",
+                "provisioning_state": "pending",
+                "status": "open",
+            },
+            [],
+        )
+    ]
