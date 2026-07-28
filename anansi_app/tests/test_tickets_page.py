@@ -76,7 +76,7 @@ def test_page_only_calls_readonly_reader_methods():
     src = open(_TICKETS_PATH).read()
     db_calls = set(re.findall(r"db\.(\w+)", src))
     assert db_calls <= {
-        "is_configured", "list_ticket_page", "get_canonical_ticket_detail", "get_ticket_detail"
+        "is_configured", "list_ticket_page", "get_canonical_ticket_detail"
     }, db_calls
 
 

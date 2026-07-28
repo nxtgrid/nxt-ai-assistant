@@ -151,7 +151,8 @@ async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
         ).classes("text-negative")
         return
 
-    # /tickets/{ref} — dedicated single-ticket detail view.
+    # /tickets/{ref} — dedicated canonical ticket detail view. The route
+    # parameter is the canonical ticket id; references are display-only.
     if ref:
         await _render_single_detail(db, ref)
         return
@@ -299,11 +300,7 @@ def _ticket_row(db, ticket: dict) -> None:
         loaded["done"] = True
         ticket_id = ticket.get("id")
         detail = await run.io_bound(
-            lambda: (
-                db.get_canonical_ticket_detail(ticket_id)
-                if ticket_id
-                else db.get_ticket_detail(ticket.get("ticket_ref"))
-            )
+            lambda: db.get_canonical_ticket_detail(ticket_id) if ticket_id else None
         )
         _render_detail_body(body, detail or ticket)
 
@@ -448,12 +445,13 @@ def _comment_card(comment: dict) -> None:
         )
 
 
-async def _render_single_detail(db, ref: str) -> None:
+async def _render_single_detail(db, ticket_id: str) -> None:
     ui.link("← Back to Tickets", "/tickets").classes("q-mb-sm")
-    detail = await run.io_bound(lambda: db.get_ticket_detail(ref))
+    detail = await run.io_bound(lambda: db.get_canonical_ticket_detail(ticket_id))
     if detail is None:
-        ui.label(f"Ticket '{ref}' was not found.").classes("text-negative")
+        ui.label("Ticket was not found.").classes("text-negative")
         return
+    ref = detail.get("ticket_ref") or ticket_id
     summary = detail.get("summary") or ref
     with ui.row().classes("items-center gap-3 flex-wrap"):
         ui.label(f"{_backend_chip(detail.get('backend'))}  {ref}").classes("text-h6")
