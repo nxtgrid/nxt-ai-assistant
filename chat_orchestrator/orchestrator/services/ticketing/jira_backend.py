@@ -480,7 +480,7 @@ class JiraTicketBackend:
             f'project = "{project_key}" AND statusCategory != Done '
             f'AND labels = "grid-{slug}" ORDER BY created DESC'
         )
-        url = f"{self._jira_base_url}/rest/api/3/issue/search"
+        url = f"{self._jira_base_url}/rest/api/3/search/jql"
         try:
             session = _get_jira_session()
             async with session.get(
@@ -494,9 +494,9 @@ class JiraTicketBackend:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status != 200:
-                    body = await resp.text()
+                    body = (await resp.text())[:1000]
                     LOGGER.warning(
-                        "Jira search failed for grid %r: HTTP %s -- %s", grid_name, resp.status, body
+                        "Jira search failed for grid {!r}: HTTP {} -- {}", grid_name, resp.status, body
                     )
                     return []
                 data = await resp.json()
@@ -996,7 +996,7 @@ class JiraTicketBackend:
             return None
         label = f"escalation-{mapping_id[:8]}"
         jql = f'project = "{self._jira_project_key}" AND labels = "{label}" ORDER BY created DESC'
-        url = f"{self._jira_base_url}/rest/api/3/issue/search"
+        url = f"{self._jira_base_url}/rest/api/3/search/jql"
         try:
             session = _get_jira_session()
             async with session.get(
