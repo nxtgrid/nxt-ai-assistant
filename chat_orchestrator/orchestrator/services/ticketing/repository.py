@@ -113,3 +113,22 @@ class TicketRepository:
 
     async def set_pending_backend(self, ticket_id: str, backend: str) -> None:
         self._raw_client().table("tickets").update({"backend": backend}).eq("id", ticket_id).execute()
+
+    async def get_by_ref(self, ref: str) -> TicketRecord | None:
+        """Return canonical ticket identity for a backend reference, if known."""
+        try:
+            response = (
+                self._raw_client()
+                .table("tickets")
+                .select("*")
+                .eq("ticket_ref", ref)
+                .limit(1)
+                .execute()
+            )
+        except TicketRepositoryError:
+            raise
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to read canonical ticket: {exc}") from exc
+
+        rows = getattr(response, "data", None) or []
+        return TicketRecord.model_validate(rows[0]) if rows else None

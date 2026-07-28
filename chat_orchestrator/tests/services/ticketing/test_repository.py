@@ -55,13 +55,14 @@ class _Query:
                 **self.payload,
             }
             return _Response([row])
-        return _Response([])
+        return _Response(self.client.select_rows)
 
 
 class _Client:
     def __init__(self):
         self.calls = []
         self.rows = []
+        self.select_rows = []
 
     def table(self, name):
         return _Query(self, name)
@@ -126,3 +127,17 @@ async def test_activate_updates_the_existing_ticket_intent_with_backend_identity
     assert payload["provisioning_state"] == "active"
     assert payload["activated_at"]
     assert payload["backend_synced_at"]
+
+
+@pytest.mark.asyncio
+async def test_get_by_ref_returns_the_persisted_backend_instead_of_inferring_it():
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "OPS-123", "backend": "jira",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+    }]
+
+    record = await TicketRepository(client=client).get_by_ref("OPS-123")
+
+    assert record is not None
+    assert record.backend == "jira"
