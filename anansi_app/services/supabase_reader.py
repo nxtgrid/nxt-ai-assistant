@@ -8,6 +8,7 @@ without any write capabilities.
 import json
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
@@ -17,6 +18,14 @@ from services._cache_compat import cache_data
 from shared.config.db_credentials import chat_db_service_key, chat_db_url
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class TicketPage:
+    """A database-paginated canonical ticket result."""
+
+    items: list[dict[str, Any]]
+    total: int
 
 
 def _resolve_telegram_chat_id(telegram_chat_id: str, source_id: str) -> str:
@@ -38,6 +47,21 @@ def _is_group_telegram_id(telegram_id: str) -> bool:
     return bool(telegram_id) and (
         telegram_id.startswith("-100") or telegram_id.startswith("100")
     )
+
+
+def telegram_message_url(external_chat_id: Any, external_message_id: Any) -> Optional[str]:
+    """Return a Telegram supergroup link only for a recorded valid destination."""
+    if external_message_id is None:
+        return None
+    chat_id = str(external_chat_id or "")
+    group_id = chat_id[4:] if chat_id.startswith("-100") else ""
+    if not group_id.isdigit():
+        return None
+    try:
+        message_id = int(external_message_id)
+    except (TypeError, ValueError):
+        return None
+    return f"https://t.me/c/{group_id}/{message_id}"
 
 
 def _merge_undifferentiated_group_topics(context_list: list[dict]) -> list[dict]:
@@ -1721,6 +1745,50 @@ class SupabaseReader:
     #     uncached (@cache_data omitted) so a status view always reflects the latest
     #     sync — freshness matters more than shaving a query on this low-traffic page.
 
+    def list_ticket_page(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        status: Optional[str] = None,
+        backend: Optional[str] = None,
+        created_via: Optional[str] = None,
+        has_escalation: Optional[bool] = None,
+        search: Optional[str] = None,
+    ) -> TicketPage:
+        """Read one canonical ticket page from the database projection."""
+        if not self.client:
+            return TicketPage(items=[], total=0)
+
+        page = max(page, 1)
+        page_size = max(page_size, 1)
+        start = (page - 1) * page_size
+        try:
+            query = self.client.table("ticket_list_view").select("*", count="exact")
+            if status:
+                query = query.eq("status", status)
+            if backend:
+                query = query.eq("backend", backend)
+            if created_via:
+                query = query.eq("created_via", created_via)
+            if has_escalation is not None:
+                query = query.eq("has_escalation", has_escalation)
+            if search:
+                escaped = search.replace("%", "\\%").replace("_", "\\_")
+                query = query.or_(f"ticket_ref.ilike.%{escaped}%,summary.ilike.%{escaped}%")
+            response = (
+                query.order("latest_activity_at", desc=True)
+                .range(start, start + page_size - 1)
+                .execute()
+            )
+        except Exception as exc:
+            logger.error("Error listing canonical tickets: %s", exc)
+            return TicketPage(items=[], total=0)
+        return TicketPage(
+            items=list(getattr(response, "data", None) or []),
+            total=getattr(response, "count", None) or 0,
+        )
+
     def list_tickets(
         self,
         status_filter: Optional[List[str]] = None,
@@ -1792,6 +1860,64 @@ class SupabaseReader:
         self._attach_comment_counts(page)
         self._attach_correlation_info(page)
         return page
+
+    def get_canonical_ticket_detail(self, ticket_id: str) -> Optional[Dict[str, Any]]:
+        """Return the canonical ticket and its recorded local activity timeline."""
+        if not self.client:
+            return None
+        try:
+            ticket_response = (
+                self.client.table("tickets").select("*").eq("id", ticket_id).limit(1).execute()
+            )
+            ticket_rows = ticket_response.data or []
+            if not ticket_rows:
+                return None
+            ticket = dict(ticket_rows[0])
+            comments = (
+                self.client.table("ticket_comments")
+                .select("source, body, author, is_public, created_at")
+                .eq("ticket_id", ticket_id)
+                .order("created_at", desc=False)
+                .limit(200)
+                .execute()
+            ).data or []
+            deliveries = (
+                self.client.table("message_deliveries")
+                .select("purpose, channel, external_chat_id, external_message_id, sent_at")
+                .eq("ticket_id", ticket_id)
+                .order("sent_at", desc=False)
+                .limit(200)
+                .execute()
+            ).data or []
+        except Exception as exc:
+            logger.error("Error fetching canonical ticket detail for %s: %s", ticket_id, exc)
+            return None
+
+        ticket["comments"] = [
+            {
+                "source": comment.get("source"),
+                "body": comment.get("body"),
+                "author": comment.get("author"),
+                "is_public": comment.get("is_public"),
+                "created_at": comment.get("created_at"),
+            }
+            for comment in comments
+        ]
+        ticket["deliveries"] = [
+            {
+                "purpose": delivery.get("purpose"),
+                "sent_at": delivery.get("sent_at"),
+                "message_url": (
+                    telegram_message_url(
+                        delivery.get("external_chat_id"), delivery.get("external_message_id")
+                    )
+                    if delivery.get("channel") == "telegram"
+                    else None
+                ),
+            }
+            for delivery in deliveries
+        ]
+        return ticket
 
     def get_ticket_detail(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
         """Return a ticket's full row plus its unified, read-only comment timeline.

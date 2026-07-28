@@ -1,8 +1,7 @@
-"""Tickets page (Task 8) — unified, READ-ONLY view across both backends.
+"""Read-only canonical Tickets page.
 
-Lists tickets from ``internal_tickets`` (🗂 Internal) and Jira-backed
-``escalation_mappings`` (🎫 Jira) via ``SupabaseReader.list_tickets`` — no live
-Jira fetch on render; statuses are "as of last sync". Responding to a ticket
+Lists every Anansi ticket from the database's ``ticket_list_view`` projection;
+there is no live Jira query or capped Python merge. Responding to a ticket
 still happens in the Telegram escalation group; this page only surfaces state
 and deep-links out. There are deliberately NO reply / close / edit / mutate
 controls anywhere on this page.
@@ -23,8 +22,6 @@ from nicegui import run, ui
 
 from nicegui_app.services_access import get_reader
 
-# Which statuses are checked by default (open + in-progress), per the spec.
-_DEFAULT_STATUSES = {"open": True, "in_progress": True, "done": False}
 _STATUS_LABELS = {"open": "open", "in_progress": "in-progress", "done": "done"}
 _STATUS_COLORS = {"open": "green", "in_progress": "orange", "done": "grey"}
 _PAGE_SIZE = 25
@@ -35,6 +32,12 @@ _COMMENT_SOURCE_LABELS = {
     "notify": "🔔 Notify",
     "jira": "🎫 Jira",
     "escalation": "🧑‍💼 Staff",
+}
+
+_DELIVERY_LABELS = {
+    "escalation": "Escalation message",
+    "notification": "Notification message",
+    "update": "Update message",
 }
 
 
@@ -112,6 +115,19 @@ def _backend_chip(backend: str) -> str:
     return "🎫 Jira" if backend == "jira" else "🗂 Internal"
 
 
+def _origin_label(created_via: str) -> str:
+    return {
+        "escalation": "🆘 Customer escalation",
+        "notification": "🔔 Operational notification",
+        "adopted": "↗ Adopted",
+        "legacy": "◷ Legacy",
+    }.get(created_via, "Unknown origin")
+
+
+def _escalation_context_label(has_escalation: bool) -> str:
+    return "🆘 Escalation" if has_escalation else "🔔 No escalation"
+
+
 def _status_badge(status: str) -> None:
     label = _STATUS_LABELS.get(status, status or "—")
     color = _STATUS_COLORS.get(status, "blue-grey")
@@ -135,34 +151,46 @@ async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
         ).classes("text-negative")
         return
 
-    # /tickets/{ref} — dedicated single-ticket detail view.
+    # /tickets/{ref} — dedicated canonical ticket detail view. The route
+    # parameter is the canonical ticket id; references are display-only.
     if ref:
         await _render_single_detail(db, ref)
         return
 
     state: dict[str, Any] = {
-        "statuses": dict(_DEFAULT_STATUSES),
+        "status": "all",
         "backend": "all",
-        "org": "",
+        "created_via": "all",
+        "has_escalation": "all",
         "search": "",
-        "offset": 0,
+        "page": 1,
     }
 
     # ── filter controls (all read-only) ───────────────────────────────────────
     with ui.row().classes("items-center gap-4 w-full flex-wrap"):
-        ui.label("Status:").classes("text-bold")
-        for key in ("open", "in_progress", "done"):
-            ui.checkbox(
-                _STATUS_LABELS[key], value=state["statuses"][key]
-            ).bind_value(state["statuses"], key).on_value_change(lambda: _reload())
+        ui.select(
+            {"all": "All statuses", **_STATUS_LABELS}, value="all"
+        ).bind_value(state, "status").on_value_change(lambda: _reload())
         ui.select(
             {"all": "All backends", "jira": "🎫 Jira", "internal": "🗂 Internal"},
             value="all",
         ).bind_value(state, "backend").on_value_change(lambda: _reload())
+        ui.select(
+            {
+                "all": "All origins",
+                "escalation": "🆘 Customer escalation",
+                "notification": "🔔 Operational notification",
+                "adopted": "↗ Adopted",
+                "legacy": "◷ Legacy",
+            },
+            value="all",
+        ).bind_value(state, "created_via").on_value_change(lambda: _reload())
+        ui.select(
+            {"all": "All ticket context", "yes": "🆘 Has escalation", "no": "No escalation"},
+            value="all",
+        ).bind_value(state, "has_escalation").on_value_change(lambda: _reload())
 
     with ui.row().classes("items-center gap-4 w-full flex-wrap"):
-        org_input = ui.input("🏢 Org filter (id or #hashtag)").classes("w-64")
-        org_input.on("keydown.enter", lambda: _apply(org_input, "org"))
         search_input = ui.input("🔍 Search ref / summary / customer").classes("w-72")
         search_input.on("keydown.enter", lambda: _apply(search_input, "search"))
 
@@ -171,24 +199,30 @@ async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
 
     async def _apply(widget, field: str) -> None:
         state[field] = widget.value or ""
-        state["offset"] = 0
+        state["page"] = 1
         await _reload()
 
     async def _reload() -> None:
         list_container.clear()
         pager.clear()
-        status_filter = [k for k, v in state["statuses"].items() if v]
-        backend_filter = None if state["backend"] == "all" else state["backend"]
-        tickets = await run.io_bound(
-            lambda: db.list_tickets(
-                status_filter=status_filter,
-                org_filter=state["org"] or None,
-                backend_filter=backend_filter,
+        result = await run.io_bound(
+            lambda: db.list_ticket_page(
+                page=state["page"],
+                page_size=_PAGE_SIZE,
+                status=None if state["status"] == "all" else state["status"],
+                backend=None if state["backend"] == "all" else state["backend"],
+                created_via=(
+                    None if state["created_via"] == "all" else state["created_via"]
+                ),
+                has_escalation=(
+                    None
+                    if state["has_escalation"] == "all"
+                    else state["has_escalation"] == "yes"
+                ),
                 search=state["search"] or None,
-                limit=_PAGE_SIZE,
-                offset=state["offset"],
             )
         )
+        tickets = result.items
         with list_container:
             if not tickets:
                 ui.label("No tickets match the current filters.").classes("text-caption")
@@ -197,22 +231,20 @@ async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
                     _ticket_row(db, ticket)
 
         with pager:
-            page_no = state["offset"] // _PAGE_SIZE + 1
             ui.button("← Prev", on_click=_prev).props("flat dense").set_enabled(
-                state["offset"] > 0
+                state["page"] > 1
             )
-            ui.label(f"Page {page_no}").classes("text-caption")
-            # A full page implies there may be more; not exact, but cheap.
+            ui.label(f"Page {state['page']} · {result.total} tickets").classes("text-caption")
             ui.button("Next →", on_click=_next).props("flat dense").set_enabled(
-                len(tickets) == _PAGE_SIZE
+                state["page"] * _PAGE_SIZE < result.total
             )
 
     async def _prev() -> None:
-        state["offset"] = max(0, state["offset"] - _PAGE_SIZE)
+        state["page"] = max(1, state["page"] - 1)
         await _reload()
 
     async def _next() -> None:
-        state["offset"] += _PAGE_SIZE
+        state["page"] += 1
         await _reload()
 
     await _reload()
@@ -240,6 +272,10 @@ def _ticket_row(db, ticket: dict) -> None:
         # Summary chips row (status badge + org/grid/customer), always visible.
         with ui.row().classes("items-center gap-3 flex-wrap"):
             _status_badge(ticket.get("status"))
+            ui.label(_origin_label(ticket.get("created_via") or "")).classes("text-caption")
+            ui.label(_escalation_context_label(bool(ticket.get("has_escalation")))).classes(
+                "text-caption"
+            )
             org = ticket.get("org_hashtag") or (
                 f"org {ticket.get('organization_id')}"
                 if ticket.get("organization_id") is not None
@@ -262,7 +298,10 @@ def _ticket_row(db, ticket: dict) -> None:
         if not exp.value or loaded["done"]:
             return
         loaded["done"] = True
-        detail = await run.io_bound(lambda: db.get_ticket_detail(ticket.get("ticket_ref")))
+        ticket_id = ticket.get("id")
+        detail = await run.io_bound(
+            lambda: db.get_canonical_ticket_detail(ticket_id) if ticket_id else None
+        )
         _render_detail_body(body, detail or ticket)
 
     exp.on_value_change(_on_toggle)
@@ -294,6 +333,18 @@ def _render_detail_body(container, detail: dict) -> None:
         if description:
             ui.label("Description").classes("text-bold q-mt-sm")
             ui.label(description).classes("text-body2").style("white-space: pre-wrap")
+
+        deliveries = detail.get("deliveries") or []
+        if deliveries:
+            ui.label("Recorded message deliveries").classes("text-bold q-mt-sm")
+            with ui.column().classes("gap-1"):
+                for delivery in deliveries:
+                    label = _DELIVERY_LABELS.get(delivery.get("purpose"), "Message delivery")
+                    timestamp = _format_time_ago(delivery.get("sent_at"))
+                    if delivery.get("message_url"):
+                        ui.link(f"↗ {label} · {timestamp}", delivery["message_url"], new_tab=True)
+                    else:
+                        ui.label(f"{label} · {timestamp}").classes("text-caption")
 
         _correlation_section(detail)
 
@@ -394,12 +445,13 @@ def _comment_card(comment: dict) -> None:
         )
 
 
-async def _render_single_detail(db, ref: str) -> None:
+async def _render_single_detail(db, ticket_id: str) -> None:
     ui.link("← Back to Tickets", "/tickets").classes("q-mb-sm")
-    detail = await run.io_bound(lambda: db.get_ticket_detail(ref))
+    detail = await run.io_bound(lambda: db.get_canonical_ticket_detail(ticket_id))
     if detail is None:
-        ui.label(f"Ticket '{ref}' was not found.").classes("text-negative")
+        ui.label("Ticket was not found.").classes("text-negative")
         return
+    ref = detail.get("ticket_ref") or ticket_id
     summary = detail.get("summary") or ref
     with ui.row().classes("items-center gap-3 flex-wrap"):
         ui.label(f"{_backend_chip(detail.get('backend'))}  {ref}").classes("text-h6")

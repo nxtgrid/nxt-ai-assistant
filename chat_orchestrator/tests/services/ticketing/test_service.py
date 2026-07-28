@@ -21,6 +21,7 @@ from orchestrator.services.ticketing.backend import (
     TicketResult,
     TicketSummary,
 )
+from orchestrator.services.ticketing.repository import TicketRecord
 from orchestrator.services.ticketing.service import TicketService
 
 
@@ -49,6 +50,50 @@ class _FakeBackend:
         if self.create_error is not None:
             raise self.create_error
         return TicketResult(ref=self._ref, backend=self.name, url=None)
+
+    async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
+        self.find_by_escalation_calls.append(mapping_id)
+        return None
+
+    async def update_ticket(self, ref: str, summary=None, description=None, priority_id=None) -> bool:
+        self.update_ticket_calls.append((ref, summary, description, priority_id))
+        return self.update_ticket_result
+
+    async def find_open_by_grid(self, grid_name: str, limit: int = 20) -> List[TicketSummary]:
+        self.find_open_by_grid_calls.append((grid_name, limit))
+        return self.find_open_by_grid_result
+
+
+class _FakeTicketRepository:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.records_by_ref: dict[str, TicketRecord] = {}
+        self.refs_by_escalation: dict[str, str] = {}
+        self.find_ref_for_escalation_calls: list[str] = []
+
+    async def create_intent(self, req, *, created_via):
+        self.calls.append(("intent", created_via, req.summary))
+        return TicketRecord(
+            id="ticket-1", summary=req.summary, created_via=created_via,
+            provisioning_state="pending",
+        )
+
+    async def set_pending_backend(self, ticket_id, backend):
+        self.calls.append(("backend", ticket_id, backend))
+
+    async def activate(self, ticket_id, result):
+        self.calls.append(("activate", ticket_id, result.ref, result.backend))
+        return TicketRecord(
+            id=ticket_id, ticket_ref=result.ref, backend=result.backend,
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+
+    async def get_by_ref(self, ref: str) -> Optional[TicketRecord]:
+        return self.records_by_ref.get(ref)
+
+    async def find_ref_for_escalation(self, escalation_id: str) -> Optional[str]:
+        self.find_ref_for_escalation_calls.append(escalation_id)
+        return self.refs_by_escalation.get(escalation_id)
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         return True
@@ -147,6 +192,7 @@ def _make_service(
     raw_client: Optional[_FakeRawClient],
     jira: Optional[_FakeBackend] = None,
     internal: Optional[_FakeBackend] = None,
+    ticket_repository=None,
 ) -> TicketService:
     jira = jira or _FakeBackend("jira")
     internal = internal or _FakeBackend("internal")
@@ -154,6 +200,7 @@ def _make_service(
         get_supabase_client=(lambda: _RawClientWrapper(raw_client)) if raw_client else None,
         jira_backend=jira,
         internal_backend=internal,
+        ticket_repository=ticket_repository or _FakeTicketRepository(),
     )
     return service
 
@@ -169,6 +216,27 @@ class _RawClientWrapper:
 
 
 class TestCreateTicketStamping:
+    def test_default_internal_backend_shares_the_service_canonical_repository(self):
+        repository = _FakeTicketRepository()
+
+        service = TicketService(ticket_repository=repository)
+
+        assert service._internal._tickets is repository
+
+    @pytest.mark.asyncio
+    async def test_persists_and_activates_one_canonical_intent(self):
+        repository = _FakeTicketRepository()
+        jira = _FakeBackend("jira", ref="OPS-42")
+        service = _make_service(raw_client=None, jira=jira, ticket_repository=repository)
+
+        result = await service.create_ticket(TicketCreateRequest(summary="x", source="notify"))
+
+        assert result.ticket_id == "ticket-1"
+        assert repository.calls == [
+            ("intent", "notification", "x"),
+            ("backend", "ticket-1", "jira"),
+            ("activate", "ticket-1", "OPS-42", "jira"),
+        ]
     @pytest.mark.asyncio
     async def test_stamps_ticket_ref_and_backend_on_success(self):
         raw = _FakeRawClient()
@@ -213,6 +281,29 @@ class TestCreateTicketStamping:
 
 class TestNotifyTicketFallback:
     @pytest.mark.asyncio
+    async def test_jira_fallback_activates_the_original_canonical_intent(self):
+        repository = _FakeTicketRepository()
+        jira = _FakeBackend("jira")
+        jira.create_error = TicketBackendError("Jira unavailable")
+        internal = _FakeBackend("internal", ref="TKT-000101")
+        service = _make_service(
+            raw_client=None, jira=jira, internal=internal, ticket_repository=repository
+        )
+
+        outcome = await service.create_ticket_with_internal_fallback(
+            TicketCreateRequest(summary="Grid down", source="notify"), backend_override="jira"
+        )
+
+        assert outcome.result is not None
+        assert outcome.result.ticket_id == "ticket-1"
+        assert repository.calls == [
+            ("intent", "notification", "Grid down"),
+            ("backend", "ticket-1", "jira"),
+            ("backend", "ticket-1", "internal"),
+            ("activate", "ticket-1", "TKT-000101", "internal"),
+        ]
+
+    @pytest.mark.asyncio
     async def test_jira_failure_creates_internal_ticket_once(self):
         jira = _FakeBackend("jira", ref="OPS-42")
         jira.create_error = TicketBackendError("Jira unavailable")
@@ -223,7 +314,9 @@ class TestNotifyTicketFallback:
             TicketCreateRequest(summary="! Urgent: Grid down"), backend_override="jira"
         )
 
-        assert outcome.result == TicketResult(ref="TKT-000101", backend="internal", url=None)
+        assert outcome.result == TicketResult(
+            ref="TKT-000101", backend="internal", url=None, ticket_id="ticket-1"
+        )
         assert outcome.fallback_used is True
         assert outcome.error is None
         assert len(jira.create_calls) == 1
@@ -263,95 +356,62 @@ class TestNotifyTicketFallback:
 
 class TestBackendForRef:
     @pytest.mark.asyncio
-    async def test_ref_found_in_internal_tickets_routes_internal(self):
-        raw = _FakeRawClient()
-        raw.tables["internal_tickets"].rows = [{"ticket_ref": "TKT-000001"}]
+    async def test_canonical_internal_ticket_routes_internal(self):
         jira = _FakeBackend("jira")
         internal = _FakeBackend("internal")
-        service = _make_service(raw, jira=jira, internal=internal)
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["TKT-000001"] = TicketRecord(
+            id="ticket-1", ticket_ref="TKT-000001", backend="internal",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, internal=internal, ticket_repository=repository)
 
         backend = await service._backend_for_ref("TKT-000001")
 
         assert backend is internal
 
     @pytest.mark.asyncio
-    async def test_ref_not_found_routes_jira(self):
-        raw = _FakeRawClient()  # internal_tickets empty
+    async def test_canonical_jira_ticket_routes_jira(self):
         jira = _FakeBackend("jira")
         internal = _FakeBackend("internal")
-        service = _make_service(raw, jira=jira, internal=internal)
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, internal=internal, ticket_repository=repository)
 
         backend = await service._backend_for_ref("OPS-99")
 
         assert backend is jira
 
     @pytest.mark.asyncio
-    async def test_lookup_failure_falls_back_to_jira(self):
-        raw = _FakeRawClient()
-        raw.tables["internal_tickets"].raise_on_execute = RuntimeError("network blip")
+    async def test_untracked_ticket_does_not_infer_a_backend(self):
         jira = _FakeBackend("jira")
         internal = _FakeBackend("internal")
-        service = _make_service(raw, jira=jira, internal=internal)
+        service = _make_service(None, jira=jira, internal=internal)
 
-        backend = await service._backend_for_ref("OPS-99")
-
-        assert backend is jira
-
-    @pytest.mark.asyncio
-    async def test_no_raw_client_falls_back_to_jira(self):
-        jira = _FakeBackend("jira")
-        internal = _FakeBackend("internal")
-        service = _make_service(raw_client=None, jira=jira, internal=internal)
-
-        backend = await service._backend_for_ref("anything")
-
-        assert backend is jira
+        with pytest.raises(TicketBackendError, match="no canonical ticket"):
+            await service._backend_for_ref("OPS-99")
 
 
 class TestFindByEscalation:
     @pytest.mark.asyncio
-    async def test_checks_jira_first_then_internal(self, monkeypatch):
-        monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "auto")
+    async def test_resolves_only_through_the_canonical_escalation_relation(self):
         jira = _FakeBackend("jira")
         internal = _FakeBackend("internal")
-        service = _make_service(raw_client=None, jira=jira, internal=internal)
+        repository = _FakeTicketRepository()
+        repository.refs_by_escalation["mapping-3"] = "TKT-3"
+        service = _make_service(
+            raw_client=None, jira=jira, internal=internal, ticket_repository=repository
+        )
 
-        await service.find_by_escalation("mapping-3")
+        result = await service.find_by_escalation("mapping-3")
 
-        assert jira.find_by_escalation_calls == ["mapping-3"]
-        assert internal.find_by_escalation_calls == ["mapping-3"]
-
-    @pytest.mark.asyncio
-    async def test_returns_jira_ref_without_checking_internal_when_jira_finds_it(
-        self, monkeypatch
-    ):
-        monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "auto")
-
-        class _JiraFinds(_FakeBackend):
-            async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
-                self.find_by_escalation_calls.append(mapping_id)
-                return "OPS-55"
-
-        jira = _JiraFinds("jira")
-        internal = _FakeBackend("internal")
-        service = _make_service(raw_client=None, jira=jira, internal=internal)
-
-        result = await service.find_by_escalation("mapping-4")
-
-        assert result == "OPS-55"
-        assert internal.find_by_escalation_calls == []
-
-    @pytest.mark.asyncio
-    async def test_override_internal_skips_jira_entirely(self, monkeypatch):
-        monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "internal")
-        jira = _FakeBackend("jira")
-        internal = _FakeBackend("internal")
-        service = _make_service(raw_client=None, jira=jira, internal=internal)
-
-        await service.find_by_escalation("mapping-5")
-
+        assert result == "TKT-3"
+        assert repository.find_ref_for_escalation_calls == ["mapping-3"]
         assert jira.find_by_escalation_calls == []
-        assert internal.find_by_escalation_calls == ["mapping-5"]
+        assert internal.find_by_escalation_calls == []
 
 
 class TestUpdateTicket:
@@ -359,12 +419,15 @@ class TestUpdateTicket:
     add_comment/get_status/transition_to_done (see TestBackendForRef)."""
 
     @pytest.mark.asyncio
-    async def test_routes_to_internal_when_ref_found_in_internal_tickets(self):
-        raw = _FakeRawClient()
-        raw.tables["internal_tickets"].rows = [{"ticket_ref": "TKT-000001"}]
+    async def test_routes_to_internal_when_canonical_ticket_is_internal(self):
         jira = _FakeBackend("jira")
         internal = _FakeBackend("internal")
-        service = _make_service(raw, jira=jira, internal=internal)
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["TKT-000001"] = TicketRecord(
+            id="ticket-1", ticket_ref="TKT-000001", backend="internal",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, internal=internal, ticket_repository=repository)
 
         ok = await service.update_ticket("TKT-000001", summary="s", description="d")
 
@@ -373,11 +436,15 @@ class TestUpdateTicket:
         assert jira.update_ticket_calls == []
 
     @pytest.mark.asyncio
-    async def test_routes_to_jira_when_ref_not_in_internal_tickets(self):
-        raw = _FakeRawClient()
+    async def test_routes_to_jira_when_canonical_ticket_is_jira(self):
         jira = _FakeBackend("jira")
         internal = _FakeBackend("internal")
-        service = _make_service(raw, jira=jira, internal=internal)
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, internal=internal, ticket_repository=repository)
 
         ok = await service.update_ticket("OPS-99", priority_id="10001")
 
@@ -387,11 +454,15 @@ class TestUpdateTicket:
 
     @pytest.mark.asyncio
     async def test_propagates_backend_failure(self):
-        raw = _FakeRawClient()
         jira = _FakeBackend("jira")
         jira.update_ticket_result = False
         internal = _FakeBackend("internal")
-        service = _make_service(raw, jira=jira, internal=internal)
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, internal=internal, ticket_repository=repository)
 
         ok = await service.update_ticket("OPS-99", summary="s")
 

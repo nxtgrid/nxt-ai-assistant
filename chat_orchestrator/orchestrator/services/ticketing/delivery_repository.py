@@ -1,0 +1,59 @@
+"""Persistence boundary for outbound Telegram delivery receipts."""
+
+from __future__ import annotations
+
+from typing import Any, Callable, Literal, Optional
+
+
+class DeliveryRepository:
+    """The only writer for ``message_deliveries``."""
+
+    def __init__(
+        self,
+        client: Optional[Any] = None,
+        get_client: Optional[Callable[[], Optional[Any]]] = None,
+    ) -> None:
+        if client is None and get_client is None:
+            raise ValueError("DeliveryRepository requires either `client` or `get_client`")
+        self._client_instance = client
+        self._get_client = get_client
+
+    def _raw_client(self) -> Any:
+        client = self._client_instance or (self._get_client() if self._get_client else None)
+        if client is None:
+            raise RuntimeError("delivery repository has no database client")
+        return client
+
+    async def record(
+        self,
+        *,
+        ticket_id: Optional[str],
+        escalation_id: Optional[str],
+        purpose: Literal["escalation", "notification", "update"],
+        external_chat_id: str,
+        external_topic_id: Optional[str],
+        external_message_id: int,
+        chat_message_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        if ticket_id is None and escalation_id is None:
+            raise ValueError("a delivery receipt requires a ticket or escalation owner")
+        payload = {
+            "ticket_id": ticket_id,
+            "escalation_id": escalation_id,
+            "purpose": purpose,
+            "channel": "telegram",
+            "external_chat_id": external_chat_id,
+            "external_topic_id": external_topic_id,
+            "external_message_id": external_message_id,
+            "chat_message_id": chat_message_id,
+        }
+        response = (
+            self._raw_client()
+            .table("message_deliveries")
+            .upsert(payload, on_conflict="channel,external_chat_id,external_message_id")
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        if not rows:
+            raise RuntimeError("delivery receipt write returned no row")
+        return rows[0]

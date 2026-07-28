@@ -902,8 +902,8 @@ async def _log_notification_to_chat_db(
 
     When ``ticket_ref`` is set (this notification created or updated a ticket),
     the saved message is also tagged via ``tag_message_as_ticket_comment`` so it
-    shows up in that ticket's comment timeline (``get_ticket_comments``), mirroring
-    how forwarded escalation replies are tagged.
+    can be associated with the canonical ticket timeline, mirroring how
+    forwarded escalation replies are tagged.
     """
     try:
         from orchestrator.models.schemas import ConversationMessage
@@ -1041,6 +1041,22 @@ async def _deliver_notification(
     await _log_notification_to_chat_db(
         body, target.chat_id, target.topic_id, message_id, ticket_ref=ticket_ref
     )
+
+    if delivery is not None and delivery.ticket is not None and delivery.ticket.ticket_id:
+        try:
+            from orchestrator.services.ticketing.delivery_repository import DeliveryRepository
+
+            receipts = DeliveryRepository(get_client=_raw_supabase_client)
+            await receipts.record(
+                ticket_id=delivery.ticket.ticket_id,
+                escalation_id=None,
+                purpose="notification",
+                external_chat_id=str(target.chat_id),
+                external_topic_id=str(target.topic_id) if target.topic_id is not None else None,
+                external_message_id=int(message_id),
+            )
+        except Exception:
+            logger.warning("Notify: failed to record delivery receipt", exc_info=True)
 
     if delivery is not None and delivery.record_message_id_for_ticket_ref:
         try:
@@ -1239,10 +1255,16 @@ class NotificationTicket:
     ref: str
     backend: str
     url: Optional[str] = None
+    ticket_id: Optional[str] = None
 
 
 def _notification_ticket_from_result(result: Any) -> NotificationTicket:
-    return NotificationTicket(ref=result.ref, backend=result.backend, url=result.url)
+    return NotificationTicket(
+        ref=result.ref,
+        backend=result.backend,
+        url=result.url,
+        ticket_id=getattr(result, "ticket_id", None),
+    )
 
 
 def _ticket_notification_url(ticket: NotificationTicket) -> Optional[str]:

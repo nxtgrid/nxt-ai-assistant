@@ -30,6 +30,7 @@ from orchestrator.services.ticketing.backend import (
 )
 from orchestrator.services.ticketing.correlation_render import AmendmentResult
 from orchestrator.services.ticketing.correlator import CorrelationDecision
+from orchestrator.services.ticketing.repository import TicketRecord
 from orchestrator.services.ticketing.service import TicketService
 from orchestrator.services.urgent_alert_context import build_urgent_alert_context
 from shared.auth.auth_service import GridNotificationTarget
@@ -415,6 +416,28 @@ async def test_handle_notify_create_ticket_returns_ref_in_response(monkeypatch):
 async def test_handle_notify_falls_open_to_internal_when_jira_has_no_compatible_type(
     monkeypatch,
 ):
+    class _CanonicalTicketRepository:
+        async def create_intent(self, request, *, created_via):
+            return TicketRecord(
+                id="ticket-1",
+                summary=request.summary,
+                created_via=created_via,
+                provisioning_state="pending",
+            )
+
+        async def set_pending_backend(self, _ticket_id, _backend):
+            return None
+
+        async def activate(self, ticket_id, result):
+            return TicketRecord(
+                id=ticket_id,
+                ticket_ref=result.ref,
+                backend=result.backend,
+                summary="Grid down",
+                created_via="notification",
+                provisioning_state="active",
+            )
+
     class _JiraWithoutCompatibleType:
         name = "jira"
 
@@ -433,6 +456,7 @@ async def test_handle_notify_falls_open_to_internal_when_jira_has_no_compatible_
     service = TicketService(
         jira_backend=_JiraWithoutCompatibleType(),
         internal_backend=_InternalFallback(),
+        ticket_repository=_CanonicalTicketRepository(),
     )
     monkeypatch.setenv("JIRA_PROJECT_KEY", "OPS")
     monkeypatch.setenv("NOTIFY_TICKETS_BACKEND", "jira")
@@ -1118,6 +1142,32 @@ def _stub_chat_db_logging(monkeypatch):
 
 
 class TestDeliverNotificationDelivery:
+    async def test_records_a_receipt_for_a_canonical_ticket(self, fake_telegram_send, monkeypatch):
+        from orchestrator.api.app import _deliver_notification
+
+        calls: list[dict[str, Any]] = []
+
+        class _Deliveries:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def record(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.delivery_repository.DeliveryRepository", _Deliveries
+        )
+        ticket = NotificationTicket(ref="TKT-9", backend="internal", ticket_id="ticket-9")
+
+        await _deliver_notification(
+            _notify_body(), _target(), ticket.ref, NotificationDelivery(ticket=ticket)
+        )
+
+        assert calls == [{
+            "ticket_id": "ticket-9", "escalation_id": None, "purpose": "notification",
+            "external_chat_id": "-100555", "external_topic_id": "42", "external_message_id": 999,
+        }]
+
     async def test_ticketed_jira_notification_links_only_the_reference(self, fake_telegram_send):
         from orchestrator.api.app import _deliver_notification
 

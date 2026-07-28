@@ -51,6 +51,16 @@ class _FakeQuery:
         self._payload = payload
         return self
 
+    def insert(self, payload: Dict[str, Any]) -> "_FakeQuery":
+        self._op = "insert"
+        self._payload = payload
+        return self
+
+    def upsert(self, payload: Dict[str, Any], **_kwargs) -> "_FakeQuery":
+        self._op = "upsert"
+        self._payload = payload
+        return self
+
     def eq(self, col: str, value: Any) -> "_FakeQuery":
         self._filters[col] = value
         return self
@@ -62,6 +72,16 @@ class _FakeQuery:
         self._t.calls.append((self._op, dict(self._filters), self._payload))
         if self._op == "select":
             return _FakeResponse(self._t.rows_matching(self._filters))
+        if self._op in {"insert", "upsert"}:
+            row = {"id": f"ticket-{len(self._t.rows) + 1}", **(self._payload or {})}
+            self._t.rows.append(row)
+            return _FakeResponse([row])
+        if self._op == "update" and self._t.rows:
+            updated = []
+            for row in self._t.rows_matching(self._filters):
+                row.update(self._payload or {})
+                updated.append(row)
+            return _FakeResponse(updated)
         return _FakeResponse([{"id": self._filters.get("id")}])
 
 
@@ -79,12 +99,16 @@ class _FakeTable:
     def update(self, payload: Dict[str, Any]) -> _FakeQuery:
         return _FakeQuery(self, "update", payload)
 
+    def insert(self, payload: Dict[str, Any]) -> _FakeQuery:
+        return _FakeQuery(self, "insert", payload)
+
 
 class _FakeRaw:
     def __init__(self) -> None:
         self.tables: Dict[str, _FakeTable] = {
             "escalation_mappings": _FakeTable(),
             "internal_tickets": _FakeTable(),
+            "tickets": _FakeTable(),
         }
 
     def table(self, name: str) -> _FakeTable:
@@ -103,6 +127,7 @@ class _FakeSupabase:
         self.tag_calls: List[tuple] = []
         self.saved_messages_return: List[Any] = [SimpleNamespace(id="msg-1")]
         self.mapping_for_reply: Optional[Dict[str, Any]] = None
+        self.internal_ticket_lookup_calls: List[str] = []
         # Sweep fixtures — configure per-test, default to empty/no-op.
         self.stale_unfiled: List[Dict[str, Any]] = []
         self.old_unfiled: List[Dict[str, Any]] = []
@@ -145,6 +170,7 @@ class _FakeSupabase:
         return []
 
     async def get_internal_ticket(self, ref: str):
+        self.internal_ticket_lookup_calls.append(ref)
         return self._internal_rows.get(ref)
 
     async def count_active_blocking_escalations(self, _sid):
@@ -228,6 +254,24 @@ class _FakeTickets:
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         self.add_comment_calls.append((ref, body, public))
         return True
+
+
+class _CanonicalDedupTickets:
+    """Ticket-service seam for an already-attached canonical escalation."""
+
+    def __init__(self, ref: str, backend: str) -> None:
+        self._ref = ref
+        self._backend = backend
+        self.find_calls: list[str] = []
+        self.backend_calls: list[str] = []
+
+    async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
+        self.find_calls.append(mapping_id)
+        return self._ref
+
+    async def get_backend_name(self, ref: str) -> str:
+        self.backend_calls.append(ref)
+        return self._backend
 
 
 # ---------------------------------------------------------------------------
@@ -352,6 +396,54 @@ async def test_track_as_ticket_internal_success_leaves_jira_key_null():
     ), sent
 
 
+async def test_track_as_ticket_attaches_the_canonical_ticket_to_the_escalation():
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "mapping-abcd1234", "state": "processing"}]
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+    jira = _FakeBackend("jira", available=True, ref="OPS-100")
+    internal = _FakeBackend("internal")
+    _install_ticket_service(svc, jira, internal)
+
+    await svc.track_as_ticket(escalation_mapping=_base_mapping())
+
+    assert raw.tables["escalations"].rows == [
+        {"id": "mapping-abcd1234", "state": "tracked", "ticket_id": "ticket-1"}
+    ]
+
+
+async def test_track_as_ticket_records_the_customer_notification_delivery():
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "mapping-abcd1234", "state": "processing"}]
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+    _install_ticket_service(svc, _FakeBackend("jira", ref="OPS-100"), _FakeBackend("internal"))
+
+    class _Deliveries:
+        calls: list[dict[str, Any]] = []
+
+        async def record(self, **kwargs):
+            self.calls.append(kwargs)
+            return kwargs
+
+    deliveries = _Deliveries()
+    svc._deliveries = deliveries
+
+    async def fake_send(*_args, **_kwargs):
+        return {"ok": True, "result": {"message_id": 77}}
+
+    svc._send_telegram_message = fake_send
+    await svc.track_as_ticket(escalation_mapping=_base_mapping())
+
+    assert deliveries.calls == [
+        {
+            "ticket_id": "ticket-1", "escalation_id": "mapping-abcd1234",
+            "purpose": "notification", "external_chat_id": "12345",
+            "external_topic_id": None, "external_message_id": 77,
+        }
+    ]
+
+
 async def test_track_as_ticket_dedup_hit_jira_writes_jira_key():
     raw = _FakeRaw()
     supa = _FakeSupabase(raw)  # no internal_tickets rows -> recovered ref is Jira
@@ -359,6 +451,8 @@ async def test_track_as_ticket_dedup_hit_jira_writes_jira_key():
     jira = _FakeBackend("jira", available=True, dedup="OPS-55")
     internal = _FakeBackend("internal")
     _install_ticket_service(svc, jira, internal)
+    canonical_tickets = _CanonicalDedupTickets("OPS-55", "jira")
+    svc._tickets = canonical_tickets
 
     result = await svc.track_as_ticket(escalation_mapping=_base_mapping())
 
@@ -368,6 +462,9 @@ async def test_track_as_ticket_dedup_hit_jira_writes_jira_key():
     assert result["ticket_url"] == f"{svc._jira_base_url}/browse/OPS-55"
     assert jira.create_calls == 0  # dedup skipped creation
     assert {"jira_ticket_key": "OPS-55"} in supa.em_update_payloads()
+    assert canonical_tickets.find_calls == ["mapping-abcd1234"]
+    assert canonical_tickets.backend_calls == ["OPS-55"]
+    assert supa.internal_ticket_lookup_calls == []
 
 
 async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
@@ -377,6 +474,8 @@ async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
     jira = _FakeBackend("jira", available=True, dedup=None)
     internal = _FakeBackend("internal", dedup="TKT-9")
     _install_ticket_service(svc, jira, internal)
+    canonical_tickets = _CanonicalDedupTickets("TKT-9", "internal")
+    svc._tickets = canonical_tickets
 
     result = await svc.track_as_ticket(escalation_mapping=_base_mapping())
 
@@ -388,6 +487,9 @@ async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
     }
     # Recovered ref is internal -> the legacy jira_ticket_key must stay untouched.
     assert all("jira_ticket_key" not in p for p in supa.em_update_payloads())
+    assert canonical_tickets.find_calls == ["mapping-abcd1234"]
+    assert canonical_tickets.backend_calls == ["TKT-9"]
+    assert supa.internal_ticket_lookup_calls == []
 
 
 async def test_track_as_ticket_creation_failure_returns_error():

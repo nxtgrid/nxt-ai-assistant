@@ -27,7 +27,9 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 
+from orchestrator.services.escalation_repository import EscalationRepository
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
+from orchestrator.services.ticketing.delivery_repository import DeliveryRepository
 from orchestrator.services.ticketing.service import TicketService
 from shared.utils.logging import get_logger
 from shared.utils.telegram_buttons import build_escalation_track_keyboard
@@ -126,6 +128,8 @@ class EscalationService:
         # backend per TICKET_BACKEND_OVERRIDE / Jira health. Shares this service's
         # own lazy-singleton Supabase getter so both see the same client.
         self._tickets = TicketService(get_supabase_client=self._get_supabase_client)
+        self._escalations = EscalationRepository(get_client=self._get_raw_client)
+        self._deliveries = DeliveryRepository(get_client=self._get_raw_client)
 
     def is_enabled(self) -> bool:
         """Check if escalation service is properly configured."""
@@ -142,6 +146,12 @@ class EscalationService:
                 key=self._supabase_key,
             )
         return self._supabase_client
+
+    def _get_raw_client(self):
+        supabase_client = self._get_supabase_client()
+        if supabase_client is None:
+            return None
+        return supabase_client._get_client()
 
     async def escalate_to_support(
         self,
@@ -1785,9 +1795,9 @@ class EscalationService:
             except Exception as e:
                 LOGGER.debug(f"Could not resolve grid for JIRA ticket: {e}")
 
-            # Dedup guard: if a previous attempt already filed a ticket for this
-            # escalation but failed to persist it, reuse that ticket instead of
-            # filing again. find_by_escalation checks both backends.
+            # Dedup guard: a canonical escalation owns at most one canonical
+            # ticket.  Its persisted backend is authoritative; reference
+            # syntax and legacy-table membership are not backend signals.
             existing_ref = await self._tickets.find_by_escalation(mapping_id)
             if existing_ref:
                 LOGGER.info(
@@ -1795,31 +1805,13 @@ class EscalationService:
                     existing_ref,
                     mapping_id,
                 )
-                # Resolve the recovered ref's backend so the legacy jira_ticket_key
-                # column stays in sync for inbound Jira webhook routing, and so the
-                # caller (e.g. the sweep) can render a link without a second lookup.
-                # A row in internal_tickets means it's internal; otherwise treat it
-                # as Jira (fail-toward-Jira on a lookup error is a cosmetic risk at
-                # worst -- see track_as_ticket's module-level design notes).
-                recovered_is_internal = False
-                if supabase_client:
-                    try:
-                        recovered_is_internal = (
-                            await supabase_client.get_internal_ticket(existing_ref)
-                        ) is not None
-                    except Exception as e:
-                        LOGGER.warning(
-                            "Dedup: could not resolve backend for recovered ref %s: %s",
-                            existing_ref,
-                            e,
-                        )
-                recovered_backend = "internal" if recovered_is_internal else "jira"
+                recovered_backend = await self._tickets.get_backend_name(existing_ref)
                 recovered_url = (
                     None
-                    if recovered_is_internal
+                    if recovered_backend == "internal"
                     else f"{self._jira_base_url}/browse/{existing_ref}"
                 )
-                if supabase_client and not recovered_is_internal:
+                if supabase_client and recovered_backend == "jira":
                     try:
                         _client = supabase_client._get_client()
                         _client.table("escalation_mappings").update(
@@ -1858,6 +1850,10 @@ class EscalationService:
 
             ticket_ref = result.ref
             issue_number = ticket_ref.split("-")[-1]
+
+            if not result.ticket_id:
+                return {"success": False, "error": "canonical ticket id missing after creation"}
+            await self._escalations.attach_ticket(mapping_id, result.ticket_id)
 
             # 6+7+8. Run independent post-ticket operations concurrently.
             async def _store_jira_key():
@@ -1906,11 +1902,23 @@ class EscalationService:
                             f"Your issue is being tracked (ref: {issue_number}). "
                             "The team is working on it. You'll hear back when it's resolved."
                         )
-                    await self._send_telegram_message(
+                    delivery = await self._send_telegram_message(
                         chat_id=customer_chat_id,
                         text=text,
                         topic_id=int(customer_topic_id) if customer_topic_id else None,
                     )
+                    message_id = (delivery.get("result") or {}).get("message_id")
+                    if message_id:
+                        await self._deliveries.record(
+                            ticket_id=result.ticket_id,
+                            escalation_id=mapping_id,
+                            purpose="notification",
+                            external_chat_id=str(customer_chat_id),
+                            external_topic_id=(
+                                str(customer_topic_id) if customer_topic_id is not None else None
+                            ),
+                            external_message_id=int(message_id),
+                        )
                 except Exception as e:
                     LOGGER.warning(f"Failed to notify customer about ticket {ticket_ref}: {e}")
 

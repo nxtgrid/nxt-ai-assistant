@@ -26,6 +26,7 @@ from .backend import (
 )
 from .internal_backend import InternalTicketBackend
 from .jira_backend import JiraTicketBackend
+from .repository import TicketRepository
 
 LOGGER = get_logger(__name__)
 
@@ -45,6 +46,7 @@ class TicketService:
         get_supabase_client: Optional[Callable[[], Optional[Any]]] = None,
         jira_backend: Optional[TicketBackend] = None,
         internal_backend: Optional[TicketBackend] = None,
+        ticket_repository: Optional[TicketRepository] = None,
     ) -> None:
         """
         Args:
@@ -61,8 +63,9 @@ class TicketService:
         self._supabase_client_instance = supabase_client
         self._get_supabase_client_fn = get_supabase_client
         self._jira: TicketBackend = jira_backend or JiraTicketBackend()
+        self._tickets = ticket_repository or TicketRepository(get_client=self._raw_client)
         self._internal: TicketBackend = internal_backend or InternalTicketBackend(
-            get_client=self._raw_client
+            get_client=self._raw_client, ticket_repository=self._tickets
         )
 
     # ------------------------------------------------------------------
@@ -124,29 +127,19 @@ class TicketService:
     async def _backend_for_ref(self, ref: str) -> TicketBackend:
         """Route by the ref's *persisted* backend, not current availability.
 
-        A Jira ticket filed before an outage must still be read as Jira when
-        Jira comes back, and an internal ticket must stay internal -- so this
-        checks whether ``ref`` exists in ``internal_tickets`` rather than
-        re-running ``resolve_backend()``.
+        The canonical ``tickets`` record is the only authority.  In
+        particular, a ticket reference is not a backend discriminator: Jira
+        project keys are deployment-specific and internal prefixes are
+        configurable.
         """
-        raw = self._raw_client()
-        if raw is not None:
-            try:
-                response = (
-                    raw.table("internal_tickets")
-                    .select("ticket_ref")
-                    .eq("ticket_ref", ref)
-                    .limit(1)
-                    .execute()
-                )
-                rows = getattr(response, "data", None) or []
-                if rows:
-                    return self._internal
-            except Exception:
-                LOGGER.warning(
-                    "ticket service: internal_tickets lookup failed for ref %s", ref, exc_info=True
-                )
-        return self._jira
+        ticket = await self._tickets.get_by_ref(ref)
+        if ticket is None or ticket.backend is None:
+            raise TicketBackendError(f"no canonical ticket backend recorded for ref {ref}")
+        if ticket.backend == "internal":
+            return self._internal
+        if ticket.backend == "jira":
+            return self._jira
+        raise TicketBackendError(f"unsupported canonical ticket backend for ref {ref}")
 
     # ------------------------------------------------------------------
     # Escalation-mapping stamping
@@ -189,13 +182,17 @@ class TicketService:
     ) -> TicketResult:
         """Create a ticket. ``backend_override`` is forwarded to ``resolve_backend``
         (see its docstring) -- omit to use ``TICKET_BACKEND_OVERRIDE`` as usual."""
+        created_via = "notification" if req.source == "notify" else "escalation"
+        intent = await self._tickets.create_intent(req, created_via=created_via)
         backend = await self.resolve_backend(override=backend_override)
+        await self._tickets.set_pending_backend(intent.id, backend.name)
         result = await backend.create_ticket(req)
+        await self._tickets.activate(intent.id, result)
         if req.escalation_mapping_id:
             await self._stamp_escalation_mapping(
                 req.escalation_mapping_id, result.ref, result.backend
             )
-        return result
+        return result.model_copy(update={"ticket_id": intent.id})
 
     async def create_ticket_with_internal_fallback(
         self, req: TicketCreateRequest, backend_override: Optional[str] = None
@@ -205,13 +202,17 @@ class TicketService:
         This deliberately resolves the primary backend once. A successful
         internal primary stays a normal internal creation; it is not retried.
         """
+        created_via = "notification" if req.source == "notify" else "escalation"
+        intent = await self._tickets.create_intent(req, created_via=created_via)
         primary = await self.resolve_backend(override=backend_override)
+        await self._tickets.set_pending_backend(intent.id, primary.name)
         try:
             result = await primary.create_ticket(req)
         except TicketBackendError as primary_error:
             if primary.name != "jira":
                 return TicketCreateOutcome(result=None, error=str(primary_error))
             try:
+                await self._tickets.set_pending_backend(intent.id, "internal")
                 result = await self._internal.create_ticket(req)
             except TicketBackendError as internal_error:
                 return TicketCreateOutcome(
@@ -219,15 +220,19 @@ class TicketService:
                     error=f"Jira: {primary_error}; internal: {internal_error}",
                     fallback_used=True,
                 )
+            await self._tickets.activate(intent.id, result)
+            canonical_result = result.model_copy(update={"ticket_id": intent.id})
             if req.escalation_mapping_id:
                 await self._stamp_escalation_mapping(
                     req.escalation_mapping_id, result.ref, result.backend
                 )
-            return TicketCreateOutcome(result=result, fallback_used=True)
+            return TicketCreateOutcome(result=canonical_result, fallback_used=True)
 
+        await self._tickets.activate(intent.id, result)
+        canonical_result = result.model_copy(update={"ticket_id": intent.id})
         if req.escalation_mapping_id:
             await self._stamp_escalation_mapping(req.escalation_mapping_id, result.ref, result.backend)
-        return TicketCreateOutcome(result=result)
+        return TicketCreateOutcome(result=canonical_result)
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         backend = await self._backend_for_ref(ref)
@@ -283,19 +288,12 @@ class TicketService:
         return await backend.find_open_by_grid(grid_name, limit=limit)
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
-        """Dedup guard used before filing a new ticket for an escalation.
+        """Resolve escalation deduplication through canonical ticket ownership.
 
-        Checks both backends -- at ticket-creation time we don't yet know
-        which backend a prior (possibly failed-to-persist) attempt used.
-
-        Skips the Jira lookup entirely when ``TICKET_BACKEND_OVERRIDE=internal``:
-        that override exists so ops can route around a configured-but-unhealthy
-        Jira, and an unconditional Jira dedup call here would silently defeat
-        it with a 10s network round-trip on every escalation.
+        A completed create attaches the ticket to ``escalations.ticket_id``;
+        that relation is the only durable dedup authority.  Backend-specific
+        searches can find an untracked external ticket, but cannot safely
+        establish its Anansi ownership or backend without an explicit adopt
+        flow, so they are intentionally not used here.
         """
-        override = (fr.get("TICKET_BACKEND_OVERRIDE") or "auto").strip().lower()
-        if override != "internal":
-            jira_ref = await self._jira.find_by_escalation(mapping_id)
-            if jira_ref:
-                return jira_ref
-        return await self._internal.find_by_escalation(mapping_id)
+        return await self._tickets.find_ref_for_escalation(mapping_id)
