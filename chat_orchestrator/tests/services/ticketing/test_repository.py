@@ -38,6 +38,13 @@ class _Query:
         self.filters.append((column, value))
         return self
 
+    def neq(self, column, value):
+        self.filters.append((column, f"neq:{value}"))
+        return self
+
+    def order(self, _column, **_kwargs):
+        return self
+
     def limit(self, _limit):
         return self
 
@@ -55,7 +62,7 @@ class _Query:
                 **self.payload,
             }
             return _Response([row])
-        return _Response(self.client.select_rows)
+        return _Response(self.client.select_rows_by_table.get(self.table_name, self.client.select_rows))
 
 
 class _Client:
@@ -63,6 +70,7 @@ class _Client:
         self.calls = []
         self.rows = []
         self.select_rows = []
+        self.select_rows_by_table = {}
 
     def table(self, name):
         return _Query(self, name)
@@ -205,4 +213,50 @@ async def test_update_by_ref_updates_canonical_summary_and_description():
 
     assert client.calls[-1] == (
         "tickets", "update", {"summary": "Grid restored"}, [("id", "ticket-1")]
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_ref_for_escalation_follows_the_canonical_ticket_relation():
+    client = _Client()
+    client.select_rows_by_table = {
+        "escalations": [{"ticket_id": "ticket-1"}],
+        "tickets": [{
+            "id": "ticket-1", "ticket_ref": "TKT-1", "backend": "internal",
+            "summary": "Grid down", "created_via": "escalation", "provisioning_state": "active",
+        }],
+    }
+
+    ref = await TicketRepository(client=client).find_ref_for_escalation("escalation-1")
+
+    assert ref == "TKT-1"
+    assert client.calls[-2] == ("escalations", "select", None, [("id", "escalation-1")])
+    assert client.calls[-1] == ("tickets", "select", None, [("id", "ticket-1")])
+
+
+@pytest.mark.asyncio
+async def test_find_open_internal_by_grid_reads_active_canonical_tickets():
+    client = _Client()
+    client.select_rows_by_table = {
+        "tickets": [{
+            "id": "ticket-1", "ticket_ref": "TKT-1", "backend": "internal",
+            "summary": "Grid down", "description": "details", "ticket_type": "Task",
+            "status": "open", "grid_name": "Kudi", "created_at": "2026-01-01T00:00:00Z",
+            "labels": ["alert"], "created_via": "notification", "provisioning_state": "active",
+        }],
+    }
+
+    tickets = await TicketRepository(client=client).find_open_internal_by_grid("Kudi", limit=5)
+
+    assert [ticket.ref for ticket in tickets] == ["TKT-1"]
+    assert tickets[0].backend == "internal"
+    assert tickets[0].is_done is False
+    assert client.calls[-1] == (
+        "tickets", "select", None,
+        [
+            ("backend", "internal"),
+            ("provisioning_state", "active"),
+            ("grid_name", "Kudi"),
+            ("status", "neq:done"),
+        ],
     )

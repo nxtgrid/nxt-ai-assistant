@@ -7,7 +7,7 @@ from typing import Any, Callable, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from .backend import BackendTicketResult, TicketCreateRequest, TicketStatus
+from .backend import BackendTicketResult, TicketCreateRequest, TicketStatus, TicketSummary
 
 
 class TicketRepositoryError(RuntimeError):
@@ -197,3 +197,72 @@ class TicketRepository:
             raise TicketRepositoryError(f"failed to update canonical ticket: {exc}") from exc
         if not getattr(response, "data", None):
             raise TicketRepositoryError("canonical ticket update returned no row")
+
+    async def find_ref_for_escalation(self, escalation_id: str) -> str | None:
+        """Return an active ticket reference linked from a canonical escalation."""
+        try:
+            escalation_response = (
+                self._raw_client()
+                .table("escalations")
+                .select("ticket_id")
+                .eq("id", escalation_id)
+                .limit(1)
+                .execute()
+            )
+            escalation_rows = getattr(escalation_response, "data", None) or []
+            if not escalation_rows or not escalation_rows[0].get("ticket_id"):
+                return None
+            ticket_response = (
+                self._raw_client()
+                .table("tickets")
+                .select("ticket_ref")
+                .eq("id", escalation_rows[0]["ticket_id"])
+                .limit(1)
+                .execute()
+            )
+        except TicketRepositoryError:
+            raise
+        except Exception as exc:
+            raise TicketRepositoryError(
+                f"failed to resolve canonical escalation ticket: {exc}"
+            ) from exc
+        ticket_rows = getattr(ticket_response, "data", None) or []
+        return ticket_rows[0].get("ticket_ref") if ticket_rows else None
+
+    async def find_open_internal_by_grid(
+        self, grid_name: str, *, limit: int = 20
+    ) -> list[TicketSummary]:
+        """Return active, non-done internal tickets for correlation candidates."""
+        try:
+            response = (
+                self._raw_client()
+                .table("tickets")
+                .select("*")
+                .eq("backend", "internal")
+                .eq("provisioning_state", "active")
+                .eq("grid_name", grid_name)
+                .neq("status", "done")
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+        except TicketRepositoryError:
+            raise
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to find canonical internal tickets: {exc}") from exc
+
+        rows = getattr(response, "data", None) or []
+        return [
+            TicketSummary(
+                ref=row["ticket_ref"],
+                backend="internal",
+                summary=row.get("summary") or "",
+                description=row.get("description") or "",
+                status=row.get("status") or "",
+                is_done=row.get("status") == "done",
+                created_at=row.get("created_at"),
+                labels=row.get("labels") or [],
+            )
+            for row in rows
+            if row.get("ticket_ref")
+        ]
