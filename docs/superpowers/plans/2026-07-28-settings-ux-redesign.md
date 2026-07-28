@@ -2096,9 +2096,15 @@ Create `docs/superpowers/plans/2026-07-28-settings-minimum-env-verification.md` 
 
 - [ ] **Step 5: Commit**
 
+`docs/superpowers/plans/` is gitignored, exactly like `tests/`. A plain `git add`
+on a new file there is a silent no-op — the commit succeeds and the document
+never reaches the remote. Force-add it and confirm:
+
 ```bash
-git add docs/superpowers/plans/2026-07-28-settings-minimum-env-verification.md
+git add -f docs/superpowers/plans/2026-07-28-settings-minimum-env-verification.md
+git status --short   # confirm the file is staged
 git commit -m "docs: record verified minimum environment per deployment tier"
+git show --stat HEAD | grep verification   # confirm it actually landed
 ```
 
 ---
@@ -2180,7 +2186,7 @@ git log --oneline main..HEAD
 git diff --stat main..HEAD
 ```
 
-Verify all five new test files appear in the diffstat: `test_flag_readiness.py`, `test_settings_service_provenance.py`, `test_settings_widgets.py`, `test_settings_readiness_panel.py`, `test_settings_page.py`.
+Verify all five new test files appear in the diffstat: `test_flag_readiness.py`, `test_settings_service_provenance.py`, `test_settings_widgets.py`, `test_settings_readiness_panel.py`, `test_settings_page.py`. Also verify `2026-07-28-settings-minimum-env-verification.md` appears — both `tests/` and `docs/superpowers/plans/` are gitignored, so either can be silently dropped by a plain `git add`.
 
 - [ ] **Step 6: Report**
 
