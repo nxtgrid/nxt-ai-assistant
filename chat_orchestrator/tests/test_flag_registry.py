@@ -108,11 +108,14 @@ def test_alert_settings_expose_only_operational_deployment_choices():
 # --------------------------------------------------------------------------- #
 class TestSettingsServiceConsistency:
     # The exact read-only set the settings service historically hardcoded.
+    # GEMINI_MAX_OUTPUT_TOKENS was historically read-only for no discoverable
+    # reason and was made editable by the settings-ux-redesign (it disagreed
+    # with the orchestrator's own bounds, so the settings page couldn't reach
+    # the documented behaviour) -- it is deliberately absent from this set now.
     HISTORICAL_DO_NOT_SAVE = {
         "ESCALATION_TELEGRAM_CHAT_ID",
         "DEBUG_TELEGRAM_CHAT_ID",
         "EMBEDDING_MODEL",
-        "GEMINI_MAX_OUTPUT_TOKENS",
         "GEMINI_LITE_MAX_OUTPUT_TOKENS",
         "CUSTOMER_SUPPORT_DOC_ID",
         "STAFF_SUPPORT_DOC_ID",
@@ -376,3 +379,25 @@ class TestNewlyRegisteredFlagsMatchTheirConsumers:
         # The consumer falls back to DEFAULT_TIMEZONE at read time; baking "UTC"
         # into the registry would silently override a deployment's own timezone.
         assert fr.get("AFTER_HOURS_TIMEZONE", env={}) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Registry values must match the orchestrator that actually runs
+# --------------------------------------------------------------------------- #
+class TestRegistryMatchesOrchestratorDefaults:
+    """The settings page must not display a value the orchestrator ignores."""
+
+    def test_fallback_model_matches_the_orchestrator(self):
+        assert fr.get("GEMINI_FALLBACK_MODEL", env={}) == "gemini-2.5-flash-lite"
+
+    def test_deep_thinking_model_matches_the_orchestrator(self):
+        assert fr.get("GEMINI_DEEP_THINKING_MODEL", env={}) == "gemini-pro-latest"
+
+    def test_temperature_is_editable(self):
+        # Rendered read-only at 0.2 while the orchestrator treats empty as "use
+        # the model default" -- an operator could not reach the documented
+        # behaviour from the UI at all.
+        assert fr.FLAGS["GEMINI_TEMPERATURE"].editable is True
+
+    def test_main_max_output_tokens_is_editable(self):
+        assert fr.FLAGS["GEMINI_MAX_OUTPUT_TOKENS"].editable is True
