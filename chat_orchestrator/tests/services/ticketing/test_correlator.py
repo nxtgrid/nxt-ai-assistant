@@ -503,25 +503,27 @@ class TestLiveStatusConfirmation:
         assert store.mark_closed_calls == ["TKT-1"]
 
     @pytest.mark.asyncio
-    async def test_missing_status_candidate_dropped(self, monkeypatch):
+    async def test_unavailable_status_preserves_stored_exact_duplicate(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
-        correlator, store, ts, gateway = _make_correlator()
+        alert = _mppt_alert()
+        correlator, store, _ts, gateway = _make_correlator()
         store.correlations.append(
             {
-                "ticket_ref": "TKT-1",
+                "ticket_ref": "OPS-42",
                 "grid_name": "Kudi",
                 "status": "open",
-                "signatures": [],
-                "affected_keys": [],
+                "signatures": [alert.signature],
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
                 "created_at": datetime.now(timezone.utc).isoformat(),
             }
         )
-        # ts.statuses has no entry for TKT-1 -> get_status returns None
 
-        decision = await correlator.decide("Kudi", _mppt_alert())
+        decision = await correlator.decide("Kudi", alert)
 
-        assert decision.decision == "new"
-        assert decision.decided_by == "no_candidates"
+        assert decision.decision == "duplicate"
+        assert decision.ticket_ref == "OPS-42"
+        assert store.mark_closed_calls == []
+        assert gateway.calls == []
 
 
 class TestBackendOnlyCandidates:
