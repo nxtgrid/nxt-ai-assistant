@@ -46,7 +46,7 @@ from shared.llm import GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 from . import correlation_rules
-from .alert_facts import AlertFacts
+from .alert_facts import AlertFacts, same_component
 
 LOGGER = get_logger(__name__)
 
@@ -249,7 +249,7 @@ def _find_signature_duplicate(
         if alert.signature not in (candidate.signatures or []):
             continue
         for entry in candidate.affected_keys or []:
-            if entry.get("kind") == alert.component_kind and entry.get("key") == alert.component_key:
+            if same_component(entry, alert.component_kind, alert.component_key):
                 return candidate
     return None
 

@@ -690,6 +690,28 @@ class TestSignatureDuplicate:
 
         assert decision.decision == "duplicate"
 
+    @pytest.mark.asyncio
+    async def test_case_differing_stored_key_still_matches(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert()
+        correlator, store, _ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "OPS-42",
+                "grid_name": "Kudi",
+                "status": "open",
+                "signatures": [alert.signature],
+                "affected_keys": [{"kind": "MPPT", "key": "a3", "label": "MPPT a3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "duplicate"
+        assert decision.decided_by == "signature"
+        assert gateway.calls == []
+
 
 class TestLiveStatusConfirmation:
     @pytest.mark.asyncio
