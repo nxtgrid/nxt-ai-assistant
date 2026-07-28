@@ -356,6 +356,12 @@ _FLAGS: List[Flag] = [
         scope=SERVICE_BOT,
     ),
     _s(
+        "JIRA_PROJECT_KEY",
+        "OPS",
+        "Jira project key used when the Jira ticket backend is selected.",
+        scope=SERVICE_BOT,
+    ),
+    _s(
         "NOTIFY_TICKETS_BACKEND",
         "internal",
         "Which ticket backend /notify-originated tickets use: 'internal' (default -- "

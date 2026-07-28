@@ -87,6 +87,7 @@ def test_generated_env_example_has_no_jira_alert_profile_block():
 
 def test_alert_settings_expose_only_operational_deployment_choices():
     visible = {flag.name for flag in fr.FLAGS.values() if flag.show_in_settings}
+    assert "JIRA_PROJECT_KEY" in visible
     assert "ALERT_CORRELATION_ENABLED" in visible
     assert "NOTIFY_TICKETS_BACKEND" in visible
     assert {

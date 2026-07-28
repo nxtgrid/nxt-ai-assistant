@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+from typing import Any
 
 import pytest
 
@@ -13,6 +15,30 @@ from orchestrator.services.ticketing.jira_issue_types import (
     JiraIssueTypeSelector,
     normalize_issue_types,
 )
+
+
+class _Response:
+    def __init__(self, status: int, payload: Any):
+        self.status = status
+        self._payload = payload
+
+    async def json(self) -> Any:
+        return self._payload
+
+    async def __aenter__(self) -> "_Response":
+        return self
+
+    async def __aexit__(self, *_args: object) -> bool:
+        return False
+
+
+class _HangingResponse:
+    async def __aenter__(self) -> "_HangingResponse":
+        await asyncio.Event().wait()
+        return self
+
+    async def __aexit__(self, *_args: object) -> bool:
+        return False
 
 
 def _expected_adf(text: str) -> dict[str, object]:
@@ -143,6 +169,210 @@ def test_incompatible_type_with_an_unknown_required_field_is_excluded():
     from orchestrator.services.ticketing.jira_issue_payload import compatible_issue_types
 
     assert compatible_issue_types(_context(), [_type_with_required_category()]) == []
+
+
+@pytest.mark.asyncio
+async def test_available_types_merges_paged_jira_field_metadata_into_the_known_type():
+    base_url = "https://example.atlassian.net/rest/api/3/issue/createmeta/OPS/issuetypes"
+
+    class Session:
+        def get(self, url: str, *, params=None, **_kwargs):
+            if url == base_url:
+                return _Response(
+                    200,
+                    {
+                        "values": [
+                            {
+                                "id": "101",
+                                "name": "Electricity Service Disruption",
+                                "description": "Grid supply incident",
+                            }
+                        ]
+                    },
+                )
+            assert url == f"{base_url}/101"
+            start_at = int((params or {}).get("startAt", 0))
+            if start_at == 0:
+                return _Response(
+                    200,
+                    {
+                        "startAt": 0,
+                        "maxResults": 2,
+                        "total": 3,
+                        "fields": [
+                            {
+                                "fieldId": "summary",
+                                "name": "Summary",
+                                "required": True,
+                            },
+                            {
+                                "fieldId": "customfield_44",
+                                "name": "Grid",
+                                "required": True,
+                                "allowedValues": [{"id": "7", "value": "Ogheye"}],
+                            },
+                        ],
+                    },
+                )
+            assert start_at == 2
+            return _Response(
+                200,
+                {
+                    "startAt": 2,
+                    "maxResults": 2,
+                    "total": 3,
+                    "fields": [
+                        {
+                            "fieldId": "priority",
+                            "name": "Priority",
+                            "required": False,
+                        }
+                    ],
+                },
+            )
+
+    selector = JiraIssueTypeSelector(
+        base_url="https://example.atlassian.net",
+        headers={},
+        project_key="OPS",
+        model="fake-model",
+        get_session=Session,
+    )
+
+    available = await selector.available_types()
+
+    assert [(item.id, item.name, item.description) for item in available] == [
+        ("101", "Electricity Service Disruption", "Grid supply incident")
+    ]
+    assert available[0].required_fields == ("summary", "customfield_44")
+    assert available[0].field("customfield_44").allowed_values == (
+        JiraFieldOption(id="7", value="Ogheye"),
+    )
+    assert available[0].field("priority") == JiraFieldDefinition(
+        id="priority", name="Priority", required=False
+    )
+
+
+@pytest.mark.asyncio
+async def test_available_types_fetches_every_paged_catalogue_entry_before_detail_filtering():
+    base_url = "https://example.atlassian.net/rest/api/3/issue/createmeta/OPS/issuetypes"
+
+    class Session:
+        def get(self, url: str, *, params=None, **_kwargs):
+            start_at = int((params or {}).get("startAt", 0))
+            if url == base_url:
+                issue_type = (
+                    {"id": "task", "name": "Task"}
+                    if start_at == 0
+                    else {"id": "comms", "name": "Comms Failure"}
+                )
+                return _Response(
+                    200,
+                    {
+                        "startAt": start_at,
+                        "maxResults": 1,
+                        "total": 2,
+                        "values": [issue_type],
+                    },
+                )
+            assert url in {f"{base_url}/task", f"{base_url}/comms"}
+            return _Response(
+                200,
+                {
+                    "startAt": 0,
+                    "maxResults": 50,
+                    "total": 1,
+                    "fields": [
+                        {"fieldId": "summary", "name": "Summary", "required": True}
+                    ],
+                },
+            )
+
+    selector = JiraIssueTypeSelector(
+        base_url="https://example.atlassian.net",
+        headers={},
+        project_key="OPS",
+        model="fake-model",
+        get_session=Session,
+    )
+
+    available = await selector.available_types()
+
+    assert [item.id for item in available] == ["task", "comms"]
+
+
+@pytest.mark.asyncio
+async def test_available_types_excludes_a_type_when_its_detail_metadata_stalls():
+    base_url = "https://example.atlassian.net/rest/api/3/issue/createmeta/OPS/issuetypes"
+
+    class Session:
+        def get(self, url: str, **_kwargs):
+            if url == base_url:
+                return _Response(
+                    200,
+                    {
+                        "values": [
+                            {"id": "stalled", "name": "Stalled"},
+                            {"id": "ready", "name": "Task"},
+                        ]
+                    },
+                )
+            if url == f"{base_url}/stalled":
+                return _HangingResponse()
+            assert url == f"{base_url}/ready"
+            return _Response(
+                200,
+                {
+                    "startAt": 0,
+                    "maxResults": 50,
+                    "total": 1,
+                    "fields": [
+                        {"fieldId": "summary", "name": "Summary", "required": True}
+                    ],
+                },
+            )
+
+    selector = JiraIssueTypeSelector(
+        base_url="https://example.atlassian.net",
+        headers={},
+        project_key="OPS",
+        model="fake-model",
+        get_session=Session,
+        metadata_timeout_seconds=0.05,
+    )
+
+    started = time.monotonic()
+    available = await selector.available_types()
+
+    assert time.monotonic() - started < 0.5
+    assert [item.id for item in available] == ["ready"]
+
+
+@pytest.mark.asyncio
+async def test_selector_times_out_a_stalled_llm_call():
+    class Gateway:
+        async def generate(self, _messages, _options):
+            await asyncio.Event().wait()
+
+    selector = JiraIssueTypeSelector(
+        base_url="https://example.atlassian.net",
+        headers={},
+        project_key="OPS",
+        model="fake-model",
+        get_session=lambda: None,
+        gateway=Gateway(),
+        llm_timeout_seconds=0.05,
+    )
+
+    started = time.monotonic()
+    selected = await selector.select(
+        summary="Grid down",
+        description="0 kW",
+        candidate_types=[JiraIssueType(id="task", name="Task")],
+    )
+
+    assert time.monotonic() - started < 0.5
+    assert selected is None
 
 
 @pytest.mark.asyncio

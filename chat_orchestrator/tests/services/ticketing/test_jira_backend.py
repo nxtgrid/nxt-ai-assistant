@@ -9,6 +9,7 @@ are queued per (method, url-substring) and each fake response supports the
 
 from __future__ import annotations
 
+import asyncio
 import json as json_module
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -122,10 +123,22 @@ def _queue_createmeta(
         ),
     )
     for issue_type in issue_types:
+        field_items = [
+            {"fieldId": field_id, **field}
+            for field_id, field in issue_type.get("fields", {}).items()
+        ]
         fake_session.queue(
             "GET",
             f"/rest/api/3/issue/createmeta/{project_key}/issuetypes/{issue_type['id']}",
-            _FakeResponse(200, issue_type),
+            _FakeResponse(
+                200,
+                {
+                    "startAt": 0,
+                    "maxResults": 50,
+                    "total": len(field_items),
+                    "fields": field_items,
+                },
+            ),
         )
 
 
@@ -433,6 +446,53 @@ class TestCreateTicket:
         )
 
         assert result.ticket_type == "Comms Failure"
+
+    @pytest.mark.asyncio
+    async def test_notify_falls_back_to_a_compatible_type_when_llm_selection_stalls(
+        self, fake_session
+    ):
+        class StalledGateway:
+            async def generate(self, _messages, _options):
+                await asyncio.Event().wait()
+
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/issue/createmeta/OPS/issuetypes",
+            _FakeResponse(200, {"values": [{"id": "task-id", "name": "Task"}]}),
+        )
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/issue/createmeta/OPS/issuetypes/task-id",
+            _FakeResponse(
+                200,
+                {
+                    "startAt": 0,
+                    "maxResults": 50,
+                    "total": 1,
+                    "fields": [
+                        {"fieldId": "summary", "name": "Summary", "required": True}
+                    ],
+                },
+            ),
+        )
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-14"}))
+        backend = _make_backend()
+        backend._issue_type_selector = JiraIssueTypeSelector(
+            base_url="https://example.atlassian.net",
+            headers={},
+            project_key="OPS",
+            model="fake-model",
+            get_session=lambda: fake_session,
+            gateway=StalledGateway(),
+            llm_timeout_seconds=0.05,
+        )
+
+        started = time.monotonic()
+        result = await backend.create_ticket(_notify_request())
+
+        assert time.monotonic() - started < 0.5
+        assert result.ref == "OPS-14"
+        assert result.ticket_type == "Task"
 
     @pytest.mark.asyncio
     async def test_escalation_uses_the_same_metadata_payload_builder(self, fake_session):
