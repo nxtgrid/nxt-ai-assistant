@@ -13,6 +13,8 @@ settings UI keeps working as-is.
 """
 
 import os
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from shared.config import flag_registry as registry
@@ -20,7 +22,29 @@ from shared.config.settings_backends import MAX_ENV_VAR_SIZE, get_backend
 
 # Backwards-compatible re-exports (derived from the registry, no longer hand-maintained).
 DO_NOT_SAVE_TO_DO = registry.non_editable_settings()
-__all__ = ["SettingsService", "DO_NOT_SAVE_TO_DO", "MAX_ENV_VAR_SIZE"]
+__all__ = [
+    "SettingsService",
+    "DO_NOT_SAVE_TO_DO",
+    "MAX_ENV_VAR_SIZE",
+    "ValueSource",
+    "SettingValue",
+]
+
+
+class ValueSource(Enum):
+    """Where a setting's effective value came from."""
+
+    DEFAULT = "default"
+    ENVIRONMENT = "environment"
+    BACKEND = "backend"
+
+
+@dataclass(frozen=True)
+class SettingValue:
+    name: str
+    value: Any
+    source: ValueSource
+    secret_is_set: bool = False
 
 GEMINI_MODEL_FALLBACKS = [
     "gemini-2.5-flash",
@@ -87,6 +111,37 @@ class SettingsService:
         """
         success, error = self.backend.update(settings, restart=restart_bot)
         return success, error
+
+    def get_settings_with_provenance(
+        self, fetch_from_do: bool = False
+    ) -> Dict[str, SettingValue]:
+        """Current values annotated with where each one came from.
+
+        ``get_current_settings`` collapses "unset" into "default", so the UI
+        cannot show whether a value was chosen or merely inherited. Secrets
+        report only whether they are set; their value never leaves this method.
+        """
+        remote: Dict[str, str] = {}
+        if fetch_from_do and self.backend.available():
+            remote = self.backend.get_all()
+
+        out: Dict[str, SettingValue] = {}
+        for name, flag in registry.FLAGS.items():
+            if not flag.show_in_settings:
+                continue
+            if name in remote:
+                raw, source = remote[name], ValueSource.BACKEND
+            elif name in os.environ:
+                raw, source = os.environ[name], ValueSource.ENVIRONMENT
+            else:
+                raw, source = None, ValueSource.DEFAULT
+
+            is_set = bool((raw or "").strip())
+            if flag.secret:
+                out[name] = SettingValue(name, "", source, secret_is_set=is_set)
+            else:
+                out[name] = SettingValue(name, flag.coerce(raw), source)
+        return out
 
     def get_available_models(self) -> List[str]:
         """Get list of available Gemini models."""

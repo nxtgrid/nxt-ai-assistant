@@ -161,7 +161,7 @@ def _model_select_options(svc, current: dict[str, Any]) -> dict[str, Any]:
     """Build provider/model select options for the active provider."""
     provider = _selected_provider(current)
     gemini_models = svc.get_gemini_models()
-    openrouter_models = svc.get_openrouter_models()
+    openrouter_models = svc.get_openrouter_models() if provider == "openrouter" else []
     active_models = openrouter_models if provider == "openrouter" else gemini_models
     route_model = _to_openrouter_model(
         str(current.get("GEMINI_MODEL") or (active_models[0] if active_models else ""))
