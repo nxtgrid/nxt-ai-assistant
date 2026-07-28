@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-from .backend import TicketCreateRequest
+from .backend import BackendTicketResult, TicketCreateRequest
 
 
 class TicketRepositoryError(RuntimeError):
@@ -82,4 +83,30 @@ class TicketRepository:
             raise
         except Exception as exc:
             raise TicketRepositoryError(f"failed to create canonical ticket intent: {exc}") from exc
+        return self._record(response)
+
+    async def activate(
+        self,
+        ticket_id: str,
+        result: BackendTicketResult,
+        *,
+        backend_status: str = "open",
+    ) -> TicketRecord:
+        now = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "ticket_ref": result.ref,
+            "backend": result.backend,
+            "ticket_type": result.ticket_type,
+            "provisioning_state": "active",
+            "status": "open",
+            "backend_status": backend_status,
+            "activated_at": now,
+            "backend_synced_at": now,
+        }
+        try:
+            response = self._raw_client().table("tickets").update(payload).eq("id", ticket_id).execute()
+        except TicketRepositoryError:
+            raise
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to activate canonical ticket: {exc}") from exc
         return self._record(response)

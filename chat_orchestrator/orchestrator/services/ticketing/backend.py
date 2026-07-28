@@ -54,13 +54,19 @@ class TicketCreateRequest(BaseModel):
     source: TicketSourceLiteral = "escalation"
 
 
-class TicketResult(BaseModel):
-    """Result of a successful ``create_ticket`` call."""
+class BackendTicketResult(BaseModel):
+    """Identity returned by a concrete ticket backend after creation."""
 
     ref: str
     backend: TicketBackendName
     url: Optional[str] = None
     ticket_type: Optional[str] = None
+
+
+class TicketResult(BackendTicketResult):
+    """Application-facing ticket result with the canonical local identity."""
+
+    ticket_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -130,7 +136,7 @@ class TicketBackend(Protocol):
         """Whether this backend can currently accept new tickets."""
         ...
 
-    async def create_ticket(self, req: TicketCreateRequest) -> TicketResult:
+    async def create_ticket(self, req: TicketCreateRequest) -> BackendTicketResult:
         """Create a new ticket. Raises ``TicketBackendError`` on failure."""
         ...
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from orchestrator.services.ticketing.backend import TicketCreateRequest
+from orchestrator.services.ticketing.backend import BackendTicketResult, TicketCreateRequest
 from orchestrator.services.ticketing.repository import TicketRepository
 
 
@@ -48,7 +48,12 @@ class _Query:
             self.client.rows.append(row)
             return _Response([row])
         if self.mode == "update":
-            row = {"id": "ticket-1", **self.payload}
+            row = {
+                "id": "ticket-1",
+                "summary": "Grid down",
+                "created_via": "notification",
+                **self.payload,
+            }
             return _Response([row])
         return _Response([])
 
@@ -99,3 +104,25 @@ async def test_create_intent_persists_a_pending_backend_neutral_ticket():
             [],
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_activate_updates_the_existing_ticket_intent_with_backend_identity():
+    client = _Client()
+    repository = TicketRepository(client=client)
+
+    result = await repository.activate(
+        "ticket-1",
+        BackendTicketResult(ref="OPS-123", backend="jira", ticket_type="Incident"),
+    )
+
+    assert result.id == "ticket-1"
+    assert result.provisioning_state == "active"
+    table, mode, payload, filters = client.calls[0]
+    assert (table, mode, filters) == ("tickets", "update", [("id", "ticket-1")])
+    assert payload["ticket_ref"] == "OPS-123"
+    assert payload["backend"] == "jira"
+    assert payload["ticket_type"] == "Incident"
+    assert payload["provisioning_state"] == "active"
+    assert payload["activated_at"]
+    assert payload["backend_synced_at"]
