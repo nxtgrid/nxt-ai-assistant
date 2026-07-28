@@ -135,10 +135,20 @@ class TestSettingsServiceConsistency:
         assert "JIRA_ENABLED" not in ss
         assert "MAX_TOOL_ROUNDS" not in ss
 
-    def test_settings_defaults_excludes_routing_only_flags(self):
+    def test_settings_defaults_includes_deployment_flags_as_read_only(self):
+        # DEFAULT_TIMEZONE / STAFF_ORG_ID / SETTINGS_BACKEND / SETTINGS_FILE were
+        # hidden entirely (show_in_settings=False), so an operator debugging why
+        # settings weren't persisting couldn't see which backend was active. The
+        # settings-ux-redesign made them visible, read-only Deployment entries.
         defaults = fr.settings_defaults(env={})
-        for hidden in ("DEFAULT_TIMEZONE", "STAFF_ORG_ID", "SETTINGS_BACKEND"):
-            assert hidden not in defaults
+        for visible_read_only in (
+            "DEFAULT_TIMEZONE",
+            "STAFF_ORG_ID",
+            "SETTINGS_BACKEND",
+            "SETTINGS_FILE",
+        ):
+            assert visible_read_only in defaults
+            assert fr.FLAGS[visible_read_only].editable is False
         # but real UI flags are present and typed
         assert defaults["JIRA_ENABLED"] is True
         assert defaults["MAX_TOOL_ROUNDS"] == 5
