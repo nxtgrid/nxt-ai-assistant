@@ -16,11 +16,13 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from orchestrator.services.ticketing.backend import (
+    BackendTicketResult,
     TicketBackendError,
     TicketCreateRequest,
     TicketResult,
     TicketSummary,
 )
+from orchestrator.services.ticketing.repository import TicketRecord
 from orchestrator.services.ticketing.service import TicketService
 
 
@@ -49,6 +51,40 @@ class _FakeBackend:
         if self.create_error is not None:
             raise self.create_error
         return TicketResult(ref=self._ref, backend=self.name, url=None)
+
+    async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
+        self.find_by_escalation_calls.append(mapping_id)
+        return None
+
+    async def update_ticket(self, ref: str, summary=None, description=None, priority_id=None) -> bool:
+        self.update_ticket_calls.append((ref, summary, description, priority_id))
+        return self.update_ticket_result
+
+    async def find_open_by_grid(self, grid_name: str, limit: int = 20) -> List[TicketSummary]:
+        self.find_open_by_grid_calls.append((grid_name, limit))
+        return self.find_open_by_grid_result
+
+
+class _FakeTicketRepository:
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+
+    async def create_intent(self, req, *, created_via):
+        self.calls.append(("intent", created_via, req.summary))
+        return TicketRecord(
+            id="ticket-1", summary=req.summary, created_via=created_via,
+            provisioning_state="pending",
+        )
+
+    async def set_pending_backend(self, ticket_id, backend):
+        self.calls.append(("backend", ticket_id, backend))
+
+    async def activate(self, ticket_id, result):
+        self.calls.append(("activate", ticket_id, result.ref, result.backend))
+        return TicketRecord(
+            id=ticket_id, ticket_ref=result.ref, backend=result.backend,
+            summary="x", created_via="notification", provisioning_state="active",
+        )
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         return True
@@ -147,6 +183,7 @@ def _make_service(
     raw_client: Optional[_FakeRawClient],
     jira: Optional[_FakeBackend] = None,
     internal: Optional[_FakeBackend] = None,
+    ticket_repository=None,
 ) -> TicketService:
     jira = jira or _FakeBackend("jira")
     internal = internal or _FakeBackend("internal")
@@ -154,6 +191,7 @@ def _make_service(
         get_supabase_client=(lambda: _RawClientWrapper(raw_client)) if raw_client else None,
         jira_backend=jira,
         internal_backend=internal,
+        ticket_repository=ticket_repository or _FakeTicketRepository(),
     )
     return service
 
@@ -169,6 +207,20 @@ class _RawClientWrapper:
 
 
 class TestCreateTicketStamping:
+    @pytest.mark.asyncio
+    async def test_persists_and_activates_one_canonical_intent(self):
+        repository = _FakeTicketRepository()
+        jira = _FakeBackend("jira", ref="OPS-42")
+        service = _make_service(raw_client=None, jira=jira, ticket_repository=repository)
+
+        result = await service.create_ticket(TicketCreateRequest(summary="x", source="notify"))
+
+        assert result.ticket_id == "ticket-1"
+        assert repository.calls == [
+            ("intent", "notification", "x"),
+            ("backend", "ticket-1", "jira"),
+            ("activate", "ticket-1", "OPS-42", "jira"),
+        ]
     @pytest.mark.asyncio
     async def test_stamps_ticket_ref_and_backend_on_success(self):
         raw = _FakeRawClient()

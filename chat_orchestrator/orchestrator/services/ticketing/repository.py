@@ -110,3 +110,6 @@ class TicketRepository:
         except Exception as exc:
             raise TicketRepositoryError(f"failed to activate canonical ticket: {exc}") from exc
         return self._record(response)
+
+    async def set_pending_backend(self, ticket_id: str, backend: str) -> None:
+        self._raw_client().table("tickets").update({"backend": backend}).eq("id", ticket_id).execute()

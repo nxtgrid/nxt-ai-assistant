@@ -26,6 +26,7 @@ from .backend import (
 )
 from .internal_backend import InternalTicketBackend
 from .jira_backend import JiraTicketBackend
+from .repository import TicketRepository
 
 LOGGER = get_logger(__name__)
 
@@ -45,6 +46,7 @@ class TicketService:
         get_supabase_client: Optional[Callable[[], Optional[Any]]] = None,
         jira_backend: Optional[TicketBackend] = None,
         internal_backend: Optional[TicketBackend] = None,
+        ticket_repository: Optional[TicketRepository] = None,
     ) -> None:
         """
         Args:
@@ -64,6 +66,7 @@ class TicketService:
         self._internal: TicketBackend = internal_backend or InternalTicketBackend(
             get_client=self._raw_client
         )
+        self._tickets = ticket_repository or TicketRepository(get_client=self._raw_client)
 
     # ------------------------------------------------------------------
     # Supabase access (wrapper -> raw client, matching EscalationService's
@@ -189,13 +192,17 @@ class TicketService:
     ) -> TicketResult:
         """Create a ticket. ``backend_override`` is forwarded to ``resolve_backend``
         (see its docstring) -- omit to use ``TICKET_BACKEND_OVERRIDE`` as usual."""
+        created_via = "notification" if req.source == "notify" else "escalation"
+        intent = await self._tickets.create_intent(req, created_via=created_via)
         backend = await self.resolve_backend(override=backend_override)
+        await self._tickets.set_pending_backend(intent.id, backend.name)
         result = await backend.create_ticket(req)
+        await self._tickets.activate(intent.id, result)
         if req.escalation_mapping_id:
             await self._stamp_escalation_mapping(
                 req.escalation_mapping_id, result.ref, result.backend
             )
-        return result
+        return result.model_copy(update={"ticket_id": intent.id})
 
     async def create_ticket_with_internal_fallback(
         self, req: TicketCreateRequest, backend_override: Optional[str] = None
