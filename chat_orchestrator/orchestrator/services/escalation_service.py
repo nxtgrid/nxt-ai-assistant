@@ -29,6 +29,7 @@ import aiohttp
 
 from orchestrator.services.escalation_repository import EscalationRepository
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
+from orchestrator.services.ticketing.delivery_repository import DeliveryRepository
 from orchestrator.services.ticketing.service import TicketService
 from shared.utils.logging import get_logger
 from shared.utils.telegram_buttons import build_escalation_track_keyboard
@@ -128,6 +129,7 @@ class EscalationService:
         # own lazy-singleton Supabase getter so both see the same client.
         self._tickets = TicketService(get_supabase_client=self._get_supabase_client)
         self._escalations = EscalationRepository(get_client=self._get_raw_client)
+        self._deliveries = DeliveryRepository(get_client=self._get_raw_client)
 
     def is_enabled(self) -> bool:
         """Check if escalation service is properly configured."""
@@ -1918,11 +1920,23 @@ class EscalationService:
                             f"Your issue is being tracked (ref: {issue_number}). "
                             "The team is working on it. You'll hear back when it's resolved."
                         )
-                    await self._send_telegram_message(
+                    delivery = await self._send_telegram_message(
                         chat_id=customer_chat_id,
                         text=text,
                         topic_id=int(customer_topic_id) if customer_topic_id else None,
                     )
+                    message_id = (delivery.get("result") or {}).get("message_id")
+                    if message_id:
+                        await self._deliveries.record(
+                            ticket_id=result.ticket_id,
+                            escalation_id=mapping_id,
+                            purpose="notification",
+                            external_chat_id=str(customer_chat_id),
+                            external_topic_id=(
+                                str(customer_topic_id) if customer_topic_id is not None else None
+                            ),
+                            external_message_id=int(message_id),
+                        )
                 except Exception as e:
                     LOGGER.warning(f"Failed to notify customer about ticket {ticket_ref}: {e}")
 

@@ -56,6 +56,11 @@ class _FakeQuery:
         self._payload = payload
         return self
 
+    def upsert(self, payload: Dict[str, Any], **_kwargs) -> "_FakeQuery":
+        self._op = "upsert"
+        self._payload = payload
+        return self
+
     def eq(self, col: str, value: Any) -> "_FakeQuery":
         self._filters[col] = value
         return self
@@ -67,7 +72,7 @@ class _FakeQuery:
         self._t.calls.append((self._op, dict(self._filters), self._payload))
         if self._op == "select":
             return _FakeResponse(self._t.rows_matching(self._filters))
-        if self._op == "insert":
+        if self._op in {"insert", "upsert"}:
             row = {"id": f"ticket-{len(self._t.rows) + 1}", **(self._payload or {})}
             self._t.rows.append(row)
             return _FakeResponse([row])
@@ -384,6 +389,38 @@ async def test_track_as_ticket_attaches_the_canonical_ticket_to_the_escalation()
 
     assert raw.tables["escalations"].rows == [
         {"id": "mapping-abcd1234", "state": "tracked", "ticket_id": "ticket-1"}
+    ]
+
+
+async def test_track_as_ticket_records_the_customer_notification_delivery():
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "mapping-abcd1234", "state": "processing"}]
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+    _install_ticket_service(svc, _FakeBackend("jira", ref="OPS-100"), _FakeBackend("internal"))
+
+    class _Deliveries:
+        calls: list[dict[str, Any]] = []
+
+        async def record(self, **kwargs):
+            self.calls.append(kwargs)
+            return kwargs
+
+    deliveries = _Deliveries()
+    svc._deliveries = deliveries
+
+    async def fake_send(*_args, **_kwargs):
+        return {"ok": True, "result": {"message_id": 77}}
+
+    svc._send_telegram_message = fake_send
+    await svc.track_as_ticket(escalation_mapping=_base_mapping())
+
+    assert deliveries.calls == [
+        {
+            "ticket_id": "ticket-1", "escalation_id": "mapping-abcd1234",
+            "purpose": "notification", "external_chat_id": "12345",
+            "external_topic_id": None, "external_message_id": 77,
+        }
     ]
 
 
