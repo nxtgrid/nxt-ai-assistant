@@ -237,6 +237,34 @@ def _amend_decision(**overrides: Any) -> CorrelationDecision:
 
 class TestApplyAmendmentAmend:
     @pytest.mark.asyncio
+    async def test_uses_defaults_without_removed_alert_profile_priority_flag(self):
+        correlation = _correlation()
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !")
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            alert=alert,
+            decision=_amend_decision(),
+            raw_text="raw notify text",
+        )
+
+        assert result is not None
+        assert result.decision == "amend"
+        assert result.escalated is False
+        assert ticket_service.update_calls[0]["priority_id"] is None
+        assert store.record_amendment_calls == [
+            {
+                "ticket_ref": "TKT-1",
+                "summary_current": ticket_service.update_calls[0]["summary"],
+                "escalated": False,
+            }
+        ]
+
+    @pytest.mark.asyncio
     async def test_merges_key_updates_ticket_and_comments(self):
         correlation = _correlation()
         store = _FakeStore(correlation=correlation)

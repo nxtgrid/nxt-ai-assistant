@@ -182,11 +182,6 @@ async def apply_amendment(
     escalate_after = (
         escalate_after if escalate_after is not None else int(fr.get("ALERT_CORRELATION_ESCALATE_AFTER"))
     )
-    escalated_priority_id = (
-        escalated_priority_id
-        if escalated_priority_id is not None
-        else (fr.get("JIRA_ALERT_ESCALATED_PRIORITY_ID") or None)
-    )
 
     await store.bump_occurrence(ticket_ref)
 
