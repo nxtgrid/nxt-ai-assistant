@@ -210,6 +210,13 @@ class _RawClientWrapper:
 
 
 class TestCreateTicketStamping:
+    def test_default_internal_backend_shares_the_service_canonical_repository(self):
+        repository = _FakeTicketRepository()
+
+        service = TicketService(ticket_repository=repository)
+
+        assert service._internal._tickets is repository
+
     @pytest.mark.asyncio
     async def test_persists_and_activates_one_canonical_intent(self):
         repository = _FakeTicketRepository()

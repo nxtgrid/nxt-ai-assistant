@@ -63,10 +63,10 @@ class TicketService:
         self._supabase_client_instance = supabase_client
         self._get_supabase_client_fn = get_supabase_client
         self._jira: TicketBackend = jira_backend or JiraTicketBackend()
-        self._internal: TicketBackend = internal_backend or InternalTicketBackend(
-            get_client=self._raw_client
-        )
         self._tickets = ticket_repository or TicketRepository(get_client=self._raw_client)
+        self._internal: TicketBackend = internal_backend or InternalTicketBackend(
+            get_client=self._raw_client, ticket_repository=self._tickets
+        )
 
     # ------------------------------------------------------------------
     # Supabase access (wrapper -> raw client, matching EscalationService's

@@ -17,7 +17,12 @@ from typing import Any, Dict, List, Optional
 
 import pytest
 
-from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
+from orchestrator.services.ticketing.backend import (
+    TicketBackendError,
+    TicketCreateRequest,
+    TicketStatus,
+    TicketSummary,
+)
 from orchestrator.services.ticketing.internal_backend import InternalTicketBackend
 
 
@@ -131,6 +136,87 @@ class _CommentsTable:
         return _FakeResult([self._insert_payload])
 
 
+class FakeCanonicalTicketRepository:
+    """In-memory canonical ticket boundary for backend delegation tests."""
+
+    def __init__(self):
+        self.tickets: List[Dict[str, Any]] = []
+        self.comments: List[Dict[str, Any]] = []
+        self.raise_on_comment: Optional[Exception] = None
+        self.raise_on_update: Optional[Exception] = None
+        self.raise_on_find: Optional[Exception] = None
+
+    def _ticket(self, ref: str) -> Optional[Dict[str, Any]]:
+        return next((ticket for ticket in self.tickets if ticket["ticket_ref"] == ref), None)
+
+    async def add_comment_by_ref(self, ref: str, body: str, *, is_public: bool = False) -> None:
+        if self.raise_on_comment:
+            raise self.raise_on_comment
+        self.comments.append(
+            {"ticket_ref": ref, "body": body, "is_public": is_public, "source": "staff"}
+        )
+
+    async def get_status_by_ref(self, ref: str) -> Optional[TicketStatus]:
+        ticket = self._ticket(ref)
+        if ticket is None:
+            return None
+        return TicketStatus(
+            summary=ticket["summary"],
+            is_done=ticket["status"] == "done",
+            raw_status=ticket["status"],
+            ticket_type=ticket["ticket_type"],
+        )
+
+    async def transition_to_done_by_ref(self, ref: str) -> None:
+        ticket = self._ticket(ref)
+        if ticket is not None:
+            ticket["status"] = "done"
+            ticket["resolved_at"] = "2026-01-01T00:01:00Z"
+
+    async def find_ref_for_escalation(self, mapping_id: str) -> Optional[str]:
+        if self.raise_on_find:
+            raise self.raise_on_find
+        ticket = next(
+            (ticket for ticket in self.tickets if ticket["escalation_mapping_id"] == mapping_id), None
+        )
+        return ticket["ticket_ref"] if ticket else None
+
+    async def update_by_ref(
+        self, ref: str, *, summary: Optional[str] = None, description: Optional[str] = None
+    ) -> None:
+        if self.raise_on_update:
+            raise self.raise_on_update
+        ticket = self._ticket(ref)
+        if ticket is not None:
+            if summary is not None:
+                ticket["summary"] = summary
+            if description is not None:
+                ticket["description"] = description
+
+    async def find_open_internal_by_grid(self, grid_name: str, *, limit: int = 20):
+        if self.raise_on_find:
+            raise self.raise_on_find
+        rows = [
+            ticket
+            for ticket in self.tickets
+            if ticket["grid_name"] == grid_name and ticket["status"] != "done"
+        ]
+        rows.sort(key=lambda ticket: ticket["created_at"], reverse=True)
+        return [
+            TicketSummary(
+                ref=ticket["ticket_ref"],
+                backend="internal",
+                summary=ticket["summary"],
+                description=ticket["description"] or "",
+                status=ticket["status"],
+                is_done=ticket["status"] == "done",
+                created_at=ticket["created_at"],
+                labels=ticket["labels"],
+            )
+            for ticket in rows[:limit]
+        ]
+
+
 class FakeSupabaseClient:
     """Minimal fake for the raw postgrest client (what ``_get_client()`` returns)."""
 
@@ -177,7 +263,8 @@ class _RpcCall:
 
 def _make_backend(client: Optional[FakeSupabaseClient] = None):
     fake = client or FakeSupabaseClient()
-    backend = InternalTicketBackend(client=fake)
+    fake.canonical_tickets = FakeCanonicalTicketRepository()
+    backend = InternalTicketBackend(client=fake, ticket_repository=fake.canonical_tickets)
     return backend, fake
 
 
@@ -196,7 +283,7 @@ def _seed_ticket(
     Creation does not seed this table: that is the regression this suite
     protects while the other operations are migrated in the next slice.
     """
-    fake.tickets.append(
+    fake.canonical_tickets.tickets.append(
         {
             "ticket_ref": ref,
             "summary": summary,
@@ -205,7 +292,7 @@ def _seed_ticket(
             "grid_name": grid_name,
             "ticket_type": ticket_type,
             "status": "open",
-            "created_at": f"2026-01-01T00:00:{len(fake.tickets):02d}Z",
+            "created_at": f"2026-01-01T00:00:{len(fake.canonical_tickets.tickets):02d}Z",
             "labels": [],
         }
     )
@@ -331,10 +418,10 @@ class TestAddComment:
         ok = await backend.add_comment("TKT-000001", "hello customer", public=True)
 
         assert ok is True
-        assert fake.comments[0]["ticket_ref"] == "TKT-000001"
-        assert fake.comments[0]["body"] == "hello customer"
-        assert fake.comments[0]["is_public"] is True
-        assert fake.comments[0]["source"] == "staff"
+        assert fake.canonical_tickets.comments[0]["ticket_ref"] == "TKT-000001"
+        assert fake.canonical_tickets.comments[0]["body"] == "hello customer"
+        assert fake.canonical_tickets.comments[0]["is_public"] is True
+        assert fake.canonical_tickets.comments[0]["source"] == "staff"
 
     @pytest.mark.asyncio
     async def test_defaults_to_not_public(self):
@@ -342,7 +429,7 @@ class TestAddComment:
 
         await backend.add_comment("TKT-000001", "internal note")
 
-        assert fake.comments[0]["is_public"] is False
+        assert fake.canonical_tickets.comments[0]["is_public"] is False
 
     @pytest.mark.asyncio
     async def test_false_when_no_client(self):
@@ -383,8 +470,8 @@ class TestTransitionToDone:
 
         await backend.transition_to_done("TKT-000001")
 
-        assert fake.tickets[0]["status"] == "done"
-        assert "resolved_at" in fake.tickets[0]
+        assert fake.canonical_tickets.tickets[0]["status"] == "done"
+        assert "resolved_at" in fake.canonical_tickets.tickets[0]
 
         status = await backend.get_status("TKT-000001")
         assert status is not None
@@ -430,8 +517,8 @@ class TestUpdateTicket:
         )
 
         assert ok is True
-        assert fake.tickets[0]["summary"] == "new summary"
-        assert fake.tickets[0]["description"] == "new description"
+        assert fake.canonical_tickets.tickets[0]["summary"] == "new summary"
+        assert fake.canonical_tickets.tickets[0]["description"] == "new description"
 
     @pytest.mark.asyncio
     async def test_ignores_priority_id(self):
@@ -442,8 +529,8 @@ class TestUpdateTicket:
         ok = await backend.update_ticket("TKT-000001", summary="s2", priority_id="10001")
 
         assert ok is True
-        assert "priority_id" not in fake.tickets[0]
-        assert "priority" not in fake.tickets[0]
+        assert "priority_id" not in fake.canonical_tickets.tickets[0]
+        assert "priority" not in fake.canonical_tickets.tickets[0]
 
     @pytest.mark.asyncio
     async def test_partial_update_omits_unset_fields(self):
@@ -452,8 +539,8 @@ class TestUpdateTicket:
 
         await backend.update_ticket("TKT-000001", summary="new summary only")
 
-        assert fake.tickets[0]["summary"] == "new summary only"
-        assert fake.tickets[0]["description"] == "orig d"
+        assert fake.canonical_tickets.tickets[0]["summary"] == "new summary only"
+        assert fake.canonical_tickets.tickets[0]["description"] == "orig d"
 
     @pytest.mark.asyncio
     async def test_false_when_no_client(self):
@@ -467,12 +554,7 @@ class TestUpdateTicket:
         backend, _ = _make_backend(fake)
         _seed_ticket(fake)
 
-        class _RaisingTable:
-            def update(self, *_a, **_k):
-                raise RuntimeError("db down")
-
-        original_table = fake.table
-        fake.table = lambda name: _RaisingTable() if name == "internal_tickets" else original_table(name)
+        fake.canonical_tickets.raise_on_update = RuntimeError("db down")
 
         assert await backend.update_ticket("TKT-000001", summary="x") is False
 
@@ -522,10 +604,6 @@ class TestFindOpenByGrid:
         fake = FakeSupabaseClient()
         backend, _ = _make_backend(fake)
 
-        class _RaisingTable:
-            def select(self, *_a, **_k):
-                raise RuntimeError("db down")
-
-        fake.table = lambda name: _RaisingTable()
+        fake.canonical_tickets.raise_on_find = RuntimeError("db down")
 
         assert await backend.find_open_by_grid("Kudi") == []
