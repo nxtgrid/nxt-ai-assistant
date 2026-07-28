@@ -288,19 +288,12 @@ class TicketService:
         return await backend.find_open_by_grid(grid_name, limit=limit)
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
-        """Dedup guard used before filing a new ticket for an escalation.
+        """Resolve escalation deduplication through canonical ticket ownership.
 
-        Checks both backends -- at ticket-creation time we don't yet know
-        which backend a prior (possibly failed-to-persist) attempt used.
-
-        Skips the Jira lookup entirely when ``TICKET_BACKEND_OVERRIDE=internal``:
-        that override exists so ops can route around a configured-but-unhealthy
-        Jira, and an unconditional Jira dedup call here would silently defeat
-        it with a 10s network round-trip on every escalation.
+        A completed create attaches the ticket to ``escalations.ticket_id``;
+        that relation is the only durable dedup authority.  Backend-specific
+        searches can find an untracked external ticket, but cannot safely
+        establish its Anansi ownership or backend without an explicit adopt
+        flow, so they are intentionally not used here.
         """
-        override = (fr.get("TICKET_BACKEND_OVERRIDE") or "auto").strip().lower()
-        if override != "internal":
-            jira_ref = await self._jira.find_by_escalation(mapping_id)
-            if jira_ref:
-                return jira_ref
-        return await self._internal.find_by_escalation(mapping_id)
+        return await self._tickets.find_ref_for_escalation(mapping_id)

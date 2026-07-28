@@ -127,6 +127,7 @@ class _FakeSupabase:
         self.tag_calls: List[tuple] = []
         self.saved_messages_return: List[Any] = [SimpleNamespace(id="msg-1")]
         self.mapping_for_reply: Optional[Dict[str, Any]] = None
+        self.internal_ticket_lookup_calls: List[str] = []
         # Sweep fixtures — configure per-test, default to empty/no-op.
         self.stale_unfiled: List[Dict[str, Any]] = []
         self.old_unfiled: List[Dict[str, Any]] = []
@@ -169,6 +170,7 @@ class _FakeSupabase:
         return []
 
     async def get_internal_ticket(self, ref: str):
+        self.internal_ticket_lookup_calls.append(ref)
         return self._internal_rows.get(ref)
 
     async def count_active_blocking_escalations(self, _sid):
@@ -252,6 +254,24 @@ class _FakeTickets:
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         self.add_comment_calls.append((ref, body, public))
         return True
+
+
+class _CanonicalDedupTickets:
+    """Ticket-service seam for an already-attached canonical escalation."""
+
+    def __init__(self, ref: str, backend: str) -> None:
+        self._ref = ref
+        self._backend = backend
+        self.find_calls: list[str] = []
+        self.backend_calls: list[str] = []
+
+    async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
+        self.find_calls.append(mapping_id)
+        return self._ref
+
+    async def get_backend_name(self, ref: str) -> str:
+        self.backend_calls.append(ref)
+        return self._backend
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +451,8 @@ async def test_track_as_ticket_dedup_hit_jira_writes_jira_key():
     jira = _FakeBackend("jira", available=True, dedup="OPS-55")
     internal = _FakeBackend("internal")
     _install_ticket_service(svc, jira, internal)
+    canonical_tickets = _CanonicalDedupTickets("OPS-55", "jira")
+    svc._tickets = canonical_tickets
 
     result = await svc.track_as_ticket(escalation_mapping=_base_mapping())
 
@@ -440,6 +462,9 @@ async def test_track_as_ticket_dedup_hit_jira_writes_jira_key():
     assert result["ticket_url"] == f"{svc._jira_base_url}/browse/OPS-55"
     assert jira.create_calls == 0  # dedup skipped creation
     assert {"jira_ticket_key": "OPS-55"} in supa.em_update_payloads()
+    assert canonical_tickets.find_calls == ["mapping-abcd1234"]
+    assert canonical_tickets.backend_calls == ["OPS-55"]
+    assert supa.internal_ticket_lookup_calls == []
 
 
 async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
@@ -449,6 +474,8 @@ async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
     jira = _FakeBackend("jira", available=True, dedup=None)
     internal = _FakeBackend("internal", dedup="TKT-9")
     _install_ticket_service(svc, jira, internal)
+    canonical_tickets = _CanonicalDedupTickets("TKT-9", "internal")
+    svc._tickets = canonical_tickets
 
     result = await svc.track_as_ticket(escalation_mapping=_base_mapping())
 
@@ -460,6 +487,9 @@ async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
     }
     # Recovered ref is internal -> the legacy jira_ticket_key must stay untouched.
     assert all("jira_ticket_key" not in p for p in supa.em_update_payloads())
+    assert canonical_tickets.find_calls == ["mapping-abcd1234"]
+    assert canonical_tickets.backend_calls == ["TKT-9"]
+    assert supa.internal_ticket_lookup_calls == []
 
 
 async def test_track_as_ticket_creation_failure_returns_error():

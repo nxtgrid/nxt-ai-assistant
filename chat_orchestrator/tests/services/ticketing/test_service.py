@@ -68,6 +68,8 @@ class _FakeTicketRepository:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.records_by_ref: dict[str, TicketRecord] = {}
+        self.refs_by_escalation: dict[str, str] = {}
+        self.find_ref_for_escalation_calls: list[str] = []
 
     async def create_intent(self, req, *, created_via):
         self.calls.append(("intent", created_via, req.summary))
@@ -88,6 +90,10 @@ class _FakeTicketRepository:
 
     async def get_by_ref(self, ref: str) -> Optional[TicketRecord]:
         return self.records_by_ref.get(ref)
+
+    async def find_ref_for_escalation(self, escalation_id: str) -> Optional[str]:
+        self.find_ref_for_escalation_calls.append(escalation_id)
+        return self.refs_by_escalation.get(escalation_id)
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         return True
@@ -391,48 +397,21 @@ class TestBackendForRef:
 
 class TestFindByEscalation:
     @pytest.mark.asyncio
-    async def test_checks_jira_first_then_internal(self, monkeypatch):
-        monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "auto")
+    async def test_resolves_only_through_the_canonical_escalation_relation(self):
         jira = _FakeBackend("jira")
         internal = _FakeBackend("internal")
-        service = _make_service(raw_client=None, jira=jira, internal=internal)
+        repository = _FakeTicketRepository()
+        repository.refs_by_escalation["mapping-3"] = "TKT-3"
+        service = _make_service(
+            raw_client=None, jira=jira, internal=internal, ticket_repository=repository
+        )
 
-        await service.find_by_escalation("mapping-3")
+        result = await service.find_by_escalation("mapping-3")
 
-        assert jira.find_by_escalation_calls == ["mapping-3"]
-        assert internal.find_by_escalation_calls == ["mapping-3"]
-
-    @pytest.mark.asyncio
-    async def test_returns_jira_ref_without_checking_internal_when_jira_finds_it(
-        self, monkeypatch
-    ):
-        monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "auto")
-
-        class _JiraFinds(_FakeBackend):
-            async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
-                self.find_by_escalation_calls.append(mapping_id)
-                return "OPS-55"
-
-        jira = _JiraFinds("jira")
-        internal = _FakeBackend("internal")
-        service = _make_service(raw_client=None, jira=jira, internal=internal)
-
-        result = await service.find_by_escalation("mapping-4")
-
-        assert result == "OPS-55"
-        assert internal.find_by_escalation_calls == []
-
-    @pytest.mark.asyncio
-    async def test_override_internal_skips_jira_entirely(self, monkeypatch):
-        monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "internal")
-        jira = _FakeBackend("jira")
-        internal = _FakeBackend("internal")
-        service = _make_service(raw_client=None, jira=jira, internal=internal)
-
-        await service.find_by_escalation("mapping-5")
-
+        assert result == "TKT-3"
+        assert repository.find_ref_for_escalation_calls == ["mapping-3"]
         assert jira.find_by_escalation_calls == []
-        assert internal.find_by_escalation_calls == ["mapping-5"]
+        assert internal.find_by_escalation_calls == []
 
 
 class TestUpdateTicket:

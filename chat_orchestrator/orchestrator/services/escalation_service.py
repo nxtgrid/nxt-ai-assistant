@@ -1795,9 +1795,9 @@ class EscalationService:
             except Exception as e:
                 LOGGER.debug(f"Could not resolve grid for JIRA ticket: {e}")
 
-            # Dedup guard: if a previous attempt already filed a ticket for this
-            # escalation but failed to persist it, reuse that ticket instead of
-            # filing again. find_by_escalation checks both backends.
+            # Dedup guard: a canonical escalation owns at most one canonical
+            # ticket.  Its persisted backend is authoritative; reference
+            # syntax and legacy-table membership are not backend signals.
             existing_ref = await self._tickets.find_by_escalation(mapping_id)
             if existing_ref:
                 LOGGER.info(
@@ -1805,31 +1805,13 @@ class EscalationService:
                     existing_ref,
                     mapping_id,
                 )
-                # Resolve the recovered ref's backend so the legacy jira_ticket_key
-                # column stays in sync for inbound Jira webhook routing, and so the
-                # caller (e.g. the sweep) can render a link without a second lookup.
-                # A row in internal_tickets means it's internal; otherwise treat it
-                # as Jira (fail-toward-Jira on a lookup error is a cosmetic risk at
-                # worst -- see track_as_ticket's module-level design notes).
-                recovered_is_internal = False
-                if supabase_client:
-                    try:
-                        recovered_is_internal = (
-                            await supabase_client.get_internal_ticket(existing_ref)
-                        ) is not None
-                    except Exception as e:
-                        LOGGER.warning(
-                            "Dedup: could not resolve backend for recovered ref %s: %s",
-                            existing_ref,
-                            e,
-                        )
-                recovered_backend = "internal" if recovered_is_internal else "jira"
+                recovered_backend = await self._tickets.get_backend_name(existing_ref)
                 recovered_url = (
                     None
-                    if recovered_is_internal
+                    if recovered_backend == "internal"
                     else f"{self._jira_base_url}/browse/{existing_ref}"
                 )
-                if supabase_client and not recovered_is_internal:
+                if supabase_client and recovered_backend == "jira":
                     try:
                         _client = supabase_client._get_client()
                         _client.table("escalation_mappings").update(
