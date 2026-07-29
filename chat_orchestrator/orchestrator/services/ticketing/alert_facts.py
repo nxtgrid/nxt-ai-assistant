@@ -27,8 +27,7 @@ from typing import Any, Dict, Tuple
 
 from pydantic import BaseModel, Field
 
-_SEVERITY_PATTERN = re.compile(r"\burgent\b", re.IGNORECASE)
-_WARNING_PATTERN = re.compile(r"\bwarning\b", re.IGNORECASE)
+_LEADING_SEVERITY = re.compile(r"^\s*!?\s*(urgent|warning)\s*:", re.IGNORECASE)
 
 _LEADING_MARKER = re.compile(r"^\s*!\s*(?:warning|urgent)\s*:\s*", re.IGNORECASE)
 _LEADING_BANG = re.compile(r"^\s*!\s*")
@@ -88,12 +87,14 @@ class AlertFacts(BaseModel):
 
 
 def derive_severity(subject: str) -> str:
-    """"urgent" | "warning" | "" from the n8n "! Urgent:"/"! Warning:" convention."""
-    if _SEVERITY_PATTERN.search(subject or ""):
-        return "urgent"
-    if _WARNING_PATTERN.search(subject or ""):
-        return "warning"
-    return ""
+    """"urgent" | "warning" | "" from the n8n "! Urgent:"/"! Warning:" convention.
+
+    Anchored to the *leading* marker only -- a fault description that
+    mentions "urgent" or "warning" elsewhere in free text must not be
+    misclassified.
+    """
+    match = _LEADING_SEVERITY.match(subject or "")
+    return match.group(1).lower() if match else ""
 
 
 def derive_component(subject: str, text: str = "") -> Tuple[str, str, str]:

@@ -36,6 +36,21 @@ class TestDeriveSeverity:
     def test_case_insensitive(self):
         assert derive_severity("URGENT: something") == "urgent"
 
+    def test_ignores_urgent_word_elsewhere_in_subject(self):
+        assert (
+            derive_severity("! Warning: DCU 862406008 needs urgent attention in Belel !")
+            == "warning"
+        )
+
+    def test_ignores_warning_word_elsewhere_in_subject(self):
+        assert (
+            derive_severity("! Urgent: Battery fault, disregard prior warning !")
+            == "urgent"
+        )
+
+    def test_bare_word_with_no_marker_is_unclassified(self):
+        assert derive_severity("This is urgent, please check Belel") == ""
+
 
 class TestDeriveComponent:
     def test_mppt_from_subject_and_text(self):
