@@ -1544,34 +1544,40 @@ async def _resolve_notify_ticket_auto(
         try:
             from orchestrator.services.ticketing.correlator import _is_urgent_severity_increase
 
-            if (
-                decision.decided_by == "replay"
-                and decision.ticket_ref
-                and not _is_urgent_severity_increase(alert.severity, decision.ticket_severity)
-            ):
-                # This dedup_key was already decided, already applied to the
-                # ticket, and already posted. Re-running the amend would double
-                # the comment and the Telegram message. An urgent severity
-                # increase is the one thing that still has to get through, so it
-                # deliberately falls past this guard into the normal amend path.
-                logger.info(
-                    "Notify: replayed dedup_key for %r -- suppressing duplicate delivery",
-                    decision.ticket_ref,
-                )
-                return (
-                    decision.ticket_ref,
-                    None,
-                    {
-                        "decision": decision.decision,
-                        "correlated_with": decision.ticket_ref,
-                        "confidence": decision.confidence,
-                        "decided_by": decision.decided_by,
-                    },
-                    NotificationDelivery(
-                        suppress=True,
-                        alert_context=alert_context,
-                        stored_ticket_severity=decision.ticket_severity,
-                    ),
+            if decision.decided_by == "replay" and decision.ticket_ref:
+                if not _is_urgent_severity_increase(alert.severity, decision.ticket_severity):
+                    # This dedup_key was already decided, already applied to
+                    # the ticket, and already posted. Re-running the amend
+                    # would double the comment and the Telegram message.
+                    logger.info(
+                        "Notify: replayed dedup_key for %r -- suppressing duplicate delivery",
+                        decision.ticket_ref,
+                    )
+                    return (
+                        decision.ticket_ref,
+                        None,
+                        {
+                            "decision": decision.decision,
+                            "correlated_with": decision.ticket_ref,
+                            "confidence": decision.confidence,
+                            "decided_by": decision.decided_by,
+                        },
+                        NotificationDelivery(
+                            suppress=True,
+                            alert_context=alert_context,
+                            stored_ticket_severity=decision.ticket_severity,
+                        ),
+                    )
+                # Urgent severity increase on a replay -- decision.ticket_ref
+                # already names a real, existing ticket (whether the original
+                # decision was "new" or "amend"), so this must escalate that
+                # ticket, never file a second one. Coercing decision to
+                # "amend" here routes it into the ordinary amend-execution
+                # path below instead of the "new"-ticket branch, which would
+                # otherwise fire because decision.decision on a replay is
+                # still whatever the ORIGINAL (pre-replay) decision type was.
+                decision = dataclasses.replace(
+                    decision, decision="amend", needs_root_cause_ticket=False
                 )
 
             if decision.decision == "new" or (

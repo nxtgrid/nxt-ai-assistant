@@ -1005,6 +1005,54 @@ class TestResolveNotifyTicketAutoReplay:
         assert delivery.suppress is False
         assert delivery.top_level is True
 
+    async def test_replayed_new_decision_with_urgent_escalation_amends_not_duplicates(
+        self, fake_apply_amendment, monkeypatch
+    ):
+        """Regression test for a holistic-review bug: a replay whose ORIGINAL
+        decision was "new" (ticket_ref backfilled after the ticket was
+        actually created -- see
+        test_new_ticket_backfills_ticket_ref_onto_its_event_row) must still
+        escalate the existing ticket on an urgent severity bump, not file a
+        second one. decision.decision on a replay is whatever the original
+        decision type was, so the "new"-ticket branch's bare
+        `decision.decision == "new"` check would otherwise fire."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="OPS-3363",
+            decision="amend",
+            escalated=True,
+            affected_keys_count=0,
+            occurrence_count=2,
+            telegram_chat_id="-100555",
+            telegram_topic_id="42",
+            telegram_message_id=123,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="new",
+            ticket_ref="OPS-3363",
+            decided_by="replay",
+            confidence=None,
+            ticket_severity="warning",
+        )
+        body = _notify_body(
+            ticket_id="auto",
+            dedup_key="alert-42",
+            alert={"subject": "! Urgent: Grid outage", "severity": "urgent"},
+        )
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "OPS-3363"
+        # Must escalate the existing ticket, not file a second one.
+        assert len(calls) == 1
+        svc = _FakeTicketService.instances[-1]
+        assert svc.create_ticket_calls == []
+        assert delivery is not None
+        assert delivery.suppress is False
+        assert delivery.top_level is True
+
     async def test_new_ticket_backfills_ticket_ref_onto_its_event_row(self, monkeypatch):
         """Regression test for the delivery-idempotency gap a code reviewer
         flagged in this fix: a "new" decision's ``ticket_correlation_events``
