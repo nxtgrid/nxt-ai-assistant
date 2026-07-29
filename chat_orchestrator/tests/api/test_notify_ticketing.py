@@ -1205,7 +1205,7 @@ class TestResolveNotifyTicketAutoFailureModes:
         assert ref == "TKT-000001"
         assert extra["decided_by"] == "fallback"
         assert observed_timeout_seconds == [
-            DEFAULT_CORRELATION_POLICY.llm_timeout_seconds
+            DEFAULT_CORRELATION_POLICY.grid_lock_timeout_seconds
         ]
         assert delivery is not None
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"

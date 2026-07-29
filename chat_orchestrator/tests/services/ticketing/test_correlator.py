@@ -21,7 +21,10 @@ import pytest
 from orchestrator.services.ticketing import correlator as correlator_module
 from orchestrator.services.ticketing.alert_facts import AlertFacts, enrich_alert_facts
 from orchestrator.services.ticketing.backend import TicketStatus, TicketSummary
-from orchestrator.services.ticketing.correlation_rules import CorrelationPolicy
+from orchestrator.services.ticketing.correlation_rules import (
+    DEFAULT_CORRELATION_POLICY,
+    CorrelationPolicy,
+)
 from orchestrator.services.ticketing.correlator import (
     AlertCorrelator,
     CandidateSummary,
@@ -821,6 +824,43 @@ class TestLiveStatusConfirmation:
         assert decision.ticket_ref == "OPS-42"
         assert store.mark_closed_calls == []
         assert gateway.calls == []
+
+
+class TestCandidateStatusConcurrency:
+    @pytest.mark.asyncio
+    async def test_status_lookups_run_concurrently(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        correlator, store, ticket_service, _gateway = _make_correlator()
+        for index in range(8):
+            store.correlations.append(
+                {
+                    "ticket_ref": f"OPS-{index}",
+                    "grid_name": "Kudi",
+                    "status": "open",
+                    "signatures": [],
+                    "affected_keys": [],
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+        in_flight = 0
+        peak = 0
+
+        async def _slow_status(ref):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.05)
+            in_flight -= 1
+            return TicketStatus(summary=ref, is_done=False)
+
+        ticket_service.get_status = _slow_status
+
+        candidates = await correlator._assemble_candidates("Kudi")
+
+        assert len(candidates) == 8
+        assert peak > 1
+        assert peak <= DEFAULT_CORRELATION_POLICY.candidate_status_concurrency
 
 
 class TestBackendOnlyCandidates:

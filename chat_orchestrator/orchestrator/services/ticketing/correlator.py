@@ -40,7 +40,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -51,6 +51,9 @@ from shared.utils.logging import get_logger
 
 from . import correlation_rules
 from .alert_facts import AlertFacts, same_component
+
+if TYPE_CHECKING:
+    from .backend import TicketStatus
 
 LOGGER = get_logger(__name__)
 
@@ -368,6 +371,7 @@ class AlertCorrelator:
         timeout_seconds: Optional[float] = None,
         lookback_hours: Optional[int] = None,
         max_candidates: Optional[int] = None,
+        candidate_status_concurrency: Optional[int] = None,
         get_correlation_instructions: Optional[Callable[[], Dict[str, str]]] = None,
         get_rag_context: Optional[Callable[..., Awaitable[List[str]]]] = None,
         get_grid_operational_context: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
@@ -398,6 +402,11 @@ class AlertCorrelator:
             max_candidates
             if max_candidates is not None
             else policy.maximum_candidate_count
+        )
+        self._candidate_status_concurrency = (
+            candidate_status_concurrency
+            if candidate_status_concurrency is not None
+            else policy.candidate_status_concurrency
         )
         self._get_correlation_instructions = (
             get_correlation_instructions or correlation_rules.get_correlation_instructions
@@ -623,13 +632,14 @@ class AlertCorrelator:
                 status=summary.status,
             )
 
+        semaphore = asyncio.Semaphore(self._candidate_status_concurrency)
+        ordered = list(by_ref.values())
+        statuses = await asyncio.gather(
+            *(self._confirm_candidate_status(c, semaphore) for c in ordered)
+        )
+
         confirmed: List[CandidateSummary] = []
-        for candidate in by_ref.values():
-            try:
-                status = await self._ticket_service.get_status(candidate.ref)
-            except Exception:
-                LOGGER.warning("Candidate status lookup raised for {!r}", candidate.ref, exc_info=True)
-                status = None
+        for candidate, status in zip(ordered, statuses):
             if status is not None and status.is_done:
                 if candidate.ref in store_refs:
                     await self._store.mark_closed(candidate.ref)
@@ -637,11 +647,23 @@ class AlertCorrelator:
             if status is None and candidate.ref not in store_refs:
                 continue
             if status is None:
-                LOGGER.warning("Preserving cached candidate {!r}: status unavailable", candidate.ref)
+                LOGGER.warning("Preserving cached candidate %r: status unavailable", candidate.ref)
             confirmed.append(candidate)
 
         confirmed.sort(key=lambda c: c.age_hours if c.age_hours is not None else 0.0)
         return confirmed[: self._max_candidates]
+
+    async def _confirm_candidate_status(
+        self, candidate: CandidateSummary, semaphore: asyncio.Semaphore
+    ) -> Optional[TicketStatus]:
+        async with semaphore:
+            try:
+                return await self._ticket_service.get_status(candidate.ref)
+            except Exception:
+                LOGGER.warning(
+                    "Candidate status lookup raised for %r", candidate.ref, exc_info=True
+                )
+                return None
 
     async def _call_llm(
         self,

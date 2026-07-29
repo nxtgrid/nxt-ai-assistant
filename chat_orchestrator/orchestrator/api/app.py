@@ -1505,7 +1505,7 @@ async def _resolve_notify_ticket_auto(
     from orchestrator.services.ticketing.correlator import AlertCorrelator
     from orchestrator.services.ticketing.service import TicketService
 
-    timeout_seconds = DEFAULT_CORRELATION_POLICY.llm_timeout_seconds
+    timeout_seconds = DEFAULT_CORRELATION_POLICY.grid_lock_timeout_seconds
     store = CorrelationStore(get_client=_raw_supabase_client)
 
     async with _acquire_grid_correlation_lock(target.grid_name, timeout_seconds) as acquired:
