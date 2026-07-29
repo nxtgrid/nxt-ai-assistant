@@ -46,9 +46,9 @@ class LiveOutputLookup:
                 self._read_output(self._grid_name), timeout=self._timeout_seconds
             )
         except asyncio.TimeoutError:
-            LOGGER.warning("Urgent alert live output timed out for grid %r", self._grid_name)
+            LOGGER.warning("Urgent alert live output timed out for grid {!r}", self._grid_name)
         except Exception:
-            LOGGER.warning("Urgent alert live output failed for grid %r", self._grid_name, exc_info=True)
+            LOGGER.warning("Urgent alert live output failed for grid {!r}", self._grid_name, exc_info=True)
         return None
 
 

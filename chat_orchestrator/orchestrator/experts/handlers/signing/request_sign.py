@@ -277,7 +277,7 @@ async def _resolve_self_signer(context: StepContext, document_drive_id: str) -> 
                 str(requester_chat_id),
             )
     except Exception as e:
-        LOGGER.error("request_sign: DB error resolving self-signer: %s", e)
+        LOGGER.error("request_sign: DB error resolving self-signer: {}", e)
         return StepResult.failure(sanitize_error_for_user(str(e)))
 
     if not row:
@@ -298,7 +298,7 @@ async def _run_with_inputs(
     )
     if not can_access:
         LOGGER.warning(
-            "request_sign: Drive access denied for email=%s file=%s",
+            "request_sign: Drive access denied for email={} file={}",
             context.effective_email,
             document_drive_id,
         )
@@ -314,7 +314,7 @@ async def _run_with_inputs(
         async with pool.acquire() as conn:
             accounts = await _query_accounts(conn)
     except Exception as e:
-        LOGGER.error("request_sign: DB error fetching accounts: %s", e)
+        LOGGER.error("request_sign: DB error fetching accounts: {}", e)
         return StepResult.failure(sanitize_error_for_user(str(e)))
 
     candidates = _resolve_candidates(signer_hint, accounts)
@@ -381,7 +381,7 @@ async def _complete_request(
             requester_email=requester_email,
         )
     except Exception as e:
-        LOGGER.error("request_sign: failed to send sign button: %s", e)
+        LOGGER.error("request_sign: failed to send sign button: {}", e)
         return StepResult.failure(sanitize_error_for_user(str(e)))
 
     signer_name = signer.get("full_name") or signer.get("email") or "the signer"

@@ -1261,7 +1261,7 @@ class AuthService:
         matched, was_fuzzy, _score = find_best_grid_match(grid_name, list(by_name.keys()))
         if not matched:
             LOGGER.warning(
-                "resolve_grid_notification_target: no confident grid match for %r", grid_name
+                "resolve_grid_notification_target: no confident grid match for {!r}", grid_name
             )
             return None
 

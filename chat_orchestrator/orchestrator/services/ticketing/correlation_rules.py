@@ -96,6 +96,6 @@ async def get_grid_operational_context(
         return await auth_service.get_grid_operational_facts(grid_name)
     except Exception:
         LOGGER.warning(
-            "Failed to fetch grid operational facts for %r", grid_name, exc_info=True
+            "Failed to fetch grid operational facts for {!r}", grid_name, exc_info=True
         )
         return {}

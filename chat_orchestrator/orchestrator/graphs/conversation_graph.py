@@ -891,7 +891,7 @@ class ConversationGraphBuilder:
                 return int(user_context.organization_ids[0])
             except (ValueError, TypeError):
                 LOGGER.warning(
-                    "Non-integer organization_id in user_context: %r",
+                    "Non-integer organization_id in user_context: {!r}",
                     user_context.organization_ids[0],
                 )
         return None

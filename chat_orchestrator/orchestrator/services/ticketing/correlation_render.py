@@ -305,7 +305,7 @@ async def apply_amendment(
                         )
                 except Exception:
                     LOGGER.warning(
-                        "apply_amendment: failed to seed Jira-only correlation row for %r",
+                        "apply_amendment: failed to seed Jira-only correlation row for {!r}",
                         ticket_ref,
                         exc_info=True,
                     )
@@ -322,7 +322,7 @@ async def apply_amendment(
                 rendered_summary=final_summary,
             )
         LOGGER.warning(
-            "apply_amendment: correlation row for %r not found after merge -- "
+            "apply_amendment: correlation row for {!r} not found after merge -- "
             "skipping render/ticket-update side effects",
             ticket_ref,
         )

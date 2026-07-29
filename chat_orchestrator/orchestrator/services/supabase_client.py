@@ -1548,7 +1548,7 @@ class EnhancedSupabaseClient:
             rows = result.data or []
             if len(rows) == limit:
                 LOGGER.warning(
-                    "get_active_tracked_escalations hit cap of %d — some tracked escalations skipped",
+                    "get_active_tracked_escalations hit cap of {} — some tracked escalations skipped",
                     limit,
                 )
             return rows

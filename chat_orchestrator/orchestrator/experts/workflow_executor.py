@@ -2697,7 +2697,7 @@ Be specific and actionable. Reference data from previous steps as needed.
             # No contract attached (e.g. an LLM step, or a function step that
             # predates contracts) -- nothing to validate against, so don't block.
             LOGGER.debug(
-                "validate_step_prerequisites: step %r has no StepContract attached; "
+                "validate_step_prerequisites: step {!r} has no StepContract attached; "
                 "nothing to validate, treating prerequisites as satisfied",
                 step_name,
             )
@@ -2729,7 +2729,7 @@ Be specific and actionable. Reference data from previous steps as needed.
             except Exception:
                 LOGGER.warning(
                     "validate_step_prerequisites: find_similar_completed lookup failed "
-                    "for step %r; continuing without Tier 2 data",
+                    "for step {!r}; continuing without Tier 2 data",
                     step_name,
                     exc_info=True,
                 )
@@ -2746,7 +2746,7 @@ Be specific and actionable. Reference data from previous steps as needed.
                 except Exception:
                     LOGGER.warning(
                         "validate_step_prerequisites: design artifact lookup failed for "
-                        "design_id=%s; continuing without Tier 3 data",
+                        "design_id={}; continuing without Tier 3 data",
                         design_id,
                         exc_info=True,
                     )

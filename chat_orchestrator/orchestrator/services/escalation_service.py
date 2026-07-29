@@ -256,7 +256,7 @@ class EscalationService:
         )
         if topic_id is None:
             LOGGER.warning(
-                "Could not create forum topic for org=%s — falling back to General", org_name
+                "Could not create forum topic for org={} — falling back to General", org_name
             )
             return None
 
@@ -264,7 +264,7 @@ class EscalationService:
             organization_id=organization_id,
             topic_id=topic_id,
         )
-        LOGGER.info("Created escalation forum topic for org=%s: topic_id=%s", org_name, topic_id)
+        LOGGER.info("Created escalation forum topic for org={}: topic_id={}", org_name, topic_id)
         return int(topic_id)
 
     async def _escalate_to_telegram(
@@ -389,8 +389,8 @@ class EscalationService:
                             status = await self._tickets.get_status(existing_ref)
                             if status and status.is_done:
                                 LOGGER.info(
-                                    "Parent ticket %s is Done — will not pre-link follow-up "
-                                    "for session %s; sweep will create a fresh ticket",
+                                    "Parent ticket {} is Done — will not pre-link follow-up "
+                                    "for session {}; sweep will create a fresh ticket",
                                     existing_ref,
                                     session_id,
                                 )
@@ -410,13 +410,13 @@ class EscalationService:
                             )
                             if commented:
                                 LOGGER.info(
-                                    "Added follow-up comment to existing ticket %s for session %s",
+                                    "Added follow-up comment to existing ticket {} for session {}",
                                     existing_ref,
                                     session_id,
                                 )
                             else:
                                 LOGGER.warning(
-                                    "Failed to add follow-up comment to ticket %s for session %s",
+                                    "Failed to add follow-up comment to ticket {} for session {}",
                                     existing_ref,
                                     session_id,
                                 )
@@ -532,7 +532,7 @@ class EscalationService:
                 and organization_id is not None
             ):
                 LOGGER.warning(
-                    "Escalation topic deleted for org_id=%s topic_id=%s — "
+                    "Escalation topic deleted for org_id={} topic_id={} — "
                     "clearing cached id and retrying to General",
                     organization_id,
                     escalation_topic_id,
@@ -777,12 +777,12 @@ class EscalationService:
                 ) as resp:
                     if resp.status != 200:
                         LOGGER.warning(
-                            "Jira org fetch returned HTTP %d — stopping pagination", resp.status
+                            "Jira org fetch returned HTTP {} — stopping pagination", resp.status
                         )
                         break
                     data = await resp.json()
             except Exception as e:
-                LOGGER.warning("Error fetching Jira organizations (page %d): %s", page, e)
+                LOGGER.warning("Error fetching Jira organizations (page {}): {}", page, e)
                 break
             orgs.extend(data.get("values", []))
             next_url = (
@@ -812,7 +812,7 @@ class EscalationService:
             matched_name, _, _score = find_best_grid_match(org_name, list(name_to_id.keys()))
             return name_to_id[matched_name] if matched_name else None
         except Exception as e:
-            LOGGER.warning("Could not resolve Jira org for '%s': %s", org_name, e)
+            LOGGER.warning("Could not resolve Jira org for '{}': {}", org_name, e)
             return None
 
     async def _create_jira_ticket(
@@ -886,7 +886,7 @@ class EscalationService:
                 if jira_org_id:
                     payload["fields"][org_field_id] = [int(jira_org_id)]
                     LOGGER.info(
-                        "Tagged Jira org field %s=%s for org '%s'",
+                        "Tagged Jira org field {}={} for org '{}'",
                         org_field_id,
                         jira_org_id,
                         organization_short_name,
@@ -979,11 +979,11 @@ class EscalationService:
                 if resp.status in (200, 201):
                     return True
                 LOGGER.warning(
-                    "Failed to add Jira comment to %s: status=%s", issue_key, resp.status
+                    "Failed to add Jira comment to {}: status={}", issue_key, resp.status
                 )
                 return False
         except Exception as e:
-            LOGGER.warning("Error adding Jira comment to %s: %s", issue_key, e)
+            LOGGER.warning("Error adding Jira comment to {}: {}", issue_key, e)
             return False
 
     async def _transition_jira_to_done(self, issue_key: str) -> None:
@@ -1010,7 +1010,7 @@ class EscalationService:
                 if resp.status != 200:
                     body = await resp.text()
                     LOGGER.warning(
-                        "Could not fetch transitions for %s: HTTP %s — %s",
+                        "Could not fetch transitions for {}: HTTP {} — {}",
                         issue_key,
                         resp.status,
                         body,
@@ -1030,7 +1030,7 @@ class EscalationService:
 
             if not transition_id:
                 LOGGER.warning(
-                    "No 'Done' transition available for %s — already closed or workflow mismatch",
+                    "No 'Done' transition available for {} — already closed or workflow mismatch",
                     issue_key,
                 )
                 return
@@ -1045,18 +1045,18 @@ class EscalationService:
                 if resp.status not in (200, 204):
                     body = await resp.text()
                     LOGGER.warning(
-                        "Jira transition failed for %s: HTTP %s — %s",
+                        "Jira transition failed for {}: HTTP {} — {}",
                         issue_key,
                         resp.status,
                         body,
                     )
                 else:
                     LOGGER.info(
-                        "Transitioned Jira %s to Done (transition %s)", issue_key, transition_id
+                        "Transitioned Jira {} to Done (transition {})", issue_key, transition_id
                     )
 
         except Exception:
-            LOGGER.warning("Error transitioning Jira %s to Done", issue_key, exc_info=True)
+            LOGGER.warning("Error transitioning Jira {} to Done", issue_key, exc_info=True)
 
     async def _fetch_jira_issue_fields(self, issue_key: str) -> Optional[Dict[str, Any]]:
         """Fetch summary and status category for a Jira issue.
@@ -1074,7 +1074,7 @@ class EscalationService:
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
-                    LOGGER.debug("Jira fetch %s returned HTTP %s", issue_key, resp.status)
+                    LOGGER.debug("Jira fetch {} returned HTTP {}", issue_key, resp.status)
                     return None
                 data = await resp.json()
             fields = data.get("fields", {})
@@ -1084,7 +1084,7 @@ class EscalationService:
                 "is_done": status_category == "done",
             }
         except Exception:
-            LOGGER.debug("Error fetching Jira issue fields for %s", issue_key, exc_info=True)
+            LOGGER.debug("Error fetching Jira issue fields for {}", issue_key, exc_info=True)
             return None
 
     async def _search_jira_for_escalation(self, mapping_id: str) -> Optional[str]:
@@ -1112,7 +1112,7 @@ class EscalationService:
             issues = data.get("issues", [])
             return str(issues[0]["key"]) if issues else None
         except Exception:
-            LOGGER.debug("Error searching Jira for escalation %s", mapping_id, exc_info=True)
+            LOGGER.debug("Error searching Jira for escalation {}", mapping_id, exc_info=True)
             return None
 
     # ==========================================================================
@@ -1661,7 +1661,7 @@ class EscalationService:
             # message_thread_id are preserved — only parse_mode is dropped.
             if _is_markdown_parse_error(result) and "parse_mode" in payload:
                 LOGGER.warning(
-                    "Telegram rejected reply as malformed Markdown (%s); retrying as plain text",
+                    "Telegram rejected reply as malformed Markdown ({}); retrying as plain text",
                     result.get("description"),
                 )
                 retry_payload = {k: v for k, v in payload.items() if k != "parse_mode"}
@@ -1744,7 +1744,7 @@ class EscalationService:
                             or []
                         )
                 except Exception as e:
-                    LOGGER.warning("Could not fetch messages for Jira ticket: %s", e)
+                    LOGGER.warning("Could not fetch messages for Jira ticket: {}", e)
             # Normalise to plain dicts — get_messages returns ConversationMessage Pydantic
             # objects (no .get()), so access attributes and convert.
             messages: List[Dict[str, Any]] = [
@@ -1801,7 +1801,7 @@ class EscalationService:
             existing_ref = await self._tickets.find_by_escalation(mapping_id)
             if existing_ref:
                 LOGGER.info(
-                    "Dedup: found existing ticket %s for mapping %s — skipping creation",
+                    "Dedup: found existing ticket {} for mapping {} — skipping creation",
                     existing_ref,
                     mapping_id,
                 )
@@ -1819,7 +1819,7 @@ class EscalationService:
                         ).eq("id", mapping_id).execute()
                     except Exception as e:
                         LOGGER.warning(
-                            "Dedup: failed to store recovered key %s: %s", existing_ref, e
+                            "Dedup: failed to store recovered key {}: {}", existing_ref, e
                         )
                 return {
                     "success": True,
@@ -1845,7 +1845,7 @@ class EscalationService:
                     )
                 )
             except TicketBackendError as e:
-                LOGGER.warning("Ticket creation failed for mapping %s: %s", mapping_id, e)
+                LOGGER.warning("Ticket creation failed for mapping {}: {}", mapping_id, e)
                 return {"success": False, "error": str(e)}
 
             ticket_ref = result.ref
@@ -1931,7 +1931,7 @@ class EscalationService:
             store_result = results[0]
             if isinstance(store_result, Exception):
                 LOGGER.warning(
-                    "Failed to store JIRA key for mapping %s: %s", mapping_id, store_result
+                    "Failed to store JIRA key for mapping {}: {}", mapping_id, store_result
                 )
                 return {"success": False, "error": f"DB write failed: {store_result}"}
 
@@ -1997,7 +1997,7 @@ class EscalationService:
 
         if len(eligible) == limit:
             LOGGER.warning(
-                "Escalation sweep: query capped at %d rows — backlog may be building", limit
+                "Escalation sweep: query capped at {} rows — backlog may be building", limit
             )
 
         filed = skipped = failed = 0
@@ -2070,11 +2070,11 @@ class EscalationService:
                             topic_id=escalation_topic_id,
                         )
                     filed += 1
-                    LOGGER.info("Sweep filed %s for escalation %s", ticket_ref, mapping_id)
+                    LOGGER.info("Sweep filed {} for escalation {}", ticket_ref, mapping_id)
                 else:
                     failed += 1
                     LOGGER.warning(
-                        "Sweep track_as_ticket failed for %s: %s",
+                        "Sweep track_as_ticket failed for {}: {}",
                         mapping_id,
                         result.get("error"),
                     )
@@ -2082,7 +2082,7 @@ class EscalationService:
 
             except Exception:
                 failed += 1
-                LOGGER.exception("Sweep error for escalation %s", mapping_id)
+                LOGGER.exception("Sweep error for escalation {}", mapping_id)
                 await supabase_client.reactivate_escalation(mapping_id)
 
             # Brief delay between calls to respect Jira rate limits (skip after last item)
@@ -2158,7 +2158,7 @@ class EscalationService:
                 )
                 if fields and fields["is_done"]:
                     # Ticket closed outside the webhook path — close the mapping silently
-                    LOGGER.info("Reconciling closed ticket %s (mapping %s)", ref, esc["id"])
+                    LOGGER.info("Reconciling closed ticket {} (mapping {})", ref, esc["id"])
                     try:
                         client = supabase_client._get_client()
                         client.table("escalation_mappings").update(
@@ -2169,7 +2169,7 @@ class EscalationService:
                         ).eq("id", esc["id"]).eq("is_active", True).execute()
                         reconciled += 1
                     except Exception:
-                        LOGGER.warning("Could not reconcile mapping %s", esc["id"], exc_info=True)
+                        LOGGER.warning("Could not reconcile mapping {}", esc["id"], exc_info=True)
                 else:
                     open_tracked.append((esc, fields))
 
@@ -2217,7 +2217,7 @@ class EscalationService:
                         sent_any = True
                     except Exception:
                         LOGGER.warning(
-                            "Failed to send pending issue %s to chat_id=%s",
+                            "Failed to send pending issue {} to chat_id={}",
                             issue["key"],
                             chat_id,
                             exc_info=True,
@@ -2233,7 +2233,7 @@ class EscalationService:
             "reconciled": reconciled,
             "notified_groups": notified_groups,
         }
-        LOGGER.info("Escalation sweep complete: %s", summary)
+        LOGGER.info("Escalation sweep complete: {}", summary)
         return summary
 
     async def recover_orphaned_claims(self) -> None:
@@ -2252,11 +2252,11 @@ class EscalationService:
             LOGGER.warning("Orphan recovery: hit row cap, may have more orphans")
         for row in orphaned:
             LOGGER.warning(
-                "Startup recovery: orphaned escalation claim %s — reactivating", row["id"]
+                "Startup recovery: orphaned escalation claim {} — reactivating", row["id"]
             )
             await supabase_client.reactivate_escalation(row["id"])
         if orphaned:
-            LOGGER.info("Startup recovery: reactivated %d orphaned escalation(s)", len(orphaned))
+            LOGGER.info("Startup recovery: reactivated {} orphaned escalation(s)", len(orphaned))
 
     async def _edit_telegram_message(
         self,
@@ -2285,7 +2285,7 @@ class EscalationService:
                 result: Dict[str, Any] = await resp.json()
                 return result
         except Exception as e:
-            LOGGER.warning("editMessageText failed for msg %s: %s", message_id, e)
+            LOGGER.warning("editMessageText failed for msg {}: {}", message_id, e)
             return {"ok": False, "description": str(e)}
 
     async def _auto_create_jira_and_edit_message(
@@ -2318,7 +2318,7 @@ class EscalationService:
                             or []
                         )
                 except Exception as e:
-                    LOGGER.debug("Could not fetch messages for after-hours Jira: %s", e)
+                    LOGGER.debug("Could not fetch messages for after-hours Jira: {}", e)
 
             # Normalise ConversationMessage Pydantic objects → plain dicts
             messages: List[Dict[str, Any]] = [
@@ -2365,7 +2365,7 @@ class EscalationService:
             except TicketBackendError as e:
                 # Ticket creation failed — restore Track button so staff can create manually
                 LOGGER.warning(
-                    "After-hours ticket creation failed for mapping %s: %s — restoring Track button",
+                    "After-hours ticket creation failed for mapping {}: {} — restoring Track button",
                     mapping_id,
                     e,
                 )
@@ -2385,7 +2385,7 @@ class EscalationService:
 
             ticket_ref = result.ref
             LOGGER.info(
-                "After-hours auto-created ticket %s (%s) for mapping %s",
+                "After-hours auto-created ticket {} ({}) for mapping {}",
                 ticket_ref,
                 result.backend,
                 mapping_id,
@@ -2401,7 +2401,7 @@ class EscalationService:
                         {"jira_ticket_key": ticket_ref}
                     ).eq("id", mapping_id).execute()
                 except Exception as e:
-                    LOGGER.warning("Failed to store after-hours Jira key: %s", e)
+                    LOGGER.warning("Failed to store after-hours Jira key: {}", e)
 
             # Edit the Telegram escalation message to prepend the ticket ref while
             # preserving the original question text so staff retain context. Internal
@@ -2428,7 +2428,7 @@ class EscalationService:
                 reply_markup=close_keyboard,
             )
         except Exception:
-            LOGGER.exception("After-hours auto-Jira task failed for mapping %s", mapping_id)
+            LOGGER.exception("After-hours auto-Jira task failed for mapping {}", mapping_id)
 
     def _single_matching_org(
         self, jira_orgs: List[Dict[str, Any]], escalation_org_name: Optional[str]
@@ -2452,12 +2452,12 @@ class EscalationService:
         """
         supabase_client = self._get_supabase_client()
         if not supabase_client:
-            LOGGER.error("No Supabase client — cannot route Jira event for %s", issue_key)
+            LOGGER.error("No Supabase client — cannot route Jira event for {}", issue_key)
             return None
 
         mapping = await supabase_client.get_escalation_mapping_by_jira_key(issue_key)
         if not mapping:
-            LOGGER.debug("No active escalation mapping for Jira ticket %s", issue_key)
+            LOGGER.debug("No active escalation mapping for Jira ticket {}", issue_key)
             return None
 
         escalation_org_id: Optional[int] = mapping.get("organization_id")
@@ -2470,7 +2470,7 @@ class EscalationService:
                 )
             except Exception as e:
                 LOGGER.warning(
-                    "Could not fetch escalation topic for org %s: %s", escalation_org_id, e
+                    "Could not fetch escalation topic for org {}: {}", escalation_org_id, e
                 )
 
         org_field_id = os.getenv("JIRA_ORGANIZATION_FIELD_ID", "")
@@ -2487,7 +2487,7 @@ class EscalationService:
                     str(escalation_org_id)
                 )
             except Exception as e:
-                LOGGER.warning("Could not fetch org name for %s: %s", escalation_org_id, e)
+                LOGGER.warning("Could not fetch org name for {}: {}", escalation_org_id, e)
 
         return {
             "mapping": mapping,
@@ -2505,19 +2505,19 @@ class EscalationService:
         # Guard: ignore bot's own comments (prevents infinite loop)
         author_email = comment.get("author", {}).get("emailAddress", "")
         if author_email and author_email.lower() == self._jira_email.lower():
-            LOGGER.debug("Ignoring Jira comment authored by bot on %s", issue_key)
+            LOGGER.debug("Ignoring Jira comment authored by bot on {}", issue_key)
             return
 
         # Only route public ("Reply to customer") comments
         is_public = comment.get("jsdPublic", False)
         if not is_public:
-            LOGGER.debug("Ignoring internal Jira comment on %s", issue_key)
+            LOGGER.debug("Ignoring internal Jira comment on {}", issue_key)
             return
 
         # Extract comment text from ADF before the DB lookup (cheap operation)
         comment_text = _adf_to_text(comment.get("body", {}))
         if not comment_text.strip():
-            LOGGER.debug("Jira comment on %s has no extractable text — skipping", issue_key)
+            LOGGER.debug("Jira comment on {} has no extractable text — skipping", issue_key)
             return
 
         issue_fields = payload.get("issue", {}).get("fields", {})
@@ -2535,7 +2535,7 @@ class EscalationService:
 
         # Post to escalation group
         LOGGER.info(
-            "Routing Jira comment on %s to escalation group (topic=%s)",
+            "Routing Jira comment on {} to escalation group (topic={})",
             issue_key,
             escalation_topic_id,
         )
@@ -2551,7 +2551,7 @@ class EscalationService:
         # Conditionally forward to customer
         if self._single_matching_org(jira_orgs, escalation_org_name):
             LOGGER.info(
-                "Forwarding Jira comment on %s to customer (single matching org)", issue_key
+                "Forwarding Jira comment on {} to customer (single matching org)", issue_key
             )
             await self.handle_support_reply(
                 reply_to_message_id=escalation_message_id,
@@ -2560,7 +2560,7 @@ class EscalationService:
             )
         else:
             LOGGER.info(
-                "Jira comment on %s not forwarded to customer: %d jira_orgs, escalation_org=%s",
+                "Jira comment on {} not forwarded to customer: {} jira_orgs, escalation_org={}",
                 issue_key,
                 len(jira_orgs),
                 ctx["escalation_org_id"],
@@ -2609,7 +2609,7 @@ class EscalationService:
         session_id = mapping.get("session_id")
         mapping_id = mapping.get("id")
         if not session_id:
-            LOGGER.warning("Cannot close escalation: no session_id in mapping %s", mapping_id)
+            LOGGER.warning("Cannot close escalation: no session_id in mapping {}", mapping_id)
             return
 
         # Atomically claim the close. If another handler already closed this mapping,
@@ -2629,12 +2629,12 @@ class EscalationService:
                 )
                 if not result.data:
                     LOGGER.info(
-                        "Mapping %s already closed by concurrent handler — skipping", mapping_id
+                        "Mapping {} already closed by concurrent handler — skipping", mapping_id
                     )
                     return
             except Exception as e:
                 LOGGER.warning(
-                    "Could not atomically close mapping %s: %s — proceeding", mapping_id, e
+                    "Could not atomically close mapping {}: {} — proceeding", mapping_id, e
                 )
 
         if notify_customer:
@@ -2891,7 +2891,7 @@ def _build_telegram_msg_link(
             return None
         return f"https://t.me/c/{group_id}/{message_id}"
     except Exception:
-        LOGGER.warning("Failed to build Telegram message link for chat_id=%s", escalation_chat_id)
+        LOGGER.warning("Failed to build Telegram message link for chat_id={}", escalation_chat_id)
         return None
 
 

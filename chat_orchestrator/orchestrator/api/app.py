@@ -161,7 +161,7 @@ if os.getenv("MINI_APP_FORMS_ENABLED", "false").lower() == "true":
         )
         logger.info("Mini App mounted at /mini-app/ (static) + /api/mini-app/ (API)")
     else:
-        logger.warning("Mini App dist not found at %s — static files not served", mini_app_dist)
+        logger.warning("Mini App dist not found at {} — static files not served", mini_app_dist)
 
 
 async def _handle_sigterm() -> None:
@@ -486,7 +486,7 @@ async def startup_event():
             try:
                 summary = await _escalation_svc.run_escalation_jira_sweep()
                 logger.info(
-                    "Escalation sweep complete in %.1fs: %s",
+                    "Escalation sweep complete in %.1fs: {}",
                     time.monotonic() - start,
                     summary,
                 )
@@ -590,7 +590,7 @@ async def _handle_jira_webhook(payload: dict) -> None:
         # Filtering by issue_event_type_name prevents double-processing.
         await svc.handle_jira_issue_updated(payload)
     else:
-        logger.debug("Ignoring Jira webhook event=%s issue_event=%s", event, issue_event)
+        logger.debug("Ignoring Jira webhook event={} issue_event={}", event, issue_event)
 
 
 @app.post("/webhook/jira")
@@ -625,7 +625,7 @@ async def jira_webhook(request: Request, background_tasks: BackgroundTasks) -> J
 
         payload = json.loads(body_bytes)
     except Exception as e:
-        logger.error("Failed to parse Jira webhook body: %s", e)
+        logger.error("Failed to parse Jira webhook body: {}", e)
         return JSONResponse(status_code=400, content={"ok": False, "error": "Invalid JSON"})
 
     background_tasks.add_task(_handle_jira_webhook, payload)
@@ -934,7 +934,7 @@ async def _log_notification_to_chat_db(
         if ticket_ref and saved:
             await client.tag_message_as_ticket_comment(saved[0].id, ticket_ref)
     except Exception as e:
-        logger.warning("Notify: chat-db logging failed (non-fatal): %s", e)
+        logger.warning("Notify: chat-db logging failed (non-fatal): {}", e)
 
 
 async def _deliver_notification(
@@ -965,7 +965,7 @@ async def _deliver_notification(
 
     if delivery is not None and delivery.suppress:
         logger.info(
-            "Notify: delivery suppressed source=%s grid=%s ticket_ref=%s",
+            "Notify: delivery suppressed source={} grid={} ticket_ref={}",
             body.source,
             target.grid_name,
             ticket_ref,
@@ -1065,7 +1065,7 @@ async def _deliver_notification(
     )
     if message_id is None:
         logger.warning(
-            "Notify: delivery failed source=%s grid=%s chat=%s",
+            "Notify: delivery failed source={} grid={} chat={}",
             body.source,
             target.grid_name,
             target.chat_id,
@@ -1073,7 +1073,7 @@ async def _deliver_notification(
         return
 
     logger.info(
-        "Notify: forwarded source=%s grid=%s (fuzzy=%s) chat=%s message_id=%s",
+        "Notify: forwarded source={} grid={} (fuzzy={}) chat={} message_id={}",
         body.source,
         target.grid_name,
         target.was_fuzzy,
@@ -1108,7 +1108,7 @@ async def _deliver_notification(
             await store.record_message_id(delivery.record_message_id_for_ticket_ref, message_id)
         except Exception:
             logger.warning(
-                "Notify: failed to record telegram_message_id for %r",
+                "Notify: failed to record telegram_message_id for {!r}",
                 delivery.record_message_id_for_ticket_ref,
                 exc_info=True,
             )
@@ -1288,7 +1288,7 @@ async def _record_new_correlation(
         )
     except Exception:
         logger.warning(
-            "Notify: failed to seed correlation row for %r", result.ref, exc_info=True
+            "Notify: failed to seed correlation row for {!r}", result.ref, exc_info=True
         )
 
 
@@ -1492,7 +1492,7 @@ async def _ticket_summary(ticket_service: Any, ticket_ref: str) -> str:
         status = await ticket_service.get_status(ticket_ref)
         return status.summary if status is not None else ""
     except Exception:
-        logger.warning("Notify: failed to read current ticket summary for %r", ticket_ref, exc_info=True)
+        logger.warning("Notify: failed to read current ticket summary for {!r}", ticket_ref, exc_info=True)
         return ""
 
 
@@ -1844,7 +1844,7 @@ async def _resolve_notify_ticket_auto(
     async with _acquire_grid_correlation_lock(target.grid_name, timeout_seconds) as acquired:
         if not acquired:
             logger.warning(
-                "Notify: grid-correlation lock timeout for %r -- attempting lock-free "
+                "Notify: grid-correlation lock timeout for {!r} -- attempting lock-free "
                 "deterministic correlation before filing a plain ticket",
                 target.grid_name,
             )
@@ -1871,7 +1871,7 @@ async def _resolve_notify_ticket_auto(
             )
         except Exception:
             logger.exception(
-                "Notify: correlator.decide() raised for grid %r -- filing plain ticket",
+                "Notify: correlator.decide() raised for grid {!r} -- filing plain ticket",
                 target.grid_name,
             )
             decision = None
@@ -1890,7 +1890,7 @@ async def _resolve_notify_ticket_auto(
                     # the ticket, and already posted. Re-running the amend
                     # would double the comment and the Telegram message.
                     logger.info(
-                        "Notify: replayed dedup_key for %r -- suppressing duplicate delivery",
+                        "Notify: replayed dedup_key for {!r} -- suppressing duplicate delivery",
                         decision.ticket_ref,
                     )
                     return (
@@ -2013,7 +2013,7 @@ async def _resolve_notify_ticket_auto(
             )
         except Exception:
             logger.exception(
-                "Notify: correlation execution raised for grid %r -- filing plain ticket",
+                "Notify: correlation execution raised for grid {!r} -- filing plain ticket",
                 target.grid_name,
             )
             return await _file_uncorrelated_ticket(
@@ -2079,7 +2079,7 @@ async def _resolve_notify_ticket_full(
     try:
         status = await ticket_service.get_status(ticket_ref)
     except Exception as exc:
-        logger.exception("Notify: ticket lookup failed for %r", ticket_ref)
+        logger.exception("Notify: ticket lookup failed for {!r}", ticket_ref)
         return (
             None,
             None,
@@ -2087,7 +2087,7 @@ async def _resolve_notify_ticket_full(
             _ticket_failure_delivery(alert_context),
         )
     if status is None:
-        logger.warning("Notify: unresolvable ticket_id=%r (source=%s)", ticket_ref, body.source)
+        logger.warning("Notify: unresolvable ticket_id={!r} (source={})", ticket_ref, body.source)
         return None, JSONResponse(
             status_code=404,
             content={"ok": False, "error": f"Unknown or unresolvable ticket_id: {ticket_ref!r}"},
@@ -2096,12 +2096,12 @@ async def _resolve_notify_ticket_full(
     try:
         commented = await ticket_service.add_comment(ticket_ref, body.text, public=False)
     except Exception as exc:
-        logger.exception("Notify: ticket comment failed for %r", ticket_ref)
+        logger.exception("Notify: ticket comment failed for {!r}", ticket_ref)
         commented = False
         ticket_error = f"Ticket update failed: {exc}"
     if not commented:
         logger.warning(
-            "Notify: add_comment reported failure for ticket_ref=%r (source=%s)",
+            "Notify: add_comment reported failure for ticket_ref={!r} (source={})",
             ticket_ref,
             body.source,
         )
@@ -2109,7 +2109,7 @@ async def _resolve_notify_ticket_full(
         try:
             await ticket_service.transition_to_done(ticket_ref)
         except Exception as exc:
-            logger.exception("Notify: ticket close failed for %r", ticket_ref)
+            logger.exception("Notify: ticket close failed for {!r}", ticket_ref)
             ticket_error = ticket_error or f"Ticket close failed: {exc}"
     ticket = NotificationTicket(
         ref=ticket_ref,
@@ -2166,7 +2166,7 @@ async def handle_notify(
 
     provided = request.headers.get("X-Notify-Secret", "")
     if not hmac.compare_digest(provided, secret):
-        logger.warning("Notify: secret mismatch from source=%s", body.source)
+        logger.warning("Notify: secret mismatch from source={}", body.source)
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     if os.getenv("NOTIFY_ENDPOINT_ENABLED", "false").lower() not in ("true", "1", "yes"):
@@ -2181,14 +2181,14 @@ async def handle_notify(
         target = await get_auth_service().resolve_grid_notification_target(body.grid_name)
     except Exception:
         logger.exception(
-            "Notify: grid resolution failed for %r (source=%s)", body.grid_name, body.source
+            "Notify: grid resolution failed for {!r} (source={})", body.grid_name, body.source
         )
         return JSONResponse(
             status_code=503,
             content={"ok": False, "error": "Grid resolution temporarily unavailable"},
         )
     if target is None:
-        logger.warning("Notify: unresolvable grid_name=%r (source=%s)", body.grid_name, body.source)
+        logger.warning("Notify: unresolvable grid_name={!r} (source={})", body.grid_name, body.source)
         return JSONResponse(
             status_code=404,
             content={
