@@ -27,7 +27,12 @@ from .backend import (
     TicketStatus,
     TicketSummary,
 )
-from .jira_issue_payload import JiraCreateContext, build_issue_payload, compatible_issue_types
+from .jira_issue_payload import (
+    JiraCreateContext,
+    build_issue_payload,
+    compatible_issue_types,
+    incompatible_issue_type_reason,
+)
 from .jira_issue_types import IssueTypeSelection, JiraIssueType, JiraIssueTypeSelector
 
 LOGGER = get_logger(__name__)
@@ -207,7 +212,14 @@ class JiraTicketBackend:
         return ok
 
     async def _probe_myself(self) -> bool:
-        """Cheap GET /rest/api/3/myself probe used by is_available()."""
+        """Cheap GET /rest/api/3/myself probe used by is_available().
+
+        Both failure paths are logged at WARNING (not DEBUG): this probe's
+        cached result silently steers ``auto`` mode away from Jira with no
+        other signal, so a non-200 (e.g. an expired API token) or a transport
+        failure must be visible at the deployment's normal log level, not
+        require enabling DEBUG after the fact.
+        """
         try:
             session = _get_jira_session()
             async with session.get(
@@ -215,9 +227,11 @@ class JiraTicketBackend:
                 headers=self._jira_auth_headers(),
                 timeout=aiohttp.ClientTimeout(total=5),
             ) as resp:
+                if resp.status != 200:
+                    LOGGER.warning("Jira health probe returned HTTP {}", resp.status)
                 return resp.status == 200
         except Exception as e:
-            LOGGER.debug("Jira health probe failed: {}", e)
+            LOGGER.warning("Jira health probe failed: {}", e)
             return False
 
     async def create_ticket(self, req: TicketCreateRequest) -> TicketResult:
@@ -261,11 +275,42 @@ class JiraTicketBackend:
         compatible = compatible_issue_types(context, available_types)
         selection = await self._choose_issue_type(req, compatible)
         if selection is None:
-            raise TicketBackendError("Jira cannot supply a compatible issue type")
+            raise TicketBackendError(
+                self._describe_no_compatible_type(context, available_types)
+            )
         payload = build_issue_payload(context, selection.issue_type)
         if payload is None:
-            raise TicketBackendError("Jira selected an incompatible issue type")
+            reason = incompatible_issue_type_reason(context, selection.issue_type)
+            detail = f": missing required field {reason!r}" if reason else ""
+            raise TicketBackendError(
+                f"Jira selected an incompatible issue type {selection.issue_type.name!r}{detail}"
+            )
         return await self._post_issue_payload(payload, selection)
+
+    def _describe_no_compatible_type(
+        self, context: JiraCreateContext, available_types: Sequence[JiraIssueType]
+    ) -> str:
+        """Diagnostic detail for "Jira cannot supply a compatible issue type".
+
+        Distinguishes "Jira returned no issue types for this project" (a
+        metadata-fetch problem, already warned about separately) from "every
+        returned type is missing a required field this integration can't
+        populate" -- and for the latter, names the blocking field per type so
+        the fix is a Jira project-config change, not a log-archaeology
+        session.
+        """
+        if not available_types:
+            return (
+                "Jira cannot supply a compatible issue type: no issue types available "
+                f"from Jira (project {self._jira_project_key!r})"
+            )
+        reasons = [
+            f"{issue_type.name!r} missing required field {reason!r}"
+            for issue_type in available_types
+            if (reason := incompatible_issue_type_reason(context, issue_type)) is not None
+        ]
+        detail = "; ".join(reasons) if reasons else "no issue types returned usable field metadata"
+        return f"Jira cannot supply a compatible issue type ({detail})"
 
     def _type_selector(self) -> JiraIssueTypeSelector:
         if self._issue_type_selector is None:
