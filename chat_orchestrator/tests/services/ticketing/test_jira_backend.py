@@ -14,6 +14,7 @@ import json as json_module
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import aiohttp
 import pytest
 from loguru import logger
 
@@ -352,6 +353,40 @@ class TestIsAvailable:
         assert await backend.is_available() is False
 
     @pytest.mark.asyncio
+    async def test_probe_failure_status_is_logged(self, fake_session, monkeypatch):
+        monkeypatch.setenv("JIRA_HEALTHCHECK_TTL_SECONDS", "60")
+        fake_session.queue("GET", "/rest/api/3/myself", _FakeResponse(401, text_data="unauthorized"))
+        backend = _make_backend()
+        records: List[str] = []
+        handler_id = logger.add(records.append, format="{message}", level="WARNING")
+
+        try:
+            assert await backend.is_available() is False
+        finally:
+            logger.remove(handler_id)
+
+        assert any("401" in record for record in records)
+
+    @pytest.mark.asyncio
+    async def test_probe_exception_is_logged_as_a_warning(self, fake_session, monkeypatch):
+        monkeypatch.setenv("JIRA_HEALTHCHECK_TTL_SECONDS", "60")
+
+        def raise_connection_error(*_args: Any, **_kwargs: Any) -> Any:
+            raise aiohttp.ClientConnectionError("connection refused")
+
+        monkeypatch.setattr(fake_session, "get", raise_connection_error)
+        backend = _make_backend()
+        records: List[str] = []
+        handler_id = logger.add(records.append, format="{message}", level="WARNING")
+
+        try:
+            assert await backend.is_available() is False
+        finally:
+            logger.remove(handler_id)
+
+        assert any("connection refused" in record for record in records)
+
+    @pytest.mark.asyncio
     async def test_probe_result_is_cached_within_ttl(self, fake_session, monkeypatch):
         monkeypatch.setenv("JIRA_HEALTHCHECK_TTL_SECONDS", "60")
         fake_session.queue("GET", "/rest/api/3/myself", _FakeResponse(200, {"accountId": "me"}))
@@ -594,6 +629,28 @@ class TestCreateTicket:
             await _make_backend().create_ticket(TicketCreateRequest(summary="Help"))
 
         assert not any(method == "POST" for method, _url, _kwargs in fake_session.calls)
+
+    async def test_no_compatible_type_error_names_the_blocking_type_and_field(self, fake_session):
+        _queue_createmeta(
+            fake_session,
+            "OPS",
+            [
+                {
+                    "id": "unsupported-type",
+                    "name": "Unsupported",
+                    "fields": {"customfield_unknown": {"required": True}},
+                }
+            ],
+        )
+
+        with pytest.raises(TicketBackendError, match="Unsupported.*customfield_unknown"):
+            await _make_backend().create_ticket(TicketCreateRequest(summary="Help"))
+
+    async def test_no_compatible_type_error_distinguishes_no_types_at_all(self, fake_session):
+        _queue_createmeta(fake_session, "OPS", [])
+
+        with pytest.raises(TicketBackendError, match="no issue types"):
+            await _make_backend().create_ticket(TicketCreateRequest(summary="Help"))
 
 
 class TestAddComment:
