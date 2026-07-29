@@ -1035,6 +1035,16 @@ async def _deliver_notification(
             # The ticket's telegram_message_id is unchanged (still the
             # message we just edited), so there's no new message_id to
             # record -- skip straight past the send/record-receipt paths.
+            #
+            # Note: this delivery runs as an independent background task per
+            # request. Two amendments to the same ticket in quick succession
+            # are serialized during the *decision* phase (same grid lock),
+            # but their edits here are not -- if the later request's HTTP
+            # call happens to land first, an older edit can overwrite a
+            # newer one on Telegram (message text only; the ticket backend's
+            # state is unaffected). Self-healing: the next amendment's edit
+            # corrects it. Same best-effort, single-process posture already
+            # accepted elsewhere in this module.
             return
         logger.warning(
             "Notify: edit of message_id={} failed, falling back to a new send "
