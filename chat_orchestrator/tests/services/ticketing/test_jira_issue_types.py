@@ -171,6 +171,32 @@ def test_incompatible_type_with_an_unknown_required_field_is_excluded():
     assert compatible_issue_types(_context(), [_type_with_required_category()]) == []
 
 
+def test_incompatible_issue_type_reason_names_the_missing_required_field():
+    from orchestrator.services.ticketing.jira_issue_payload import incompatible_issue_type_reason
+
+    reason = incompatible_issue_type_reason(_context(), _type_with_required_category())
+
+    assert reason == "Category"
+
+
+def test_incompatible_issue_type_reason_names_an_unmatched_required_grid_field():
+    from orchestrator.services.ticketing.jira_issue_payload import incompatible_issue_type_reason
+
+    reason = incompatible_issue_type_reason(
+        _context(grid_name="Unknown grid"), _type_with_required_grid_option()
+    )
+
+    assert reason == "Grid"
+
+
+def test_incompatible_issue_type_reason_is_none_for_a_compatible_type():
+    from orchestrator.services.ticketing.jira_issue_payload import incompatible_issue_type_reason
+
+    reason = incompatible_issue_type_reason(_context(), _type_with_required_grid_option())
+
+    assert reason is None
+
+
 @pytest.mark.asyncio
 async def test_available_types_merges_paged_jira_field_metadata_into_the_known_type():
     base_url = "https://example.atlassian.net/rest/api/3/issue/createmeta/OPS/issuetypes"

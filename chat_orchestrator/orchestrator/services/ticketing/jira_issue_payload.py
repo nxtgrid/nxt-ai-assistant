@@ -52,6 +52,21 @@ def _grid_option(field: JiraFieldDefinition, grid_name: str | None) -> dict[str,
     return {"id": option.id} if option is not None else None
 
 
+def _resolve_field_value(field: JiraFieldDefinition, context: JiraCreateContext) -> Any:
+    """Value ``build_issue_payload`` would set for a non-standard field, or ``None``
+    when this context has nothing to offer it. Shared with
+    ``incompatible_issue_type_reason`` so the two never drift out of sync."""
+    if field.id == "assignee" and context.assignee_account_id:
+        return {"accountId": context.assignee_account_id}
+    if field.id == "priority" and context.priority_id:
+        return {"id": context.priority_id}
+    if _field_name(field) in _ORGANIZATION_FIELD_NAMES and context.organization_id:
+        return {"id": context.organization_id}
+    if _field_name(field) == "grid":
+        return _grid_option(field, context.grid_name)
+    return None
+
+
 def build_issue_payload(
     context: JiraCreateContext, issue_type: JiraIssueType
 ) -> dict[str, Any] | None:
@@ -69,24 +84,14 @@ def build_issue_payload(
         "labels": list(context.labels),
     }
     for field in issue_type.fields:
-        value: Any = None
         if field.id in _STANDARD_FIELDS:
-            value = fields[field.id]
-        elif field.id == "assignee" and context.assignee_account_id:
-            value = {"accountId": context.assignee_account_id}
-        elif field.id == "priority" and context.priority_id:
-            value = {"id": context.priority_id}
-        elif _field_name(field) in _ORGANIZATION_FIELD_NAMES and context.organization_id:
-            value = {"id": context.organization_id}
-        elif _field_name(field) == "grid":
-            value = _grid_option(field, context.grid_name)
-
+            continue
+        value = _resolve_field_value(field, context)
         if value is None:
             if field.required:
                 return None
             continue
-        if field.id not in _STANDARD_FIELDS:
-            fields[field.id] = value
+        fields[field.id] = value
     return {"fields": fields}
 
 
@@ -95,3 +100,21 @@ def compatible_issue_types(
 ) -> list[JiraIssueType]:
     """Return just the types whose required metadata fields are satisfiable."""
     return [issue_type for issue_type in issue_types if build_issue_payload(context, issue_type)]
+
+
+def incompatible_issue_type_reason(
+    context: JiraCreateContext, issue_type: JiraIssueType
+) -> str | None:
+    """Name of the first required field this context can't satisfy for
+    ``issue_type``, or ``None`` when the type is compatible.
+
+    For diagnostics only -- mirrors ``build_issue_payload``'s field-resolution
+    logic via the shared ``_resolve_field_value`` helper rather than
+    re-deriving it, so the two can't silently disagree on what's compatible.
+    """
+    for field in issue_type.fields:
+        if field.id in _STANDARD_FIELDS or not field.required:
+            continue
+        if _resolve_field_value(field, context) is None:
+            return field.name
+    return None
