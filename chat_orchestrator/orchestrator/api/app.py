@@ -14,7 +14,7 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from urllib.parse import quote
@@ -958,7 +958,10 @@ async def _deliver_notification(
     exactly today's behavior: the full alert text, unthreaded.
     """
     from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
-    from shared.utils.telegram_send import send_telegram_message_with_fallback
+    from shared.utils.telegram_send import (
+        edit_telegram_message,
+        send_telegram_message_with_fallback,
+    )
 
     if delivery is not None and delivery.suppress:
         logger.info(
@@ -1012,6 +1015,45 @@ async def _deliver_notification(
     reply_to_message_id = (
         delivery.reply_to_message_id if delivery is not None and not delivery.top_level else None
     )
+
+    if delivery is not None and delivery.edit_message_id:
+        edited = await edit_telegram_message(
+            bot_token,
+            target.chat_id,
+            delivery.edit_message_id,
+            text,
+            parse_mode=parse_mode,
+        )
+        if edited:
+            logger.info(
+                "Notify: edited existing message_id={} source={} grid={} chat={}",
+                delivery.edit_message_id,
+                body.source,
+                target.grid_name,
+                target.chat_id,
+            )
+            # The ticket's telegram_message_id is unchanged (still the
+            # message we just edited), so there's no new message_id to
+            # record -- skip straight past the send/record-receipt paths.
+            #
+            # Note: this delivery runs as an independent background task per
+            # request. Two amendments to the same ticket in quick succession
+            # are serialized during the *decision* phase (same grid lock),
+            # but their edits here are not -- if the later request's HTTP
+            # call happens to land first, an older edit can overwrite a
+            # newer one on Telegram (message text only; the ticket backend's
+            # state is unaffected). Self-healing: the next amendment's edit
+            # corrects it. Same best-effort, single-process posture already
+            # accepted elsewhere in this module.
+            return
+        logger.warning(
+            "Notify: edit of message_id={} failed, falling back to a new send "
+            "source={} grid={} chat={}",
+            delivery.edit_message_id,
+            body.source,
+            target.grid_name,
+            target.chat_id,
+        )
 
     message_id = await send_telegram_message_with_fallback(
         bot_token,
@@ -1187,7 +1229,9 @@ async def _create_notify_ticket(
         return None, f"Ticket creation failed: {error}"
     if outcome.fallback_used:
         logger.warning(
-            "Notify: Jira ticket creation failed; created internal fallback {}", outcome.result.ref
+            "Notify: Jira ticket creation failed; created internal fallback {} ({})",
+            outcome.result.ref,
+            outcome.error,
         )
     return outcome.result, None
 
@@ -1390,6 +1434,7 @@ class NotificationDelivery:
     suppress: bool = False
     text_override: Optional[str] = None
     reply_to_message_id: Optional[int] = None
+    edit_message_id: Optional[int] = None  # amend: edit this message instead of replying
     top_level: bool = False  # escalation: force a fresh (non-reply) post
     record_message_id_for_ticket_ref: Optional[str] = None
     ticket: Optional[NotificationTicket] = None
@@ -1468,21 +1513,287 @@ def _amend_delivery(
         return NotificationDelivery(suppress=True)
 
     if component_added:
-        label = (decision.affected_key or {}).get("label") or "a new component"
-        count = amendment.affected_keys_count if amendment is not None else 1
-        message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
+        rendered_summary = (amendment.rendered_summary or "").strip() if amendment is not None else ""
+        if rendered_summary:
+            message = rendered_summary
+        else:
+            # Rendered summary is blank on paths that never compute a full
+            # ticket summary (e.g. the Jira-only-seed path) -- fall back to
+            # the older short phrasing rather than posting/editing to blank.
+            label = (decision.affected_key or {}).get("label") or "a new component"
+            count = amendment.affected_keys_count if amendment is not None else 1
+            message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
     else:
         message = "Escalated to urgent"
 
     if escalated:
-        return NotificationDelivery(text_override=message, top_level=True, ticket=ticket)
+        # A fresh top-level post, not an edit -- and it becomes the new edit
+        # target for any subsequent amend, so the edit target moves off the
+        # stale original message instead of staying pinned to it forever.
+        return NotificationDelivery(
+            text_override=message,
+            top_level=True,
+            record_message_id_for_ticket_ref=ticket.ref,
+            ticket=ticket,
+        )
     reply_to = amendment.telegram_message_id if amendment is not None else None
-    return NotificationDelivery(text_override=message, reply_to_message_id=reply_to, ticket=ticket)
+    return NotificationDelivery(
+        text_override=message,
+        reply_to_message_id=reply_to,
+        edit_message_id=reply_to,
+        ticket=ticket,
+    )
 
 
 def _duplicate_delivery(amendment: Any, ticket: NotificationTicket) -> NotificationDelivery:
     """Duplicates amend ticket history but never create Telegram noise."""
     return NotificationDelivery(suppress=True)
+
+
+def _candidate_summaries_from_store_rows(rows: List[Dict[str, Any]]) -> List[Any]:
+    """Convert raw ``ticket_correlations`` rows into ``CandidateSummary``
+    instances, mirroring ``AlertCorrelator._assemble_candidates``'s store-row
+    conversion (correlator.py) -- minus the ``TicketService.find_open_by_grid``
+    merge and the live status-confirmation pass, both of which are exactly the
+    I/O this lock-free path exists to avoid. Trusts the correlation store's
+    own "open" bookkeeping instead of re-confirming against the ticket
+    backend, which is an acceptable approximation only for this narrow,
+    best-effort timeout fallback -- the lock-*held* path still does the full,
+    confirmed assembly."""
+    from orchestrator.services.ticketing.correlator import CandidateSummary, _age_hours
+
+    now = datetime.now(timezone.utc)
+    candidates: List[CandidateSummary] = []
+    for row in rows:
+        ref = row.get("ticket_ref")
+        if not ref:
+            continue
+        candidates.append(
+            CandidateSummary(
+                ref=ref,
+                backend=row.get("ticket_backend") or "",
+                summary=row.get("summary_current") or row.get("summary_base") or "",
+                age_hours=_age_hours(row.get("created_at"), now),
+                root_cause_kind=row.get("root_cause_kind"),
+                affected_keys=row.get("affected_keys") or [],
+                occurrence_count=row.get("occurrence_count") or 1,
+                status=row.get("status") or "",
+                signatures=row.get("signatures") or [],
+                severity=row.get("severity") or "",
+            )
+        )
+    candidates.sort(key=lambda c: c.age_hours if c.age_hours is not None else 0.0)
+    return candidates
+
+
+async def _finalize_correlation_decision(
+    body: "NotifyRequest",
+    target: "GridNotificationTarget",
+    alert: "AlertFacts",
+    alert_context: UrgentAlertContext,
+    store: Any,
+    ticket_service: Any,
+    decision: Any,
+) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
+    """Execute an "amend"/"duplicate" ``CorrelationDecision`` via
+    ``apply_amendment`` and turn the result into the ``(ref, response, extra,
+    delivery)`` 4-tuple ``_resolve_notify_ticket_auto`` returns.
+
+    Shared by ``_resolve_notify_ticket_auto``'s own lock-held amend/duplicate
+    branch and ``_attempt_lock_free_signature_correlation``'s lock-free
+    match -- both need identical post-decision plumbing once a
+    ``CorrelationDecision`` names an existing ``ticket_ref`` to amend/dup,
+    regardless of how that decision was reached (LLM+lock vs.
+    deterministic+lock-free).
+    """
+    from orchestrator.services.ticketing.correlation_render import apply_amendment
+
+    amendment = await apply_amendment(
+        store=store,
+        ticket_service=ticket_service,
+        ticket_ref=decision.ticket_ref,
+        alert=alert,
+        decision=decision,
+        raw_text=body.text,
+        grid_name=target.grid_name,
+        telegram_chat_id=target.chat_id,
+        telegram_topic_id=target.topic_id,
+    )
+    if amendment is None:
+        # Correlation row vanished between the decision and here (store
+        # outage) -- the target ticket still exists, so at minimum comment
+        # on it rather than silently dropping the alert. No reply-target
+        # context survives this, so deliver nothing rather than risk a
+        # misdirected/noisy post.
+        await ticket_service.add_comment(decision.ticket_ref, body.text, public=False)
+        ref = decision.ticket_ref
+        delivery = NotificationDelivery(
+            suppress=True,
+            alert_context=alert_context,
+            stored_ticket_severity=decision.ticket_severity,
+        )
+    else:
+        ref = amendment.ticket_ref
+        ticket = NotificationTicket(
+            ref=ref, backend=await ticket_service.get_backend_name(ref)
+        )
+        delivery = (
+            _amend_delivery(decision, amendment, ticket)
+            if amendment.decision == "amend"
+            else _duplicate_delivery(amendment, ticket)
+        )
+        delivery = dataclasses.replace(
+            delivery,
+            alert_context=alert_context,
+            ticket_summary=(
+                "" if delivery.suppress else await _ticket_summary(ticket_service, ref)
+            ),
+            stored_ticket_severity=decision.ticket_severity,
+        )
+    return (
+        ref,
+        None,
+        {
+            "decision": decision.decision,
+            "correlated_with": decision.ticket_ref,
+            "confidence": decision.confidence,
+            "decided_by": decision.decided_by,
+        },
+        delivery,
+    )
+
+
+async def _attempt_lock_free_signature_correlation(
+    body: "NotifyRequest",
+    target: "GridNotificationTarget",
+    alert: "AlertFacts",
+    alert_context: UrgentAlertContext,
+    store: Any,
+    ticket_service: Any,
+) -> "Optional[tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]]":
+    """Best-effort, lock-free dedup check for the grid-correlation-lock
+    timeout path only (see ``_resolve_notify_ticket_auto``).
+
+    A lock *timeout* used to skip correlation entirely and file a blind new
+    ticket -- on a busy grid, a burst of alerts queued behind the lock could
+    each exceed the wait budget and each duplicate a ticket a decide() call
+    earlier in the same burst had already correctly correlated. This runs
+    only the deterministic, LLM-free rungs (``_find_signature_duplicate`` /
+    ``_find_signature_only_duplicate``) against a fresh, unlocked read of
+    open candidates -- cheap enough to stay inline on the timeout path,
+    unlike the full lock-held ``AlertCorrelator.decide()`` (candidate
+    assembly + live status confirmation + LLM call).
+
+    Returns the resolved 4-tuple (mirroring ``_resolve_notify_ticket_auto``'s
+    own return shape) when a match is found -- routed through
+    ``apply_amendment`` exactly like the signature-rung match inside
+    ``AlertCorrelator.decide()`` does, and recorded via ``store.record_event``
+    the same (best-effort) way ``AlertCorrelator._finalize`` does. Returns
+    ``None`` when there's no match, or when anything here fails -- either
+    way the caller falls through to ``_file_uncorrelated_ticket`` exactly as
+    it did before this existed.
+    """
+    from orchestrator.services.ticketing.correlation_rules import DEFAULT_CORRELATION_POLICY
+    from orchestrator.services.ticketing.correlator import (
+        CorrelationDecision,
+        _find_signature_duplicate,
+        _find_signature_only_duplicate,
+        _is_urgent_severity_increase,
+    )
+
+    try:
+        since_iso = (
+            datetime.now(timezone.utc)
+            - timedelta(hours=DEFAULT_CORRELATION_POLICY.open_candidate_window_hours)
+        ).isoformat()
+        rows = await store.open_candidates_for_grid(
+            target.grid_name,
+            since_iso,
+            limit=DEFAULT_CORRELATION_POLICY.maximum_candidate_count,
+        )
+        candidates = _candidate_summaries_from_store_rows(rows)
+
+        duplicate = _find_signature_duplicate(candidates, alert) or _find_signature_only_duplicate(
+            candidates, alert
+        )
+        if duplicate is None:
+            return None
+
+        severity_increased = _is_urgent_severity_increase(alert.severity, duplicate.severity)
+        # Mirrors AlertCorrelator.decide()'s own signature-rung branch
+        # (correlator.py) -- see that function's comment for why
+        # alert.component_kind alone tells keyed apart from keyless matches.
+        keyed_match = bool(alert.component_kind)
+        if keyed_match:
+            reason = (
+                "urgent severity increase on an exact signature+component match "
+                "(grid-lock timed out; matched without the lock)"
+                if severity_increased
+                else "exact signature+component match against an open ticket "
+                "(grid-lock timed out; matched without the lock)"
+            )
+        else:
+            reason = (
+                "urgent severity increase on an exact signature match "
+                "(grid-level alert, no equipment key; grid-lock timed out; "
+                "matched without the lock)"
+                if severity_increased
+                else "exact signature match against an open ticket "
+                "(grid-level alert, no equipment key; grid-lock timed out; "
+                "matched without the lock)"
+            )
+        decision = CorrelationDecision(
+            decision="amend" if severity_increased else "duplicate",
+            ticket_ref=duplicate.ref,
+            confidence=1.0,
+            decided_by="fallback_signature",
+            reason=reason,
+            affected_key={
+                "kind": alert.component_kind,
+                "key": alert.component_key,
+                "label": alert.component_label,
+            },
+            root_cause_kind=duplicate.root_cause_kind,
+            update_message="",
+            amended_summary=alert.subject if severity_increased else "",
+            candidate_refs=[c.ref for c in candidates],
+            llm_raw=None,
+            needs_root_cause_ticket=False,
+            ticket_severity=duplicate.severity,
+        )
+
+        try:
+            await store.record_event(
+                ticket_ref=decision.ticket_ref,
+                grid_name=target.grid_name,
+                source=alert.rule_id or None,
+                signature=alert.signature or None,
+                dedup_key=body.dedup_key,
+                decision=decision.decision,
+                decided_by=decision.decided_by,
+                confidence=decision.confidence,
+                reason=decision.reason,
+                candidate_refs=decision.candidate_refs,
+                alert=alert.model_dump(),
+                llm_raw=decision.llm_raw,
+            )
+        except Exception:
+            logger.warning(
+                "Notify: failed to record lock-free correlation event for grid {}",
+                target.grid_name,
+                exc_info=True,
+            )
+
+        return await _finalize_correlation_decision(
+            body, target, alert, alert_context, store, ticket_service, decision
+        )
+    except Exception:
+        logger.warning(
+            "Notify: lock-free correlation attempt raised for grid {} -- filing plain ticket",
+            target.grid_name,
+            exc_info=True,
+        )
+        return None
 
 
 async def _resolve_notify_ticket_auto(
@@ -1533,9 +1844,16 @@ async def _resolve_notify_ticket_auto(
     async with _acquire_grid_correlation_lock(target.grid_name, timeout_seconds) as acquired:
         if not acquired:
             logger.warning(
-                "Notify: grid-correlation lock timeout for {!r} -- filing plain ticket",
+                "Notify: grid-correlation lock timeout for {!r} -- attempting lock-free "
+                "deterministic correlation before filing a plain ticket",
                 target.grid_name,
             )
+            ticket_service = TicketService(get_supabase_client=get_supabase_client)
+            lock_free_result = await _attempt_lock_free_signature_correlation(
+                body, target, alert, alert_context, store, ticket_service
+            )
+            if lock_free_result is not None:
+                return lock_free_result
             return await _file_uncorrelated_ticket(
                 body, target, backend_override, alert, alert_context, store, "fallback"
             )
@@ -1690,58 +2008,8 @@ async def _resolve_notify_ticket_auto(
                 )
 
             # amend (onto an existing ticket) or duplicate.
-            amendment = await apply_amendment(
-                store=store,
-                ticket_service=ticket_service,
-                ticket_ref=decision.ticket_ref,
-                alert=alert,
-                decision=decision,
-                raw_text=body.text,
-                grid_name=target.grid_name,
-                telegram_chat_id=target.chat_id,
-                telegram_topic_id=target.topic_id,
-            )
-            if amendment is None:
-                # Correlation row vanished between decide() and here (store
-                # outage) -- the target ticket still exists, so at minimum
-                # comment on it rather than silently dropping the alert.
-                # No reply-target context survives this, so deliver nothing
-                # rather than risk a misdirected/noisy post.
-                await ticket_service.add_comment(decision.ticket_ref, body.text, public=False)
-                ref = decision.ticket_ref
-                delivery = NotificationDelivery(
-                    suppress=True,
-                    alert_context=alert_context,
-                    stored_ticket_severity=decision.ticket_severity,
-                )
-            else:
-                ref = amendment.ticket_ref
-                ticket = NotificationTicket(
-                    ref=ref, backend=await ticket_service.get_backend_name(ref)
-                )
-                delivery = (
-                    _amend_delivery(decision, amendment, ticket)
-                    if amendment.decision == "amend"
-                    else _duplicate_delivery(amendment, ticket)
-                )
-                delivery = dataclasses.replace(
-                    delivery,
-                    alert_context=alert_context,
-                    ticket_summary=(
-                        "" if delivery.suppress else await _ticket_summary(ticket_service, ref)
-                    ),
-                    stored_ticket_severity=decision.ticket_severity,
-                )
-            return (
-                ref,
-                None,
-                {
-                    "decision": decision.decision,
-                    "correlated_with": decision.ticket_ref,
-                    "confidence": decision.confidence,
-                    "decided_by": decision.decided_by,
-                },
-                delivery,
+            return await _finalize_correlation_decision(
+                body, target, alert, alert_context, store, ticket_service, decision
             )
         except Exception:
             logger.exception(

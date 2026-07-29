@@ -86,6 +86,10 @@ class CorrelationDecision:
     ticket_ref: Optional[str]
     confidence: Optional[float]
     decided_by: str  # "replay"|"flag_off"|"no_candidates"|"signature"|"llm"|"fallback"
+    # "fallback_signature" is also produced -- outside this module, by
+    # app.py's lock-free grid-lock-timeout fallback, which mirrors this
+    # class's "signature" rung without holding the per-grid lock. See
+    # ``_attempt_lock_free_signature_correlation`` in app.py.
     reason: str
     affected_key: Optional[Dict[str, str]]
     root_cause_kind: Optional[str]

@@ -236,6 +236,91 @@ async def send_telegram_message_with_fallback(
     return message_id
 
 
+def _is_message_not_modified_error(result: Dict[str, Any]) -> bool:
+    """True if an editMessageText 400 failed only because the text is unchanged.
+
+    Telegram returns HTTP 400 with a "message is not modified" description when
+    the new text is byte-identical to what's already posted. That's a legitimate
+    no-op (the amendment we tried to render happened to match what's already on
+    screen), not a delivery failure -- callers should treat it as success.
+    """
+    if not result or result.get("ok"):
+        return False
+    description = str(result.get("description", "")).lower()
+    return result.get("error_code") == 400 and "message is not modified" in description
+
+
+async def edit_telegram_message(
+    bot_token: str,
+    chat_id: str,
+    message_id: int,
+    text: str,
+    *,
+    parse_mode: Optional[str] = None,
+) -> bool:
+    """Edit an existing Telegram message in place.
+
+    Used by alert-correlation amendments so joining a ticket updates the
+    original Telegram post instead of spamming a new reply for every
+    component that lands (see docs/superpowers/plans/
+    2026-07-29-notify-correlation-followup-fixes.md).
+
+    Args:
+        bot_token: Telegram bot token
+        chat_id: Telegram chat ID
+        message_id: The id of the message to edit
+        text: New message text
+        parse_mode: Optional parse mode (e.g., "Markdown", "HTML")
+
+    Returns:
+        True if the edit succeeded, or if Telegram rejected it only because
+        the text was already identical (a no-op, not a failure). False on
+        any other error -- never raises, so callers can safely fall back to
+        sending a new message instead.
+    """
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+        payload: Dict[str, Any] = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": text,
+        }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+
+        session = _get_session()
+        async with session.post(
+            url,
+            json=payload,
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as response:
+            try:
+                result = cast(Dict[str, Any], await response.json())
+            except Exception:
+                result = {
+                    "ok": False,
+                    "error_code": response.status,
+                    "description": await response.text(),
+                }
+
+        if result.get("ok"):
+            return True
+        if _is_message_not_modified_error(result):
+            logger.info(
+                f"Telegram edit for message {message_id} in chat {chat_id} "
+                "was a no-op (text unchanged)"
+            )
+            return True
+        logger.warning(
+            f"Failed to edit Telegram message {message_id} in chat {chat_id}: "
+            f"{result.get('description')}"
+        )
+        return False
+    except Exception as e:
+        logger.warning(f"Error editing Telegram message {message_id} in chat {chat_id}: {e}")
+        return False
+
+
 async def create_forum_topic(
     bot_token: str,
     chat_id: str,

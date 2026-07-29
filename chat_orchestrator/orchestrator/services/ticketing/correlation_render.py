@@ -166,6 +166,7 @@ class AmendmentResult:
     telegram_topic_id: Optional[str]
     telegram_message_id: Optional[int]
     component_added: bool = False
+    rendered_summary: str = ""
 
 
 async def apply_amendment(
@@ -318,6 +319,7 @@ async def apply_amendment(
                 telegram_topic_id=telegram_topic_id,
                 telegram_message_id=None,
                 component_added=bool(seeded_affected_count),
+                rendered_summary=final_summary,
             )
         LOGGER.warning(
             "apply_amendment: correlation row for {!r} not found after merge -- "
@@ -390,4 +392,5 @@ async def apply_amendment(
         telegram_topic_id=correlation.get("telegram_topic_id"),
         telegram_message_id=correlation.get("telegram_message_id"),
         component_added=component_added,
+        rendered_summary=final_summary,
     )

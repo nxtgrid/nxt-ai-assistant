@@ -34,8 +34,17 @@ class CorrelationPolicy:
     # The lock is held across candidate assembly (Jira search + status
     # confirmation) *and* the LLM call, so it must outlast the LLM budget --
     # sharing it made every concurrent alert on a busy grid file its own
-    # ticket.
-    grid_lock_timeout_seconds: float = 45
+    # ticket. A single holder's own worst case (LLM 12s + bounded
+    # ticket-backend HTTP calls) can already approach the old 45s bound, and
+    # /chat/notify's ticket-resolution step is synchronous in the caller's
+    # request cycle (see the comment at app.py's handle_notify -- "Ticket
+    # resolution (if requested) is synchronous..."), so a multi-alert burst
+    # queued behind one grid's lock could exceed 45s well before the burst
+    # itself was unreasonable. 120s keeps that burst queued and correlated
+    # rather than bailing out to the (now lock-free, deterministic-only)
+    # timeout fallback, while still bounding the caller's worst-case wait to
+    # a fixed, documented ceiling.
+    grid_lock_timeout_seconds: float = 120
     open_candidate_window_hours: int = 168
     maximum_candidate_count: int = 15
     candidate_status_concurrency: int = 5

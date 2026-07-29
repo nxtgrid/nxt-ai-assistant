@@ -627,13 +627,24 @@ class _RecordingCorrelationStore:
     ``test_new_ticket_backfills_ticket_ref_onto_its_event_row`` above -- that
     one isn't reusable outside its own test function, so this is a separate,
     shared fixture rather than a duplicate of it).
+
+    ``open_candidates_for_grid`` and ``record_event`` back the lock-free
+    deterministic-only correlation attempt on the grid-lock-timeout path:
+    ``open_candidates_to_return`` is a class attribute (following the same
+    pattern as ``_FakeCorrelator.decision_to_return``) so a test can seed it
+    before the store gets constructed fresh inside ``_resolve_notify_ticket_auto``.
+    It defaults to ``[]`` so every existing caller that never seeds it keeps
+    seeing "no open candidates", unchanged.
     """
 
     instances: List["_RecordingCorrelationStore"] = []
+    open_candidates_to_return: List[Dict[str, Any]] = []
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         self.upsert_calls: List[Dict[str, Any]] = []
         self.backfill_calls: List[tuple] = []
+        self.open_candidates_for_grid_calls: List[tuple] = []
+        self.record_event_calls: List[Dict[str, Any]] = []
         _RecordingCorrelationStore.instances.append(self)
 
     async def upsert_correlation(self, **kwargs: Any) -> bool:
@@ -644,12 +655,29 @@ class _RecordingCorrelationStore:
         self.backfill_calls.append((dedup_key, ticket_ref))
         return True
 
+    async def open_candidates_for_grid(
+        self, grid_name: str, since_iso: str, limit: int = 15
+    ) -> List[Dict[str, Any]]:
+        self.open_candidates_for_grid_calls.append((grid_name, since_iso, limit))
+        return _RecordingCorrelationStore.open_candidates_to_return
+
+    async def record_event(self, **kwargs: Any) -> bool:
+        self.record_event_calls.append(kwargs)
+        return True
+
 
 def _patch_recording_store(monkeypatch) -> None:
     monkeypatch.setattr(
         "orchestrator.services.ticketing.correlation_store.CorrelationStore",
         _RecordingCorrelationStore,
     )
+
+
+@pytest.fixture(autouse=True)
+def _reset_recording_correlation_store_seed():
+    _RecordingCorrelationStore.open_candidates_to_return = []
+    yield
+    _RecordingCorrelationStore.open_candidates_to_return = []
 
 
 class TestResolveNotifyTicketAutoFlagOff:
@@ -1315,6 +1343,155 @@ class TestResolveNotifyTicketAutoFailureModes:
         ]
         assert backfills == [("alert-lock-timeout-1", ref)]
 
+    async def test_lock_timeout_with_matching_candidate_amends_instead_of_filing_new(
+        self, monkeypatch, fake_apply_amendment
+    ):
+        """Regression test for the grid-lock-timeout fallback duplicating
+        tickets under a burst: today, timing out on the lock skips
+        correlation entirely and blindly files a new ticket even when an
+        open candidate is an exact (signature, component_key) match. The
+        lock-free deterministic-only correlation attempt must catch this
+        case -- amend/dup the existing candidate, not mint a fresh
+        TKT-000001 -- without ever touching the LLM (that's the whole point
+        of staying lock-free)."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+
+        from contextlib import asynccontextmanager
+
+        import orchestrator.api.app as app_module
+        from orchestrator.services.ticketing.alert_facts import AlertFacts, enrich_alert_facts
+
+        @asynccontextmanager
+        async def _never_available(grid_name, timeout_seconds):
+            yield False
+
+        monkeypatch.setattr(app_module, "_acquire_grid_correlation_lock", _never_available)
+
+        subject = "! Warning: MPPT A3 in Acme Grid seems to perform lower !"
+        base_alert = AlertFacts(subject=subject, details="mppt A3 [Acme Grid]")
+        computed_alert = enrich_alert_facts(base_alert, grid_name="Acme Grid")
+        assert computed_alert.component_kind == "mppt"
+        assert computed_alert.component_key == "A3"
+
+        _RecordingCorrelationStore.open_candidates_to_return = [
+            {
+                "ticket_ref": "TKT-EXISTING-1",
+                "grid_name": "Acme Grid",
+                "status": "open",
+                "severity": "warning",
+                "signatures": [computed_alert.signature],
+                "affected_keys": [
+                    {
+                        "kind": computed_alert.component_kind,
+                        "key": computed_alert.component_key,
+                        "label": computed_alert.component_label,
+                    }
+                ],
+                "created_at": "2026-07-20T00:00:00+00:00",
+            }
+        ]
+
+        calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="TKT-EXISTING-1",
+            decision="duplicate",
+            escalated=False,
+            affected_keys_count=1,
+            occurrence_count=2,
+            telegram_chat_id=None,
+            telegram_topic_id=None,
+            telegram_message_id=None,
+        )
+
+        body = _notify_body(ticket_id="auto", text=subject, alert=base_alert.model_dump())
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        # The existing candidate's ref -- not a freshly minted TKT-000001.
+        assert ref == "TKT-EXISTING-1"
+        assert extra["decided_by"] == "fallback_signature"
+        assert extra["decision"] == "duplicate"
+        assert extra["correlated_with"] == "TKT-EXISTING-1"
+
+        # No new ticket was ever filed via the plain-create path.
+        assert all(
+            not svc.create_ticket_calls for svc in _FakeTicketService.instances
+        )
+        assert len(calls) == 1
+        assert calls[0]["ticket_ref"] == "TKT-EXISTING-1"
+        assert calls[0]["decision"] == "duplicate"
+
+        # Best-effort correlation event recorded, matching _finalize's shape.
+        recorded = [
+            e for s in _RecordingCorrelationStore.instances for e in s.record_event_calls
+        ]
+        assert len(recorded) == 1
+        assert recorded[0]["ticket_ref"] == "TKT-EXISTING-1"
+        assert recorded[0]["decided_by"] == "fallback_signature"
+
+        assert delivery is not None
+        assert delivery.suppress is True
+
+    async def test_lock_timeout_with_no_matching_candidate_still_falls_back_to_plain_create(
+        self, monkeypatch
+    ):
+        """Regression guard for the still-no-match case: when the lock-free
+        deterministic check finds candidates but none of them match this
+        alert's (signature, component_key), the timeout path must still fall
+        back to _file_uncorrelated_ticket exactly as it did before this fix
+        -- see test_lock_timeout_falls_back_to_plain_create above for the
+        no-candidates-at-all variant of the same guarantee."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+
+        from contextlib import asynccontextmanager
+
+        import orchestrator.api.app as app_module
+
+        @asynccontextmanager
+        async def _never_available(grid_name, timeout_seconds):
+            yield False
+
+        monkeypatch.setattr(app_module, "_acquire_grid_correlation_lock", _never_available)
+
+        # A candidate exists on the grid, but its signature doesn't match --
+        # not a duplicate, just an unrelated open ticket.
+        _RecordingCorrelationStore.open_candidates_to_return = [
+            {
+                "ticket_ref": "TKT-UNRELATED-1",
+                "grid_name": "Acme Grid",
+                "status": "open",
+                "severity": "warning",
+                "signatures": ["some-other-signature"],
+                "affected_keys": [{"kind": "inverter", "key": "B1", "label": "Inverter B1"}],
+                "created_at": "2026-07-20T00:00:00+00:00",
+            }
+        ]
+
+        body = _notify_body(ticket_id="auto")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "TKT-000001"
+        assert extra["decided_by"] == "fallback"
+        # The read happened (lock-free attempt ran)...
+        read_calls = [
+            c
+            for s in _RecordingCorrelationStore.instances
+            for c in s.open_candidates_for_grid_calls
+        ]
+        assert len(read_calls) == 1
+        # ...but no correlation event was recorded for a match that never
+        # happened, and the plain-create path still seeded the usual row.
+        assert all(not s.record_event_calls for s in _RecordingCorrelationStore.instances)
+        upserts = [u for s in _RecordingCorrelationStore.instances for u in s.upsert_calls]
+        assert [u["ticket_ref"] for u in upserts] == [ref]
+
     async def test_outer_exception_ticket_still_gets_a_correlation_row(self, monkeypatch):
         """Regression test for Task 6: when a decision comes back (not None)
         but something raises while executing it (e.g. apply_amendment
@@ -1791,6 +1968,83 @@ class TestDeliverNotificationDelivery:
 
         assert recorded == [("TKT-000001", 999)]
 
+    async def test_edit_message_id_success_skips_new_send(self, fake_telegram_send, monkeypatch):
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        edit_calls: List[Dict[str, Any]] = []
+
+        async def _edit(bot_token, chat_id, message_id, text, *, parse_mode=None):
+            edit_calls.append(
+                {
+                    "bot_token": bot_token,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": text,
+                    "parse_mode": parse_mode,
+                }
+            )
+            return True
+
+        monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", _edit)
+        body = _notify_body()
+        delivery = NotificationDelivery(
+            text_override="TKT-000042: MPPT A7 also affected",
+            edit_message_id=555,
+            reply_to_message_id=555,
+            ticket=NotificationTicket(ref="TKT-000042", backend="internal"),
+        )
+
+        await _deliver_notification(body, _target(), "TKT-000042", delivery)
+
+        assert len(edit_calls) == 1
+        assert edit_calls[0]["message_id"] == 555
+        assert fake_telegram_send.calls == []
+
+    async def test_edit_message_id_failure_falls_back_to_send(
+        self, fake_telegram_send, monkeypatch
+    ):
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        edit_calls: List[Dict[str, Any]] = []
+
+        async def _edit(bot_token, chat_id, message_id, text, *, parse_mode=None):
+            edit_calls.append({"message_id": message_id})
+            return False
+
+        monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", _edit)
+
+        recorded: List[tuple] = []
+
+        class _FakeCorrelationStore:
+            def __init__(self, get_client=None):
+                pass
+
+            async def record_message_id(self, ticket_ref, message_id):
+                recorded.append((ticket_ref, message_id))
+                return True
+
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+            _FakeCorrelationStore,
+        )
+        body = _notify_body()
+        delivery = NotificationDelivery(
+            text_override="TKT-000042: MPPT A7 also affected",
+            edit_message_id=555,
+            reply_to_message_id=555,
+            record_message_id_for_ticket_ref="TKT-000042",
+            ticket=NotificationTicket(ref="TKT-000042", backend="internal"),
+        )
+
+        await _deliver_notification(body, _target(), "TKT-000042", delivery)
+
+        assert len(edit_calls) == 1
+        assert len(fake_telegram_send.calls) == 1
+        assert fake_telegram_send.calls[0]["reply_to_message_id"] == 555
+        # Fallback send behaves exactly as an edit-less delivery would --
+        # the new message still gets recorded as the ticket's tracked id.
+        assert recorded == [("TKT-000042", 999)]
+
 
 def test_amend_delivery_names_new_component_and_distinct_total():
     from orchestrator.api.app import _amend_delivery
@@ -1818,14 +2072,57 @@ def test_amend_delivery_names_new_component_and_distinct_total():
         telegram_topic_id="42",
         telegram_message_id=555,
         component_added=True,
+        rendered_summary="TKT-000042: MPPT A3, MPPT A7 affected (2 components)",
     )
     ticket = NotificationTicket(ref="TKT-000042", backend="internal")
 
     delivery = _amend_delivery(decision, amendment, ticket)
 
     assert delivery.ticket == ticket
-    assert delivery.text_override == "Added MPPT A7 (2 affected components)"
+    assert delivery.text_override == amendment.rendered_summary
+    assert delivery.text_override != "Added MPPT A7 (2 affected components)"
     assert delivery.reply_to_message_id == 555
+    assert delivery.edit_message_id == 555
+
+
+def test_amend_delivery_falls_back_to_added_label_phrasing_when_rendered_summary_blank():
+    """The Jira-only-seed path can hand back an ``AmendmentResult`` without a
+    full rendered ticket summary (``rendered_summary`` defaults to ``""``).
+    In that case ``_amend_delivery`` must keep the older "Added X (...)"
+    phrasing instead of posting/editing to blank text."""
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="TKT-000042",
+        confidence=0.9,
+        decided_by="llm",
+        reason="same issue",
+        affected_key={"kind": "mppt", "key": "A7", "label": "MPPT A7"},
+        root_cause_kind=None,
+        update_message="ignored LLM wording",
+        amended_summary="",
+        candidate_refs=["TKT-000042"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="TKT-000042",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=2,
+        occurrence_count=3,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+        component_added=True,
+        rendered_summary="",
+    )
+    ticket = NotificationTicket(ref="TKT-000042", backend="internal")
+
+    delivery = _amend_delivery(decision, amendment, ticket)
+
+    assert delivery.text_override == "Added MPPT A7 (2 affected components)"
+    assert delivery.edit_message_id == 555
 
 
 def test_amend_delivery_is_silent_when_no_component_was_added():
@@ -1934,6 +2231,46 @@ def test_amend_delivery_posts_escalation_without_a_component_add():
     assert delivery.suppress is False
     assert delivery.top_level is True
     assert delivery.text_override == "Escalated to urgent"
+
+
+def test_amend_delivery_escalation_moves_the_edit_target_to_the_new_post():
+    """An escalation posts a brand-new top-level message. A future amend's
+    edit must target *that* new message, not the stale original -- so the
+    escalation branch has to set record_message_id_for_ticket_ref, the same
+    way a freshly-filed ticket does."""
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3353",
+        confidence=0.9,
+        decided_by="llm",
+        reason="urgent now",
+        affected_key=None,
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3353"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3353",
+        decision="amend",
+        escalated=True,
+        affected_keys_count=0,
+        occurrence_count=9,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+        component_added=False,
+        rendered_summary="🔴 Escalated summary",
+    )
+    ticket = NotificationTicket(ref="OPS-3353", backend="jira")
+
+    delivery = _amend_delivery(decision, amendment, ticket)
+
+    assert delivery.top_level is True
+    assert delivery.record_message_id_for_ticket_ref == ticket.ref
 
 
 def test_duplicate_delivery_is_silent():
