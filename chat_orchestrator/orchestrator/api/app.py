@@ -1523,6 +1523,83 @@ def _candidate_summaries_from_store_rows(rows: List[Dict[str, Any]]) -> List[Any
     return candidates
 
 
+async def _finalize_correlation_decision(
+    body: "NotifyRequest",
+    target: "GridNotificationTarget",
+    alert: "AlertFacts",
+    alert_context: UrgentAlertContext,
+    store: Any,
+    ticket_service: Any,
+    decision: Any,
+) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
+    """Execute an "amend"/"duplicate" ``CorrelationDecision`` via
+    ``apply_amendment`` and turn the result into the ``(ref, response, extra,
+    delivery)`` 4-tuple ``_resolve_notify_ticket_auto`` returns.
+
+    Shared by ``_resolve_notify_ticket_auto``'s own lock-held amend/duplicate
+    branch and ``_attempt_lock_free_signature_correlation``'s lock-free
+    match -- both need identical post-decision plumbing once a
+    ``CorrelationDecision`` names an existing ``ticket_ref`` to amend/dup,
+    regardless of how that decision was reached (LLM+lock vs.
+    deterministic+lock-free).
+    """
+    from orchestrator.services.ticketing.correlation_render import apply_amendment
+
+    amendment = await apply_amendment(
+        store=store,
+        ticket_service=ticket_service,
+        ticket_ref=decision.ticket_ref,
+        alert=alert,
+        decision=decision,
+        raw_text=body.text,
+        grid_name=target.grid_name,
+        telegram_chat_id=target.chat_id,
+        telegram_topic_id=target.topic_id,
+    )
+    if amendment is None:
+        # Correlation row vanished between the decision and here (store
+        # outage) -- the target ticket still exists, so at minimum comment
+        # on it rather than silently dropping the alert. No reply-target
+        # context survives this, so deliver nothing rather than risk a
+        # misdirected/noisy post.
+        await ticket_service.add_comment(decision.ticket_ref, body.text, public=False)
+        ref = decision.ticket_ref
+        delivery = NotificationDelivery(
+            suppress=True,
+            alert_context=alert_context,
+            stored_ticket_severity=decision.ticket_severity,
+        )
+    else:
+        ref = amendment.ticket_ref
+        ticket = NotificationTicket(
+            ref=ref, backend=await ticket_service.get_backend_name(ref)
+        )
+        delivery = (
+            _amend_delivery(decision, amendment, ticket)
+            if amendment.decision == "amend"
+            else _duplicate_delivery(amendment, ticket)
+        )
+        delivery = dataclasses.replace(
+            delivery,
+            alert_context=alert_context,
+            ticket_summary=(
+                "" if delivery.suppress else await _ticket_summary(ticket_service, ref)
+            ),
+            stored_ticket_severity=decision.ticket_severity,
+        )
+    return (
+        ref,
+        None,
+        {
+            "decision": decision.decision,
+            "correlated_with": decision.ticket_ref,
+            "confidence": decision.confidence,
+            "decided_by": decision.decided_by,
+        },
+        delivery,
+    )
+
+
 async def _attempt_lock_free_signature_correlation(
     body: "NotifyRequest",
     target: "GridNotificationTarget",
@@ -1553,7 +1630,6 @@ async def _attempt_lock_free_signature_correlation(
     way the caller falls through to ``_file_uncorrelated_ticket`` exactly as
     it did before this existed.
     """
-    from orchestrator.services.ticketing.correlation_render import apply_amendment
     from orchestrator.services.ticketing.correlation_rules import DEFAULT_CORRELATION_POLICY
     from orchestrator.services.ticketing.correlator import (
         CorrelationDecision,
@@ -1640,67 +1716,17 @@ async def _attempt_lock_free_signature_correlation(
             )
         except Exception:
             logger.warning(
-                "Notify: failed to record lock-free correlation event for grid %r",
+                "Notify: failed to record lock-free correlation event for grid {}",
                 target.grid_name,
                 exc_info=True,
             )
 
-        amendment = await apply_amendment(
-            store=store,
-            ticket_service=ticket_service,
-            ticket_ref=decision.ticket_ref,
-            alert=alert,
-            decision=decision,
-            raw_text=body.text,
-            grid_name=target.grid_name,
-            telegram_chat_id=target.chat_id,
-            telegram_topic_id=target.topic_id,
-        )
-        if amendment is None:
-            # Correlation row vanished between the read above and here (store
-            # outage) -- the target ticket still exists, so at minimum
-            # comment on it rather than silently dropping the alert. Mirrors
-            # _resolve_notify_ticket_auto's own handling of this case.
-            await ticket_service.add_comment(decision.ticket_ref, body.text, public=False)
-            ref = decision.ticket_ref
-            delivery = NotificationDelivery(
-                suppress=True,
-                alert_context=alert_context,
-                stored_ticket_severity=decision.ticket_severity,
-            )
-        else:
-            ref = amendment.ticket_ref
-            ticket = NotificationTicket(
-                ref=ref, backend=await ticket_service.get_backend_name(ref)
-            )
-            delivery = (
-                _amend_delivery(decision, amendment, ticket)
-                if amendment.decision == "amend"
-                else _duplicate_delivery(amendment, ticket)
-            )
-            delivery = dataclasses.replace(
-                delivery,
-                alert_context=alert_context,
-                ticket_summary=(
-                    "" if delivery.suppress else await _ticket_summary(ticket_service, ref)
-                ),
-                stored_ticket_severity=decision.ticket_severity,
-            )
-
-        return (
-            ref,
-            None,
-            {
-                "decision": decision.decision,
-                "correlated_with": decision.ticket_ref,
-                "confidence": decision.confidence,
-                "decided_by": decision.decided_by,
-            },
-            delivery,
+        return await _finalize_correlation_decision(
+            body, target, alert, alert_context, store, ticket_service, decision
         )
     except Exception:
         logger.warning(
-            "Notify: lock-free correlation attempt raised for grid %r -- filing plain ticket",
+            "Notify: lock-free correlation attempt raised for grid {} -- filing plain ticket",
             target.grid_name,
             exc_info=True,
         )
@@ -1919,58 +1945,8 @@ async def _resolve_notify_ticket_auto(
                 )
 
             # amend (onto an existing ticket) or duplicate.
-            amendment = await apply_amendment(
-                store=store,
-                ticket_service=ticket_service,
-                ticket_ref=decision.ticket_ref,
-                alert=alert,
-                decision=decision,
-                raw_text=body.text,
-                grid_name=target.grid_name,
-                telegram_chat_id=target.chat_id,
-                telegram_topic_id=target.topic_id,
-            )
-            if amendment is None:
-                # Correlation row vanished between decide() and here (store
-                # outage) -- the target ticket still exists, so at minimum
-                # comment on it rather than silently dropping the alert.
-                # No reply-target context survives this, so deliver nothing
-                # rather than risk a misdirected/noisy post.
-                await ticket_service.add_comment(decision.ticket_ref, body.text, public=False)
-                ref = decision.ticket_ref
-                delivery = NotificationDelivery(
-                    suppress=True,
-                    alert_context=alert_context,
-                    stored_ticket_severity=decision.ticket_severity,
-                )
-            else:
-                ref = amendment.ticket_ref
-                ticket = NotificationTicket(
-                    ref=ref, backend=await ticket_service.get_backend_name(ref)
-                )
-                delivery = (
-                    _amend_delivery(decision, amendment, ticket)
-                    if amendment.decision == "amend"
-                    else _duplicate_delivery(amendment, ticket)
-                )
-                delivery = dataclasses.replace(
-                    delivery,
-                    alert_context=alert_context,
-                    ticket_summary=(
-                        "" if delivery.suppress else await _ticket_summary(ticket_service, ref)
-                    ),
-                    stored_ticket_severity=decision.ticket_severity,
-                )
-            return (
-                ref,
-                None,
-                {
-                    "decision": decision.decision,
-                    "correlated_with": decision.ticket_ref,
-                    "confidence": decision.confidence,
-                    "decided_by": decision.decided_by,
-                },
-                delivery,
+            return await _finalize_correlation_decision(
+                body, target, alert, alert_context, store, ticket_service, decision
             )
         except Exception:
             logger.exception(
