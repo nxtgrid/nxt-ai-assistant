@@ -92,7 +92,7 @@ def _model_select_options(svc, current: dict[str, Any]) -> dict[str, Any]:
     provider_routes = (
         svc.get_openrouter_provider_routes(route_model) if provider == "openrouter" else {}
     )
-    return {
+    options: dict[str, Any] = {
         "__GEMINI_MODELS": gemini_models,
         "__OPENROUTER_MODELS": openrouter_models,
         "LLM_PROVIDER": svc.get_llm_provider_options(),
@@ -103,6 +103,13 @@ def _model_select_options(svc, current: dict[str, Any]) -> dict[str, Any]:
         "VERIFICATION_MODEL": active_models,
         "OPENROUTER_PROVIDER_ORDER": provider_routes,
     }
+    # Any registry flag opted into a Gemini-only model picker (as opposed to
+    # the provider-aware role model fields above) gets its options built here
+    # generically, so new flags need no edit to this page.
+    for flag in registry.FLAGS.values():
+        if flag.model_picker == "gemini":
+            options[flag.name] = gemini_models
+    return options
 
 
 def _selected_provider(values: dict[str, Any]) -> str:

@@ -184,6 +184,21 @@ def test_model_setting_options_use_openrouter_models_for_role_fields():
     }
 
 
+def test_model_setting_options_include_gemini_only_model_fields():
+    opts = settings_page._model_select_options(
+        SimpleNamespace(
+            get_llm_provider_options=lambda: {},
+            get_gemini_models=lambda: ["gemini-2.5-pro", "gemini-2.5-flash-lite"],
+            get_openrouter_models=lambda: ["google/gemini-2.5-flash"],
+            get_openrouter_provider_routes=lambda model: {},
+        ),
+        {"LLM_PROVIDER": "openrouter", "GEMINI_MODEL": "google/gemini-2.5-flash"},
+    )
+
+    assert opts["GEMINI_AGENT_PRO_MODEL"] == ["gemini-2.5-pro", "gemini-2.5-flash-lite"]
+    assert opts["THREAD_CLASSIFIER_MODEL"] == ["gemini-2.5-pro", "gemini-2.5-flash-lite"]
+
+
 def test_model_setting_options_use_role_model_for_provider_routes():
     opts = settings_page._model_select_options(
         SimpleNamespace(
