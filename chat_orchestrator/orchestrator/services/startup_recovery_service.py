@@ -104,7 +104,7 @@ async def recover_orphaned_packets() -> int:
     if not orphaned:
         return 0
 
-    LOGGER.info("Startup recovery: found %d orphaned packet(s)", len(orphaned))
+    LOGGER.info("Startup recovery: found {} orphaned packet(s)", len(orphaned))
     recovered = 0
 
     for packet in orphaned:
@@ -113,10 +113,10 @@ async def recover_orphaned_packets() -> int:
             recovered += 1
         except Exception:
             LOGGER.exception(
-                "Startup recovery: failed to process packet %s", packet.get("packet_id")
+                "Startup recovery: failed to process packet {}", packet.get("packet_id")
             )
 
-    LOGGER.info("Startup recovery: re-enqueued %d packet(s)", recovered)
+    LOGGER.info("Startup recovery: re-enqueued {} packet(s)", recovered)
     return recovered
 
 
@@ -132,7 +132,7 @@ async def _recover_one(packet: dict, supabase: Any) -> None:
         # Too many auto-retries — let the user-facing failed prompt handle it.
         # Clear auto_resumable so ask_resume_failed shows the normal "Resume?" dialog.
         LOGGER.warning(
-            "Startup recovery: packet %s exceeded auto-retry limit (%d/%d), "
+            "Startup recovery: packet {} exceeded auto-retry limit ({}/{}), "
             "falling back to user-facing failed prompt",
             packet_short_id,
             auto_retry_count,
@@ -179,14 +179,14 @@ async def _recover_one(packet: dict, supabase: Any) -> None:
         # Lost the race — packet was already updated by another path (e.g. first user message).
         # This is safe: the user message path will handle it.
         LOGGER.info(
-            "Startup recovery: packet %s already claimed by another path, skipping",
+            "Startup recovery: packet {} already claimed by another path, skipping",
             packet_short_id,
         )
         return
 
     LOGGER.info(
-        "Startup recovery: packet %s marked for auto-resume "
-        "(site=%s, steps_done=%d, auto_retry=%d)",
+        "Startup recovery: packet {} marked for auto-resume "
+        "(site={}, steps_done={}, auto_retry={})",
         packet_short_id,
         site_name,
         len(steps_done),

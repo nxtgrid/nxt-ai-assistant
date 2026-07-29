@@ -76,7 +76,7 @@ class CorrelationStore:
                 .execute()
             )
         except Exception as e:
-            LOGGER.warning("correlation store: get_by_dedup_key(%s) failed: %s", dedup_key, e)
+            LOGGER.warning("correlation store: get_by_dedup_key({}) failed: {}", dedup_key, e)
             return None
         rows = getattr(response, "data", None) or []
         return rows[0] if rows else None
@@ -123,7 +123,7 @@ class CorrelationStore:
             ).execute()
             return True
         except Exception as e:
-            LOGGER.warning("correlation store: record_event failed: %s", e)
+            LOGGER.warning("correlation store: record_event failed: {}", e)
             return False
 
     async def record_event_ticket_ref(self, dedup_key: str, ticket_ref: str) -> bool:
@@ -146,7 +146,7 @@ class CorrelationStore:
             return True
         except Exception as e:
             LOGGER.warning(
-                "correlation store: record_event_ticket_ref(%s) failed: %s", dedup_key, e
+                "correlation store: record_event_ticket_ref({}) failed: {}", dedup_key, e
             )
             return False
 
@@ -170,7 +170,7 @@ class CorrelationStore:
                 .execute()
             )
         except Exception as e:
-            LOGGER.warning("correlation store: get_correlation(%s) failed: %s", ticket_ref, e)
+            LOGGER.warning("correlation store: get_correlation({}) failed: {}", ticket_ref, e)
             return None
         rows = getattr(response, "data", None) or []
         return rows[0] if rows else None
@@ -198,7 +198,7 @@ class CorrelationStore:
             ).execute()
             return True
         except Exception as e:
-            LOGGER.warning("correlation store: record_amendment(%s) failed: %s", ticket_ref, e)
+            LOGGER.warning("correlation store: record_amendment({}) failed: {}", ticket_ref, e)
             return False
 
     async def open_candidates_for_grid(
@@ -222,7 +222,7 @@ class CorrelationStore:
             )
         except Exception as e:
             LOGGER.warning(
-                "correlation store: open_candidates_for_grid(%s) failed: %s", grid_name, e
+                "correlation store: open_candidates_for_grid({}) failed: {}", grid_name, e
             )
             return []
         return getattr(response, "data", None) or []
@@ -275,7 +275,7 @@ class CorrelationStore:
             ).execute()
             return True
         except Exception as e:
-            LOGGER.warning("correlation store: upsert_correlation(%s) failed: %s", ticket_ref, e)
+            LOGGER.warning("correlation store: upsert_correlation({}) failed: {}", ticket_ref, e)
             return False
 
     async def merge_affected_key(
@@ -345,7 +345,7 @@ class CorrelationStore:
             ).execute()
             return AffectedKeyMerge(affected_keys=affected_keys, added=added)
         except Exception as e:
-            LOGGER.warning("correlation store: merge_affected_key(%s) failed: %s", ticket_ref, e)
+            LOGGER.warning("correlation store: merge_affected_key({}) failed: {}", ticket_ref, e)
             return None
 
     async def bump_occurrence(
@@ -376,7 +376,7 @@ class CorrelationStore:
             ).eq("ticket_ref", ticket_ref).execute()
             return True
         except Exception as e:
-            LOGGER.warning("correlation store: bump_occurrence(%s) failed: %s", ticket_ref, e)
+            LOGGER.warning("correlation store: bump_occurrence({}) failed: {}", ticket_ref, e)
             return False
 
     async def record_message_id(self, ticket_ref: str, message_id: int) -> bool:
@@ -391,7 +391,7 @@ class CorrelationStore:
             ).eq("ticket_ref", ticket_ref).execute()
             return True
         except Exception as e:
-            LOGGER.warning("correlation store: record_message_id(%s) failed: %s", ticket_ref, e)
+            LOGGER.warning("correlation store: record_message_id({}) failed: {}", ticket_ref, e)
             return False
 
     async def mark_closed(self, ticket_ref: str) -> bool:
@@ -409,5 +409,5 @@ class CorrelationStore:
             ).execute()
             return True
         except Exception as e:
-            LOGGER.warning("correlation store: mark_closed(%s) failed: %s", ticket_ref, e)
+            LOGGER.warning("correlation store: mark_closed({}) failed: {}", ticket_ref, e)
             return False

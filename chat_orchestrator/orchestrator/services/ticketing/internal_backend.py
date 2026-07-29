@@ -109,14 +109,14 @@ class InternalTicketBackend:
             await self._tickets.add_comment_by_ref(ref, body, is_public=public)
             return True
         except Exception as e:
-            LOGGER.warning("Failed to add internal comment to %s: %s", ref, e)
+            LOGGER.warning("Failed to add internal comment to {}: {}", ref, e)
             return False
 
     async def get_status(self, ref: str) -> Optional[TicketStatus]:
         try:
             return await self._tickets.get_status_by_ref(ref)
         except Exception as e:
-            LOGGER.warning("Failed to fetch internal ticket status for %s: %s", ref, e)
+            LOGGER.warning("Failed to fetch internal ticket status for {}: {}", ref, e)
             return None
 
     async def transition_to_done(self, ref: str) -> None:
@@ -127,13 +127,13 @@ class InternalTicketBackend:
         try:
             await self._tickets.transition_to_done_by_ref(ref)
         except Exception as e:
-            LOGGER.warning("Failed to transition internal ticket %s to done: %s", ref, e)
+            LOGGER.warning("Failed to transition internal ticket {} to done: {}", ref, e)
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         try:
             return await self._tickets.find_ref_for_escalation(mapping_id)
         except Exception as e:
-            LOGGER.debug("Error looking up internal ticket for escalation %s: %s", mapping_id, e)
+            LOGGER.debug("Error looking up internal ticket for escalation {}: {}", mapping_id, e)
             return None
 
     async def update_ticket(
@@ -161,12 +161,12 @@ class InternalTicketBackend:
             await self._tickets.update_by_ref(ref, **payload)
             return True
         except Exception as e:
-            LOGGER.warning("Failed to update internal ticket %s: %s", ref, e)
+            LOGGER.warning("Failed to update internal ticket {}: {}", ref, e)
             return False
 
     async def find_open_by_grid(self, grid_name: str, limit: int = 20) -> List[TicketSummary]:
         try:
             return await self._tickets.find_open_internal_by_grid(grid_name, limit=limit)
         except Exception as e:
-            LOGGER.warning("Failed to find open internal tickets for grid %s: %s", grid_name, e)
+            LOGGER.warning("Failed to find open internal tickets for grid {}: {}", grid_name, e)
             return []

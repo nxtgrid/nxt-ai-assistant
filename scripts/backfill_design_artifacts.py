@@ -120,7 +120,7 @@ def backfill_packet(
     design = design_repo.get(design_id)
     if design is None:
         logger.warning(
-            "backfill_design_artifacts: design %s (from packet %s) not found; skipping",
+            "backfill_design_artifacts: design {} (from packet {}) not found; skipping",
             design_id,
             packet_id,
         )
@@ -204,7 +204,7 @@ def run(*, dry_run: bool, limit: int | None) -> None:
         except Exception:
             errored += 1
             logger.warning(
-                "backfill_design_artifacts: error processing packet_id=%s; continuing",
+                "backfill_design_artifacts: error processing packet_id={}; continuing",
                 packet_id,
                 exc_info=True,
             )

@@ -217,7 +217,7 @@ class JiraTicketBackend:
             ) as resp:
                 return resp.status == 200
         except Exception as e:
-            LOGGER.debug("Jira health probe failed: %s", e)
+            LOGGER.debug("Jira health probe failed: {}", e)
             return False
 
     async def create_ticket(self, req: TicketCreateRequest) -> TicketResult:
@@ -330,7 +330,7 @@ class JiraTicketBackend:
         key = result.get("key")
         if not key:
             raise TicketBackendError("Jira ticket creation failed: response has no key")
-        LOGGER.info("Created Jira ticket: %s", key)
+        LOGGER.info("Created Jira ticket: {}", key)
         return TicketResult(
             ref=key,
             backend="jira",
@@ -399,10 +399,10 @@ class JiraTicketBackend:
                 if resp.status in (200, 204):
                     return True
                 body = await resp.text()
-                LOGGER.warning("Failed to update Jira issue %s: HTTP %s -- %s", ref, resp.status, body)
+                LOGGER.warning("Failed to update Jira issue {}: HTTP {} -- {}", ref, resp.status, body)
                 return False
         except Exception:
-            LOGGER.warning("Error updating Jira issue %s", ref, exc_info=True)
+            LOGGER.warning("Error updating Jira issue {}", ref, exc_info=True)
             return False
 
     async def resolve_priority_id(self, priority_id: str) -> Optional[str]:
@@ -427,7 +427,7 @@ class JiraTicketBackend:
             ) as response:
                 if response.status != 200:
                     LOGGER.warning(
-                        "Failed to discover Jira Highest priority: HTTP %s",
+                        "Failed to discover Jira Highest priority: HTTP {}",
                         response.status,
                     )
                     return None
@@ -482,7 +482,7 @@ class JiraTicketBackend:
                     return []
                 data = await resp.json()
         except Exception:
-            LOGGER.warning("Error searching Jira for grid %r", grid_name, exc_info=True)
+            LOGGER.warning("Error searching Jira for grid {!r}", grid_name, exc_info=True)
             return []
 
         results: List[TicketSummary] = []
@@ -567,12 +567,12 @@ class JiraTicketBackend:
                 ) as resp:
                     if resp.status != 200:
                         LOGGER.warning(
-                            "Jira org fetch returned HTTP %d -- stopping pagination", resp.status
+                            "Jira org fetch returned HTTP {} -- stopping pagination", resp.status
                         )
                         break
                     data = await resp.json()
             except Exception as e:
-                LOGGER.warning("Error fetching Jira organizations (page %d): %s", page, e)
+                LOGGER.warning("Error fetching Jira organizations (page {}): {}", page, e)
                 break
             orgs.extend(data.get("values", []))
             next_url = (
@@ -602,7 +602,7 @@ class JiraTicketBackend:
             matched_name, _, _score = find_best_grid_match(org_name, list(name_to_id.keys()))
             return name_to_id[matched_name] if matched_name else None
         except Exception as e:
-            LOGGER.warning("Could not resolve Jira org for '%s': %s", org_name, e)
+            LOGGER.warning("Could not resolve Jira org for '{}': {}", org_name, e)
             return None
 
     async def _add_jira_comment(self, issue_key: str, body: str) -> bool:
@@ -626,11 +626,11 @@ class JiraTicketBackend:
                 if resp.status in (200, 201):
                     return True
                 LOGGER.warning(
-                    "Failed to add Jira comment to %s: status=%s", issue_key, resp.status
+                    "Failed to add Jira comment to {}: status={}", issue_key, resp.status
                 )
                 return False
         except Exception as e:
-            LOGGER.warning("Error adding Jira comment to %s: %s", issue_key, e)
+            LOGGER.warning("Error adding Jira comment to {}: {}", issue_key, e)
             return False
 
     async def _transition_jira_to_done(self, issue_key: str) -> None:
@@ -657,7 +657,7 @@ class JiraTicketBackend:
                 if resp.status != 200:
                     body = await resp.text()
                     LOGGER.warning(
-                        "Could not fetch transitions for %s: HTTP %s -- %s",
+                        "Could not fetch transitions for {}: HTTP {} -- {}",
                         issue_key,
                         resp.status,
                         body,
@@ -677,7 +677,7 @@ class JiraTicketBackend:
 
             if not transition_id:
                 LOGGER.warning(
-                    "No 'Done' transition available for %s -- already closed or workflow mismatch",
+                    "No 'Done' transition available for {} -- already closed or workflow mismatch",
                     issue_key,
                 )
                 return
@@ -692,18 +692,18 @@ class JiraTicketBackend:
                 if resp.status not in (200, 204):
                     body = await resp.text()
                     LOGGER.warning(
-                        "Jira transition failed for %s: HTTP %s -- %s",
+                        "Jira transition failed for {}: HTTP {} -- {}",
                         issue_key,
                         resp.status,
                         body,
                     )
                 else:
                     LOGGER.info(
-                        "Transitioned Jira %s to Done (transition %s)", issue_key, transition_id
+                        "Transitioned Jira {} to Done (transition {})", issue_key, transition_id
                     )
 
         except Exception:
-            LOGGER.warning("Error transitioning Jira %s to Done", issue_key, exc_info=True)
+            LOGGER.warning("Error transitioning Jira {} to Done", issue_key, exc_info=True)
 
     async def _fetch_jira_issue_fields(self, issue_key: str) -> Optional[Dict[str, Any]]:
         """Fetch summary and status category for a Jira issue.
@@ -725,7 +725,7 @@ class JiraTicketBackend:
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status != 200:
-                    LOGGER.debug("Jira fetch %s returned HTTP %s", issue_key, resp.status)
+                    LOGGER.debug("Jira fetch {} returned HTTP {}", issue_key, resp.status)
                     return None
                 data = await resp.json()
             fields = data.get("fields", {})
@@ -737,7 +737,7 @@ class JiraTicketBackend:
                 "raw_status": status_field.get("name", ""),
             }
         except Exception:
-            LOGGER.debug("Error fetching Jira issue fields for %s", issue_key, exc_info=True)
+            LOGGER.debug("Error fetching Jira issue fields for {}", issue_key, exc_info=True)
             return None
 
     async def _search_jira_for_escalation(self, mapping_id: str) -> Optional[str]:
@@ -765,5 +765,5 @@ class JiraTicketBackend:
             issues = data.get("issues", [])
             return str(issues[0]["key"]) if issues else None
         except Exception:
-            LOGGER.debug("Error searching Jira for escalation %s", mapping_id, exc_info=True)
+            LOGGER.debug("Error searching Jira for escalation {}", mapping_id, exc_info=True)
             return None

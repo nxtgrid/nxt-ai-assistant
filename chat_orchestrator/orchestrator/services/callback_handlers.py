@@ -909,7 +909,7 @@ async def _handle_escalation_close_callback(
                 {"resolved_at": datetime.now(timezone.utc).isoformat()}
             ).eq("id", mapping_id).execute()
         except Exception:
-            LOGGER.warning("Could not set resolved_at for mapping %s", mapping_id, exc_info=True)
+            LOGGER.warning("Could not set resolved_at for mapping {}", mapping_id, exc_info=True)
 
         session_id = escalation.get("session_id")
         if not session_id:

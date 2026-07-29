@@ -665,8 +665,8 @@ def _get_design_artifact_sync(
         except HttpError as e:
             if getattr(e.resp, "status", None) == 404:
                 logger.warning(
-                    "get_design_artifact: drive_file_id=%s (design_id=%s, "
-                    "artifact_type=%s, version=%s) is gone from Drive; marking stale",
+                    "get_design_artifact: drive_file_id={} (design_id={}, "
+                    "artifact_type={}, version={}) is gone from Drive; marking stale",
                     drive_file_id,
                     design_id,
                     artifact_type,
@@ -675,8 +675,8 @@ def _get_design_artifact_sync(
                 artifact_log.mark_artifact_stale(design_id, artifact_type, drive_file_id)
                 continue
             logger.warning(
-                "get_design_artifact: non-404 Drive error checking drive_file_id=%s "
-                "(design_id=%s, artifact_type=%s, version=%s); stopping walk",
+                "get_design_artifact: non-404 Drive error checking drive_file_id={} "
+                "(design_id={}, artifact_type={}, version={}); stopping walk",
                 drive_file_id,
                 design_id,
                 artifact_type,
@@ -690,8 +690,8 @@ def _get_design_artifact_sync(
             }
         except Exception:
             logger.warning(
-                "get_design_artifact: unexpected error checking drive_file_id=%s "
-                "(design_id=%s, artifact_type=%s, version=%s); stopping walk",
+                "get_design_artifact: unexpected error checking drive_file_id={} "
+                "(design_id={}, artifact_type={}, version={}); stopping walk",
                 drive_file_id,
                 design_id,
                 artifact_type,

@@ -572,7 +572,7 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
                 )
                 if packet_expert == "user_agent" or packet_is_scheduled:
                     LOGGER.info(
-                        "Auto-resume skipped for packet %s (expert=%s, scheduled=%s) — "
+                        "Auto-resume skipped for packet {} (expert={}, scheduled={}) — "
                         "user_agent and scheduled packets must resume via explicit prompt",
                         auto_resumable_packet["packet_id"],
                         packet_expert,
@@ -581,8 +581,8 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
                     # Fall through to normal routing / resume prompt
                 elif user_input and user_input.strip().startswith("/"):
                     LOGGER.info(
-                        "Auto-resume bypassed: user sent new command '%s' "
-                        "while interrupted packet %s exists — new command takes precedence",
+                        "Auto-resume bypassed: user sent new command '{}' "
+                        "while interrupted packet {} exists — new command takes precedence",
                         user_input.strip()[:60],
                         auto_resumable_packet["packet_id"],
                     )
@@ -590,7 +590,7 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
                 else:
                     expert_id = auto_resumable_packet.get("assigned_expert")
                     LOGGER.info(
-                        "Auto-resuming deployment-interrupted packet %s (expert=%s, steps=%d)",
+                        "Auto-resuming deployment-interrupted packet {} (expert={}, steps={})",
                         auto_resumable_packet["packet_id"],
                         expert_id,
                         len(auto_resumable_packet.get("steps_completed") or []),

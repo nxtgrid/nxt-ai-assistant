@@ -326,7 +326,7 @@ async def submit_form(
         )
     except Exception:
         LOGGER.exception(
-            "Failed to save form overrides for packet=%s (write contention?)", body.packet_id
+            "Failed to save form overrides for packet={} (write contention?)", body.packet_id
         )
         raise HTTPException(
             status_code=503,
@@ -341,7 +341,7 @@ async def submit_form(
     )
 
     LOGGER.info(
-        "Mini App form submitted for packet=%s by telegram_id=%s",
+        "Mini App form submitted for packet={} by telegram_id={}",
         body.packet_id,
         user.get("user", {}).get("id"),
     )
@@ -418,7 +418,7 @@ async def proxy_drive_image(
     try:
         image_bytes = await download_drive_file(file_id)
     except Exception:
-        LOGGER.warning("Failed to proxy Drive image file_id=%s", file_id, exc_info=True)
+        LOGGER.warning("Failed to proxy Drive image file_id={}", file_id, exc_info=True)
         raise HTTPException(status_code=502, detail="Could not fetch image from Drive")
 
     # Sniff content type from first bytes; default to PNG
@@ -491,7 +491,7 @@ def _get_validated_user_sign(request: Request) -> Dict[str, Any]:
     try:
         data = validate_init_data(init_data_raw, bot_token, max_age_seconds=_SIGN_AUTH_MAX_AGE)
     except ValueError as e:
-        LOGGER.warning("Sign endpoint auth failed: %s", e)
+        LOGGER.warning("Sign endpoint auth failed: {}", e)
         raise HTTPException(status_code=401, detail="Authentication failed")
     return dict(data)
 
@@ -519,7 +519,7 @@ async def _notify_signing_party(
             parse_mode="Markdown",
         )
     except Exception:
-        LOGGER.warning("PDF send to %s failed for packet=%s, falling back to text", role, packet_id)
+        LOGGER.warning("PDF send to {} failed for packet={}, falling back to text", role, packet_id)
         await send_telegram_message(bot_token, telegram_id, fallback_text, parse_mode="Markdown")
 
 
@@ -581,7 +581,7 @@ async def _stamp_and_notify(
         parents = meta.get("parents", [])
         parent_folder_id = str(parents[0]) if parents else None
         if not parent_folder_id:
-            LOGGER.warning("Could not determine parent folder for %s", document_drive_id)
+            LOGGER.warning("Could not determine parent folder for {}", document_drive_id)
             await service.update_state(packet_id, {"signing_status": "failed"})
             return
 
@@ -624,7 +624,7 @@ async def _stamp_and_notify(
             )
         except Exception:
             LOGGER.warning(
-                "Audit page generation failed for packet=%s — uploading without it", packet_id
+                "Audit page generation failed for packet={} — uploading without it", packet_id
             )
             audit_page_bytes = b""
             final_bytes = signed_bytes
@@ -658,7 +658,7 @@ async def _stamp_and_notify(
         if len(upload_results) > 1:
             audit_result = upload_results[1]
             if isinstance(audit_result, BaseException):
-                LOGGER.warning("Failed to upload standalone audit trail for packet=%s", packet_id)
+                LOGGER.warning("Failed to upload standalone audit trail for packet={}", packet_id)
             else:
                 audit_trail_drive_id = audit_result["id"]
 
@@ -741,15 +741,15 @@ async def _stamp_and_notify(
                     await sb.save_messages(session_row.id, [completion_msg])
             except Exception:
                 LOGGER.warning(
-                    "Failed to save signing event to chat history for packet=%s", packet_id
+                    "Failed to save signing event to chat history for packet={}", packet_id
                 )
 
     except Exception:
-        LOGGER.exception("_stamp_and_notify failed for packet=%s", packet_id)
+        LOGGER.exception("_stamp_and_notify failed for packet={}", packet_id)
         try:
             await service.update_state(packet_id, {"signing_status": "failed"})
         except Exception:
-            LOGGER.warning("Failed to update signing_status to failed for packet=%s", packet_id)
+            LOGGER.warning("Failed to update signing_status to failed for packet={}", packet_id)
         # Notify signer to retry (non-fatal — failure to notify should not mask the original error)
         if bot_token and signer_telegram_id:
             try:
@@ -761,7 +761,7 @@ async def _stamp_and_notify(
                 )
             except Exception:
                 LOGGER.warning(
-                    "Could not send failure notification to signer for packet=%s", packet_id
+                    "Could not send failure notification to signer for packet={}", packet_id
                 )
 
 
@@ -809,7 +809,7 @@ async def get_sign_data(
     try:
         pdf_bytes = await download_drive_file(document_drive_id)
     except Exception:
-        LOGGER.exception("Failed to proxy PDF file_id=%s", document_drive_id)
+        LOGGER.exception("Failed to proxy PDF file_id={}", document_drive_id)
         raise HTTPException(status_code=502, detail="Could not fetch document from Drive")
 
     # Record first-view timestamp and signer IP for the audit trail.
@@ -828,7 +828,7 @@ async def get_sign_data(
                 },
             )
         except Exception:
-            LOGGER.warning("Failed to record view audit fields for packet=%s", packet_id)
+            LOGGER.warning("Failed to record view audit fields for packet={}", packet_id)
 
     def _safe_header(value: str) -> str:
         """Strip CR/LF to prevent HTTP response splitting via packet_state values."""
@@ -936,7 +936,7 @@ async def submit_signature(
     task.add_done_callback(_background_tasks.discard)
 
     LOGGER.info(
-        "Signature accepted for packet=%s signer_telegram_id=%s",
+        "Signature accepted for packet={} signer_telegram_id={}",
         body.packet_id,
         caller_telegram_id,
     )

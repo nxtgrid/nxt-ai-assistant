@@ -99,7 +99,7 @@ class ToolExecutor:
 
         # Fall back to registry-based execution
         if not self._registry:
-            LOGGER.error("No registry available and tool %s is not a bridge tool", call.name)
+            LOGGER.error("No registry available and tool {} is not a bridge tool", call.name)
             return ToolCallResult(
                 name=call.name,
                 success=False,
@@ -110,7 +110,7 @@ class ToolExecutor:
         try:
             service_config = self._registry.get_service(call.name)
         except KeyError as exc:  # pragma: no cover - defensive
-            LOGGER.error("Attempted to call unknown service %s", call.name)
+            LOGGER.error("Attempted to call unknown service {}", call.name)
             sanitized = sanitize_error_for_tool_result(str(exc), call.name)
             return ToolCallResult(name=call.name, success=False, output=None, error=sanitized)
 
@@ -137,7 +137,7 @@ class ToolExecutor:
                 error=f"Unsupported payload mode '{service_config.payload_mode}'",
             )
 
-        LOGGER.info("Calling service %s using %s", call.name, method)
+        LOGGER.info("Calling service {} using {}", call.name, method)
         try:
             response = await self._client.request(
                 method,
@@ -146,7 +146,7 @@ class ToolExecutor:
                 **request_kwargs,
             )
         except httpx.HTTPError as exc:
-            LOGGER.error("Service %s request failed: %s", call.name, exc)
+            LOGGER.error("Service {} request failed: {}", call.name, exc)
             sanitized = sanitize_error_for_tool_result(str(exc), call.name)
             return ToolCallResult(name=call.name, success=False, output=None, error=sanitized)
 

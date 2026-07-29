@@ -18,12 +18,12 @@ class ToolRegistry:
         self._services: Dict[str, ToolServiceConfig] = {
             svc.name: svc for svc in self._settings.known_services
         }
-        LOGGER.debug("Initialised tool registry with %d services", len(self._services))
+        LOGGER.debug("Initialised tool registry with {} services", len(self._services))
 
     def register(self, config: ToolServiceConfig) -> None:
         """Register or overwrite a service configuration."""
 
-        LOGGER.info("Registering service %s", config.name)
+        LOGGER.info("Registering service {}", config.name)
         self._services[config.name] = config
 
     def get_service(self, name: str) -> ToolServiceConfig:

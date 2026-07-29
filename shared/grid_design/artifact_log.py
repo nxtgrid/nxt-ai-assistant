@@ -61,8 +61,8 @@ def sweep_state_for_artifacts(design_id: str, state: dict, *, packet_id: str | N
             )
         except Exception:
             logger.warning(
-                "sweep_state_for_artifacts: failed to log artifact for design_id=%s "
-                "key=%s; continuing sweep",
+                "sweep_state_for_artifacts: failed to log artifact for design_id={} "
+                "key={}; continuing sweep",
                 design_id,
                 key,
                 exc_info=True,
@@ -103,8 +103,8 @@ def append_design_artifact(
         design = repo.get(design_id)
         if design is None:
             logger.warning(
-                "append_design_artifact: design %s not found; skipping artifact log write "
-                "(artifact_type=%s)",
+                "append_design_artifact: design {} not found; skipping artifact log write "
+                "(artifact_type={})",
                 design_id,
                 artifact_type,
             )
@@ -128,8 +128,8 @@ def append_design_artifact(
         updated = repo.update(design_id, {"artifacts": artifacts})
         if updated is None:
             logger.warning(
-                "append_design_artifact: update returned no row for design %s "
-                "(artifact_type=%s); design may have been deleted concurrently",
+                "append_design_artifact: update returned no row for design {} "
+                "(artifact_type={}); design may have been deleted concurrently",
                 design_id,
                 artifact_type,
             )
@@ -137,7 +137,7 @@ def append_design_artifact(
         return artifacts
     except Exception:
         logger.warning(
-            "append_design_artifact failed for design_id=%s artifact_type=%s",
+            "append_design_artifact failed for design_id={} artifact_type={}",
             design_id,
             artifact_type,
             exc_info=True,
@@ -171,8 +171,8 @@ def mark_artifact_stale(design_id: str, artifact_type: str, drive_file_id: str) 
         design = repo.get(design_id)
         if design is None:
             logger.warning(
-                "mark_artifact_stale: design %s not found; skipping (artifact_type=%s, "
-                "drive_file_id=%s)",
+                "mark_artifact_stale: design {} not found; skipping (artifact_type={}, "
+                "drive_file_id={})",
                 design_id,
                 artifact_type,
                 drive_file_id,
@@ -194,8 +194,8 @@ def mark_artifact_stale(design_id: str, artifact_type: str, drive_file_id: str) 
 
         if not matched:
             logger.warning(
-                "mark_artifact_stale: no matching entry for design_id=%s artifact_type=%s "
-                "drive_file_id=%s; no-op",
+                "mark_artifact_stale: no matching entry for design_id={} artifact_type={} "
+                "drive_file_id={}; no-op",
                 design_id,
                 artifact_type,
                 drive_file_id,
@@ -206,8 +206,8 @@ def mark_artifact_stale(design_id: str, artifact_type: str, drive_file_id: str) 
         updated = repo.update(design_id, {"artifacts": artifacts})
         if updated is None:
             logger.warning(
-                "mark_artifact_stale: update returned no row for design %s "
-                "(artifact_type=%s, drive_file_id=%s)",
+                "mark_artifact_stale: update returned no row for design {} "
+                "(artifact_type={}, drive_file_id={})",
                 design_id,
                 artifact_type,
                 drive_file_id,
@@ -216,7 +216,7 @@ def mark_artifact_stale(design_id: str, artifact_type: str, drive_file_id: str) 
         return artifacts
     except Exception:
         logger.warning(
-            "mark_artifact_stale failed for design_id=%s artifact_type=%s drive_file_id=%s",
+            "mark_artifact_stale failed for design_id={} artifact_type={} drive_file_id={}",
             design_id,
             artifact_type,
             drive_file_id,
