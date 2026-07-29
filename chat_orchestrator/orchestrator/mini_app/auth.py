@@ -132,7 +132,7 @@ async def resolve_user_from_telegram_id(
                 return dict(row)
             return None
     except Exception:
-        LOGGER.exception("Failed to resolve user from telegram_id=%s", telegram_id)
+        LOGGER.exception("Failed to resolve user from telegram_id={}", telegram_id)
         return None
 
 
@@ -183,7 +183,7 @@ async def get_validated_user(request: Request) -> Dict[str, Any]:
     try:
         data = validate_init_data(init_data_raw, bot_token)
     except ValueError as e:
-        LOGGER.warning("Mini App auth failed: %s", e)
+        LOGGER.warning("Mini App auth failed: {}", e)
         raise HTTPException(status_code=401, detail="Authentication failed")
 
     # Resolve organization from Telegram user ID (with in-memory cache)

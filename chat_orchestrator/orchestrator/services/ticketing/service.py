@@ -159,7 +159,7 @@ class TicketService:
         raw = self._raw_client()
         if raw is None:
             LOGGER.warning(
-                "ticket service: no Supabase client -- cannot stamp ticket_ref for mapping %s",
+                "ticket service: no Supabase client -- cannot stamp ticket_ref for mapping {}",
                 mapping_id,
             )
             return
@@ -169,7 +169,7 @@ class TicketService:
             ).eq("id", mapping_id).execute()
         except Exception:
             LOGGER.warning(
-                "ticket service: failed to stamp ticket_ref for mapping %s", mapping_id,
+                "ticket service: failed to stamp ticket_ref for mapping {}", mapping_id,
                 exc_info=True,
             )
 

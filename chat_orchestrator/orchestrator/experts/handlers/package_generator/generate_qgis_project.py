@@ -129,7 +129,7 @@ async def generate_qgis_project(context: StepContext) -> StepResult:
             jumpers_gdf=jumpers_gdf,
         )
     except Exception as exc:
-        LOGGER.exception("QGIS project generation failed: %s", exc)
+        LOGGER.exception("QGIS project generation failed: {}", exc)
         from shared.utils.error_messages import sanitize_error_for_user
 
         return StepResult.failure(sanitize_error_for_user(str(exc)))

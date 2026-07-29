@@ -434,7 +434,7 @@ class AlertCorrelator:
                         correlation = await self._store.get_correlation(ticket_ref)
                     except Exception:
                         LOGGER.warning(
-                            "Failed to load durable severity for replayed ticket %r",
+                            "Failed to load durable severity for replayed ticket {!r}",
                             ticket_ref,
                             exc_info=True,
                         )
@@ -468,7 +468,7 @@ class AlertCorrelator:
         try:
             candidates = await self._assemble_candidates(grid_name, backend_override=backend_override)
         except Exception:
-            LOGGER.warning("Candidate assembly failed for grid %r", grid_name, exc_info=True)
+            LOGGER.warning("Candidate assembly failed for grid {!r}", grid_name, exc_info=True)
             candidates = []
 
         if not candidates:
@@ -583,7 +583,7 @@ class AlertCorrelator:
             )
         except Exception:
             LOGGER.warning(
-                "Failed to record correlation event for grid %r", grid_name, exc_info=True
+                "Failed to record correlation event for grid {!r}", grid_name, exc_info=True
             )
         return decision
 
@@ -647,7 +647,7 @@ class AlertCorrelator:
             if status is None and candidate.ref not in store_refs:
                 continue
             if status is None:
-                LOGGER.warning("Preserving cached candidate %r: status unavailable", candidate.ref)
+                LOGGER.warning("Preserving cached candidate {!r}: status unavailable", candidate.ref)
             confirmed.append(candidate)
 
         confirmed.sort(key=lambda c: c.age_hours if c.age_hours is not None else 0.0)
@@ -661,7 +661,7 @@ class AlertCorrelator:
                 return await self._ticket_service.get_status(candidate.ref)
             except Exception:
                 LOGGER.warning(
-                    "Candidate status lookup raised for %r", candidate.ref, exc_info=True
+                    "Candidate status lookup raised for {!r}", candidate.ref, exc_info=True
                 )
                 return None
 
@@ -683,7 +683,7 @@ class AlertCorrelator:
             try:
                 live_facts = await get_live_facts()
             except Exception:
-                LOGGER.warning("Live telemetry context failed for grid %r", grid_name, exc_info=True)
+                LOGGER.warning("Live telemetry context failed for grid {!r}", grid_name, exc_info=True)
                 live_facts = {"live_inverter_output": "unavailable"}
             grid_facts = {**grid_facts, "live_telemetry": live_facts}
         rag_query = f"{alert.subject}\n{alert.details}".strip()

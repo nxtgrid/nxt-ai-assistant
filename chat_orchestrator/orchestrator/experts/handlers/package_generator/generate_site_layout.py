@@ -191,8 +191,8 @@ async def generate_site_layout(context: StepContext) -> StepResult:
                 or not (-180 <= _minx <= _maxx <= 180 and -90 <= _miny <= _maxy <= 90)
             ):
                 LOGGER.warning(
-                    "site_candidates[0].polygon failed validation (type=%s, valid=%s, "
-                    "bounds=%s) — falling back to synthetic polygon",
+                    "site_candidates[0].polygon failed validation (type={}, valid={}, "
+                    "bounds={}) — falling back to synthetic polygon",
                     type(_candidate).__name__,
                     _candidate.is_valid,
                     (_minx, _miny, _maxx, _maxy),

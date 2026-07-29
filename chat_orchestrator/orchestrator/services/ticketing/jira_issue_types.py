@@ -238,7 +238,7 @@ class JiraIssueTypeSelector:
                 timeout=aiohttp.ClientTimeout(total=self._metadata_timeout_seconds),
             ) as response:
                 if response.status != 200:
-                    LOGGER.warning("Jira issue-type metadata failed: HTTP %s", response.status)
+                    LOGGER.warning("Jira issue-type metadata failed: HTTP {}", response.status)
                     return []
                 payload = await response.json()
             if not isinstance(payload, dict):

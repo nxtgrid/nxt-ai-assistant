@@ -1004,7 +1004,7 @@ async def _save_passive_group_message(telegram_msg: Dict[str, Any], chat: Dict[s
     )
 
     LOGGER.debug(
-        "Saved passive group message: session=%s, sender=%s, topic=%s, thread_id=%s",
+        "Saved passive group message: session={}, sender={}, topic={}, thread_id={}",
         session_id,
         sender_name,
         topic_name or topic_id,

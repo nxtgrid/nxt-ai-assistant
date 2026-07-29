@@ -262,7 +262,7 @@ async def _get_issue_type_breakdown(
     rows = response.data or []
     if len(rows) == _LIMIT:
         logger.warning(
-            "_get_issue_type_breakdown hit row cap (%d) — counts may be incomplete", _LIMIT
+            "_get_issue_type_breakdown hit row cap ({}) — counts may be incomplete", _LIMIT
         )
     counts: Dict[str, int] = {}
     for row in rows:
