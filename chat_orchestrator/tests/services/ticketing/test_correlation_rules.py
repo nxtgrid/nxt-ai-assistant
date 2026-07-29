@@ -73,6 +73,10 @@ class TestCorrelationPolicy:
         with pytest.raises(FrozenInstanceError):
             correlation_rules.DEFAULT_CORRELATION_POLICY.confidence_floor = 0.1
 
+    def test_grid_lock_budget_exceeds_llm_budget(self):
+        policy = correlation_rules.DEFAULT_CORRELATION_POLICY
+        assert policy.grid_lock_timeout_seconds > policy.llm_timeout_seconds
+
 
 class _FakeAuthService:
     def __init__(self, facts: Optional[Dict[str, Any]] = None, error: Optional[Exception] = None):

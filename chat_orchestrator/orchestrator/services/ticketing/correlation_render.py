@@ -165,6 +165,7 @@ class AmendmentResult:
     telegram_chat_id: Optional[str]
     telegram_topic_id: Optional[str]
     telegram_message_id: Optional[int]
+    component_added: bool = False
 
 
 async def apply_amendment(
@@ -218,13 +219,18 @@ async def apply_amendment(
 
     await store.bump_occurrence(ticket_ref)
 
-    if decision.decision == "amend" and decision.affected_key:
-        kind = decision.affected_key.get("kind", "")
-        key = decision.affected_key.get("key", "")
-        label = decision.affected_key.get("label") or f"{kind} {key}".strip()
-        await store.merge_affected_key(
+    component_added = False
+    affected_key = decision.affected_key or {}
+    kind = str(affected_key.get("kind") or "").strip()
+    key = str(affected_key.get("key") or "").strip()
+    # A dict of empty strings is truthy, so the old `if decision.affected_key`
+    # guard would merge a nameless ("", "") entry for any component-less alert.
+    if decision.decision == "amend" and kind and key:
+        label = affected_key.get("label") or f"{kind} {key}".strip()
+        merge = await store.merge_affected_key(
             ticket_ref, kind=kind, key=key, label=label, signature=alert.signature or None
         )
+        component_added = bool(merge is not None and merge.added)
 
     correlation = await store.get_correlation(ticket_ref)
     if correlation is None:
@@ -311,6 +317,7 @@ async def apply_amendment(
                 telegram_chat_id=telegram_chat_id,
                 telegram_topic_id=telegram_topic_id,
                 telegram_message_id=None,
+                component_added=bool(seeded_affected_count),
             )
         LOGGER.warning(
             "apply_amendment: correlation row for %r not found after merge -- "
@@ -382,4 +389,5 @@ async def apply_amendment(
         telegram_chat_id=correlation.get("telegram_chat_id"),
         telegram_topic_id=correlation.get("telegram_topic_id"),
         telegram_message_id=correlation.get("telegram_message_id"),
+        component_added=component_added,
     )

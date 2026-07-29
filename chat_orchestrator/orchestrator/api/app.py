@@ -1248,6 +1248,48 @@ async def _record_new_correlation(
         )
 
 
+async def _file_uncorrelated_ticket(
+    body: "NotifyRequest",
+    target: "GridNotificationTarget",
+    backend_override: str,
+    alert: "AlertFacts",
+    alert_context: UrgentAlertContext,
+    store: Any,
+    decided_by: str,
+) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
+    """File a plain ticket on a fail-open path *and* record its correlation row.
+
+    Without the row the ticket is invisible to ``open_candidates_for_grid``
+    forever, so the next identical alert cannot correlate with it and files yet
+    another ticket. Recording is best-effort inside ``_record_new_correlation``
+    -- a store outage still leaves the ticket filed and the alert delivered.
+
+    Returns the same 4-tuple shape as ``_resolve_notify_ticket_auto`` itself
+    (``response`` is always ``None`` here -- no path through this helper
+    produces one) so callers can return its result directly.
+    """
+    summary = _notify_ticket_subject(body)
+    result, error = await _create_notify_ticket(
+        body, target, backend_override, alert_context=alert_context
+    )
+    if error is not None:
+        return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
+    await _record_new_correlation(store, target, alert, result, None, summary, body.text)
+    if body.dedup_key:
+        await store.record_event_ticket_ref(body.dedup_key, result.ref)
+    return (
+        result.ref,
+        None,
+        {
+            "decision": "new",
+            "correlated_with": None,
+            "confidence": None,
+            "decided_by": decided_by,
+        },
+        _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
+    )
+
+
 @dataclass(frozen=True)
 class NotificationTicket:
     """Backend-neutral ticket data needed to render a notification."""
@@ -1412,10 +1454,27 @@ async def _ticket_summary(ticket_service: Any, ticket_ref: str) -> str:
 def _amend_delivery(
     decision: Any, amendment: Any, ticket: NotificationTicket
 ) -> NotificationDelivery:
-    label = (decision.affected_key or {}).get("label") or "another component"
-    count = amendment.affected_keys_count if amendment is not None else 1
-    message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
-    if amendment is not None and amendment.escalated:
+    """Post only what an operator needs to act on.
+
+    An amend that merely re-listed a component already on the ticket changed
+    nothing operationally -- the ticket still records the occurrence and the
+    raw alert comment, but Telegram stays quiet. Only a component genuinely
+    joining the ticket, or an escalation, is worth a message.
+    """
+    escalated = bool(amendment is not None and amendment.escalated)
+    component_added = bool(amendment is not None and amendment.component_added)
+
+    if not (component_added or escalated):
+        return NotificationDelivery(suppress=True)
+
+    if component_added:
+        label = (decision.affected_key or {}).get("label") or "a new component"
+        count = amendment.affected_keys_count if amendment is not None else 1
+        message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
+    else:
+        message = "Escalated to urgent"
+
+    if escalated:
         return NotificationDelivery(text_override=message, top_level=True, ticket=ticket)
     reply_to = amendment.telegram_message_id if amendment is not None else None
     return NotificationDelivery(text_override=message, reply_to_message_id=reply_to, ticket=ticket)
@@ -1441,30 +1500,10 @@ async def _resolve_notify_ticket_auto(
     ``ticket_id=""``). An alert is never dropped; correlation only ever adds
     grouping on top, never a new way to fail.
     """
-    from shared.config import flag_registry as fr
-
-    if not fr.get("ALERT_CORRELATION_ENABLED"):
-        result, error = await _create_notify_ticket(
-            body, target, backend_override, alert_context=alert_context
-        )
-        if error is not None:
-            return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
-        return (
-            result.ref,
-            None,
-            {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "flag_off"},
-            _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
-        )
-
     from orchestrator.services.supabase_client import get_supabase_client
     from orchestrator.services.ticketing.alert_facts import enrich_alert_facts
-    from orchestrator.services.ticketing.correlation_render import apply_amendment
-    from orchestrator.services.ticketing.correlation_rules import (
-        DEFAULT_CORRELATION_POLICY,
-    )
     from orchestrator.services.ticketing.correlation_store import CorrelationStore
-    from orchestrator.services.ticketing.correlator import AlertCorrelator
-    from orchestrator.services.ticketing.service import TicketService
+    from shared.config import flag_registry as fr
 
     if body.alert is not None:
         base_alert = body.alert
@@ -1475,7 +1514,21 @@ async def _resolve_notify_ticket_auto(
         base_alert = AlertFacts(subject=first_line, details=body.text)
     alert = enrich_alert_facts(base_alert, grid_name=target.grid_name)
 
-    timeout_seconds = DEFAULT_CORRELATION_POLICY.llm_timeout_seconds
+    if not fr.get("ALERT_CORRELATION_ENABLED"):
+        store = CorrelationStore(get_client=_raw_supabase_client)
+        return await _file_uncorrelated_ticket(
+            body, target, backend_override, alert, alert_context, store, "flag_off"
+        )
+
+    from orchestrator.services.ticketing.correlation_render import apply_amendment
+    from orchestrator.services.ticketing.correlation_rules import (
+        DEFAULT_CORRELATION_POLICY,
+    )
+    from orchestrator.services.ticketing.correlator import AlertCorrelator
+    from orchestrator.services.ticketing.service import TicketService
+
+    timeout_seconds = DEFAULT_CORRELATION_POLICY.grid_lock_timeout_seconds
+    store = CorrelationStore(get_client=_raw_supabase_client)
 
     async with _acquire_grid_correlation_lock(target.grid_name, timeout_seconds) as acquired:
         if not acquired:
@@ -1483,19 +1536,10 @@ async def _resolve_notify_ticket_auto(
                 "Notify: grid-correlation lock timeout for %r -- filing plain ticket",
                 target.grid_name,
             )
-            result, error = await _create_notify_ticket(
-                body, target, backend_override, alert_context=alert_context
-            )
-            if error is not None:
-                return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
-            return (
-                result.ref,
-                None,
-                {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
+            return await _file_uncorrelated_ticket(
+                body, target, backend_override, alert, alert_context, store, "fallback"
             )
 
-        store = CorrelationStore(get_client=_raw_supabase_client)
         ticket_service = TicketService(get_supabase_client=get_supabase_client)
         correlator = AlertCorrelator(store=store, ticket_service=ticket_service)
 
@@ -1515,19 +1559,49 @@ async def _resolve_notify_ticket_auto(
             decision = None
 
         if decision is None:
-            result, error = await _create_notify_ticket(
-                body, target, backend_override, alert_context=alert_context
-            )
-            if error is not None:
-                return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
-            return (
-                result.ref,
-                None,
-                {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
+            return await _file_uncorrelated_ticket(
+                body, target, backend_override, alert, alert_context, store, "fallback"
             )
 
         try:
+            from orchestrator.services.ticketing.correlator import _is_urgent_severity_increase
+
+            if decision.decided_by == "replay" and decision.ticket_ref:
+                if not _is_urgent_severity_increase(alert.severity, decision.ticket_severity):
+                    # This dedup_key was already decided, already applied to
+                    # the ticket, and already posted. Re-running the amend
+                    # would double the comment and the Telegram message.
+                    logger.info(
+                        "Notify: replayed dedup_key for %r -- suppressing duplicate delivery",
+                        decision.ticket_ref,
+                    )
+                    return (
+                        decision.ticket_ref,
+                        None,
+                        {
+                            "decision": decision.decision,
+                            "correlated_with": decision.ticket_ref,
+                            "confidence": decision.confidence,
+                            "decided_by": decision.decided_by,
+                        },
+                        NotificationDelivery(
+                            suppress=True,
+                            alert_context=alert_context,
+                            stored_ticket_severity=decision.ticket_severity,
+                        ),
+                    )
+                # Urgent severity increase on a replay -- decision.ticket_ref
+                # already names a real, existing ticket (whether the original
+                # decision was "new" or "amend"), so this must escalate that
+                # ticket, never file a second one. Coercing decision to
+                # "amend" here routes it into the ordinary amend-execution
+                # path below instead of the "new"-ticket branch, which would
+                # otherwise fire because decision.decision on a replay is
+                # still whatever the ORIGINAL (pre-replay) decision type was.
+                decision = dataclasses.replace(
+                    decision, decision="amend", needs_root_cause_ticket=False
+                )
+
             if decision.decision == "new" or (
                 decision.decision == "amend" and decision.needs_root_cause_ticket
             ):
@@ -1558,6 +1632,8 @@ async def _resolve_notify_ticket_auto(
                     await _record_new_correlation(
                         store, target, alert, result, decision.root_cause_kind, root_summary, root_description
                     )
+                    if body.dedup_key:
+                        await store.record_event_ticket_ref(body.dedup_key, result.ref)
                     await apply_amendment(
                         store=store,
                         ticket_service=ticket_service,
@@ -1599,6 +1675,8 @@ async def _resolve_notify_ticket_auto(
                 await _record_new_correlation(
                     store, target, alert, result, decision.root_cause_kind, summary, body.text
                 )
+                if body.dedup_key:
+                    await store.record_event_ticket_ref(body.dedup_key, result.ref)
                 return (
                     result.ref,
                     None,
@@ -1649,7 +1727,9 @@ async def _resolve_notify_ticket_auto(
                 delivery = dataclasses.replace(
                     delivery,
                     alert_context=alert_context,
-                    ticket_summary=await _ticket_summary(ticket_service, ref),
+                    ticket_summary=(
+                        "" if delivery.suppress else await _ticket_summary(ticket_service, ref)
+                    ),
                     stored_ticket_severity=decision.ticket_severity,
                 )
             return (
@@ -1668,16 +1748,8 @@ async def _resolve_notify_ticket_auto(
                 "Notify: correlation execution raised for grid %r -- filing plain ticket",
                 target.grid_name,
             )
-            result, error = await _create_notify_ticket(
-                body, target, backend_override, alert_context=alert_context
-            )
-            if error is not None:
-                return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
-            return (
-                result.ref,
-                None,
-                {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
+            return await _file_uncorrelated_ticket(
+                body, target, backend_override, alert, alert_context, store, "fallback"
             )
 
 

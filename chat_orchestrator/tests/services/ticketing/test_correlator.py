@@ -21,7 +21,10 @@ import pytest
 from orchestrator.services.ticketing import correlator as correlator_module
 from orchestrator.services.ticketing.alert_facts import AlertFacts, enrich_alert_facts
 from orchestrator.services.ticketing.backend import TicketStatus, TicketSummary
-from orchestrator.services.ticketing.correlation_rules import CorrelationPolicy
+from orchestrator.services.ticketing.correlation_rules import (
+    DEFAULT_CORRELATION_POLICY,
+    CorrelationPolicy,
+)
 from orchestrator.services.ticketing.correlator import (
     AlertCorrelator,
     CandidateSummary,
@@ -272,6 +275,12 @@ class _FakeStore:
             }
         return True
 
+    async def record_event_ticket_ref(self, dedup_key: str, ticket_ref: str) -> bool:
+        if dedup_key in self.events:
+            self.events[dedup_key]["ticket_ref"] = ticket_ref
+            return True
+        return False
+
 
 class _FakeTicketService:
     def __init__(self) -> None:
@@ -451,6 +460,35 @@ class TestDedupReplay:
         assert decision.decided_by == "replay"
         assert decision.ticket_severity == "urgent"
         assert gateway.calls == []  # no LLM call for a replay
+
+    @pytest.mark.asyncio
+    async def test_backfilled_ticket_ref_is_returned_on_replay(self):
+        """End-to-end regression test for the delivery-idempotency gap: a
+        "new" decision's event row is recorded with ticket_ref=None (there's
+        nothing to reference until the ticket is actually created by
+        app.py), the post-creation backfill lands via
+        ``record_event_ticket_ref`` (simulating what
+        ``_resolve_notify_ticket_auto`` now does right after
+        ``_create_notify_ticket``), and a later replay of the same
+        dedup_key must come back with the backfilled ``ticket_ref`` --
+        that's what lets the /notify replay guard's ``decision.ticket_ref``
+        truthiness check actually suppress the duplicate-ticket case instead
+        of silently falling through to file a second ticket."""
+        correlator, store, _ts, gateway = _make_correlator()
+
+        first = await correlator.decide("Kudi", _mppt_alert(), dedup_key="dk-2")
+        assert first.decision == "new"
+        assert first.ticket_ref is None
+        assert store.events["dk-2"]["ticket_ref"] is None
+
+        backfilled = await store.record_event_ticket_ref("dk-2", "TKT-99")
+        assert backfilled is True
+
+        replay = await correlator.decide("Kudi", _mppt_alert(), dedup_key="dk-2")
+
+        assert replay.decided_by == "replay"
+        assert replay.decision == "new"
+        assert replay.ticket_ref == "TKT-99"
 
 
 class TestFlagOff:
@@ -655,6 +693,91 @@ class TestSignatureDuplicate:
 
         assert decision.decision == "duplicate"
 
+    @pytest.mark.asyncio
+    async def test_case_differing_stored_key_still_matches(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert()
+        correlator, store, _ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "OPS-42",
+                "grid_name": "Kudi",
+                "status": "open",
+                "signatures": [alert.signature],
+                "affected_keys": [{"kind": "MPPT", "key": "a3", "label": "MPPT a3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "duplicate"
+        assert decision.decided_by == "signature"
+        assert gateway.calls == []
+
+
+class TestKeylessSignatureDuplicate:
+    @pytest.mark.asyncio
+    async def test_identical_keyless_alert_is_a_duplicate_without_the_llm(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = enrich_alert_facts(
+            AlertFacts(
+                subject=(
+                    "! Urgent: Turn off Combiner: ALERT - 'Okpokunou': "
+                    "'#26 - Charger terminal overheated' on 'Combiner Box 4' !"
+                ),
+                severity="urgent",
+            ),
+            grid_name="Okpokunou",
+        )
+        correlator, store, _ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "OPS-3363",
+                "grid_name": "Okpokunou",
+                "status": "open",
+                "severity": "urgent",
+                "signatures": [alert.signature],
+                "affected_keys": [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        decision = await correlator.decide("Okpokunou", alert)
+
+        assert decision.decision == "duplicate"
+        assert decision.ticket_ref == "OPS-3363"
+        assert decision.decided_by == "signature"
+        assert gateway.calls == []
+        # No component was involved in this match -- the audit reason must
+        # not claim a component match happened.
+        assert "component" not in decision.reason.lower()
+
+    @pytest.mark.asyncio
+    async def test_keyless_signature_match_still_escalates_on_urgency(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = enrich_alert_facts(
+            AlertFacts(subject="! Urgent: Grid outage in Okpokunou !", severity="urgent"),
+            grid_name="Okpokunou",
+        )
+        correlator, store, _ts, _gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_ref": "OPS-3363",
+                "grid_name": "Okpokunou",
+                "status": "open",
+                "severity": "warning",
+                "signatures": [alert.signature],
+                "affected_keys": [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        decision = await correlator.decide("Okpokunou", alert)
+
+        assert decision.decision == "amend"
+        assert decision.ticket_ref == "OPS-3363"
+
 
 class TestLiveStatusConfirmation:
     @pytest.mark.asyncio
@@ -701,6 +824,43 @@ class TestLiveStatusConfirmation:
         assert decision.ticket_ref == "OPS-42"
         assert store.mark_closed_calls == []
         assert gateway.calls == []
+
+
+class TestCandidateStatusConcurrency:
+    @pytest.mark.asyncio
+    async def test_status_lookups_run_concurrently(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        correlator, store, ticket_service, _gateway = _make_correlator()
+        for index in range(8):
+            store.correlations.append(
+                {
+                    "ticket_ref": f"OPS-{index}",
+                    "grid_name": "Kudi",
+                    "status": "open",
+                    "signatures": [],
+                    "affected_keys": [],
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+
+        in_flight = 0
+        peak = 0
+
+        async def _slow_status(ref):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.05)
+            in_flight -= 1
+            return TicketStatus(summary=ref, is_done=False)
+
+        ticket_service.get_status = _slow_status
+
+        candidates = await correlator._assemble_candidates("Kudi")
+
+        assert len(candidates) == 8
+        assert peak > 1
+        assert peak <= DEFAULT_CORRELATION_POLICY.candidate_status_concurrency
 
 
 class TestBackendOnlyCandidates:

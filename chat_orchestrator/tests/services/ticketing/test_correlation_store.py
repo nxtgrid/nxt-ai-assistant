@@ -226,37 +226,6 @@ class TestOpenCandidatesForGrid:
         assert await store.open_candidates_for_grid("Kudi", since_iso="2026-01-01") == []
 
 
-class TestGetBySignature:
-    @pytest.mark.asyncio
-    async def test_finds_open_ticket_with_signature(self):
-        store, fake = _make_store()
-        fake.tables["ticket_correlations"] = [
-            {"ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": ["sig-a", "sig-b"]},
-            {"ticket_ref": "TKT-2", "grid_name": "Kudi", "status": "open", "signatures": ["sig-c"]},
-        ]
-
-        results = await store.get_by_signature("Kudi", "sig-a")
-
-        assert [r["ticket_ref"] for r in results] == ["TKT-1"]
-
-    @pytest.mark.asyncio
-    async def test_empty_when_no_match(self):
-        store, fake = _make_store()
-        fake.tables["ticket_correlations"] = [
-            {"ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": ["sig-c"]},
-        ]
-
-        assert await store.get_by_signature("Kudi", "sig-a") == []
-
-    @pytest.mark.asyncio
-    async def test_empty_on_error(self):
-        fake = FakeRawClient()
-        fake.raise_on_execute["ticket_correlations"] = RuntimeError("down")
-        store, _ = _make_store(fake)
-
-        assert await store.get_by_signature("Kudi", "sig-a") == []
-
-
 class TestUpsertCorrelation:
     @pytest.mark.asyncio
     async def test_creates_new_row(self):
@@ -348,12 +317,12 @@ class TestMergeAffectedKey:
         )
 
         assert updated is not None
-        assert len(updated) == 1
-        assert updated[0]["kind"] == "mppt"
-        assert updated[0]["key"] == "A3"
-        assert updated[0]["count"] == 1
-        assert updated[0]["first_seen"] == "2026-01-01T00:00:00Z"
-        assert updated[0]["last_seen"] == "2026-01-01T00:00:00Z"
+        assert len(updated.affected_keys) == 1
+        assert updated.affected_keys[0]["kind"] == "mppt"
+        assert updated.affected_keys[0]["key"] == "A3"
+        assert updated.affected_keys[0]["count"] == 1
+        assert updated.affected_keys[0]["first_seen"] == "2026-01-01T00:00:00Z"
+        assert updated.affected_keys[0]["last_seen"] == "2026-01-01T00:00:00Z"
 
     @pytest.mark.asyncio
     async def test_idempotent_bumps_existing_key(self):
@@ -379,10 +348,11 @@ class TestMergeAffectedKey:
             "TKT-1", kind="mppt", key="A3", label="MPPT A3", occurred_at="2026-01-02T00:00:00Z"
         )
 
-        assert len(updated) == 1
-        assert updated[0]["count"] == 2
-        assert updated[0]["first_seen"] == "2026-01-01T00:00:00Z"
-        assert updated[0]["last_seen"] == "2026-01-02T00:00:00Z"
+        assert updated is not None
+        assert len(updated.affected_keys) == 1
+        assert updated.affected_keys[0]["count"] == 2
+        assert updated.affected_keys[0]["first_seen"] == "2026-01-01T00:00:00Z"
+        assert updated.affected_keys[0]["last_seen"] == "2026-01-02T00:00:00Z"
 
     @pytest.mark.asyncio
     async def test_adds_new_component_alongside_existing(self):
@@ -401,8 +371,9 @@ class TestMergeAffectedKey:
             "TKT-1", kind="mppt", key="A7", label="MPPT A7", occurred_at="2026-01-02T00:00:00Z"
         )
 
-        assert len(updated) == 2
-        assert {u["key"] for u in updated} == {"A3", "A7"}
+        assert updated is not None
+        assert len(updated.affected_keys) == 2
+        assert {u["key"] for u in updated.affected_keys} == {"A3", "A7"}
 
     @pytest.mark.asyncio
     async def test_signature_appended_when_new(self):
@@ -430,6 +401,65 @@ class TestMergeAffectedKey:
         store, _ = _make_store(fake)
 
         assert await store.merge_affected_key("TKT-1", kind="mppt", key="A3", label="MPPT A3") is None
+
+
+class TestMergeAffectedKeyReportsNovelty:
+    @pytest.mark.asyncio
+    async def test_new_key_reports_added_true(self):
+        store, fake = _make_store()
+        fake.tables["ticket_correlations"] = [
+            {"ticket_ref": "TKT-1", "affected_keys": [], "signatures": []}
+        ]
+
+        merge = await store.merge_affected_key(
+            "TKT-1", kind="mppt", key="A7", label="MPPT A7", signature="sig-a"
+        )
+
+        assert merge is not None
+        assert merge.added is True
+        assert [e["key"] for e in merge.affected_keys] == ["A7"]
+
+    @pytest.mark.asyncio
+    async def test_existing_key_reports_added_false_and_bumps_count(self):
+        store, fake = _make_store()
+        fake.tables["ticket_correlations"] = [
+            {
+                "ticket_ref": "TKT-1",
+                "affected_keys": [
+                    {"kind": "mppt", "key": "A7", "label": "MPPT A7", "count": 1}
+                ],
+                "signatures": ["sig-a"],
+            }
+        ]
+
+        merge = await store.merge_affected_key(
+            "TKT-1", kind="mppt", key="A7", label="MPPT A7", signature="sig-a"
+        )
+
+        assert merge is not None
+        assert merge.added is False
+        assert merge.affected_keys[0]["count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_case_differing_key_is_not_a_new_component(self):
+        store, fake = _make_store()
+        fake.tables["ticket_correlations"] = [
+            {
+                "ticket_ref": "TKT-1",
+                "affected_keys": [
+                    {"kind": "mppt", "key": "IYYY", "label": "MPPT IYYY", "count": 1}
+                ],
+                "signatures": [],
+            }
+        ]
+
+        merge = await store.merge_affected_key(
+            "TKT-1", kind="MPPT", key="iyyy", label="MPPT iyyy"
+        )
+
+        assert merge is not None
+        assert merge.added is False
+        assert len(merge.affected_keys) == 1
 
 
 class TestBumpOccurrence:
@@ -569,6 +599,33 @@ class TestRecordEvent:
             llm_raw=None,
         )
         assert ok is False
+
+
+class TestRecordEventTicketRef:
+    @pytest.mark.asyncio
+    async def test_backfills_ticket_ref_by_dedup_key(self):
+        store, fake = _make_store()
+        fake.tables["ticket_correlation_events"] = [
+            {"dedup_key": "alert-42", "ticket_ref": None, "decision": "new"}
+        ]
+
+        ok = await store.record_event_ticket_ref("alert-42", "TKT-000123")
+
+        assert ok is True
+        assert fake.tables["ticket_correlation_events"][0]["ticket_ref"] == "TKT-000123"
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_error(self):
+        fake = FakeRawClient()
+        fake.raise_on_execute["ticket_correlation_events"] = RuntimeError("down")
+        store, _ = _make_store(fake)
+
+        assert await store.record_event_ticket_ref("alert-42", "TKT-000123") is False
+
+    @pytest.mark.asyncio
+    async def test_false_when_no_client(self):
+        store = CorrelationStore(get_client=lambda: None)
+        assert await store.record_event_ticket_ref("alert-42", "TKT-000123") is False
 
 
 class TestGetCorrelation:

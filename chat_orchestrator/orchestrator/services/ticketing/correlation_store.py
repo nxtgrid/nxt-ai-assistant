@@ -13,12 +13,28 @@ an unhandled exception reaching the /notify handler.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from shared.utils.logging import get_logger
 
+from .alert_facts import same_component
+
 LOGGER = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class AffectedKeyMerge:
+    """Outcome of folding one component into a correlation's affected_keys.
+
+    ``added`` is what the delivery layer needs: a merge that only bumped an
+    existing entry's ``count`` changed nothing an operator has to be told
+    about, so it must not produce a Telegram post.
+    """
+
+    affected_keys: List[Dict[str, Any]]
+    added: bool
 
 
 class CorrelationStore:
@@ -110,6 +126,30 @@ class CorrelationStore:
             LOGGER.warning("correlation store: record_event failed: %s", e)
             return False
 
+    async def record_event_ticket_ref(self, dedup_key: str, ticket_ref: str) -> bool:
+        """Backfill the ticket a "new"-decided event actually produced.
+
+        ``record_event`` runs inside ``AlertCorrelator._finalize``, before the
+        ticket is created -- a "new" decision's event row is written with
+        ``ticket_ref=None`` because there's nothing to reference yet. Without
+        this backfill, a later replay of the same ``dedup_key`` finds a row
+        whose ``ticket_ref`` is still ``None``, fails the delivery-idempotency
+        guard's truthiness check, and files a second duplicate ticket.
+        """
+        client = self._client()
+        if client is None:
+            return False
+        try:
+            client.table("ticket_correlation_events").update(
+                {"ticket_ref": ticket_ref}
+            ).eq("dedup_key", dedup_key).execute()
+            return True
+        except Exception as e:
+            LOGGER.warning(
+                "correlation store: record_event_ticket_ref(%s) failed: %s", dedup_key, e
+            )
+            return False
+
     # ------------------------------------------------------------------
     # ticket_correlations
     # ------------------------------------------------------------------
@@ -187,30 +227,6 @@ class CorrelationStore:
             return []
         return getattr(response, "data", None) or []
 
-    async def get_by_signature(
-        self, grid_name: str, signature: str, limit: int = 5
-    ) -> List[Dict[str, Any]]:
-        """Open correlation rows on this grid whose ``signatures`` array
-        already contains ``signature`` -- the deterministic pre-pass'
-        exact-shape match (rung 2 of the decision pipeline)."""
-        client = self._client()
-        if client is None:
-            return []
-        try:
-            response = (
-                client.table("ticket_correlations")
-                .select("*")
-                .eq("grid_name", grid_name)
-                .eq("status", "open")
-                .contains("signatures", [signature])
-                .limit(limit)
-                .execute()
-            )
-        except Exception as e:
-            LOGGER.warning("correlation store: get_by_signature(%s) failed: %s", grid_name, e)
-            return []
-        return getattr(response, "data", None) or []
-
     async def upsert_correlation(
         self,
         *,
@@ -271,12 +287,14 @@ class CorrelationStore:
         label: str,
         occurred_at: Optional[str] = None,
         signature: Optional[str] = None,
-    ) -> Optional[List[Dict[str, Any]]]:
+    ) -> Optional[AffectedKeyMerge]:
         """Idempotently add/bump ``(kind, key)`` in a correlation's
         ``affected_keys``, and fold ``signature`` into ``signatures`` if new.
 
-        Returns the updated ``affected_keys`` list, or ``None`` if the
-        ticket_ref isn't found or the store errors.
+        Returns an ``AffectedKeyMerge`` (the updated ``affected_keys`` list
+        plus whether a genuinely new component was appended vs. an existing
+        entry's count merely bumped), or ``None`` if the ticket_ref isn't
+        found or the store errors.
         """
         client = self._client()
         if client is None:
@@ -296,14 +314,14 @@ class CorrelationStore:
             row = rows[0]
 
             affected_keys = list(row.get("affected_keys") or [])
-            found = False
+            added = True
             for entry in affected_keys:
-                if entry.get("kind") == kind and entry.get("key") == key:
+                if same_component(entry, kind, key):
                     entry["count"] = int(entry.get("count") or 0) + 1
                     entry["last_seen"] = occurred_at
-                    found = True
+                    added = False
                     break
-            if not found:
+            if added:
                 affected_keys.append(
                     {
                         "kind": kind,
@@ -325,7 +343,7 @@ class CorrelationStore:
             client.table("ticket_correlations").update(update_payload).eq(
                 "ticket_ref", ticket_ref
             ).execute()
-            return affected_keys
+            return AffectedKeyMerge(affected_keys=affected_keys, added=added)
         except Exception as e:
             LOGGER.warning("correlation store: merge_affected_key(%s) failed: %s", ticket_ref, e)
             return None

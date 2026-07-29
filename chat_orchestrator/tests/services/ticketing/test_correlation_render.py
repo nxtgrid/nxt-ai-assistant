@@ -195,13 +195,17 @@ class _FakeStore:
         return True
 
     async def merge_affected_key(self, ticket_ref, *, kind, key, label, occurred_at=None, signature=None):
+        from orchestrator.services.ticketing.correlation_store import AffectedKeyMerge
+
         self.merge_calls.append({"ticket_ref": ticket_ref, "kind": kind, "key": key, "label": label})
-        if self.correlation is not None:
-            affected = list(self.correlation.get("affected_keys") or [])
-            if not any(e["kind"] == kind and e["key"] == key for e in affected):
-                affected.append({"kind": kind, "key": key, "label": label, "first_seen": "t", "last_seen": "t", "count": 1})
-                self.correlation["affected_keys"] = affected
-        return self.correlation.get("affected_keys") if self.correlation else None
+        if self.correlation is None:
+            return None
+        affected = list(self.correlation.get("affected_keys") or [])
+        added = not any(e["kind"] == kind and e["key"] == key for e in affected)
+        if added:
+            affected.append({"kind": kind, "key": key, "label": label, "first_seen": "t", "last_seen": "t", "count": 1})
+            self.correlation["affected_keys"] = affected
+        return AffectedKeyMerge(affected_keys=affected, added=added)
 
     async def get_correlation(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
         return self.correlation
@@ -492,6 +496,62 @@ class TestApplyAmendmentAmend:
         assert ticket_service.comment_calls == [
             {"ref": "OPS-42", "body": "urgent raw text", "public": False}
         ]
+
+
+class TestApplyAmendmentReportsNovelty:
+    @pytest.mark.asyncio
+    async def test_new_component_sets_component_added(self):
+        store = _FakeStore(correlation=_correlation())
+        result = await apply_amendment(
+            store=store,
+            ticket_service=_FakeTicketService(),
+            ticket_ref="TKT-1",
+            alert=AlertFacts(subject="! Warning: MPPT A7 in Kudi !", severity="warning"),
+            decision=_amend_decision(),
+            raw_text="raw notify text",
+        )
+
+        assert result is not None
+        assert result.component_added is True
+
+    @pytest.mark.asyncio
+    async def test_already_known_component_clears_component_added(self):
+        store = _FakeStore(correlation=_correlation())
+        decision = _amend_decision(
+            affected_key={"kind": "mppt", "key": "A3", "label": "MPPT A3"}
+        )
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=_FakeTicketService(),
+            ticket_ref="TKT-1",
+            alert=AlertFacts(subject="! Warning: MPPT A3 in Kudi !", severity="warning"),
+            decision=decision,
+            raw_text="raw notify text",
+        )
+
+        assert result is not None
+        assert result.decision == "amend"
+        assert result.component_added is False
+        assert result.affected_keys_count == 1
+
+    @pytest.mark.asyncio
+    async def test_amend_without_affected_key_is_not_a_component_add(self):
+        store = _FakeStore(correlation=_correlation(affected_keys=[]))
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=_FakeTicketService(),
+            ticket_ref="TKT-1",
+            alert=AlertFacts(subject="! Urgent: Grid outage in Kudi !", severity="warning"),
+            decision=_amend_decision(affected_key=None),
+            raw_text="raw notify text",
+        )
+
+        assert result is not None
+        assert result.component_added is False
+        assert result.affected_keys_count == 0
+        assert store.merge_calls == []
 
 
 class TestApplyAmendmentDuplicate:

@@ -607,9 +607,49 @@ def _decision(**overrides: Any) -> CorrelationDecision:
         candidate_refs=[],
         llm_raw=None,
         needs_root_cause_ticket=False,
+        ticket_severity="",
     )
     defaults.update(overrides)
     return CorrelationDecision(**defaults)
+
+
+class _RecordingCorrelationStore:
+    """Fake CorrelationStore for the fail-open (uncorrelated-ticket) paths.
+
+    Task 6 fixes 4 fallback sites (flag off, lock timeout, decision is None,
+    outer exception) that used to file a ticket with no ``ticket_correlations``
+    row at all -- making it permanently invisible to
+    ``open_candidates_for_grid`` and therefore a guaranteed future duplicate.
+    This fake captures ``upsert_correlation``/``record_event_ticket_ref``
+    calls so tests can assert every one of those paths now seeds a row.
+    Mirrors the interface those paths actually touch (compare to the
+    similarly-shaped, but test-local, ``_FakeStore`` in
+    ``test_new_ticket_backfills_ticket_ref_onto_its_event_row`` above -- that
+    one isn't reusable outside its own test function, so this is a separate,
+    shared fixture rather than a duplicate of it).
+    """
+
+    instances: List["_RecordingCorrelationStore"] = []
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.upsert_calls: List[Dict[str, Any]] = []
+        self.backfill_calls: List[tuple] = []
+        _RecordingCorrelationStore.instances.append(self)
+
+    async def upsert_correlation(self, **kwargs: Any) -> bool:
+        self.upsert_calls.append(kwargs)
+        return True
+
+    async def record_event_ticket_ref(self, dedup_key: str, ticket_ref: str) -> bool:
+        self.backfill_calls.append((dedup_key, ticket_ref))
+        return True
+
+
+def _patch_recording_store(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+        _RecordingCorrelationStore,
+    )
 
 
 class TestResolveNotifyTicketAutoFlagOff:
@@ -633,6 +673,30 @@ class TestResolveNotifyTicketAutoFlagOff:
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
         # Never even constructs a correlator when the flag is off.
         assert _FakeCorrelator.instances == []
+
+    async def test_flag_off_ticket_still_gets_a_correlation_row(self, monkeypatch):
+        """Regression test for Task 6: before this fix, the flag-off path
+        filed a ticket via _create_notify_ticket with no follow-up
+        upsert_correlation call, so the ticket was invisible to
+        open_candidates_for_grid forever and every future identical alert on
+        this grid would file yet another ticket."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+        body = _notify_body(ticket_id="auto", dedup_key="alert-flagoff-1")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert extra["decided_by"] == "flag_off"
+        upserts = [
+            u for s in _RecordingCorrelationStore.instances for u in s.upsert_calls
+        ]
+        assert [u["ticket_ref"] for u in upserts] == [ref]
+        backfills = [
+            b for s in _RecordingCorrelationStore.instances for b in s.backfill_calls
+        ]
+        assert backfills == [("alert-flagoff-1", ref)]
 
 
 class TestResolveNotifyTicketAutoNew:
@@ -671,6 +735,7 @@ class TestResolveNotifyTicketAutoAmend:
             telegram_chat_id="-100555",
             telegram_topic_id="42",
             telegram_message_id=123,
+            component_added=True,
         )
         _FakeCorrelator.decision_to_return = _decision(
             decision="amend",
@@ -898,6 +963,167 @@ class TestResolveNotifyTicketAutoAmend:
         assert len(fake_telegram_send.calls) == 1
 
 
+class TestResolveNotifyTicketAutoReplay:
+    async def test_replayed_amend_does_not_renotify_or_recomment(
+        self, fake_apply_amendment, monkeypatch
+    ):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        calls, _result_holder = fake_apply_amendment
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="amend",
+            ticket_ref="OPS-3353",
+            confidence=0.9,
+            decided_by="replay",
+            reason="replayed prior decision (dedup_key match)",
+            affected_key=None,
+            ticket_severity="warning",
+        )
+        body = _notify_body(ticket_id="auto", dedup_key="alert-42")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "OPS-3353"
+        assert extra["decided_by"] == "replay"
+        assert delivery is not None
+        assert delivery.suppress is True
+        # The prior run already amended the ticket and already posted.
+        assert calls == []
+
+    async def test_replayed_urgent_escalation_still_applies(
+        self, fake_apply_amendment, monkeypatch
+    ):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="OPS-3353",
+            decision="amend",
+            escalated=True,
+            affected_keys_count=0,
+            occurrence_count=4,
+            telegram_chat_id="-100555",
+            telegram_topic_id="42",
+            telegram_message_id=123,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="amend",
+            ticket_ref="OPS-3353",
+            confidence=0.9,
+            decided_by="replay",
+            reason="replayed prior decision (dedup_key match)",
+            affected_key=None,
+            ticket_severity="warning",
+        )
+        body = _notify_body(
+            ticket_id="auto",
+            dedup_key="alert-42",
+            alert={"subject": "! Urgent: Grid outage", "severity": "urgent"},
+        )
+
+        ref, error, _extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "OPS-3353"
+        assert len(calls) == 1
+        assert delivery is not None
+        assert delivery.suppress is False
+        assert delivery.top_level is True
+
+    async def test_replayed_new_decision_with_urgent_escalation_amends_not_duplicates(
+        self, fake_apply_amendment, monkeypatch
+    ):
+        """Regression test for a holistic-review bug: a replay whose ORIGINAL
+        decision was "new" (ticket_ref backfilled after the ticket was
+        actually created -- see
+        test_new_ticket_backfills_ticket_ref_onto_its_event_row) must still
+        escalate the existing ticket on an urgent severity bump, not file a
+        second one. decision.decision on a replay is whatever the original
+        decision type was, so the "new"-ticket branch's bare
+        `decision.decision == "new"` check would otherwise fire."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="OPS-3363",
+            decision="amend",
+            escalated=True,
+            affected_keys_count=0,
+            occurrence_count=2,
+            telegram_chat_id="-100555",
+            telegram_topic_id="42",
+            telegram_message_id=123,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="new",
+            ticket_ref="OPS-3363",
+            decided_by="replay",
+            confidence=None,
+            ticket_severity="warning",
+        )
+        body = _notify_body(
+            ticket_id="auto",
+            dedup_key="alert-42",
+            alert={"subject": "! Urgent: Grid outage", "severity": "urgent"},
+        )
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "OPS-3363"
+        # Must escalate the existing ticket, not file a second one.
+        assert len(calls) == 1
+        svc = _FakeTicketService.instances[-1]
+        assert svc.create_ticket_calls == []
+        assert delivery is not None
+        assert delivery.suppress is False
+        assert delivery.top_level is True
+
+    async def test_new_ticket_backfills_ticket_ref_onto_its_event_row(self, monkeypatch):
+        """Regression test for the delivery-idempotency gap a code reviewer
+        flagged in this fix: a "new" decision's ``ticket_correlation_events``
+        row is written with ``ticket_ref=None`` (nothing exists yet at
+        decide-time -- see AlertCorrelator._finalize), so without a backfill
+        a later replay of the same dedup_key would find ``ticket_ref=None``,
+        fail the replay guard's truthiness check, and file a duplicate
+        ticket. This exercises the actual app.py wiring added in
+        _resolve_notify_ticket_auto -- that it calls
+        store.record_event_ticket_ref(dedup_key, <new ticket ref>)
+        immediately after a brand-new ticket is created and correlated."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+
+        class _FakeStore:
+            def __init__(self) -> None:
+                self.upsert_calls: List[Dict[str, Any]] = []
+                self.backfill_calls: List[tuple] = []
+
+            async def upsert_correlation(self, **kwargs):
+                self.upsert_calls.append(kwargs)
+                return True
+
+            async def record_event_ticket_ref(self, dedup_key, ticket_ref):
+                self.backfill_calls.append((dedup_key, ticket_ref))
+                return True
+
+        store = _FakeStore()
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+            lambda get_client=None: store,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="new", ticket_ref=None, decided_by="no_candidates"
+        )
+        body = _notify_body(ticket_id="auto", dedup_key="alert-42")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert extra["decision"] == "new"
+        # The new ticket's ref must be backfilled onto the dedup_key's event
+        # row -- exactly once, with the ref the ticket service actually
+        # returned -- so a later replay's get_by_dedup_key() lookup finds a
+        # populated ticket_ref and the guard above can suppress correctly.
+        assert store.backfill_calls == [("alert-42", ref)]
+
+
 class TestResolveNotifyTicketAutoDuplicate:
     async def test_duplicate_decision_returns_existing_ref_without_new_ticket(
         self, fake_apply_amendment, monkeypatch
@@ -1000,6 +1226,31 @@ class TestResolveNotifyTicketAutoFailureModes:
         assert delivery is not None
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
 
+    async def test_correlator_exception_ticket_still_gets_a_correlation_row(self, monkeypatch):
+        """Regression test for Task 6: this fallback (correlator.decide()
+        raises -> decision = None -> plain ticket) used to call
+        _create_notify_ticket with no upsert_correlation follow-up, leaving
+        the ticket invisible to open_candidates_for_grid for every future
+        alert on this grid."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+        _FakeCorrelator.raise_error = RuntimeError("LLM gateway down")
+        body = _notify_body(ticket_id="auto", dedup_key="alert-decision-none-1")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert extra["decided_by"] == "fallback"
+        upserts = [
+            u for s in _RecordingCorrelationStore.instances for u in s.upsert_calls
+        ]
+        assert [u["ticket_ref"] for u in upserts] == [ref]
+        backfills = [
+            b for s in _RecordingCorrelationStore.instances for b in s.backfill_calls
+        ]
+        assert backfills == [("alert-decision-none-1", ref)]
+
     async def test_lock_timeout_falls_back_to_plain_create(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
 
@@ -1026,10 +1277,81 @@ class TestResolveNotifyTicketAutoFailureModes:
         assert ref == "TKT-000001"
         assert extra["decided_by"] == "fallback"
         assert observed_timeout_seconds == [
-            DEFAULT_CORRELATION_POLICY.llm_timeout_seconds
+            DEFAULT_CORRELATION_POLICY.grid_lock_timeout_seconds
         ]
         assert delivery is not None
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
+
+    async def test_lock_timeout_ticket_still_gets_a_correlation_row(self, monkeypatch):
+        """Regression test for Task 6: the grid-lock-timeout fallback used to
+        call _create_notify_ticket with no upsert_correlation follow-up,
+        leaving the ticket invisible to open_candidates_for_grid for every
+        future alert on this grid."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+
+        from contextlib import asynccontextmanager
+
+        import orchestrator.api.app as app_module
+
+        @asynccontextmanager
+        async def _never_available(grid_name, timeout_seconds):
+            yield False
+
+        monkeypatch.setattr(app_module, "_acquire_grid_correlation_lock", _never_available)
+        body = _notify_body(ticket_id="auto", dedup_key="alert-lock-timeout-1")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert extra["decided_by"] == "fallback"
+        upserts = [
+            u for s in _RecordingCorrelationStore.instances for u in s.upsert_calls
+        ]
+        assert [u["ticket_ref"] for u in upserts] == [ref]
+        backfills = [
+            b for s in _RecordingCorrelationStore.instances for b in s.backfill_calls
+        ]
+        assert backfills == [("alert-lock-timeout-1", ref)]
+
+    async def test_outer_exception_ticket_still_gets_a_correlation_row(self, monkeypatch):
+        """Regression test for Task 6: when a decision comes back (not None)
+        but something raises while executing it (e.g. apply_amendment
+        crashes), the outer `except Exception:` fallback used to call
+        _create_notify_ticket with no upsert_correlation follow-up, leaving
+        the ticket invisible to open_candidates_for_grid for every future
+        alert on this grid."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+
+        async def _boom(**kwargs: Any):
+            raise RuntimeError("apply_amendment blew up")
+
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlation_render.apply_amendment", _boom
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="amend",
+            ticket_ref="OPS-9001",
+            confidence=0.9,
+            decided_by="llm",
+        )
+        body = _notify_body(ticket_id="auto", dedup_key="alert-outer-exc-1")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert extra["decided_by"] == "fallback"
+        upserts = [
+            u for s in _RecordingCorrelationStore.instances for u in s.upsert_calls
+        ]
+        assert [u["ticket_ref"] for u in upserts] == [ref]
+        backfills = [
+            b for s in _RecordingCorrelationStore.instances for b in s.backfill_calls
+        ]
+        assert backfills == [("alert-outer-exc-1", ref)]
 
     async def test_ticket_creation_failure_still_delivers_base_alert(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
@@ -1495,6 +1817,7 @@ def test_amend_delivery_names_new_component_and_distinct_total():
         telegram_chat_id="-100555",
         telegram_topic_id="42",
         telegram_message_id=555,
+        component_added=True,
     )
     ticket = NotificationTicket(ref="TKT-000042", backend="internal")
 
@@ -1503,6 +1826,114 @@ def test_amend_delivery_names_new_component_and_distinct_total():
     assert delivery.ticket == ticket
     assert delivery.text_override == "Added MPPT A7 (2 affected components)"
     assert delivery.reply_to_message_id == 555
+
+
+def test_amend_delivery_is_silent_when_no_component_was_added():
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3352",
+        confidence=0.9,
+        decided_by="llm",
+        reason="same root cause",
+        affected_key={"kind": "mppt", "key": "J47M", "label": "MPPT J47M"},
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3352"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3352",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=16,
+        occurrence_count=42,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+        component_added=False,
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3352", backend="jira")
+    )
+
+    assert delivery.suppress is True
+    assert delivery.text_override is None
+
+
+def test_amend_delivery_never_announces_a_nameless_component():
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3353",
+        confidence=0.9,
+        decided_by="llm",
+        reason="grid level",
+        affected_key=None,
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3353"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3353",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=0,
+        occurrence_count=9,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+        component_added=False,
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3353", backend="jira")
+    )
+
+    assert delivery.suppress is True
+
+
+def test_amend_delivery_posts_escalation_without_a_component_add():
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3353",
+        confidence=0.9,
+        decided_by="llm",
+        reason="urgent now",
+        affected_key=None,
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3353"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3353",
+        decision="amend",
+        escalated=True,
+        affected_keys_count=0,
+        occurrence_count=9,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+        component_added=False,
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3353", backend="jira")
+    )
+
+    assert delivery.suppress is False
+    assert delivery.top_level is True
+    assert delivery.text_override == "Escalated to urgent"
 
 
 def test_duplicate_delivery_is_silent():

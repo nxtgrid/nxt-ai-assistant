@@ -17,7 +17,11 @@ Decision pipeline (cheapest/safest first -- most alerts never reach the LLM):
 2. No open candidates for the grid -> "new".
 3. An open candidate already has this alert's exact ``(signature,
    component_key)`` pair -> deterministic "duplicate", never touches the LLM.
-4. Otherwise, ask the LLM, then run its response through
+4. For an alert with no identifiable component, an open candidate already
+   carrying this alert's exact ``signature`` -> deterministic "duplicate",
+   never touches the LLM (there is no component key that could make it a
+   distinct affected component).
+5. Otherwise, ask the LLM, then run its response through
    ``_apply_guardrails`` -- which can force "new" (unknown ref, low
    confidence, unparseable response), downgrade "duplicate" to "amend" (no
    signature overlap and not a confident "same_issue"), or flag
@@ -36,7 +40,7 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -46,7 +50,10 @@ from shared.llm import GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 from . import correlation_rules
-from .alert_facts import AlertFacts
+from .alert_facts import AlertFacts, same_component
+
+if TYPE_CHECKING:
+    from .backend import TicketStatus
 
 LOGGER = get_logger(__name__)
 
@@ -249,8 +256,24 @@ def _find_signature_duplicate(
         if alert.signature not in (candidate.signatures or []):
             continue
         for entry in candidate.affected_keys or []:
-            if entry.get("kind") == alert.component_kind and entry.get("key") == alert.component_key:
+            if same_component(entry, alert.component_kind, alert.component_key):
                 return candidate
+    return None
+
+
+def _find_signature_only_duplicate(
+    candidates: List[CandidateSummary], alert: AlertFacts
+) -> Optional[CandidateSummary]:
+    """Rung 4: for an alert with no identifiable component, an open candidate
+    carrying this exact signature *is* the same alert re-firing -- there is no
+    component key that could make it a distinct affected component. Without
+    this, identical grid-level and unparsed-device alerts depend entirely on an
+    LLM judgment that falls back to "new" (a duplicate ticket) on any hiccup."""
+    if not alert.signature or alert.component_kind:
+        return None
+    for candidate in candidates:
+        if alert.signature in (candidate.signatures or []):
+            return candidate
     return None
 
 
@@ -348,6 +371,7 @@ class AlertCorrelator:
         timeout_seconds: Optional[float] = None,
         lookback_hours: Optional[int] = None,
         max_candidates: Optional[int] = None,
+        candidate_status_concurrency: Optional[int] = None,
         get_correlation_instructions: Optional[Callable[[], Dict[str, str]]] = None,
         get_rag_context: Optional[Callable[..., Awaitable[List[str]]]] = None,
         get_grid_operational_context: Optional[Callable[[str], Awaitable[Dict[str, Any]]]] = None,
@@ -378,6 +402,11 @@ class AlertCorrelator:
             max_candidates
             if max_candidates is not None
             else policy.maximum_candidate_count
+        )
+        self._candidate_status_concurrency = (
+            candidate_status_concurrency
+            if candidate_status_concurrency is not None
+            else policy.candidate_status_concurrency
         )
         self._get_correlation_instructions = (
             get_correlation_instructions or correlation_rules.get_correlation_instructions
@@ -450,21 +479,38 @@ class AlertCorrelator:
                 _fallback_decision("no open candidates for grid", [], decided_by="no_candidates"),
             )
 
-        duplicate = _find_signature_duplicate(candidates, alert)
+        duplicate = _find_signature_duplicate(candidates, alert) or (
+            _find_signature_only_duplicate(candidates, alert)
+        )
         if duplicate is not None:
             severity_increased = _is_urgent_severity_increase(
                 alert.severity, duplicate.severity
             )
+            # alert.component_kind is truthy only for matches found via
+            # _find_signature_duplicate (component-keyed); a keyless match can
+            # only have come from _find_signature_only_duplicate, which
+            # requires component_kind to be empty.
+            keyed_match = bool(alert.component_kind)
+            if keyed_match:
+                reason = (
+                    "urgent severity increase on an exact signature+component match"
+                    if severity_increased
+                    else "exact signature+component match against an open ticket"
+                )
+            else:
+                reason = (
+                    "urgent severity increase on an exact signature match "
+                    "(grid-level alert, no equipment key)"
+                    if severity_increased
+                    else "exact signature match against an open ticket "
+                    "(grid-level alert, no equipment key)"
+                )
             decision = CorrelationDecision(
                 decision="amend" if severity_increased else "duplicate",
                 ticket_ref=duplicate.ref,
                 confidence=1.0,
                 decided_by="signature",
-                reason=(
-                    "urgent severity increase on an exact signature+component match"
-                    if severity_increased
-                    else "exact signature+component match against an open ticket"
-                ),
+                reason=reason,
                 affected_key={
                     "kind": alert.component_kind,
                     "key": alert.component_key,
@@ -586,13 +632,14 @@ class AlertCorrelator:
                 status=summary.status,
             )
 
+        semaphore = asyncio.Semaphore(self._candidate_status_concurrency)
+        ordered = list(by_ref.values())
+        statuses = await asyncio.gather(
+            *(self._confirm_candidate_status(c, semaphore) for c in ordered)
+        )
+
         confirmed: List[CandidateSummary] = []
-        for candidate in by_ref.values():
-            try:
-                status = await self._ticket_service.get_status(candidate.ref)
-            except Exception:
-                LOGGER.warning("Candidate status lookup raised for {!r}", candidate.ref, exc_info=True)
-                status = None
+        for candidate, status in zip(ordered, statuses):
             if status is not None and status.is_done:
                 if candidate.ref in store_refs:
                     await self._store.mark_closed(candidate.ref)
@@ -600,11 +647,23 @@ class AlertCorrelator:
             if status is None and candidate.ref not in store_refs:
                 continue
             if status is None:
-                LOGGER.warning("Preserving cached candidate {!r}: status unavailable", candidate.ref)
+                LOGGER.warning("Preserving cached candidate %r: status unavailable", candidate.ref)
             confirmed.append(candidate)
 
         confirmed.sort(key=lambda c: c.age_hours if c.age_hours is not None else 0.0)
         return confirmed[: self._max_candidates]
+
+    async def _confirm_candidate_status(
+        self, candidate: CandidateSummary, semaphore: asyncio.Semaphore
+    ) -> Optional[TicketStatus]:
+        async with semaphore:
+            try:
+                return await self._ticket_service.get_status(candidate.ref)
+            except Exception:
+                LOGGER.warning(
+                    "Candidate status lookup raised for %r", candidate.ref, exc_info=True
+                )
+                return None
 
     async def _call_llm(
         self,

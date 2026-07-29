@@ -31,8 +31,14 @@ class CorrelationPolicy:
 
     confidence_floor: float = 0.75
     llm_timeout_seconds: float = 12
+    # The lock is held across candidate assembly (Jira search + status
+    # confirmation) *and* the LLM call, so it must outlast the LLM budget --
+    # sharing it made every concurrent alert on a busy grid file its own
+    # ticket.
+    grid_lock_timeout_seconds: float = 45
     open_candidate_window_hours: int = 168
     maximum_candidate_count: int = 15
+    candidate_status_concurrency: int = 5
 
 
 DEFAULT_CORRELATION_POLICY = CorrelationPolicy()
