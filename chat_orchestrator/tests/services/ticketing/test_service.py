@@ -318,7 +318,7 @@ class TestNotifyTicketFallback:
             ref="TKT-000101", backend="internal", url=None, ticket_id="ticket-1"
         )
         assert outcome.fallback_used is True
-        assert outcome.error == "Jira: Jira unavailable"
+        assert outcome.error == "Jira unavailable"
         assert len(jira.create_calls) == 1
         assert len(internal.create_calls) == 1
 

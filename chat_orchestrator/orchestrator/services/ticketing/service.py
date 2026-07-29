@@ -228,7 +228,7 @@ class TicketService:
                 )
             return TicketCreateOutcome(
                 result=canonical_result,
-                error=f"Jira: {primary_error}",
+                error=str(primary_error),
                 fallback_used=True,
             )
 
