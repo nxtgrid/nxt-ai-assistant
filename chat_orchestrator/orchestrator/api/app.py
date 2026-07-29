@@ -1232,6 +1232,48 @@ async def _record_new_correlation(
         )
 
 
+async def _file_uncorrelated_ticket(
+    body: "NotifyRequest",
+    target: "GridNotificationTarget",
+    backend_override: str,
+    alert: "AlertFacts",
+    alert_context: UrgentAlertContext,
+    store: Any,
+    decided_by: str,
+) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
+    """File a plain ticket on a fail-open path *and* record its correlation row.
+
+    Without the row the ticket is invisible to ``open_candidates_for_grid``
+    forever, so the next identical alert cannot correlate with it and files yet
+    another ticket. Recording is best-effort inside ``_record_new_correlation``
+    -- a store outage still leaves the ticket filed and the alert delivered.
+
+    Returns the same 4-tuple shape as ``_resolve_notify_ticket_auto`` itself
+    (``response`` is always ``None`` here -- no path through this helper
+    produces one) so callers can return its result directly.
+    """
+    summary = _notify_ticket_subject(body)
+    result, error = await _create_notify_ticket(
+        body, target, backend_override, alert_context=alert_context
+    )
+    if error is not None:
+        return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
+    await _record_new_correlation(store, target, alert, result, None, summary, body.text)
+    if body.dedup_key:
+        await store.record_event_ticket_ref(body.dedup_key, result.ref)
+    return (
+        result.ref,
+        None,
+        {
+            "decision": "new",
+            "correlated_with": None,
+            "confidence": None,
+            "decided_by": decided_by,
+        },
+        _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
+    )
+
+
 @dataclass(frozen=True)
 class NotificationTicket:
     """Backend-neutral ticket data needed to render a notification."""
@@ -1436,30 +1478,10 @@ async def _resolve_notify_ticket_auto(
     ``ticket_id=""``). An alert is never dropped; correlation only ever adds
     grouping on top, never a new way to fail.
     """
-    from shared.config import flag_registry as fr
-
-    if not fr.get("ALERT_CORRELATION_ENABLED"):
-        result, error = await _create_notify_ticket(
-            body, target, backend_override, alert_context=alert_context
-        )
-        if error is not None:
-            return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
-        return (
-            result.ref,
-            None,
-            {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "flag_off"},
-            _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
-        )
-
     from orchestrator.services.supabase_client import get_supabase_client
     from orchestrator.services.ticketing.alert_facts import enrich_alert_facts
-    from orchestrator.services.ticketing.correlation_render import apply_amendment
-    from orchestrator.services.ticketing.correlation_rules import (
-        DEFAULT_CORRELATION_POLICY,
-    )
     from orchestrator.services.ticketing.correlation_store import CorrelationStore
-    from orchestrator.services.ticketing.correlator import AlertCorrelator
-    from orchestrator.services.ticketing.service import TicketService
+    from shared.config import flag_registry as fr
 
     if body.alert is not None:
         base_alert = body.alert
@@ -1470,7 +1492,21 @@ async def _resolve_notify_ticket_auto(
         base_alert = AlertFacts(subject=first_line, details=body.text)
     alert = enrich_alert_facts(base_alert, grid_name=target.grid_name)
 
+    if not fr.get("ALERT_CORRELATION_ENABLED"):
+        store = CorrelationStore(get_client=_raw_supabase_client)
+        return await _file_uncorrelated_ticket(
+            body, target, backend_override, alert, alert_context, store, "flag_off"
+        )
+
+    from orchestrator.services.ticketing.correlation_render import apply_amendment
+    from orchestrator.services.ticketing.correlation_rules import (
+        DEFAULT_CORRELATION_POLICY,
+    )
+    from orchestrator.services.ticketing.correlator import AlertCorrelator
+    from orchestrator.services.ticketing.service import TicketService
+
     timeout_seconds = DEFAULT_CORRELATION_POLICY.llm_timeout_seconds
+    store = CorrelationStore(get_client=_raw_supabase_client)
 
     async with _acquire_grid_correlation_lock(target.grid_name, timeout_seconds) as acquired:
         if not acquired:
@@ -1478,19 +1514,10 @@ async def _resolve_notify_ticket_auto(
                 "Notify: grid-correlation lock timeout for %r -- filing plain ticket",
                 target.grid_name,
             )
-            result, error = await _create_notify_ticket(
-                body, target, backend_override, alert_context=alert_context
-            )
-            if error is not None:
-                return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
-            return (
-                result.ref,
-                None,
-                {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
+            return await _file_uncorrelated_ticket(
+                body, target, backend_override, alert, alert_context, store, "fallback"
             )
 
-        store = CorrelationStore(get_client=_raw_supabase_client)
         ticket_service = TicketService(get_supabase_client=get_supabase_client)
         correlator = AlertCorrelator(store=store, ticket_service=ticket_service)
 
@@ -1510,16 +1537,8 @@ async def _resolve_notify_ticket_auto(
             decision = None
 
         if decision is None:
-            result, error = await _create_notify_ticket(
-                body, target, backend_override, alert_context=alert_context
-            )
-            if error is not None:
-                return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
-            return (
-                result.ref,
-                None,
-                {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
+            return await _file_uncorrelated_ticket(
+                body, target, backend_override, alert, alert_context, store, "fallback"
             )
 
         try:
@@ -1701,16 +1720,8 @@ async def _resolve_notify_ticket_auto(
                 "Notify: correlation execution raised for grid %r -- filing plain ticket",
                 target.grid_name,
             )
-            result, error = await _create_notify_ticket(
-                body, target, backend_override, alert_context=alert_context
-            )
-            if error is not None:
-                return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
-            return (
-                result.ref,
-                None,
-                {"decision": "new", "correlated_with": None, "confidence": None, "decided_by": "fallback"},
-                _new_ticket_delivery(_notification_ticket_from_result(result), alert_context),
+            return await _file_uncorrelated_ticket(
+                body, target, backend_override, alert, alert_context, store, "fallback"
             )
 
 

@@ -589,6 +589,45 @@ def _decision(**overrides: Any) -> CorrelationDecision:
     return CorrelationDecision(**defaults)
 
 
+class _RecordingCorrelationStore:
+    """Fake CorrelationStore for the fail-open (uncorrelated-ticket) paths.
+
+    Task 6 fixes 4 fallback sites (flag off, lock timeout, decision is None,
+    outer exception) that used to file a ticket with no ``ticket_correlations``
+    row at all -- making it permanently invisible to
+    ``open_candidates_for_grid`` and therefore a guaranteed future duplicate.
+    This fake captures ``upsert_correlation``/``record_event_ticket_ref``
+    calls so tests can assert every one of those paths now seeds a row.
+    Mirrors the interface those paths actually touch (compare to the
+    similarly-shaped, but test-local, ``_FakeStore`` in
+    ``test_new_ticket_backfills_ticket_ref_onto_its_event_row`` above -- that
+    one isn't reusable outside its own test function, so this is a separate,
+    shared fixture rather than a duplicate of it).
+    """
+
+    instances: List["_RecordingCorrelationStore"] = []
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.upsert_calls: List[Dict[str, Any]] = []
+        self.backfill_calls: List[tuple] = []
+        _RecordingCorrelationStore.instances.append(self)
+
+    async def upsert_correlation(self, **kwargs: Any) -> bool:
+        self.upsert_calls.append(kwargs)
+        return True
+
+    async def record_event_ticket_ref(self, dedup_key: str, ticket_ref: str) -> bool:
+        self.backfill_calls.append((dedup_key, ticket_ref))
+        return True
+
+
+def _patch_recording_store(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+        _RecordingCorrelationStore,
+    )
+
+
 class TestResolveNotifyTicketAutoFlagOff:
     async def test_flag_off_files_plain_ticket(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
@@ -610,6 +649,30 @@ class TestResolveNotifyTicketAutoFlagOff:
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
         # Never even constructs a correlator when the flag is off.
         assert _FakeCorrelator.instances == []
+
+    async def test_flag_off_ticket_still_gets_a_correlation_row(self, monkeypatch):
+        """Regression test for Task 6: before this fix, the flag-off path
+        filed a ticket via _create_notify_ticket with no follow-up
+        upsert_correlation call, so the ticket was invisible to
+        open_candidates_for_grid forever and every future identical alert on
+        this grid would file yet another ticket."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+        body = _notify_body(ticket_id="auto", dedup_key="alert-flagoff-1")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert extra["decided_by"] == "flag_off"
+        upserts = [
+            u for s in _RecordingCorrelationStore.instances for u in s.upsert_calls
+        ]
+        assert [u["ticket_ref"] for u in upserts] == [ref]
+        backfills = [
+            b for s in _RecordingCorrelationStore.instances for b in s.backfill_calls
+        ]
+        assert backfills == [("alert-flagoff-1", ref)]
 
 
 class TestResolveNotifyTicketAutoNew:
@@ -1091,6 +1154,31 @@ class TestResolveNotifyTicketAutoFailureModes:
         assert delivery is not None
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
 
+    async def test_correlator_exception_ticket_still_gets_a_correlation_row(self, monkeypatch):
+        """Regression test for Task 6: this fallback (correlator.decide()
+        raises -> decision = None -> plain ticket) used to call
+        _create_notify_ticket with no upsert_correlation follow-up, leaving
+        the ticket invisible to open_candidates_for_grid for every future
+        alert on this grid."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+        _FakeCorrelator.raise_error = RuntimeError("LLM gateway down")
+        body = _notify_body(ticket_id="auto", dedup_key="alert-decision-none-1")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert extra["decided_by"] == "fallback"
+        upserts = [
+            u for s in _RecordingCorrelationStore.instances for u in s.upsert_calls
+        ]
+        assert [u["ticket_ref"] for u in upserts] == [ref]
+        backfills = [
+            b for s in _RecordingCorrelationStore.instances for b in s.backfill_calls
+        ]
+        assert backfills == [("alert-decision-none-1", ref)]
+
     async def test_lock_timeout_falls_back_to_plain_create(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
 
@@ -1121,6 +1209,77 @@ class TestResolveNotifyTicketAutoFailureModes:
         ]
         assert delivery is not None
         assert delivery.record_message_id_for_ticket_ref == "TKT-000001"
+
+    async def test_lock_timeout_ticket_still_gets_a_correlation_row(self, monkeypatch):
+        """Regression test for Task 6: the grid-lock-timeout fallback used to
+        call _create_notify_ticket with no upsert_correlation follow-up,
+        leaving the ticket invisible to open_candidates_for_grid for every
+        future alert on this grid."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+
+        from contextlib import asynccontextmanager
+
+        import orchestrator.api.app as app_module
+
+        @asynccontextmanager
+        async def _never_available(grid_name, timeout_seconds):
+            yield False
+
+        monkeypatch.setattr(app_module, "_acquire_grid_correlation_lock", _never_available)
+        body = _notify_body(ticket_id="auto", dedup_key="alert-lock-timeout-1")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert extra["decided_by"] == "fallback"
+        upserts = [
+            u for s in _RecordingCorrelationStore.instances for u in s.upsert_calls
+        ]
+        assert [u["ticket_ref"] for u in upserts] == [ref]
+        backfills = [
+            b for s in _RecordingCorrelationStore.instances for b in s.backfill_calls
+        ]
+        assert backfills == [("alert-lock-timeout-1", ref)]
+
+    async def test_outer_exception_ticket_still_gets_a_correlation_row(self, monkeypatch):
+        """Regression test for Task 6: when a decision comes back (not None)
+        but something raises while executing it (e.g. apply_amendment
+        crashes), the outer `except Exception:` fallback used to call
+        _create_notify_ticket with no upsert_correlation follow-up, leaving
+        the ticket invisible to open_candidates_for_grid for every future
+        alert on this grid."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+
+        async def _boom(**kwargs: Any):
+            raise RuntimeError("apply_amendment blew up")
+
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlation_render.apply_amendment", _boom
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="amend",
+            ticket_ref="OPS-9001",
+            confidence=0.9,
+            decided_by="llm",
+        )
+        body = _notify_body(ticket_id="auto", dedup_key="alert-outer-exc-1")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert extra["decided_by"] == "fallback"
+        upserts = [
+            u for s in _RecordingCorrelationStore.instances for u in s.upsert_calls
+        ]
+        assert [u["ticket_ref"] for u in upserts] == [ref]
+        backfills = [
+            b for s in _RecordingCorrelationStore.instances for b in s.backfill_calls
+        ]
+        assert backfills == [("alert-outer-exc-1", ref)]
 
     async def test_ticket_creation_failure_still_delivers_base_alert(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
