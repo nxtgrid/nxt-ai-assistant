@@ -1968,6 +1968,83 @@ class TestDeliverNotificationDelivery:
 
         assert recorded == [("TKT-000001", 999)]
 
+    async def test_edit_message_id_success_skips_new_send(self, fake_telegram_send, monkeypatch):
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        edit_calls: List[Dict[str, Any]] = []
+
+        async def _edit(bot_token, chat_id, message_id, text, *, parse_mode=None):
+            edit_calls.append(
+                {
+                    "bot_token": bot_token,
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "text": text,
+                    "parse_mode": parse_mode,
+                }
+            )
+            return True
+
+        monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", _edit)
+        body = _notify_body()
+        delivery = NotificationDelivery(
+            text_override="TKT-000042: MPPT A7 also affected",
+            edit_message_id=555,
+            reply_to_message_id=555,
+            ticket=NotificationTicket(ref="TKT-000042", backend="internal"),
+        )
+
+        await _deliver_notification(body, _target(), "TKT-000042", delivery)
+
+        assert len(edit_calls) == 1
+        assert edit_calls[0]["message_id"] == 555
+        assert fake_telegram_send.calls == []
+
+    async def test_edit_message_id_failure_falls_back_to_send(
+        self, fake_telegram_send, monkeypatch
+    ):
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        edit_calls: List[Dict[str, Any]] = []
+
+        async def _edit(bot_token, chat_id, message_id, text, *, parse_mode=None):
+            edit_calls.append({"message_id": message_id})
+            return False
+
+        monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", _edit)
+
+        recorded: List[tuple] = []
+
+        class _FakeCorrelationStore:
+            def __init__(self, get_client=None):
+                pass
+
+            async def record_message_id(self, ticket_ref, message_id):
+                recorded.append((ticket_ref, message_id))
+                return True
+
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+            _FakeCorrelationStore,
+        )
+        body = _notify_body()
+        delivery = NotificationDelivery(
+            text_override="TKT-000042: MPPT A7 also affected",
+            edit_message_id=555,
+            reply_to_message_id=555,
+            record_message_id_for_ticket_ref="TKT-000042",
+            ticket=NotificationTicket(ref="TKT-000042", backend="internal"),
+        )
+
+        await _deliver_notification(body, _target(), "TKT-000042", delivery)
+
+        assert len(edit_calls) == 1
+        assert len(fake_telegram_send.calls) == 1
+        assert fake_telegram_send.calls[0]["reply_to_message_id"] == 555
+        # Fallback send behaves exactly as an edit-less delivery would --
+        # the new message still gets recorded as the ticket's tracked id.
+        assert recorded == [("TKT-000042", 999)]
+
 
 def test_amend_delivery_names_new_component_and_distinct_total():
     from orchestrator.api.app import _amend_delivery
@@ -1995,14 +2072,57 @@ def test_amend_delivery_names_new_component_and_distinct_total():
         telegram_topic_id="42",
         telegram_message_id=555,
         component_added=True,
+        rendered_summary="TKT-000042: MPPT A3, MPPT A7 affected (2 components)",
     )
     ticket = NotificationTicket(ref="TKT-000042", backend="internal")
 
     delivery = _amend_delivery(decision, amendment, ticket)
 
     assert delivery.ticket == ticket
-    assert delivery.text_override == "Added MPPT A7 (2 affected components)"
+    assert delivery.text_override == amendment.rendered_summary
+    assert delivery.text_override != "Added MPPT A7 (2 affected components)"
     assert delivery.reply_to_message_id == 555
+    assert delivery.edit_message_id == 555
+
+
+def test_amend_delivery_falls_back_to_added_label_phrasing_when_rendered_summary_blank():
+    """The Jira-only-seed path can hand back an ``AmendmentResult`` without a
+    full rendered ticket summary (``rendered_summary`` defaults to ``""``).
+    In that case ``_amend_delivery`` must keep the older "Added X (...)"
+    phrasing instead of posting/editing to blank text."""
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="TKT-000042",
+        confidence=0.9,
+        decided_by="llm",
+        reason="same issue",
+        affected_key={"kind": "mppt", "key": "A7", "label": "MPPT A7"},
+        root_cause_kind=None,
+        update_message="ignored LLM wording",
+        amended_summary="",
+        candidate_refs=["TKT-000042"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="TKT-000042",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=2,
+        occurrence_count=3,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+        component_added=True,
+        rendered_summary="",
+    )
+    ticket = NotificationTicket(ref="TKT-000042", backend="internal")
+
+    delivery = _amend_delivery(decision, amendment, ticket)
+
+    assert delivery.text_override == "Added MPPT A7 (2 affected components)"
+    assert delivery.edit_message_id == 555
 
 
 def test_amend_delivery_is_silent_when_no_component_was_added():
@@ -2111,6 +2231,46 @@ def test_amend_delivery_posts_escalation_without_a_component_add():
     assert delivery.suppress is False
     assert delivery.top_level is True
     assert delivery.text_override == "Escalated to urgent"
+
+
+def test_amend_delivery_escalation_moves_the_edit_target_to_the_new_post():
+    """An escalation posts a brand-new top-level message. A future amend's
+    edit must target *that* new message, not the stale original -- so the
+    escalation branch has to set record_message_id_for_ticket_ref, the same
+    way a freshly-filed ticket does."""
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3353",
+        confidence=0.9,
+        decided_by="llm",
+        reason="urgent now",
+        affected_key=None,
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3353"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3353",
+        decision="amend",
+        escalated=True,
+        affected_keys_count=0,
+        occurrence_count=9,
+        telegram_chat_id="-100555",
+        telegram_topic_id="42",
+        telegram_message_id=555,
+        component_added=False,
+        rendered_summary="🔴 Escalated summary",
+    )
+    ticket = NotificationTicket(ref="OPS-3353", backend="jira")
+
+    delivery = _amend_delivery(decision, amendment, ticket)
+
+    assert delivery.top_level is True
+    assert delivery.record_message_id_for_ticket_ref == ticket.ref
 
 
 def test_duplicate_delivery_is_silent():

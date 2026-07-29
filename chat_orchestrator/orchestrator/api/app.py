@@ -958,7 +958,10 @@ async def _deliver_notification(
     exactly today's behavior: the full alert text, unthreaded.
     """
     from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
-    from shared.utils.telegram_send import send_telegram_message_with_fallback
+    from shared.utils.telegram_send import (
+        edit_telegram_message,
+        send_telegram_message_with_fallback,
+    )
 
     if delivery is not None and delivery.suppress:
         logger.info(
@@ -1012,6 +1015,35 @@ async def _deliver_notification(
     reply_to_message_id = (
         delivery.reply_to_message_id if delivery is not None and not delivery.top_level else None
     )
+
+    if delivery is not None and delivery.edit_message_id:
+        edited = await edit_telegram_message(
+            bot_token,
+            target.chat_id,
+            delivery.edit_message_id,
+            text,
+            parse_mode=parse_mode,
+        )
+        if edited:
+            logger.info(
+                "Notify: edited existing message_id={} source={} grid={} chat={}",
+                delivery.edit_message_id,
+                body.source,
+                target.grid_name,
+                target.chat_id,
+            )
+            # The ticket's telegram_message_id is unchanged (still the
+            # message we just edited), so there's no new message_id to
+            # record -- skip straight past the send/record-receipt paths.
+            return
+        logger.warning(
+            "Notify: edit of message_id={} failed, falling back to a new send "
+            "source={} grid={} chat={}",
+            delivery.edit_message_id,
+            body.source,
+            target.grid_name,
+            target.chat_id,
+        )
 
     message_id = await send_telegram_message_with_fallback(
         bot_token,
@@ -1392,6 +1424,7 @@ class NotificationDelivery:
     suppress: bool = False
     text_override: Optional[str] = None
     reply_to_message_id: Optional[int] = None
+    edit_message_id: Optional[int] = None  # amend: edit this message instead of replying
     top_level: bool = False  # escalation: force a fresh (non-reply) post
     record_message_id_for_ticket_ref: Optional[str] = None
     ticket: Optional[NotificationTicket] = None
@@ -1470,16 +1503,36 @@ def _amend_delivery(
         return NotificationDelivery(suppress=True)
 
     if component_added:
-        label = (decision.affected_key or {}).get("label") or "a new component"
-        count = amendment.affected_keys_count if amendment is not None else 1
-        message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
+        rendered_summary = (amendment.rendered_summary or "").strip() if amendment is not None else ""
+        if rendered_summary:
+            message = rendered_summary
+        else:
+            # Rendered summary is blank on paths that never compute a full
+            # ticket summary (e.g. the Jira-only-seed path) -- fall back to
+            # the older short phrasing rather than posting/editing to blank.
+            label = (decision.affected_key or {}).get("label") or "a new component"
+            count = amendment.affected_keys_count if amendment is not None else 1
+            message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
     else:
         message = "Escalated to urgent"
 
     if escalated:
-        return NotificationDelivery(text_override=message, top_level=True, ticket=ticket)
+        # A fresh top-level post, not an edit -- and it becomes the new edit
+        # target for any subsequent amend, so the edit target moves off the
+        # stale original message instead of staying pinned to it forever.
+        return NotificationDelivery(
+            text_override=message,
+            top_level=True,
+            record_message_id_for_ticket_ref=ticket.ref,
+            ticket=ticket,
+        )
     reply_to = amendment.telegram_message_id if amendment is not None else None
-    return NotificationDelivery(text_override=message, reply_to_message_id=reply_to, ticket=ticket)
+    return NotificationDelivery(
+        text_override=message,
+        reply_to_message_id=reply_to,
+        edit_message_id=reply_to,
+        ticket=ticket,
+    )
 
 
 def _duplicate_delivery(amendment: Any, ticket: NotificationTicket) -> NotificationDelivery:
