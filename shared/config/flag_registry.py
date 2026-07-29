@@ -133,6 +133,13 @@ class Flag:
         maximum: Inclusive upper bound for INT/FLOAT flags (UI + save validation).
         set_via: For read-only flags, a short hint about where an operator sets
             this value (e.g. "Set in the DigitalOcean console.").
+        model_picker: When set to ``"gemini"``, the settings UI renders this
+            flag as a select populated from the live Gemini model list
+            (fetched via the Google API) instead of free text. Unlike
+            :attr:`choices`, the option list isn't known statically. Distinct
+            from the provider-aware "role model" fields (``GEMINI_MODEL`` and
+            friends), which switch between Gemini and OpenRouter model lists
+            based on ``LLM_PROVIDER``.
     """
 
     name: str
@@ -154,6 +161,7 @@ class Flag:
     minimum: Optional[float] = None
     maximum: Optional[float] = None
     set_via: Optional[str] = None
+    model_picker: Optional[str] = None
 
     def coerce(self, raw: Optional[str]) -> Any:
         """Coerce a raw string (or None) to this flag's typed value."""
@@ -446,6 +454,7 @@ _FLAGS: List[Flag] = [
         "gemini-2.5-pro",
         "Model for complex agent tasks (analysis, multi-step reasoning).",
         group="models",
+        model_picker="gemini",
     ),
     _s(
         "THREAD_CLASSIFIER_MODEL",
@@ -454,6 +463,7 @@ _FLAGS: List[Flag] = [
         scope=SERVICE_BOT,
         group="models",
         depends_on="THREAD_DISENTANGLEMENT_ENABLED",
+        model_picker="gemini",
     ),
     _b(
         "GOOGLE_SEARCH_GROUNDING",
