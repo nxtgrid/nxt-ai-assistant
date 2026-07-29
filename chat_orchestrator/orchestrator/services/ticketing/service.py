@@ -226,7 +226,11 @@ class TicketService:
                 await self._stamp_escalation_mapping(
                     req.escalation_mapping_id, result.ref, result.backend
                 )
-            return TicketCreateOutcome(result=canonical_result, fallback_used=True)
+            return TicketCreateOutcome(
+                result=canonical_result,
+                error=f"Jira: {primary_error}",
+                fallback_used=True,
+            )
 
         await self._tickets.activate(intent.id, result)
         canonical_result = result.model_copy(update={"ticket_id": intent.id})

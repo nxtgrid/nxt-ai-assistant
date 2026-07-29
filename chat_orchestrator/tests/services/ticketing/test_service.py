@@ -318,9 +318,28 @@ class TestNotifyTicketFallback:
             ref="TKT-000101", backend="internal", url=None, ticket_id="ticket-1"
         )
         assert outcome.fallback_used is True
-        assert outcome.error is None
+        assert outcome.error == "Jira: Jira unavailable"
         assert len(jira.create_calls) == 1
         assert len(internal.create_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_jira_fallback_success_still_surfaces_the_jira_error(self):
+        """Even when the internal fallback succeeds, the Jira failure reason
+        must not be discarded -- it's the only thing that explains why a
+        notify ticket didn't land in Jira despite NOTIFY_TICKETS_BACKEND=auto."""
+        jira = _FakeBackend("jira", ref="OPS-42")
+        jira.create_error = TicketBackendError("field X is required")
+        internal = _FakeBackend("internal", ref="TKT-000101")
+        service = _make_service(raw_client=None, jira=jira, internal=internal)
+
+        outcome = await service.create_ticket_with_internal_fallback(
+            TicketCreateRequest(summary="! Urgent: Grid down"), backend_override="jira"
+        )
+
+        assert outcome.result is not None
+        assert outcome.fallback_used is True
+        assert outcome.error is not None
+        assert "field X is required" in outcome.error
 
     @pytest.mark.asyncio
     async def test_double_failure_returns_error_without_raising(self):

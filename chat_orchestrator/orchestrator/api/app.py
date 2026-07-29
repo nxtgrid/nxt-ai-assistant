@@ -1178,16 +1178,18 @@ async def _create_notify_ticket(
             backend_override=backend_override,
         )
     except Exception as exc:
-        logger.exception("Notify: ticket creation crashed source=%s", body.source)
+        logger.exception("Notify: ticket creation crashed source={}", body.source)
         return None, f"Ticket creation failed: {exc}"
 
     if outcome.result is None:
         error = outcome.error or "Ticket creation failed in both configured backends"
-        logger.error("Notify: ticket creation failed source=%s: %s", body.source, error)
+        logger.error("Notify: ticket creation failed source={}: {}", body.source, error)
         return None, f"Ticket creation failed: {error}"
     if outcome.fallback_used:
         logger.warning(
-            "Notify: Jira ticket creation failed; created internal fallback %s", outcome.result.ref
+            "Notify: Jira ticket creation failed; created internal fallback {} ({})",
+            outcome.result.ref,
+            outcome.error,
         )
     return outcome.result, None
 
