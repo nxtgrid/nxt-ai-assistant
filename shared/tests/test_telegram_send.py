@@ -108,3 +108,63 @@ class TestSendTelegramMessageWithFallbackReply:
         assert msg_id == 555
         _url, kwargs = fake_session.calls[-1]
         assert kwargs["json"]["reply_to_message_id"] == 123
+
+
+class TestEditTelegramMessage:
+    @pytest.mark.asyncio
+    async def test_successful_edit_returns_true_and_calls_edit_message_text(self):
+        session = FakeSession(_FakeResponse(200, {"ok": True, "result": {"message_id": 555}}))
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(telegram_send, "_get_session", lambda: session)
+            result = await telegram_send.edit_telegram_message(
+                "TOKEN", "-100", 555, "updated text", parse_mode="Markdown"
+            )
+
+        assert result is True
+        url, kwargs = session.calls[-1]
+        assert url == "https://api.telegram.org/botTOKEN/editMessageText"
+        payload = kwargs["json"]
+        assert payload["chat_id"] == "-100"
+        assert payload["message_id"] == 555
+        assert payload["text"] == "updated text"
+        assert payload["parse_mode"] == "Markdown"
+
+    @pytest.mark.asyncio
+    async def test_message_not_modified_is_treated_as_success(self):
+        session = FakeSession(
+            _FakeResponse(
+                400,
+                {
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message is not modified",
+                },
+            )
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(telegram_send, "_get_session", lambda: session)
+            result = await telegram_send.edit_telegram_message(
+                "TOKEN", "-100", 555, "same text"
+            )
+
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_other_non_2xx_response_returns_false_and_does_not_raise(self):
+        session = FakeSession(
+            _FakeResponse(
+                400,
+                {
+                    "ok": False,
+                    "error_code": 400,
+                    "description": "Bad Request: message to edit not found",
+                },
+            )
+        )
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(telegram_send, "_get_session", lambda: session)
+            result = await telegram_send.edit_telegram_message(
+                "TOKEN", "-100", 555, "new text"
+            )
+
+        assert result is False
