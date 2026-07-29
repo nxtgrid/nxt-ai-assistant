@@ -304,6 +304,8 @@ class TestApplyAmendmentAmend:
         assert result.affected_keys_count == 4
         assert not ticket_service.update_calls[0]["summary"].startswith("🔴")
         assert ticket_service.update_calls[0]["priority_id"] is None
+        assert result.rendered_summary == ticket_service.update_calls[0]["summary"]
+        assert result.rendered_summary != ""
         assert store.record_amendment_calls == [
             {
                 "ticket_ref": "TKT-1",
@@ -496,6 +498,7 @@ class TestApplyAmendmentAmend:
         assert ticket_service.comment_calls == [
             {"ref": "OPS-42", "body": "urgent raw text", "public": False}
         ]
+        assert result.rendered_summary == "🔴 ! Urgent: Kudi inverter outage"
 
 
 class TestApplyAmendmentReportsNovelty:
