@@ -839,6 +839,78 @@ BEGIN
 END;
 $$;
 
+-- ── Prompt Library ────────────────────────────────────────────────────────────
+-- Versioned prompt overrides, labels, Google Doc bindings, and knowledge
+-- modules. See db/migrations/0006_prompt_library.sql — this block mirrors it
+-- for reference; that migration file is the one applied by hand.
+
+CREATE TABLE IF NOT EXISTS prompt_versions (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    prompt_id    text NOT NULL,
+    version      integer NOT NULL,
+    body         text NOT NULL,
+    checksum     text NOT NULL,
+    note         text,
+    created_at   timestamptz NOT NULL DEFAULT now(),
+    created_by   text NOT NULL,
+    created_via  text NOT NULL DEFAULT 'ui',
+    CONSTRAINT prompt_versions_via_chk CHECK (created_via IN ('ui', 'api', 'import')),
+    CONSTRAINT prompt_versions_unique UNIQUE (prompt_id, version)
+);
+
+CREATE INDEX IF NOT EXISTS prompt_versions_prompt_idx
+    ON prompt_versions (prompt_id, version DESC);
+
+CREATE TABLE IF NOT EXISTS prompt_labels (
+    prompt_id    text NOT NULL,
+    label        text NOT NULL,
+    version      integer NOT NULL,
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    updated_by   text NOT NULL,
+    PRIMARY KEY (prompt_id, label)
+);
+
+CREATE TABLE IF NOT EXISTS prompt_doc_bindings (
+    prompt_id      text PRIMARY KEY,
+    doc_id         text NOT NULL,
+    last_synced_at timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_modules (
+    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug         text NOT NULL UNIQUE,
+    title        text NOT NULL,
+    summary      text NOT NULL,
+    body         text NOT NULL,
+    tags         text[] NOT NULL DEFAULT '{}',
+    scope        text NOT NULL DEFAULT 'sector',
+    mode         text NOT NULL DEFAULT 'pinned',
+    source       text NOT NULL DEFAULT 'manual',
+    source_ref   text,
+    edit_groups  text[] NOT NULL DEFAULT '{}',
+    version      integer NOT NULL DEFAULT 1,
+    is_active    boolean NOT NULL DEFAULT true,
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    updated_by   text,
+    CONSTRAINT knowledge_modules_mode_chk CHECK (mode IN ('pinned', 'on_demand')),
+    CONSTRAINT knowledge_modules_source_chk
+        CHECK (source IN ('manual', 'gdoc', 'ingested'))
+);
+
+CREATE INDEX IF NOT EXISTS knowledge_modules_tags_idx
+    ON knowledge_modules USING gin (tags);
+CREATE INDEX IF NOT EXISTS knowledge_modules_active_idx
+    ON knowledge_modules (is_active) WHERE is_active = true;
+
+CREATE TABLE IF NOT EXISTS prompt_knowledge_overrides (
+    prompt_id    text NOT NULL,
+    module_id    uuid NOT NULL REFERENCES knowledge_modules (id) ON DELETE CASCADE,
+    pinned       boolean NOT NULL,
+    updated_at   timestamptz NOT NULL DEFAULT now(),
+    updated_by   text,
+    PRIMARY KEY (prompt_id, module_id)
+);
+
 -- ── Auto-update triggers ──────────────────────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION update_updated_at()
@@ -859,7 +931,8 @@ BEGIN
         ('chat_sessions'), ('agent_work_packets'), ('user_schedules'),
         ('user_preferences'), ('broadcast_templates'), ('documents'),
         ('entities'), ('relationships'), ('persistent_agent_instances'),
-        ('bot_artifacts'), ('internal_tickets'), ('ticket_correlations')
+        ('bot_artifacts'), ('internal_tickets'), ('ticket_correlations'),
+        ('prompt_labels'), ('knowledge_modules'), ('prompt_knowledge_overrides')
     LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS %I ON %I; CREATE TRIGGER %I BEFORE UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION update_updated_at()',
