@@ -1,6 +1,12 @@
 """Knowledge Modules page view-model and the Prompts page knowledge tab."""
 
+import sys
+from types import SimpleNamespace
+
 import pytest
+
+sys.modules.setdefault("nicegui", SimpleNamespace(run=SimpleNamespace(), ui=SimpleNamespace()))
+
 from nicegui_app.pages.knowledge_modules import ModuleRow, build_module_rows, validate_module
 from nicegui_app.pages.prompts import build_knowledge_tab
 
