@@ -9,7 +9,7 @@ import PROMPTS``.
 
 from __future__ import annotations
 
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.prompts.bundled import BundledStore
 from shared.prompts.render import render_body, split_sections
@@ -38,9 +38,14 @@ class PromptLibrary:
         db_body_for: Optional[DbBodyFor] = None,
         gdoc_body_for: Optional[GDocBodyFor] = None,
         invalidate_gdoc: Optional[Callable[[], None]] = None,
+        overrides: Optional[Any] = None,
     ) -> None:
         self._bundled = bundled or BundledStore()
-        self._db_body_for = db_body_for
+        # `overrides` (an OverrideStore, or any object with the same duck-typed
+        # shape) supersedes a bare `db_body_for` callable: it's required for
+        # propose()/publish() below, which need more than just a body lookup.
+        self._overrides = overrides
+        self._db_body_for = overrides.body_for if overrides is not None else db_body_for
         self._gdoc_body_for = gdoc_body_for
         self._invalidate_gdoc = invalidate_gdoc
 
@@ -132,6 +137,48 @@ class PromptLibrary:
             return f"{rendered.system_text}\n\n{rendered.context_text}"
         return rendered.system_text
 
+    # ── write API ────────────────────────────────────────────────────────────
+    def propose(
+        self,
+        prompt_id: str,
+        body: str,
+        note: str,
+        actor: str,
+        via: str = "ui",
+        enforce_access: bool = True,
+    ) -> int:
+        """Append a new version. Never makes it live.
+
+        ``enforce_access=False`` is for trusted backend callers, which have no
+        email identity. They may propose; ``publish`` still refuses them.
+        """
+        from shared.prompts.access import can_edit_prompt
+
+        spec = self._bundled.get(prompt_id)
+        if enforce_access and not can_edit_prompt(spec, actor):
+            raise PermissionError(f"{actor} may not edit prompt '{prompt_id}'")
+        if not enforce_access and not spec.overridable:
+            raise PermissionError(f"prompt '{prompt_id}' is not overridable")
+        if self._overrides is None:
+            raise RuntimeError("prompt override store is not configured")
+        return self._overrides.propose(prompt_id, body, note=note, actor=actor, via=via)
+
+    def publish(self, prompt_id: str, version: int, actor: str, via: str = "ui") -> None:
+        """Make a version live. Humans only."""
+        from shared.prompts.access import can_publish_prompt
+
+        if via != "ui":
+            raise PermissionError(
+                "Automated callers may propose a prompt version but never publish one; "
+                "a human with the publish verb must promote it"
+            )
+        spec = self._bundled.get(prompt_id)
+        if not can_publish_prompt(spec, actor):
+            raise PermissionError(f"{actor} may not publish prompt '{prompt_id}'")
+        if self._overrides is None:
+            raise RuntimeError("prompt override store is not configured")
+        self._overrides.publish(prompt_id, version, actor=actor)
+
 
 def _build_default_library() -> PromptLibrary:
     from shared.prompts.gdoc import GDocStore
@@ -140,7 +187,7 @@ def _build_default_library() -> PromptLibrary:
     overrides = OverrideStore.from_env()
     gdoc_store = GDocStore(doc_id_for=overrides.doc_id_for)
     return PromptLibrary(
-        db_body_for=overrides.body_for,
+        overrides=overrides,
         gdoc_body_for=gdoc_store.body_for,
         invalidate_gdoc=gdoc_store.invalidate,
     )
