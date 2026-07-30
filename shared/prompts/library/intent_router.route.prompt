@@ -1,0 +1,38 @@
+---
+id: intent_router.route
+description: Decides whether a staff message clearly asks to start an expert workflow, and which one.
+owner: eng
+overridable: false
+output: json
+schema:
+  type: object
+  required: [should_route_to_expert]
+  properties:
+    should_route_to_expert: {type: boolean}
+    confidence: {type: number}
+    command: {type: string}
+    packet_type: {type: string}
+    key_entity: {type: string}
+    args: {type: string}
+    latitude: {type: string}
+    longitude: {type: string}
+    raw_request: {type: string}
+sections: []
+variables: [now_str, user_input_repr]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+TODAY'S DATE AND TIME: {{now_str}}
+
+Decide whether this staff message is clearly asking to start an expert workflow.
+Only route when the intent is explicit. Do not route ordinary questions, status checks, or vague requests.
+
+Supported expert workflows:
+- /lpp -> light_preliminary_package: create or generate a Light Preliminary Package for a named site or GPS coordinates.
+
+Message: {{user_input_repr}}
+
+Return only JSON with this shape:
+{"should_route_to_expert": false, "confidence": 0.0, "command": "/lpp", "packet_type": "light_preliminary_package", "key_entity": "site name or coordinate pair, if present", "args": "slash-command arguments, if present", "latitude": "decimal latitude, if present", "longitude": "decimal longitude, if present", "raw_request": "original user message"}

@@ -25,6 +25,7 @@ from typing import List, Optional
 
 from orchestrator.config.settings import get_settings
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -192,37 +193,12 @@ async def generate_suggested_procedure(
     existing_list = "\n".join(f"- Procedure {p.number}: {p.title}" for p in existing_procedures)
     next_number = max((p.number for p in existing_procedures), default=0) + 1
 
-    prompt = f"""Analyze this support conversation example and generate a suggested procedure
-that could be added to a Customer Support documentation.
-
-IMPORTANT: Use standard markdown with ## and ### for headers.
-Do NOT use *asterisks* for bold - use proper ## headers instead.
-
-The procedure should follow this exact format:
-
-## Procedure {next_number}: [Title]
-
-### Purpose
-
-[1-2 sentence description of what issue/scenario this procedure addresses]
-
-### Prerequisites
-
-- [List any required access, tools, or conditions needed]
-
-### Procedure Steps
-
-1. [First step]
-2. [Second step]
-...
-
-EXISTING PROCEDURES (for context, avoid duplicating):
-{existing_list}
-
-SUPPORT EXAMPLE CONTENT:
-{content[:8000]}
-
-Generate ONLY the procedure markdown using ## headers. No *asterisk bold*. No explanation."""
+    prompt = PROMPTS.text(
+        "procedure.suggest",
+        next_number=next_number,
+        existing_list=existing_list,
+        content=content[:8000],
+    )
 
     try:
         response = await gateway.generate(
@@ -267,22 +243,11 @@ async def match_content_to_procedures(
         for p in procedures
     )
 
-    prompt = f"""Analyze this support conversation example and determine which procedure it best matches.
-
-AVAILABLE PROCEDURES:
-{procedure_descriptions}
-
-SUPPORT EXAMPLE CONTENT (first 4000 chars):
-{content[:4000]}
-
-Respond in this exact format:
-MATCH: [procedure number, or NONE if no good match]
-CONFIDENCE: [0.0 to 1.0]
-REASONING: [1 sentence explanation]
-
-Only output MATCH with a procedure number if you are confident the support example
-demonstrates or is directly related to that procedure. If the content doesn't clearly
-fit any procedure, output MATCH: NONE."""
+    prompt = PROMPTS.text(
+        "procedure.match",
+        procedure_descriptions=procedure_descriptions,
+        content=content[:4000],
+    )
 
     try:
         response = await gateway.generate(

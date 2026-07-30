@@ -1,0 +1,51 @@
+---
+id: verification.sanitize
+description: Checks a customer-facing response for leaked internal technical details and rewrites it if needed.
+owner: eng
+overridable: false
+output: json
+schema:
+  type: object
+  required: [has_technical_details]
+  properties:
+    has_technical_details: {type: boolean}
+    issues_found:
+      type: array
+      items: {type: string}
+    rewritten_response: {type: string}
+sections: []
+variables: [response_text, context]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+Analyze this response that will be sent to a user. Check if it contains any internal technical details that should not be exposed:
+
+RESPONSE TO CHECK:
+{{response_text}}
+
+CONTEXT: This response is from a {{context}}.
+
+Check for these issues:
+1. Internal step/function names (e.g., "step copy_lpp_template", "generate_distribution_map")
+2. Protection markers (e.g., "__PROTECTED_CMD_", "⟦CMD")
+3. File paths (e.g., "/app/orchestrator/...")
+4. Python/code error traces or stack traces
+5. Internal field names with underscores (e.g., "packet_state", "site_id")
+6. Technical jargon the user wouldn't understand
+7. Raw error codes or internal status values
+
+Respond with JSON only:
+{
+  "has_technical_details": true or false,
+  "issues_found": ["list of specific issues found"],
+  "rewritten_response": "If has_technical_details is true, provide a user-friendly version that conveys the same information without technical details. If false, leave empty."
+}
+
+Guidelines for rewriting:
+- Keep the same meaning and tone
+- Replace technical terms with plain language
+- If there was an error, explain what the user should do
+- Be helpful and friendly
+- Don't mention internal systems or step names

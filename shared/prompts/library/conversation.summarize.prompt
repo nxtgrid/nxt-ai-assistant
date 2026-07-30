@@ -1,0 +1,33 @@
+---
+id: conversation.summarize
+description: Summarizes a batch of old conversation messages into a compact context summary.
+owner: ops
+overridable: true
+output: text
+sections: []
+variables: [messages]
+access:
+  view: [ops, eng]
+  edit: [ops]
+  publish: [ops]
+---
+Summarize the following conversation messages into a concise context summary.
+
+Focus on:
+1. Key topics discussed (grid names, ticket numbers, meter IDs)
+2. Decisions made or questions answered
+3. Open questions or pending items
+4. Any entities mentioned (grid names, people, organizations)
+
+Format the summary as:
+**Topics:** [comma-separated list]
+**Key Points:**
+- [point 1]
+- [point 2]
+**Entities:** [comma-separated list of mentioned grids, tickets, people]
+**Open Items:** [any unresolved questions or pending actions]
+
+Messages to summarize:
+{{messages}}
+
+Keep the summary under 500 tokens. Be factual and concise.

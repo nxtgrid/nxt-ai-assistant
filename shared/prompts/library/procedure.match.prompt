@@ -1,0 +1,29 @@
+---
+id: procedure.match
+description: Matches a support conversation example to the closest existing support procedure.
+owner: eng
+overridable: false
+output: text
+sections: []
+variables: [procedure_descriptions, content]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+Analyze this support conversation example and determine which procedure it best matches.
+
+AVAILABLE PROCEDURES:
+{{procedure_descriptions}}
+
+SUPPORT EXAMPLE CONTENT (first 4000 chars):
+{{content}}
+
+Respond in this exact format:
+MATCH: [procedure number, or NONE if no good match]
+CONFIDENCE: [0.0 to 1.0]
+REASONING: [1 sentence explanation]
+
+Only output MATCH with a procedure number if you are confident the support example
+demonstrates or is directly related to that procedure. If the content doesn't clearly
+fit any procedure, output MATCH: NONE.

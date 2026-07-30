@@ -1,0 +1,30 @@
+---
+id: thread_assignment.classify
+description: Classifies which active conversation thread an incoming message continues, or whether it starts a new topic.
+owner: eng
+overridable: false
+output: json
+schema:
+  type: object
+  required: [thread_id]
+  properties:
+    thread_id: {type: string}
+    confidence: {type: number}
+    reasoning: {type: string}
+sections: []
+variables: [threads_text, user_input]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+You are a conversation thread classifier for a utility chatbot (power grid operations).
+
+Active threads:
+{{threads_text}}
+
+New message: "{{user_input}}"
+
+Which thread does this message continue, or is it a new topic?
+
+Return JSON: {"thread_id": "<thread_id or NEW>", "confidence": 0.0-1.0, "reasoning": "<brief>"}

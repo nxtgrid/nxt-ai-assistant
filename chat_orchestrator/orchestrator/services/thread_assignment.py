@@ -19,6 +19,7 @@ from typing import List, Optional
 
 from orchestrator.models.schemas import ConversationMessage
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -280,16 +281,11 @@ class ThreadAssignmentService:
 
         threads_text = "\n\n".join(thread_summaries)
 
-        prompt = f"""You are a conversation thread classifier for a utility chatbot (power grid operations).
-
-Active threads:
-{threads_text}
-
-New message: "{user_input}"
-
-Which thread does this message continue, or is it a new topic?
-
-Return JSON: {{"thread_id": "<thread_id or NEW>", "confidence": 0.0-1.0, "reasoning": "<brief>"}}"""
+        prompt = PROMPTS.text(
+            "thread_assignment.classify",
+            threads_text=threads_text,
+            user_input=user_input,
+        )
 
         try:
             gateway = get_default_generation_gateway(default_model=model)
