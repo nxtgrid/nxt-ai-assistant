@@ -1157,6 +1157,30 @@ _FLAGS: List[Flag] = [
         group="documents",
         set_via="Set in the deployment environment alongside GOOGLE_SERVICE_ACCOUNT_JSON.",
     ),
+    _s(
+        "PROMPT_EDITORS_OPS",
+        "",
+        "Comma-separated emails in the ops prompt-editor group.",
+        editable=False,
+        group="documents",
+        set_via="Set in the deployment environment alongside the other access whitelists.",
+    ),
+    _s(
+        "PROMPT_EDITORS_ENG",
+        "",
+        "Comma-separated emails in the engineering prompt-editor group.",
+        editable=False,
+        group="documents",
+        set_via="Set in the deployment environment alongside the other access whitelists.",
+    ),
+    _s(
+        "PROMPT_ADMINS",
+        "",
+        "Comma-separated emails with full access to every prompt.",
+        editable=False,
+        group="documents",
+        set_via="Set in the deployment environment alongside the other access whitelists.",
+    ),
     # These MUST stay show_in_settings=True (the default). The settings page
     # renders them as editable text inputs; when show_in_settings is False the
     # overlay in get_current_settings drops their real DO values, the inputs
