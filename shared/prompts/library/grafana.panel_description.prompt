@@ -2,6 +2,7 @@
 id: grafana.panel_description
 description: Generates an LLM tool description for a Grafana dashboard panel.
 owner: ops
+component: anansi_app
 overridable: true
 output: text
 sections: []

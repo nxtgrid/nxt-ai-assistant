@@ -2,12 +2,14 @@
 
 import pytest
 
+from shared.prompts.components import UNCATEGORIZED
 from shared.prompts.spec import AccessSpec, parse_prompt_file
 
 VALID = """---
 id: customer.system
 description: Customer-mode instructions.
 owner: ops
+component: orchestrator_services
 overridable: true
 output: text
 variables: [user_name]
@@ -28,10 +30,17 @@ def test_parses_frontmatter_fields():
     spec = parse_prompt_file(VALID, path="customer.system.prompt")
     assert spec.id == "customer.system"
     assert spec.owner == "ops"
+    assert spec.component == "orchestrator_services"
     assert spec.overridable is True
     assert spec.variables == ["user_name"]
     assert spec.sections == ["system_instructions", "examples"]
     assert spec.knowledge_tags == ["grid_ops"]
+
+
+def test_component_defaults_to_uncategorized():
+    text = "---\nid: a.b\ndescription: d\n---\nbody"
+    spec = parse_prompt_file(text, path="a.b.prompt")
+    assert spec.component == UNCATEGORIZED
 
 
 def test_body_excludes_frontmatter():

@@ -2,6 +2,7 @@
 id: ingestion.fetch_document.type_selection
 description: User-facing message asking which document type is being ingested (interactive /learn flow). Not an LLM prompt — sent verbatim to the user.
 owner: ops
+component: orchestrator_experts
 overridable: true
 output: text
 sections: []

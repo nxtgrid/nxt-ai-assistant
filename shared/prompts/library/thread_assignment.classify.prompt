@@ -2,6 +2,7 @@
 id: thread_assignment.classify
 description: Classifies which active conversation thread an incoming message continues, or whether it starts a new topic.
 owner: eng
+component: orchestrator_services
 overridable: false
 output: json
 schema:

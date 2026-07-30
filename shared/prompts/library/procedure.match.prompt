@@ -2,6 +2,7 @@
 id: procedure.match
 description: Matches a support conversation example to the closest existing support procedure.
 owner: eng
+component: orchestrator_services
 overridable: false
 output: text
 sections: []

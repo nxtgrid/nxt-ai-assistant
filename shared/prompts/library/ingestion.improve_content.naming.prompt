@@ -2,6 +2,7 @@
 id: ingestion.improve_content.naming
 description: Generates a descriptive title for a newly-ingested knowledge base document.
 owner: eng
+component: orchestrator_experts
 overridable: false
 output: text
 sections: []

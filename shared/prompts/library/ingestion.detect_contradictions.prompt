@@ -2,6 +2,7 @@
 id: ingestion.detect_contradictions
 description: Identifies factual contradictions between a new document and existing knowledge before ingestion.
 owner: eng
+component: orchestrator_experts
 overridable: false
 output: json
 schema:

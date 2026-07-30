@@ -2,6 +2,7 @@
 id: doc_editing.edit_highlighted
 description: Generates markdown replacement text for a highlighted section of a Google Doc.
 owner: eng
+component: shared
 overridable: false
 output: text
 sections: []

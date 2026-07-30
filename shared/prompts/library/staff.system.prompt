@@ -2,6 +2,7 @@
 id: staff.system
 description: Staff-mode system instructions and context for internal users.
 owner: ops
+component: orchestrator_services
 overridable: true
 output: text
 sections: [system_instructions]

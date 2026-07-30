@@ -2,6 +2,7 @@
 id: verification.sanitize_system
 description: System instruction for the response-sanitization LLM-as-judge call.
 owner: eng
+component: orchestrator_services
 overridable: false
 output: text
 sections: []

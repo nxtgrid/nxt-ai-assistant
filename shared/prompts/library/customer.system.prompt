@@ -2,6 +2,7 @@
 id: customer.system
 description: Customer-mode system instructions and context for Telegram support.
 owner: ops
+component: orchestrator_services
 overridable: true
 output: text
 sections: [system_instructions]

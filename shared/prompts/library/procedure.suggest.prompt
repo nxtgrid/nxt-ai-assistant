@@ -2,6 +2,7 @@
 id: procedure.suggest
 description: Generates a suggested support-documentation procedure from a support conversation example.
 owner: ops
+component: orchestrator_services
 overridable: true
 output: text
 sections: []
