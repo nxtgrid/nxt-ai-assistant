@@ -24,6 +24,7 @@ BOT_ADMIN_NAV = [
     ("/documents", "📚 RAG Knowledgebase"),
     ("/agents", "🤖 Agents"),
     ("/prompts", "📝 Prompts"),
+    ("/knowledge-modules", "🧠 Knowledge Modules"),
     ("/settings", "⚙️ Settings"),
 ]
 

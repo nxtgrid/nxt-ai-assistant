@@ -38,6 +38,48 @@ class PromptRow:
     can_publish: bool
 
 
+@dataclass(frozen=True)
+class KnowledgeTabRow:
+    slug: str
+    title: str
+    mode: str
+    chars: int
+    checked: bool
+    origin: str  # "tag" | "override"
+
+
+def build_knowledge_tab(
+    prompt_tags: List[str], modules: List[Any], overrides: dict
+) -> List[KnowledgeTabRow]:
+    """The per-prompt checkbox grid: tag-derived, individually overridable.
+
+    A module appears if it shares a tag with the prompt, or if an override
+    exists for it (a forced-on module the tags didn't select, or a
+    forced-off module they did).
+    """
+    wanted = set(prompt_tags)
+    rows = []
+    for module in sorted(modules, key=lambda m: m.slug):
+        by_tag = bool(wanted & set(module.tags))
+        if module.slug in overrides:
+            checked, origin = overrides[module.slug], "override"
+        else:
+            checked, origin = by_tag, "tag"
+        if not (by_tag or module.slug in overrides):
+            continue
+        rows.append(
+            KnowledgeTabRow(
+                slug=module.slug,
+                title=module.title,
+                mode=module.mode,
+                chars=len(module.body),
+                checked=checked,
+                origin=origin,
+            )
+        )
+    return rows
+
+
 def build_rows(library: Any, email: str) -> List[PromptRow]:
     """The list view, filtered to what this user may see."""
     rows: List[PromptRow] = []

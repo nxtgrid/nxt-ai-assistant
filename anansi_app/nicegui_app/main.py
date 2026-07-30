@@ -168,6 +168,21 @@ async def prompts_route() -> None:
         await prompts.render(user["email"])
 
 
+@ui.page("/knowledge-modules")
+async def knowledge_modules_route() -> None:
+    user = auth.current_user()
+    if not user:
+        ui.navigate.to("/login")
+        return
+    with layout.frame(user, "/knowledge-modules"):
+        if not perms.can_view_bot_admin(user["email"]):
+            layout.access_denied()
+            return
+        from nicegui_app.pages import knowledge_modules
+
+        await knowledge_modules.render(user["email"])
+
+
 @ui.page("/grid/{bare}")
 async def grid_page(bare: str, request: Request) -> None:
     user = auth.current_user()
