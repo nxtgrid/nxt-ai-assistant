@@ -12,6 +12,13 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.prompts.bundled import BundledStore
+from shared.prompts.knowledge import (
+    apply_overrides,
+    budget_pinned,
+    render_catalog,
+    render_pinned,
+    select_modules,
+)
 from shared.prompts.render import render_body, split_sections
 from shared.prompts.spec import PromptSpec, body_checksum
 from shared.prompts.types import PromptSource, RenderedPrompt, RequestScope
@@ -39,6 +46,7 @@ class PromptLibrary:
         gdoc_body_for: Optional[GDocBodyFor] = None,
         invalidate_gdoc: Optional[Callable[[], None]] = None,
         overrides: Optional[Any] = None,
+        knowledge: Optional[Any] = None,
     ) -> None:
         self._bundled = bundled or BundledStore()
         # `overrides` (an OverrideStore, or any object with the same duck-typed
@@ -48,6 +56,7 @@ class PromptLibrary:
         self._db_body_for = overrides.body_for if overrides is not None else db_body_for
         self._gdoc_body_for = gdoc_body_for
         self._invalidate_gdoc = invalidate_gdoc
+        self._knowledge = knowledge
 
     # ── introspection ────────────────────────────────────────────────────────
     def ids(self) -> List[str]:
@@ -106,6 +115,31 @@ class PromptLibrary:
         """
         return self._bundled.get(prompt_id).body
 
+    def _compose_knowledge(
+        self, spec: PromptSpec, scope: RequestScope
+    ) -> Tuple[Optional[str], List[str]]:
+        """Resolve, budget and render this prompt's knowledge. Never raises."""
+        if self._knowledge is None or not spec.knowledge_tags:
+            return None, []
+        try:
+            modules = self._knowledge.all_modules()
+            overrides = self._knowledge.overrides_for(spec.id)
+        except Exception:
+            LOGGER.warning(
+                f"Knowledge lookup failed for '{spec.id}'; rendering without it", exc_info=True
+            )
+            return None, []
+
+        chosen = apply_overrides(
+            select_modules(modules, spec.knowledge_tags, scope), modules, overrides
+        )
+        pinned, _dropped = budget_pinned([m for m in chosen if m.mode == "pinned"])
+        on_demand = [m for m in chosen if m.mode == "on_demand"]
+
+        blocks = [b for b in (render_pinned(pinned), render_catalog(on_demand)) if b]
+        used = [m.slug for m in pinned] + [m.slug for m in on_demand]
+        return ("\n\n".join(blocks) or None), used
+
     def render(
         self,
         prompt_id: str,
@@ -119,6 +153,10 @@ class PromptLibrary:
         rendered = render_body(body, vars or {}, spec.variables, self._partial)
         system_text, context_text = split_sections(rendered, spec.sections)
 
+        knowledge_text, knowledge_used = self._compose_knowledge(spec, scope or RequestScope())
+        if knowledge_text:
+            context_text = f"{context_text}\n\n{knowledge_text}" if context_text else knowledge_text
+
         result = RenderedPrompt(
             prompt_id=prompt_id,
             system_text=system_text,
@@ -126,6 +164,7 @@ class PromptLibrary:
             source=source,
             version=version,
             checksum=body_checksum(body),
+            knowledge_used=knowledge_used,
         )
         LOGGER.debug(f"Rendered prompt {result.provenance()}")
         return result
@@ -182,6 +221,7 @@ class PromptLibrary:
 
 def _build_default_library() -> PromptLibrary:
     from shared.prompts.gdoc import GDocStore
+    from shared.prompts.knowledge import KnowledgeStore
     from shared.prompts.overrides import OverrideStore
 
     overrides = OverrideStore.from_env()
@@ -190,6 +230,7 @@ def _build_default_library() -> PromptLibrary:
         overrides=overrides,
         gdoc_body_for=gdoc_store.body_for,
         invalidate_gdoc=gdoc_store.invalidate,
+        knowledge=KnowledgeStore.from_env(),
     )
 
 

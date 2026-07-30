@@ -104,3 +104,77 @@ def render_catalog(modules: List[KnowledgeModule]) -> Optional[str]:
         "Fetch any of these with the `get_knowledge_module` tool when relevant:\n\n"
         + "\n".join(lines)
     )
+
+
+class KnowledgeStore:
+    """Reads knowledge_modules and prompt_knowledge_overrides.
+
+    Degrades to "no knowledge" whenever the tables are absent or unreachable —
+    a prompt must still render.
+    """
+
+    def __init__(self, client=None, ttl_seconds: int = 300) -> None:
+        self._client = client
+        self._ttl = ttl_seconds
+        self._cache: Optional[List[KnowledgeModule]] = None
+        self._expires = 0.0
+
+    @classmethod
+    def from_env(cls) -> "KnowledgeStore":
+        from shared.config.db_credentials import chat_db_service_key, chat_db_url
+
+        url, key = chat_db_url(), chat_db_service_key()
+        if not (url and key):
+            return cls(client=None)
+        try:
+            from supabase import create_client
+
+            return cls(client=create_client(url, key))
+        except Exception:
+            LOGGER.warning("Could not build the knowledge store client", exc_info=True)
+            return cls(client=None)
+
+    def invalidate(self) -> None:
+        self._cache = None
+        self._expires = 0.0
+
+    def all_modules(self) -> List[KnowledgeModule]:
+        import time
+
+        if self._cache is not None and time.time() < self._expires:
+            return self._cache
+        if not self._client:
+            return []
+        try:
+            result = (
+                self._client.table("knowledge_modules")
+                .select("id, slug, title, summary, body, tags, scope, mode")
+                .eq("is_active", True)
+                .execute()
+            )
+            self._cache = [KnowledgeModule(**row) for row in (result.data or [])]
+        except Exception:
+            LOGGER.warning("Knowledge module fetch failed; continuing without", exc_info=True)
+            self._cache = []
+        self._expires = time.time() + self._ttl
+        return self._cache
+
+    def overrides_for(self, prompt_id: str) -> Dict[str, bool]:
+        if not self._client:
+            return {}
+        try:
+            result = (
+                self._client.table("prompt_knowledge_overrides")
+                .select("module_id, pinned")
+                .eq("prompt_id", prompt_id)
+                .execute()
+            )
+        except Exception:
+            LOGGER.warning(f"Knowledge overrides fetch failed for '{prompt_id}'", exc_info=True)
+            return {}
+        by_id = {m.id: m.slug for m in self.all_modules()}
+        return {
+            by_id[row["module_id"]]: row["pinned"]
+            for row in (result.data or [])
+            if row["module_id"] in by_id
+        }
