@@ -1,9 +1,9 @@
 """Knowledge Modules page view-model and the Prompts page knowledge tab."""
 
 import pytest
-
 from nicegui_app.pages.knowledge_modules import ModuleRow, build_module_rows, validate_module
 from nicegui_app.pages.prompts import build_knowledge_tab
+
 from shared.prompts.knowledge import KnowledgeModule
 
 
