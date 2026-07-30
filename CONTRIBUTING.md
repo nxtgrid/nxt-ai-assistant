@@ -85,6 +85,52 @@ Do not "fix" this by broadening `.gitignore`. Files arrive in these directories
 from upstream syncs, and the deny-by-default is what keeps internal ones out of
 a public repository.
 
+### Adding or editing a prompt
+
+Every prompt Anansi sends to a model lives in `shared/prompts/library/` as a
+`.prompt` file — YAML frontmatter, then a markdown body. Wording changes to an
+*existing* prompt don't need a PR at all: edit it from the Prompts admin page
+(`/prompts`) if you have edit access. Add a `.prompt` file here only for a
+genuinely new prompt.
+
+```yaml
+---
+id: my_feature.summarize        # dotted namespace matching the calling module
+description: One sentence a reviewer can act on without reading the body.
+owner: ops                       # ops | eng — who this prompt belongs to
+overridable: true                # false if a bad edit could break parsing
+                                  # (JSON-emitting prompts) or bypass a safety
+                                  # policy (see ticketing.correlation for why)
+output: text                     # or json, which requires a `schema` field
+sections: []                     # [] = whole body is the system channel;
+                                  # ["system_instructions"] etc. splits by H1
+variables: [doc_type, content]   # every {{placeholder}} used below
+access:
+  view: [ops, eng]
+  edit: [ops]                    # empty list = nobody but admins
+  publish: [ops]
+---
+Your prompt text, with {{doc_type}} and {{content}} substituted at render time.
+```
+
+Then:
+
+- Call it with `PROMPTS.text("my_feature.summarize", doc_type=..., content=...)`
+  (or `PROMPTS.render(...)` if you need the system/context split, or
+  provenance for logging).
+- If the prompt is JSON-emitting or drives routing/parsing logic, set
+  `overridable: false` — it should ship reviewed with the app, not be
+  editable live. `ticketing.correlation`'s frontmatter explains the reasoning
+  if you want the fuller argument.
+- Regenerate the parity snapshot so future drift is caught: delete
+  `chat_orchestrator/tests/prompt_checksums.json` and re-run
+  `pytest tests/test_prompt_parity.py` from `chat_orchestrator/` — it
+  recreates the file on a missing-snapshot run. Review the diff before
+  committing; a change here changes what the model sees.
+
+See `docs/superpowers/specs/2026-07-30-prompt-library-design.md` for the full
+design (resolution order, knowledge modules, access control).
+
 ## Code Style
 
 - **Python 3.11+**, formatted with `ruff` (100-char line length)

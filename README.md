@@ -64,12 +64,13 @@ Conversations that need a human are routed to the right internal Telegram group 
 
 ## Why "general-purpose underneath" matters
 
-Anansi is a provider-aware LLM chat orchestrator at its core — Google Docs system instructions (your ops team edits the prompt in a browser, no redeploy), MCP tools, RAG, expert workflows. Gemini remains the default generation provider, and the shared LLM gateway can also be pointed at OpenRouter for OpenAI-style chat completions. The mini-grid focus comes from the *tools and embellishments* layered on top, and from the "messenger-first" assumption that field staff and customers live in chat apps, not dashboards. Telegram is the primary surface today; WhatsApp is on the roadmap but not yet supported.
+Anansi is a provider-aware LLM chat orchestrator at its core — a prompt library (your ops team edits any prompt from an in-app admin page, no redeploy; a bundled default always ships with the code, and a Google Doc can still be attached per prompt for teams that prefer editing there), MCP tools, RAG, expert workflows. Gemini remains the default generation provider, and the shared LLM gateway can also be pointed at OpenRouter for OpenAI-style chat completions. The mini-grid focus comes from the *tools and embellishments* layered on top, and from the "messenger-first" assumption that field staff and customers live in chat apps, not dashboards. Telegram is the primary surface today; WhatsApp is on the roadmap but not yet supported.
 
 **Project structure:**
-- `chat_orchestrator/` - Main chat orchestration service with Google Docs instructions; Gemini is the default provider
+- `chat_orchestrator/` - Main chat orchestration service; Gemini is the default provider
 - `mcp_servers/` - MCP tool servers (Supabase, Timescale, JIRA, logs, codebase)
 - `rag_pipeline/` - Knowledge ingestion from GitHub, Google Drive, Telegram
+- `shared/prompts/` - The prompt library: bundled defaults, DB overrides, Google Doc attachments, and tagged knowledge modules composed into prompt context
 - `shared/` - Common utilities (auth, database, logging, Google Docs fetching, provider-neutral LLM gateways)
 - `anansi_app/` - Streamlit admin UI for chat history, broadcasts, and settings
 - `llms.txt` - Short repo map for LLM-assisted setup and onboarding. Keep it in sync when README setup, provider configuration, or major component paths change.
@@ -97,11 +98,15 @@ Anansi is a provider-aware LLM chat orchestrator at its core — Google Docs sys
 # Download credentials JSON
 ```
 
-### 2. Create System Instructions in Google Docs
+### 2. Prompts — bundled by default, editable without a redeploy
 
-Create two Google Docs (one for customer mode, one for staff mode):
+Every prompt Anansi sends to a model — customer instructions, staff instructions, expert definitions, and about twenty smaller prompts used by individual workflows — lives in `shared/prompts/library/*.prompt` and ships with the code. A fresh clone works immediately with these generic defaults; nothing in this step is required to get started.
 
-**Structure:**
+To customize for your organization, sign in to the admin app and open **Prompts** (`/prompts`). Pick an overridable prompt (most are; a handful of policy/routing prompts are locked and shipped-only by design — see the prompt's own detail view), edit its body, and either save a draft or publish it live. Changes take effect within about a minute, no redeploy.
+
+If your team prefers editing in a Google Doc instead of the in-app editor, you can still attach one per prompt — the doc becomes that prompt's live source, with the bundled file as the fallback if the doc becomes unreachable. This is optional; the in-app Prompts page is now the primary way to edit.
+
+**If you do attach a Google Doc**, give it this structure so section parsing works:
 ```
 [Optional title page]
 
@@ -120,9 +125,9 @@ User: I can't log in
 Assistant: I understand that's frustrating. Let me help...
 ```
 
-**Share docs with service account:**
-- Get service account email from JSON: `"client_email": "..."`
-- Share both docs with Viewer access
+**Share the doc with your service account:**
+- Get the service account email from the credentials JSON: `"client_email": "..."`
+- Share the doc with Viewer access
 
 ### 3. Install and Configure
 
@@ -150,9 +155,19 @@ cp .env.example .env
 # Required
 LLM_PROVIDER=gemini
 GOOGLE_API_KEY=your-gemini-api-key
-GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
+GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'  # only needed if you attach Google Docs to prompts
+
+# Optional — only if attaching a Google Doc to customer.system / staff.system
+# instead of editing them from the Prompts admin page (see step 2 above)
 CUSTOMER_SUPPORT_DOC_ID=1abc123xyz456  # From GDoc URL
 STAFF_SUPPORT_DOC_ID=1def789uvw012     # From GDoc URL
+
+# Who may edit/publish prompts from the Prompts admin page (comma-separated
+# emails). All three are optional; unset means nobody can edit anything —
+# the bot still runs fine on bundled defaults.
+PROMPT_EDITORS_OPS=ops@example.com
+PROMPT_EDITORS_ENG=eng@example.com
+PROMPT_ADMINS=admin@example.com
 
 # Chat Database (for conversations and RAG)
 CHAT_DB_URL=https://your-project.supabase.co
@@ -222,15 +237,15 @@ Without this, the bot won't respond when mentioned by name in group chats.
 
 ### System instructions
 
-The files under `chat_orchestrator/instructions/` are fallback examples used when the Google Doc env vars aren't set. For a real deployment, create your own Google Docs and point to them:
+The bundled prompts under `shared/prompts/library/*.prompt` (including `customer.system` and `staff.system`) are intentionally generic and will not reflect your organization's actual support process. For a real deployment, edit them from the **Prompts** admin page (`/prompts`) — no env vars required.
+
+If you'd rather keep editing in Google Docs, the legacy doc-id env vars still work exactly as before and take precedence over the bundled default (though a DB override made from the Prompts page takes precedence over the doc, if you use both):
 
 ```bash
 CUSTOMER_SUPPORT_DOC_ID=<your-customer-doc-id>
 STAFF_SUPPORT_DOC_ID=<your-staff-doc-id>
 EXPERT_INSTRUCTIONS_DOC_ID=<your-expert-doc-id>
 ```
-
-The fallback files are intentionally generic and will not reflect your organization's actual support process.
 
 ### LLM provider selection
 
@@ -269,31 +284,28 @@ Most MCP servers are disabled by default. Enable only what you have credentials 
 
 ## How It Works
 
-### System Instructions Flow
+### Prompt Resolution & System Instructions Flow
+
+Every prompt resolves through `shared.prompts.PROMPTS`, in this order — each layer optional, falling through to the next on any failure:
 
 ```
-Google Doc (customer or staff)
-    ↓
-1. Fetch via Docs API
-    ↓
-2. Convert to Markdown
-   - Heading 1-6 → # to ######
-   - Bold → **text**
-   - Italic → *text*
-    ↓
-3. Auto-strip unwanted content
-   - Title page (before first page break)
-   - Headers and footers
-   - Inline images
-   - Content before "System Instructions"
-    ↓
-4. Parse into sections by Heading 1
-    ↓
-5. Split sections:
-   - "System Instructions" → systemInstruction field
-   - Other sections (QnA, Examples) → First user message
-    ↓
-6. Send to Gemini API (default provider)
+1. DB override (Prompts admin page) — only if the prompt is overridable
+    ↓ (if none, or lookup fails)
+2. Attached Google Doc — only if a doc id is configured for this prompt
+    ↓ (if none, or fetch fails)
+3. Bundled default (shared/prompts/library/<id>.prompt) — always present
+
+For a Google Doc source, steps in between:
+   a. Fetch via Docs API
+   b. Convert to Markdown (Heading 1-6 → # to ######, Bold → **text**, Italic → *text*)
+   c. Auto-strip title page, headers/footers, inline images
+
+Whatever body wins resolution is then:
+4. Parsed into sections by Heading 1 (per the prompt's declared `sections`)
+5. Split: the named system-instructions section → systemInstruction field;
+   everything else (QnA, Examples, and any composed knowledge modules) →
+   first user message
+6. Sent to Gemini API (default provider)
 
 {
   "systemInstruction": {
@@ -302,26 +314,28 @@ Google Doc (customer or staff)
   "contents": [
     {
       "role": "user",
-      "parts": [{"text": "QnA + Examples sections"}]
+      "parts": [{"text": "QnA + Examples + Technical Knowledge sections"}]
     },
     {
-      "role": "user", 
+      "role": "user",
       "parts": [{"text": "Actual user question"}]
     }
   ]
 }
 ```
 
+Every render carries provenance (which prompt id, source, version, checksum produced it) into logs and, when `LANGFUSE_ENABLED=true`, the trace.
+
 ### Customer vs Staff Mode
 
 **Determined by user's `organization_id`:**
 - `organization_id = STAFF_ORG_ID` (env var, default `2`) → **Staff mode** (internal users)
-  - Fetches from `STAFF_SUPPORT_DOC_ID`
+  - Resolves the `staff.system` prompt
   - Access to all MCP tools
   - Full system capabilities
 
 - All other `organization_id` values → **Customer mode** (external users)
-  - Fetches from `CUSTOMER_SUPPORT_DOC_ID`
+  - Resolves the `customer.system` prompt
   - Limited to customer support tools
   - Safe, scoped responses
 
@@ -465,7 +479,7 @@ Telegram / Web Client
 | `/analyze` | Grid Analyst | Analyze grid performance and faults |
 | `/kpi`, `/report` | Grid Analyst | Generate KPI reports |
 
-**Expert Definition (Google Doc):**
+**Expert Definition** (the `experts.definitions` prompt — bundled by default, editable from the Prompts admin page, or a Google Doc via `EXPERT_INSTRUCTIONS_DOC_ID`):
 ```markdown
 # Expert: package_generator
 
@@ -500,7 +514,7 @@ You are a specialist in creating Light Preliminary Packages...
 User Request
     ↓
 Instructions Provider
-    ├─ Fetch Google Doc (customer or staff mode)
+    ├─ Resolve via the prompt library (DB override → Google Doc → bundled)
     ├─ Parse sections
     └─ Split: System Instructions vs Context
     ↓
@@ -522,7 +536,8 @@ Response
 |------|---------|
 | `orchestrator/services/conversation.py` | Main conversation orchestration |
 | `orchestrator/graphs/conversation_graph.py` | LangGraph stategraph |
-| `orchestrator/services/instructions_provider.py` | Google Doc fetching |
+| `shared/prompts/` | The prompt library: bundled defaults, DB overrides, Doc attachments, knowledge modules |
+| `orchestrator/services/instructions_provider.py` | Composes customer/staff prompts into system instructions + context |
 | `orchestrator/services/tool_executor.py` | MCP tool execution |
 | `orchestrator/services/command_registry.py` | Slash command definitions |
 | `mcp_servers/tool_definitions.json` | All tool definitions (source of truth) |
@@ -689,7 +704,7 @@ ALERT_CORRELATION_ENABLED=true
 - **Disable the endpoint entirely**: `NOTIFY_ENDPOINT_ENABLED=false` — `/notify` 503s.
 - **Inspect a decision**: the `ticket_correlation_events` table (or the ticket's "Decision history" section on its admin Tickets page detail view) has every decision, `decided_by`, confidence, and reason for a ticket_ref.
 
-### Getting Google Doc IDs
+### Getting Google Doc IDs (optional — only if attaching a Doc to a prompt)
 
 From Google Doc URL:
 ```
@@ -1019,7 +1034,7 @@ anansi/
 │   │   ├── api/            # FastAPI endpoints
 │   │   ├── services/       # Core logic
 │   │   │   ├── conversation.py        # Conversation orchestration
-│   │   │   ├── instructions_provider.py  # Google Docs fetching
+│   │   │   ├── instructions_provider.py  # Composes prompts into instructions + context
 │   │   │   └── artifacts_provider.py     # Section parsing
 │   │   └── clients/        # External API clients
 │   └── local_server.py     # Development server
@@ -1044,6 +1059,12 @@ anansi/
 │   └── mcp_launcher.py     # Server manager
 │
 └── shared/                 # Common utilities
+    ├── prompts/
+    │   ├── library/             # Bundled .prompt files (the versioned default)
+    │   ├── core.py               # PromptLibrary: resolution, render, propose/publish
+    │   ├── overrides.py          # DB-backed versions + labels
+    │   ├── access.py             # Per-prompt group ACLs (view/edit/publish)
+    │   └── knowledge.py          # Tagged knowledge modules, pinned + on-demand
     └── utils/
         ├── google_auth.py          # Google authentication
         ├── gdrive_doc_fetcher.py   # Doc fetching + parsing
@@ -1052,19 +1073,22 @@ anansi/
 
 ## Troubleshooting
 
-### "CUSTOMER_SUPPORT_DOC_ID not set"
-- Add to `.env` file
-- Get from Google Doc URL
+### Prompt not updating after an edit
+- Check the source badge on the Prompts page (`/prompts`) — Default, Overridden, or Google Doc — to see where it's actually resolving from
+- A DB override (Overridden) takes effect within about a minute (label cache TTL); use "Reload cache" on the prompt's detail dialog to force it immediately
+- A Google Doc attachment is cached for up to an hour; same "Reload cache" action applies
 
-### "Failed to fetch Google Doc"
+### "Failed to fetch Google Doc" (only relevant if you've attached one)
 - Verify doc is shared with service account email
 - Check service account has Docs API enabled
 - Confirm doc ID is correct
+- The prompt still works either way — it falls back to the bundled default or a DB override
 
 ### "No 'System Instructions' section found"
 - Add "System Instructions" as Heading 1 (not bold text)
 - Section name is case-insensitive
 - Must be the first section (after title page)
+- Applies whether the section lives in a Google Doc or the prompt body edited from the Prompts page
 
 ### "No module named 'shared'"
 ```bash
@@ -1078,21 +1102,16 @@ export PYTHONPATH=$PWD
 python3 -c "from shared.utils.google_auth import verify_credentials; verify_credentials()"
 ```
 
-### Content not updating
-- Docs are cached briefly
-- Restart service to clear cache
-- Check logs for "Using cached Google Doc"
-
 ## Key Features
 
-### Google Docs Integration
-- ✅ Single source of truth for instructions
-- ✅ Collaborative editing
-- ✅ Version history via Google Docs
-- ✅ No code deployments needed for updates
-- ✅ Markdown conversion preserves formatting
-- ✅ Auto-strips title pages, headers, footers, images
-- ✅ Section parsing by heading styles
+### Prompt Library
+- ✅ Every prompt in one place (`shared/prompts/library/`), bundled and versioned with the code
+- ✅ Live editing from the Prompts admin page — no redeploy, no Google Doc required
+- ✅ Draft → publish workflow with version history and one-click revert to default
+- ✅ Per-prompt access control (view/edit/publish) via `PROMPT_EDITORS_OPS` / `PROMPT_EDITORS_ENG` / `PROMPT_ADMINS`
+- ✅ Google Doc attachment still supported per prompt, for teams that prefer editing there
+- ✅ Provenance (prompt id, source, version) on every render, in logs and Langfuse traces
+- ✅ Tagged, scoped knowledge modules composed into prompt context (pinned or fetched on-demand via an MCP tool)
 
 ### Proper Default Gemini API Usage
 - ✅ System instructions in `systemInstruction` field
@@ -1190,7 +1209,7 @@ General guidelines:
 
 1. Follow existing code structure
 2. Use shared utilities from `shared/`
-3. Update Google Docs for instruction changes (no code needed)
+3. For prompt wording changes, edit from the Prompts admin page (no code needed); for a new prompt, add a `.prompt` file under `shared/prompts/library/` (see CONTRIBUTING.md)
 4. Add tests for new features
 5. Keep documentation current
 
