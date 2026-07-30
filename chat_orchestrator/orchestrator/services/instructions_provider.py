@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from orchestrator.models.schemas import EntityContext, UserContext
 from shared.auth import get_auth_service
 from shared.prompts import PROMPTS
+from shared.utils.langfuse_utils import prompt_metadata
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -239,6 +240,13 @@ class InstructionsProvider:
             supabase_key or os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY", "")
         )
         self._client = None
+        self._last_provenance: Optional[Dict[str, Any]] = None
+
+    def get_last_provenance(self) -> Optional[Dict[str, Any]]:
+        """Provenance of the system instructions from the most recent
+        get_customer_instructions()/_get_staff_instructions_from_doc() call,
+        for callers (prepare_context.py) that want to log or trace it."""
+        return self._last_provenance
 
     def _get_client(self):
         """Get or create Supabase client."""
@@ -301,6 +309,7 @@ class InstructionsProvider:
             - context_message: Goes as first user message (or None)
         """
         rendered = PROMPTS.render("customer.system")
+        self._last_provenance = prompt_metadata(rendered)
         context_message = _postprocess_context(rendered.context_text, extract_staff_groups=False)
         context_message = _cap_context(context_message)
 
@@ -353,6 +362,7 @@ class InstructionsProvider:
             - context_message: Goes as first user message (or None)
         """
         rendered = PROMPTS.render("staff.system")
+        self._last_provenance = prompt_metadata(rendered)
         context_message = _postprocess_context(rendered.context_text, extract_staff_groups=True)
         context_message = _cap_context(context_message)
 

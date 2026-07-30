@@ -58,6 +58,21 @@ def update_trace(**kwargs):
         LOGGER.debug(f"Langfuse update_trace failed (non-fatal): {e}")
 
 
+def prompt_metadata(rendered) -> dict:
+    """Trace metadata identifying which prompt version produced a generation.
+
+    ``rendered`` is a ``shared.prompts.types.RenderedPrompt``. Typed as a
+    plain object here (not imported) to avoid a shared.utils -> shared.prompts
+    import edge purely for a type hint.
+    """
+    return {
+        "prompt_id": rendered.prompt_id,
+        "prompt_source": rendered.source.value,
+        "prompt_version": rendered.version,
+        "prompt_checksum": rendered.checksum[:8],
+    }
+
+
 def score_trace(**kwargs):
     """Safely score the current Langfuse trace."""
     if not LANGFUSE_ENABLED:

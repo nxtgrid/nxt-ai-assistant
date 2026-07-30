@@ -25,6 +25,27 @@ def test_examples_word_cap_lives_in_one_place():
     assert source.count("MAX_EXAMPLES_WORDS = 5000") == 1
 
 
+def test_get_last_provenance_is_none_before_any_fetch():
+    assert ip.InstructionsProvider().get_last_provenance() is None
+
+
+@pytest.mark.asyncio
+async def test_get_last_provenance_populated_after_customer_fetch():
+    provider = ip.InstructionsProvider()
+    await provider.get_customer_instructions()
+    provenance = provider.get_last_provenance()
+    assert provenance["prompt_id"] == "customer.system"
+    assert provenance["prompt_source"] in ("bundled", "gdoc", "db")
+
+
+@pytest.mark.asyncio
+async def test_get_last_provenance_populated_after_staff_fetch():
+    provider = ip.InstructionsProvider()
+    await provider._get_staff_instructions_from_doc()
+    provenance = provider.get_last_provenance()
+    assert provenance["prompt_id"] == "staff.system"
+
+
 @pytest.mark.asyncio
 async def test_customer_instructions_come_from_the_library():
     system, _context = await ip.InstructionsProvider().get_customer_instructions()
