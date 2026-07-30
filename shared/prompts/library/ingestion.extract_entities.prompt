@@ -2,7 +2,7 @@
 id: ingestion.extract_entities
 description: Extracts entities and relationships from document content for GraphRAG indexing.
 owner: eng
-component: orchestrator_experts
+component: orchestrator_experts_ingestion
 overridable: false
 output: json
 schema:

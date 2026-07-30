@@ -2,7 +2,7 @@
 id: gtr.analysis_conversation
 description: System prompt for the Grids Technical Reviewer's interactive KPI analysis conversation.
 owner: ops
-component: orchestrator_experts
+component: orchestrator_experts_gtr
 overridable: true
 output: text
 sections: []
