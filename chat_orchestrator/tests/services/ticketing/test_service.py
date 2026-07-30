@@ -19,6 +19,7 @@ from orchestrator.services.ticketing.backend import (
     TicketBackendError,
     TicketCreateRequest,
     TicketResult,
+    TicketStatus,
     TicketSummary,
 )
 from orchestrator.services.ticketing.repository import TicketRecord
@@ -38,12 +39,25 @@ class _FakeBackend:
         self.update_ticket_result: bool = True
         self.create_error: Optional[Exception] = None
         self.create_calls: List[TicketCreateRequest] = []
+        self.transition_to_done_calls: List[str] = []
+        self.status_by_ref: Dict[str, Optional[TicketStatus]] = {}
+        self.get_status_calls: List[str] = []
+        self.get_status_error: Optional[Exception] = None
 
     async def is_available(self) -> bool:
         return True
 
     def has_credentials(self) -> bool:
         return True
+
+    async def transition_to_done(self, ref: str) -> None:
+        self.transition_to_done_calls.append(ref)
+
+    async def get_status(self, ref: str) -> Optional[TicketStatus]:
+        self.get_status_calls.append(ref)
+        if self.get_status_error is not None:
+            raise self.get_status_error
+        return self.status_by_ref.get(ref)
 
     async def create_ticket(self, req: TicketCreateRequest) -> TicketResult:
         self.create_calls.append(req)
@@ -70,6 +84,9 @@ class _FakeTicketRepository:
         self.records_by_ref: dict[str, TicketRecord] = {}
         self.refs_by_escalation: dict[str, str] = {}
         self.find_ref_for_escalation_calls: list[str] = []
+        self.transition_to_done_by_ref_calls: list[str] = []
+        self.open_refs_by_backend: dict[str, list[str]] = {}
+        self.list_open_by_backend_calls: list[tuple] = []
 
     async def create_intent(self, req, *, created_via):
         self.calls.append(("intent", created_via, req.summary))
@@ -101,8 +118,12 @@ class _FakeTicketRepository:
     async def get_status(self, ref: str):
         return None
 
-    async def transition_to_done(self, ref: str) -> None:
-        return None
+    async def transition_to_done_by_ref(self, ref: str) -> None:
+        self.transition_to_done_by_ref_calls.append(ref)
+
+    async def list_open_by_backend(self, backend: str, *, limit: int = 200) -> List[str]:
+        self.list_open_by_backend_calls.append((backend, limit))
+        return self.open_refs_by_backend.get(backend, [])
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         self.find_by_escalation_calls.append(mapping_id)
@@ -431,6 +452,104 @@ class TestFindByEscalation:
         assert repository.find_ref_for_escalation_calls == ["mapping-3"]
         assert jira.find_by_escalation_calls == []
         assert internal.find_by_escalation_calls == []
+
+
+class TestTransitionToDone:
+    """jira_backend.transition_to_done() only calls the Jira transitions API --
+    it has no repository reference, so nothing marks the canonical ``tickets``
+    row done for Jira-backed tickets. TicketService must close that gap
+    itself; the internal backend already persists via the shared repository
+    (see internal_backend.transition_to_done), so it must not be double-written."""
+
+    @pytest.mark.asyncio
+    async def test_persists_canonical_done_status_when_backend_is_jira(self):
+        jira = _FakeBackend("jira")
+        internal = _FakeBackend("internal")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, internal=internal, ticket_repository=repository)
+
+        await service.transition_to_done("OPS-99")
+
+        assert jira.transition_to_done_calls == ["OPS-99"]
+        assert repository.transition_to_done_by_ref_calls == ["OPS-99"]
+
+    @pytest.mark.asyncio
+    async def test_does_not_double_write_when_backend_is_internal(self):
+        jira = _FakeBackend("jira")
+        internal = _FakeBackend("internal")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["TKT-1"] = TicketRecord(
+            id="ticket-1", ticket_ref="TKT-1", backend="internal",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, internal=internal, ticket_repository=repository)
+
+        await service.transition_to_done("TKT-1")
+
+        assert internal.transition_to_done_calls == ["TKT-1"]
+        # Internal backend already persists via the shared repository itself --
+        # TicketService must not also call it, or resolved_at would be bumped twice.
+        assert repository.transition_to_done_by_ref_calls == []
+
+
+class TestSyncJiraTicketStatuses:
+    """Sweep entry point: reconciles canonical status for Jira tickets that
+    aren't tied to any escalation mapping (e.g. filed via /notify), which the
+    escalation sweep's own reconciliation loop never sees."""
+
+    @pytest.mark.asyncio
+    async def test_closes_canonical_tickets_whose_jira_status_is_done(self):
+        jira = _FakeBackend("jira")
+        jira.status_by_ref = {
+            "OPS-1": TicketStatus(summary="Grid down", is_done=True),
+            "OPS-2": TicketStatus(summary="Meter fault", is_done=False),
+        }
+        repository = _FakeTicketRepository()
+        repository.open_refs_by_backend["jira"] = ["OPS-1", "OPS-2"]
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+
+        result = await service.sync_jira_ticket_statuses()
+
+        assert set(jira.get_status_calls) == {"OPS-1", "OPS-2"}
+        assert repository.transition_to_done_by_ref_calls == ["OPS-1"]
+        assert result == {"checked": 2, "closed": 1}
+
+    @pytest.mark.asyncio
+    async def test_no_open_tickets_is_a_no_op(self):
+        jira = _FakeBackend("jira")
+        repository = _FakeTicketRepository()
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+
+        result = await service.sync_jira_ticket_statuses()
+
+        assert result == {"checked": 0, "closed": 0}
+        assert repository.transition_to_done_by_ref_calls == []
+
+    @pytest.mark.asyncio
+    async def test_get_status_failure_for_one_ref_does_not_abort_the_rest(self):
+        jira = _FakeBackend("jira")
+        jira.status_by_ref = {"OPS-2": TicketStatus(summary="Meter fault", is_done=True)}
+        repository = _FakeTicketRepository()
+        repository.open_refs_by_backend["jira"] = ["OPS-1", "OPS-2"]
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+
+        original_get_status = jira.get_status
+
+        async def flaky_get_status(ref: str):
+            if ref == "OPS-1":
+                raise RuntimeError("Jira API down")
+            return await original_get_status(ref)
+
+        jira.get_status = flaky_get_status
+
+        result = await service.sync_jira_ticket_statuses()
+
+        assert repository.transition_to_done_by_ref_calls == ["OPS-2"]
+        assert result == {"checked": 2, "closed": 1}
 
 
 class TestUpdateTicket:

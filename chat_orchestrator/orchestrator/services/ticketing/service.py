@@ -10,7 +10,7 @@ in without also having to design its public surface.
 
 from __future__ import annotations
 
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
@@ -258,6 +258,19 @@ class TicketService:
     async def transition_to_done(self, ref: str) -> None:
         backend = await self._backend_for_ref(ref)
         await backend.transition_to_done(ref)
+        if backend is self._jira:
+            # Unlike the internal backend (which persists via the repository it
+            # shares with this service), jira_backend.transition_to_done() only
+            # calls the Jira transitions API -- it has no repository reference,
+            # so the canonical row would otherwise stay "open" forever.
+            try:
+                await self._tickets.transition_to_done_by_ref(ref)
+            except Exception:
+                LOGGER.warning(
+                    "transition_to_done: failed to persist canonical status for jira ticket {}",
+                    ref,
+                    exc_info=True,
+                )
 
     async def update_ticket(
         self,
@@ -276,6 +289,35 @@ class TicketService:
         return await backend.update_ticket(
             ref, summary=summary, description=description, priority_id=priority_id
         )
+
+    async def sync_jira_ticket_statuses(self, limit: int = 200) -> Dict[str, int]:
+        """Pull live Jira status for open Jira-backed canonical tickets and close done ones.
+
+        Complements the near-instant Jira webhook and the escalation sweep's
+        own reconciliation loop (which only reconciles tickets tied to an
+        escalation mapping): this walks every open Jira ticket in the
+        canonical ``tickets`` table, so it also catches tickets filed via
+        ``/notify`` with no linked escalation, or a closure the webhook
+        missed. Meant to be called from the same daily sweep job.
+        """
+        refs = await self._tickets.list_open_by_backend("jira", limit=limit)
+        checked = 0
+        closed = 0
+        for ref in refs:
+            checked += 1
+            try:
+                status = await self._jira.get_status(ref)
+            except Exception:
+                LOGGER.warning("ticket status sync: get_status failed for {}", ref, exc_info=True)
+                continue
+            if status is None or not status.is_done:
+                continue
+            try:
+                await self._tickets.transition_to_done_by_ref(ref)
+                closed += 1
+            except Exception:
+                LOGGER.warning("ticket status sync: failed to close {}", ref, exc_info=True)
+        return {"checked": checked, "closed": closed}
 
     async def find_open_by_grid(
         self, grid_name: str, limit: int = 20, backend_override: Optional[str] = None

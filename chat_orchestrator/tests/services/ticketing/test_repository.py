@@ -235,6 +235,37 @@ async def test_find_ref_for_escalation_follows_the_canonical_ticket_relation():
 
 
 @pytest.mark.asyncio
+async def test_list_open_by_backend_reads_active_non_done_tickets_for_that_backend():
+    client = _Client()
+    client.select_rows_by_table = {
+        "tickets": [
+            {
+                "id": "ticket-1", "ticket_ref": "OPS-1", "backend": "jira",
+                "status": "open", "summary": "Grid down",
+                "created_via": "notification", "provisioning_state": "active",
+            },
+            {
+                "id": "ticket-2", "ticket_ref": "OPS-2", "backend": "jira",
+                "status": "in_progress", "summary": "Meter fault",
+                "created_via": "notification", "provisioning_state": "active",
+            },
+        ],
+    }
+
+    refs = await TicketRepository(client=client).list_open_by_backend("jira", limit=50)
+
+    assert refs == ["OPS-1", "OPS-2"]
+    assert client.calls[-1] == (
+        "tickets", "select", None,
+        [
+            ("backend", "jira"),
+            ("provisioning_state", "active"),
+            ("status", "neq:done"),
+        ],
+    )
+
+
+@pytest.mark.asyncio
 async def test_find_open_internal_by_grid_reads_active_canonical_tickets():
     client = _Client()
     client.select_rows_by_table = {
