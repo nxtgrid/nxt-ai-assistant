@@ -238,6 +238,34 @@ async def _handle_summarize_knowledge(arguments: dict) -> list[types.TextContent
     return [types.TextContent(type="text", text=summary + footer)]
 
 
+def fetch_knowledge_module(slug: str, store: Any = None) -> str:
+    """Return one knowledge module's full body by slug.
+
+    Backs the on-demand tier: the model sees only slug and summary in context
+    (the '# Available Knowledge' catalog block PromptLibrary.render composes)
+    and calls this when it decides a module is relevant.
+    """
+    from shared.prompts.knowledge import KnowledgeStore
+
+    store = store or KnowledgeStore.from_env()
+    modules = {m.slug: m for m in store.all_modules()}
+    if not modules:
+        return "No knowledge modules are configured."
+    module = modules.get(slug)
+    if not module:
+        return f"No knowledge module named '{slug}'. Available: " + ", ".join(sorted(modules))
+    return f"# {module.title}\n\n{module.body}"
+
+
+@registry.tool("get_knowledge_module", _SCHEMAS_BY_NAME["get_knowledge_module"])
+async def _handle_get_knowledge_module(arguments: dict) -> list[types.TextContent]:
+    """Handle get_knowledge_module tool call."""
+    slug = arguments.get("slug", "")
+    if not slug:
+        return [types.TextContent(type="text", text="Error: slug is required")]
+    return [types.TextContent(type="text", text=fetch_knowledge_module(slug))]
+
+
 @registry.tool("list_document_types", _SCHEMAS_BY_NAME["list_document_types"])
 async def _handle_list_document_types(arguments: dict) -> list[types.TextContent]:
     """Handle list_document_types tool call."""
