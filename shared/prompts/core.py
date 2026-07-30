@@ -37,10 +37,12 @@ class PromptLibrary:
         bundled: Optional[BundledStore] = None,
         db_body_for: Optional[DbBodyFor] = None,
         gdoc_body_for: Optional[GDocBodyFor] = None,
+        invalidate_gdoc: Optional[Callable[[], None]] = None,
     ) -> None:
         self._bundled = bundled or BundledStore()
         self._db_body_for = db_body_for
         self._gdoc_body_for = gdoc_body_for
+        self._invalidate_gdoc = invalidate_gdoc
 
     # ── introspection ────────────────────────────────────────────────────────
     def ids(self) -> List[str]:
@@ -51,6 +53,15 @@ class PromptLibrary:
 
     def reload(self) -> None:
         self._bundled.reload()
+
+    def invalidate_doc_cache(self) -> None:
+        """Force the next render to re-fetch from Google Docs.
+
+        For callers that know a doc's content just changed (e.g. after an
+        automated doc edit) and don't want to wait out the TTL cache.
+        """
+        if self._invalidate_gdoc is not None:
+            self._invalidate_gdoc()
 
     # ── resolution ───────────────────────────────────────────────────────────
     def _resolve_body(self, spec: PromptSpec) -> Tuple[str, PromptSource, Optional[int]]:
@@ -125,7 +136,11 @@ class PromptLibrary:
 def _build_default_library() -> PromptLibrary:
     from shared.prompts.gdoc import GDocStore
 
-    return PromptLibrary(gdoc_body_for=GDocStore().body_for)
+    gdoc_store = GDocStore()
+    return PromptLibrary(
+        gdoc_body_for=gdoc_store.body_for,
+        invalidate_gdoc=gdoc_store.invalidate,
+    )
 
 
 PROMPTS = _build_default_library()

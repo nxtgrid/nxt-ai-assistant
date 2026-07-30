@@ -1,9 +1,9 @@
-"""Provider for expert-specific instructions from Google Docs.
+"""Provider for expert-specific instructions.
 
-Parses a single Google Doc containing all expert definitions with
-system instructions, tools, packet types, and workflows.
-
-Doc ID is set via the EXPERT_INSTRUCTIONS_DOC_ID environment variable.
+Parses a single document (the "experts.definitions" prompt, resolved via the
+shared prompt library — DB override, then EXPERT_INSTRUCTIONS_DOC_ID Google
+Doc, then the bundled default, in that order) containing all expert
+definitions with system instructions, tools, packet types, and workflows.
 
 Expected doc structure:
     # Shared Components
@@ -44,47 +44,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from shared.utils.gdrive_doc_fetcher import fetch_google_doc_markdown_sections
+from shared.prompts import PROMPTS
+from shared.utils.gdrive_doc_fetcher import parse_sections
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
-
-_INSTRUCTIONS_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "instructions"
-)
-
-
-def _load_fallback_expert_instructions() -> Optional[Dict[str, str]]:
-    path = os.path.join(_INSTRUCTIONS_DIR, "expert_instructions.md")
-    if not os.path.exists(path):
-        return None
-    try:
-        import re
-
-        text = open(path).read()
-        text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL).strip()
-        # Parse into sections matching fetch_google_doc_markdown_sections output format
-        sections: Dict[str, str] = {}
-        current_key: Optional[str] = None
-        current_lines: list[str] = []
-        for line in text.splitlines():
-            m = re.match(r"^#\s+(.+)", line)
-            if m:
-                if current_key and current_lines:
-                    sections[current_key] = "\n".join(current_lines).strip()
-                current_key = m.group(1).strip().lower().replace(" ", "_")
-                current_lines = []
-            else:
-                if current_key is not None:
-                    current_lines.append(line)
-        if current_key and current_lines:
-            sections[current_key] = "\n".join(current_lines).strip()
-        LOGGER.info(f"Loaded fallback expert instructions ({len(sections)} sections)")
-        return sections or None
-    except Exception as e:
-        LOGGER.error(f"Failed to load fallback expert instructions: {e}")
-        return None
-
 
 # Module-level cache (1 hour TTL)
 _expert_cache: Dict[str, "ExpertConfig"] = {}
@@ -146,25 +110,12 @@ class ExpertConfig:
 
 
 class ExpertInstructionsProvider:
-    """Provides expert configurations from Google Docs.
+    """Provides expert configurations.
 
     Follows the caching pattern from artifacts_provider.py with module-level
-    TTL cache for performance.
+    TTL cache for performance, layered on top of the shared prompt library's
+    own resolution and caching.
     """
-
-    DEFAULT_EXPERT_DOC_ID = ""  # Set EXPERT_INSTRUCTIONS_DOC_ID env var; falls back to bundled file
-
-    def __init__(self, doc_id: Optional[str] = None):
-        """Initialize the provider.
-
-        Args:
-            doc_id: Google Doc ID containing expert definitions.
-                   Falls back to EXPERT_INSTRUCTIONS_DOC_ID env var,
-                   then to DEFAULT_EXPERT_DOC_ID.
-        """
-        self.doc_id = (
-            doc_id or os.getenv("EXPERT_INSTRUCTIONS_DOC_ID") or self.DEFAULT_EXPERT_DOC_ID
-        )
 
     async def get_expert_config(self, expert_id: str) -> Optional[ExpertConfig]:
         """Get configuration for a specific expert.
@@ -227,8 +178,17 @@ class ExpertInstructionsProvider:
     async def _fetch_all_experts(self) -> Dict[str, ExpertConfig]:
         """Fetch and parse all expert configurations.
 
-        Uses existing Google Doc converter with start_section='shared components'
-        to skip the introduction section before the Shared Components header.
+        The prompt library resolves the source (DB override, then Google Doc,
+        then bundled default); this method parses whatever body it returns.
+
+        start_section is intentionally None here, not "shared components": the
+        bundled default has no "# Shared Components" heading (it's plain intro
+        text), so filtering on it would silently parse to zero experts whenever
+        the bundled default is in use. Parsing from the first heading onward —
+        the same behavior the old bundled-fallback path always used — is safe
+        for a real doc too: any "# Introduction" section before "# Shared
+        Components" just becomes an extra, harmless entry in the sections dict
+        that no expert-matching pattern below picks up.
 
         Returns cached results if cache is still valid (1 hour TTL).
 
@@ -242,20 +202,8 @@ class ExpertInstructionsProvider:
             return _expert_cache
 
         try:
-            sections = None
-            if self.doc_id:
-                # Reuse existing doc fetcher - start from "Shared Components" section
-                # This ignores any introduction content before that header
-                sections = fetch_google_doc_markdown_sections(
-                    self.doc_id, start_section="shared components"
-                )
-                if not sections:
-                    LOGGER.warning(
-                        f"Failed to fetch expert instructions doc {self.doc_id} - trying fallback file"
-                    )
-
-            if not sections:
-                sections = _load_fallback_expert_instructions()
+            body = PROMPTS.text("experts.definitions")
+            sections = parse_sections(body, start_section=None)
             if not sections:
                 LOGGER.error("No expert instructions available")
                 return _expert_cache if _expert_cache else {}
@@ -265,7 +213,7 @@ class ExpertInstructionsProvider:
             _expert_cache = experts
             _cache_timestamp = time.time()
 
-            LOGGER.info(f"Loaded {len(experts)} expert configurations from Google Doc")
+            LOGGER.info(f"Loaded {len(experts)} expert configurations")
             return experts
 
         except Exception as e:

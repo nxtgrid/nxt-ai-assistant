@@ -11,26 +11,33 @@ from orchestrator.services.ticketing import correlation_rules
 
 
 class TestGetCorrelationInstructions:
-    def test_correlation_instructions_are_loaded_from_the_bundled_file(self, monkeypatch):
+    def test_correlation_instructions_are_loaded_from_the_prompt_library(self, monkeypatch):
+        from shared.prompts.types import PromptSource, RenderedPrompt
+
         monkeypatch.setattr(
-            "orchestrator.services.instructions_provider._load_fallback_instructions",
-            lambda filename: {"system_instructions": "from bundled file"},
+            correlation_rules.PROMPTS,
+            "render",
+            lambda prompt_id: RenderedPrompt(
+                prompt_id=prompt_id,
+                system_text="from bundled file",
+                context_text=None,
+                source=PromptSource.BUNDLED,
+                version=None,
+                checksum="c",
+            ),
         )
 
         sections = correlation_rules.get_correlation_instructions()
 
         assert sections == {"system_instructions": "from bundled file"}
 
-    def test_minimal_builtin_fallback_when_bundled_file_missing_too(self, monkeypatch):
-        monkeypatch.setattr(
-            "orchestrator.services.instructions_provider._load_fallback_instructions",
-            lambda filename: None,
-        )
+    def test_the_ticketing_correlation_prompt_is_not_overridable(self):
+        """There is intentionally no document id or DB override for this
+        policy: the guarantee this module's docstring describes is enforced
+        by the prompt spec, not by a fallback-of-a-fallback here."""
+        from shared.prompts import PROMPTS
 
-        sections = correlation_rules.get_correlation_instructions()
-
-        assert "system_instructions" in sections
-        assert sections["system_instructions"]  # non-empty
+        assert PROMPTS.spec("ticketing.correlation").overridable is False
 
     def test_uses_real_bundled_file_by_default(self):
         """Sanity check against the actual shipped file (no monkeypatching) --

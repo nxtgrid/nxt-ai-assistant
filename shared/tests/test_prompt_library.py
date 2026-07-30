@@ -113,3 +113,15 @@ def test_ids_come_from_the_bundled_store(bundled):
 def test_spec_exposes_frontmatter(bundled):
     lib = PromptLibrary(bundled=bundled)
     assert lib.spec("locked").overridable is False
+
+
+def test_invalidate_doc_cache_calls_the_hook(bundled):
+    calls = []
+    lib = PromptLibrary(bundled=bundled, invalidate_gdoc=lambda: calls.append(1))
+    lib.invalidate_doc_cache()
+    assert calls == [1]
+
+
+def test_invalidate_doc_cache_is_a_noop_without_a_hook(bundled):
+    lib = PromptLibrary(bundled=bundled)
+    lib.invalidate_doc_cache()  # must not raise

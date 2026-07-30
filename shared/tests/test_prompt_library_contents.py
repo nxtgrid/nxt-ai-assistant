@@ -6,6 +6,12 @@ from shared.prompts import PROMPTS
 
 NON_OVERRIDABLE = {
     "ticketing.correlation",
+}
+
+# Historically Google-Doc-driven (VERIFICATION_DOC_ID) with no bundled
+# fallback at all; kept overridable so the doc keeps working exactly as
+# before (Phase 1 parity), even though verification is safety-sensitive.
+OVERRIDABLE = {
     "verification.criteria",
 }
 
@@ -28,6 +34,11 @@ def test_every_prompt_declares_an_owner_we_recognise():
 @pytest.mark.parametrize("prompt_id", sorted(NON_OVERRIDABLE))
 def test_protected_prompts_are_not_overridable(prompt_id):
     assert PROMPTS.spec(prompt_id).overridable is False
+
+
+@pytest.mark.parametrize("prompt_id", sorted(OVERRIDABLE))
+def test_doc_driven_prompts_stay_overridable(prompt_id):
+    assert PROMPTS.spec(prompt_id).overridable is True
 
 
 def test_customer_system_still_has_a_system_instructions_section():

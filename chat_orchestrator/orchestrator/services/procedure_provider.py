@@ -18,7 +18,6 @@ matching capabilities for support example ingestion. Procedures follow the forma
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional
@@ -49,40 +48,24 @@ class ProcedureProvider:
     a specific format with ## Procedure N: Title headers.
     """
 
-    def __init__(self) -> None:
-        """Initialize the provider."""
-        self._cached_procedures: Optional[List[Procedure]] = None
-
     def get_procedures(self, force_reload: bool = False) -> List[Procedure]:
-        """Fetch and parse procedures from CUSTOMER_SUPPORT_DOC_ID.
+        """Fetch and parse procedures from the customer.system prompt
+        (bundled default, or its Google Doc / DB override).
 
         Args:
-            force_reload: If True, bypass cache and reload from Google Doc
+            force_reload: If True, bypass the prompt library's doc cache and
+                re-fetch before parsing.
 
         Returns:
             List of Procedure objects found in the document
         """
-        if self._cached_procedures is not None and not force_reload:
-            LOGGER.debug(f"Returning {len(self._cached_procedures)} cached procedures")
-            return self._cached_procedures
-
-        doc_id = os.getenv("CUSTOMER_SUPPORT_DOC_ID", "").strip()
-        if not doc_id:
-            LOGGER.warning("CUSTOMER_SUPPORT_DOC_ID not configured")
-            return []
+        if force_reload:
+            PROMPTS.invalidate_doc_cache()
 
         try:
-            from shared.utils.gdrive_doc_fetcher import fetch_google_doc_markdown
-
-            content = fetch_google_doc_markdown(doc_id)
-            if not content:
-                LOGGER.error(f"Failed to fetch Customer Support Doc: {doc_id}")
-                return []
-
+            content = PROMPTS.text("customer.system")
             procedures = self._parse_procedures(content)
-            self._cached_procedures = procedures
-
-            LOGGER.info(f"Parsed {len(procedures)} procedures from Customer Support Doc")
+            LOGGER.info(f"Parsed {len(procedures)} procedures from customer.system")
             return procedures
 
         except Exception as e:
@@ -90,8 +73,9 @@ class ProcedureProvider:
             return []
 
     def clear_cache(self) -> None:
-        """Clear the cached procedures to force reload on next call."""
-        self._cached_procedures = None
+        """Force the next get_procedures() call to re-fetch rather than use
+        the prompt library's cached Google Doc body."""
+        PROMPTS.invalidate_doc_cache()
         LOGGER.info("Cleared procedure cache")
 
     def _parse_procedures(self, content: str) -> List[Procedure]:

@@ -1,15 +1,15 @@
 ---
 id: verification.criteria
-description: LLM-as-judge criteria for verifying customer-facing responses before sending.
+description: LLM-as-judge criteria for verifying customer-facing responses before sending. Historically Google-Doc-driven (VERIFICATION_DOC_ID); kept overridable for Phase 1 parity.
 owner: eng
-overridable: false
+overridable: true
 output: text
 sections: []
 knowledge_tags: []
 access:
   view: [ops, eng]
-  edit: []
-  publish: []
+  edit: [eng]
+  publish: [eng]
 ---
 # Verification Criteria
 
