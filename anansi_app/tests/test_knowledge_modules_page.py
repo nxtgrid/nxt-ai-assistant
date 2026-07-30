@@ -7,7 +7,13 @@ import pytest
 
 sys.modules.setdefault("nicegui", SimpleNamespace(run=SimpleNamespace(), ui=SimpleNamespace()))
 
-from nicegui_app.pages.knowledge_modules import ModuleRow, build_module_rows, validate_module
+from nicegui_app.pages.knowledge_modules import (
+    ModuleRow,
+    build_module_rows,
+    group_module_rows,
+    prompt_option_label,
+    validate_module,
+)
 from nicegui_app.pages.prompts import build_knowledge_tab
 
 from shared.prompts.knowledge import KnowledgeModule
@@ -93,3 +99,42 @@ def test_validate_module_requires_slug_title_and_body():
 def test_validate_module_rejects_a_bad_mode():
     with pytest.raises(ValueError, match="mode"):
         validate_module(slug="a", title="A", summary="s", body="b", mode="sometimes")
+
+
+def test_group_module_rows_orders_pinned_before_on_demand():
+    rows = [
+        _row_for_grouping("catalog", mode="on_demand"),
+        _row_for_grouping("comms", mode="pinned"),
+    ]
+    groups = group_module_rows(rows)
+    assert [label for label, _ in groups] == ["Pinned", "On-demand"]
+
+
+def test_group_module_rows_keeps_slug_order_within_a_group():
+    rows = [_row_for_grouping("a"), _row_for_grouping("b")]
+    groups = group_module_rows(rows)
+    assert [r.slug for r in groups[0][1]] == ["a", "b"]
+
+
+def test_group_module_rows_omits_empty_buckets():
+    groups = group_module_rows([_row_for_grouping("a", mode="pinned")])
+    assert [label for label, _ in groups] == ["Pinned"]
+
+
+def _row_for_grouping(slug: str, mode: str = "pinned") -> ModuleRow:
+    return ModuleRow(slug=slug, title=slug.title(), tags=[], scope="sector", mode=mode, chars=0)
+
+
+def test_prompt_option_label_combines_id_and_description():
+    assert prompt_option_label("customer.system", "Customer-mode instructions.") == (
+        "customer.system — Customer-mode instructions."
+    )
+
+
+def test_prompt_option_label_truncates_a_long_description():
+    label = prompt_option_label("a.b", "x" * 100, max_len=10)
+    assert label == "a.b — " + "x" * 9 + "…"
+
+
+def test_prompt_option_label_falls_back_to_bare_id_when_no_description():
+    assert prompt_option_label("a.b", "") == "a.b"

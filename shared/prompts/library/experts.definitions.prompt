@@ -2,6 +2,7 @@
 id: experts.definitions
 description: Expert, workflow and packet-type definitions parsed into ExpertConfig objects.
 owner: eng
+component: orchestrator_services
 overridable: true
 output: text
 sections: []

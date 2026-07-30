@@ -2,6 +2,7 @@
 id: ticketing.jira_issue_types
 description: Selects the most appropriate Jira issue type for an alert from the project's issue-type catalogue.
 owner: eng
+component: orchestrator_ticketing
 overridable: false
 output: json
 schema:

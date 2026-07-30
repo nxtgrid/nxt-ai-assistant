@@ -9,6 +9,7 @@ without a redeploy.
 from __future__ import annotations
 
 import difflib
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, List, Tuple
 
@@ -16,6 +17,7 @@ from nicegui import ui
 
 from shared.prompts import PROMPTS
 from shared.prompts.access import can_edit_prompt, can_publish_prompt, can_view_prompt
+from shared.prompts.components import COMPONENT_LABELS, COMPONENT_ORDER, UNCATEGORIZED
 from shared.prompts.overrides import OverrideStore
 from shared.prompts.types import PromptSource
 
@@ -24,6 +26,10 @@ SOURCE_LABELS = {
     PromptSource.GDOC: "Google Doc",
     PromptSource.BUNDLED: "Default",
 }
+
+# Same disclosure-triangle convention as the Settings page: pointing right
+# while collapsed, down once expanded -- no rotation, two distinct icons.
+DISCLOSURE_ICONS = 'expand-icon="keyboard_arrow_right" expanded-icon="keyboard_arrow_down"'
 
 
 @dataclass(frozen=True)
@@ -36,6 +42,7 @@ class PromptRow:
     overridable: bool
     can_edit: bool
     can_publish: bool
+    component: str = UNCATEGORIZED
 
 
 @dataclass(frozen=True)
@@ -93,6 +100,7 @@ def build_rows(library: Any, email: str) -> List[PromptRow]:
                 prompt_id=prompt_id,
                 description=spec.description,
                 owner=spec.owner,
+                component=spec.component,
                 source=SOURCE_LABELS[source],
                 version=version,
                 overridable=spec.overridable,
@@ -101,6 +109,25 @@ def build_rows(library: Any, email: str) -> List[PromptRow]:
             )
         )
     return rows
+
+
+def group_rows(rows: List[PromptRow]) -> List[Tuple[str, List[PromptRow]]]:
+    """Bucket rows by component, in ``COMPONENT_ORDER``, as ``(label, rows)``.
+
+    A component outside ``COMPONENT_ORDER`` (unset, or a typo in frontmatter)
+    lands in a trailing "Uncategorized" bucket rather than being dropped, so a
+    bad or missing tag is visible instead of silently disappearing a prompt.
+    Each bucket stays prompt-id sorted because ``rows`` already is (see
+    ``build_rows``), so no re-sort is needed here.
+    """
+    by_component: "defaultdict[str, List[PromptRow]]" = defaultdict(list)
+    for row in rows:
+        by_component[row.component].append(row)
+
+    order = [c for c in COMPONENT_ORDER if c in by_component]
+    order += sorted(c for c in by_component if c not in COMPONENT_LABELS)
+
+    return [(COMPONENT_LABELS.get(c, "Uncategorized"), by_component[c]) for c in order]
 
 
 def diff_lines(default_body: str, current_body: str) -> List[Tuple[str, str]]:
@@ -146,8 +173,14 @@ async def render(user_email: str) -> None:
             if not rows:
                 ui.label("No prompts match.").classes("text-italic")
                 return
-            for row in rows:
-                _render_row(row, store, refresh, user_email)
+            for label, group in group_rows(rows):
+                section = ui.expansion(f"{label}  ·  {len(group)}", value=bool(query)).classes(
+                    "w-full q-mb-sm"
+                )
+                section.props(f'header-class="text-h6 text-weight-bold" {DISCLOSURE_ICONS}')
+                with section:
+                    for row in group:
+                        _render_row(row, store, refresh, user_email)
 
     search_input.on_value_change(lambda: refresh())
     refresh()

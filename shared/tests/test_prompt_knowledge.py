@@ -4,6 +4,7 @@ from shared.prompts.knowledge import (
     KnowledgeModule,
     apply_overrides,
     budget_pinned,
+    diff_prompt_pins,
     render_catalog,
     render_pinned,
     select_modules,
@@ -95,3 +96,20 @@ def test_catalog_lists_slug_and_summary_only():
 
 def test_catalog_of_nothing_is_none():
     assert render_catalog([]) is None
+
+
+def test_diff_prompt_pins_adds_newly_selected():
+    to_add, to_remove = diff_prompt_pins(set(), {"customer.system"})
+    assert to_add == {"customer.system"}
+    assert to_remove == set()
+
+
+def test_diff_prompt_pins_removes_deselected():
+    to_add, to_remove = diff_prompt_pins({"customer.system"}, set())
+    assert to_add == set()
+    assert to_remove == {"customer.system"}
+
+
+def test_diff_prompt_pins_is_a_noop_when_unchanged():
+    to_add, to_remove = diff_prompt_pins({"a.b"}, {"a.b"})
+    assert to_add == set() and to_remove == set()

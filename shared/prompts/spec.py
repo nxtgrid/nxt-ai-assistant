@@ -9,6 +9,8 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from shared.prompts.components import UNCATEGORIZED
+
 _FRONTMATTER = re.compile(r"\A---\s*\n(.*?)\n---\s*\n?(.*)\Z", re.DOTALL)
 
 
@@ -34,6 +36,7 @@ class PromptSpec:
     body: str
     checksum: str
     owner: str = "eng"
+    component: str = UNCATEGORIZED
     overridable: bool = False
     output: str = "text"
     schema: Optional[Dict[str, Any]] = None
@@ -86,6 +89,7 @@ def parse_prompt_file(text: str, *, path: str) -> PromptSpec:
         body=body,
         checksum=body_checksum(body),
         owner=str(raw.get("owner", "eng")),
+        component=str(raw.get("component", UNCATEGORIZED)),
         overridable=bool(raw.get("overridable", False)),
         output=str(output),
         schema=schema,

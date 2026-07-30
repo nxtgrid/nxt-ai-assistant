@@ -3,6 +3,7 @@
 import pytest
 
 from shared.prompts import PROMPTS
+from shared.prompts.components import COMPONENT_LABELS
 
 NON_OVERRIDABLE = {
     "ticketing.correlation",
@@ -29,6 +30,14 @@ def test_every_prompt_parses_and_has_a_description():
 def test_every_prompt_declares_an_owner_we_recognise():
     for prompt_id in PROMPTS.ids():
         assert PROMPTS.spec(prompt_id).owner in {"ops", "eng"}
+
+
+def test_every_prompt_declares_a_component_we_recognise():
+    """Every bundled prompt must land in a real admin-UI group, not the
+    trailing "Uncategorized" bucket -- an unset or misspelled ``component``
+    silently orphans a prompt from its natural section."""
+    for prompt_id in PROMPTS.ids():
+        assert PROMPTS.spec(prompt_id).component in COMPONENT_LABELS, prompt_id
 
 
 @pytest.mark.parametrize("prompt_id", sorted(NON_OVERRIDABLE))

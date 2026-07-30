@@ -8,13 +8,21 @@ docs/superpowers/specs/2026-07-30-prompt-library-design.md.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, List, Tuple
 
 from nicegui import ui
 
 VALID_MODES = {"pinned", "on_demand"}
 VALID_SOURCES = {"manual", "gdoc", "ingested"}
+
+MODE_LABELS = {"pinned": "Pinned", "on_demand": "On-demand"}
+MODE_ORDER = ["pinned", "on_demand"]
+
+# Same disclosure-triangle convention as the Prompts and Settings pages:
+# pointing right while collapsed, down once expanded.
+DISCLOSURE_ICONS = 'expand-icon="keyboard_arrow_right" expanded-icon="keyboard_arrow_down"'
 
 
 @dataclass(frozen=True)
@@ -35,6 +43,30 @@ def build_module_rows(modules: List[Any]) -> List[ModuleRow]:
         )
         for m in sorted(modules, key=lambda m: m.slug)
     ]
+
+
+def group_module_rows(rows: List[ModuleRow]) -> List[Tuple[str, List[ModuleRow]]]:
+    """Bucket rows by mode -- pinned, then on-demand -- as ``(label, rows)``.
+
+    Each bucket stays slug-sorted because ``rows`` already is (see
+    ``build_module_rows``).
+    """
+    by_mode: "defaultdict[str, List[ModuleRow]]" = defaultdict(list)
+    for row in rows:
+        by_mode[row.mode].append(row)
+
+    order = [m for m in MODE_ORDER if m in by_mode]
+    order += sorted(m for m in by_mode if m not in MODE_LABELS)
+
+    return [(MODE_LABELS.get(m, m), by_mode[m]) for m in order]
+
+
+def prompt_option_label(prompt_id: str, description: str, max_len: int = 70) -> str:
+    """Dropdown label: the id plus a truncated purpose, not the id alone."""
+    description = description.strip()
+    if len(description) > max_len:
+        description = description[: max_len - 1].rstrip() + "…"
+    return f"{prompt_id} — {description}" if description else prompt_id
 
 
 def validate_module(
@@ -64,9 +96,10 @@ async def render(user_email: str) -> None:
 
     ui.label("🧠 Knowledge Modules").classes("text-h5")
     ui.label(
-        "Curated, tagged, scoped context that prompts pin by tag. Pinned modules are "
-        "inlined in full; on-demand modules contribute only their summary to a prompt's "
-        "context, and the model fetches the body via a tool when it decides it's relevant."
+        "Curated, scoped context pinned directly to the prompts that need it. Pinned "
+        "modules are inlined in full; on-demand modules contribute only their summary to "
+        "a prompt's context, and the model fetches the body via a tool when it decides "
+        "it's relevant."
     ).classes("text-caption")
 
     store = KnowledgeStore.from_env()
@@ -86,18 +119,25 @@ async def render(user_email: str) -> None:
         with list_container:
             with ui.row().classes("justify-end w-full"):
                 ui.button(
-                    "+ New module", on_click=lambda: _open_edit_dialog(None, store, refresh)
+                    "+ New module",
+                    on_click=lambda: _open_edit_dialog(None, store, refresh, user_email),
                 ).props("color=primary")
             if not rows:
                 ui.label("No knowledge modules yet.").classes("text-italic")
                 return
-            for row in rows:
-                _render_row(row, store, refresh)
+            for label, group in group_module_rows(rows):
+                section = ui.expansion(f"{label}  ·  {len(group)}", value=True).classes(
+                    "w-full q-mb-sm"
+                )
+                section.props(f'header-class="text-h6 text-weight-bold" {DISCLOSURE_ICONS}')
+                with section:
+                    for row in group:
+                        _render_row(row, store, refresh, user_email)
 
     refresh()
 
 
-def _render_row(row: ModuleRow, store: Any, refresh) -> None:
+def _render_row(row: ModuleRow, store: Any, refresh, user_email: str) -> None:
     with ui.card().classes("w-full q-my-xs"):
         with ui.row().classes("items-center justify-between w-full no-wrap"):
             with ui.column().classes("gap-0").style("flex: 3"):
@@ -106,16 +146,22 @@ def _render_row(row: ModuleRow, store: Any, refresh) -> None:
                     "text-caption"
                 )
                 if row.tags:
-                    ui.label(", ".join(row.tags)).classes("text-caption")
+                    ui.label(f"tags (legacy): {', '.join(row.tags)}").classes("text-caption")
             ui.button(
-                "Edit", on_click=lambda: _open_edit_dialog(row.slug, store, refresh)
+                "Edit",
+                on_click=lambda: _open_edit_dialog(row.slug, store, refresh, user_email),
             ).props("flat dense")
 
 
-async def _open_edit_dialog(slug: "str | None", store: Any, refresh) -> None:
+async def _open_edit_dialog(
+    slug: "str | None", store: Any, refresh, user_email: str
+) -> None:
+    from shared.prompts import PROMPTS
+
     existing = None
     if slug:
         existing = next((m for m in store.all_modules() if m.slug == slug), None)
+    existing_pins = store.prompts_pinning(existing.id) if existing else []
 
     with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width: 700px"):
         ui.label("Edit module" if existing else "New module").classes("text-h6")
@@ -127,9 +173,6 @@ async def _open_edit_dialog(slug: "str | None", store: Any, refresh) -> None:
         summary_input = ui.input("Summary", value=existing.summary if existing else "").classes(
             "w-full"
         )
-        tags_input = ui.input(
-            "Tags (comma-separated)", value=", ".join(existing.tags) if existing else ""
-        ).classes("w-full")
         scope_input = ui.input(
             "Scope (sector | site:<name> | org:<id>)",
             value=existing.scope if existing else "sector",
@@ -140,9 +183,18 @@ async def _open_edit_dialog(slug: "str | None", store: Any, refresh) -> None:
         body_input = ui.textarea("Body", value=existing.body if existing else "").classes(
             "w-full"
         ).props("rows=10")
+        prompt_options = {
+            pid: prompt_option_label(pid, PROMPTS.spec(pid).description)
+            for pid in sorted(PROMPTS.ids())
+        }
+        prompts_select = ui.select(
+            prompt_options,
+            value=list(existing_pins),
+            multiple=True,
+            label="Used by these prompts",
+        ).classes("w-full").props("use-chips")
 
         async def save() -> None:
-            tags = [t.strip() for t in tags_input.value.split(",") if t.strip()]
             try:
                 validate_module(
                     slug=slug_input.value.strip(),
@@ -161,18 +213,23 @@ async def _open_edit_dialog(slug: "str | None", store: Any, refresh) -> None:
                 "title": title_input.value.strip(),
                 "summary": summary_input.value.strip(),
                 "body": body_input.value,
-                "tags": tags,
+                "tags": list(existing.tags) if existing else [],
                 "scope": scope_input.value.strip() or "sector",
                 "mode": mode_select.value,
-                "updated_by": "unknown",
+                "updated_by": user_email,
             }
             try:
                 if existing:
                     store._client.table("knowledge_modules").update(row).eq(
                         "slug", row["slug"]
                     ).execute()
+                    module_id = existing.id
                 else:
-                    store._client.table("knowledge_modules").insert(row).execute()
+                    result = store._client.table("knowledge_modules").insert(row).execute()
+                    module_id = result.data[0]["id"]
+                store.set_prompt_pins(
+                    module_id, list(prompts_select.value or []), actor=user_email
+                )
                 ui.notify("Saved", type="positive")
                 dialog.close()
                 refresh()

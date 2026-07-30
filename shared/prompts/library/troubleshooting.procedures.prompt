@@ -2,6 +2,7 @@
 id: troubleshooting.procedures
 description: Shared troubleshooting procedures appended to customer and staff system instructions.
 owner: ops
+component: orchestrator_services
 overridable: true
 output: text
 sections: []

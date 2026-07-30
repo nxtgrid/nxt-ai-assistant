@@ -2,6 +2,7 @@
 id: intent_router.route
 description: Decides whether a staff message clearly asks to start an expert workflow, and which one.
 owner: eng
+component: orchestrator_services
 overridable: false
 output: json
 schema:

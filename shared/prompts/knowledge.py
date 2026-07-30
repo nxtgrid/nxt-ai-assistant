@@ -46,6 +46,11 @@ def select_modules(
     return [m for m in modules if wanted & set(m.tags) and scope.matches(m.scope)]
 
 
+def diff_prompt_pins(current: "set[str]", selected: "set[str]") -> "tuple[set[str], set[str]]":
+    """(to_add, to_remove) to reconcile a module's pinned prompts to ``selected``."""
+    return selected - current, current - selected
+
+
 def apply_overrides(
     selected: List[KnowledgeModule],
     all_modules: List[KnowledgeModule],
@@ -178,3 +183,45 @@ class KnowledgeStore:
             for row in (result.data or [])
             if row["module_id"] in by_id
         }
+
+    def prompts_pinning(self, module_id: str) -> List[str]:
+        """Prompt ids that currently force this module on (pinned=True)."""
+        if not self._client:
+            return []
+        try:
+            result = (
+                self._client.table("prompt_knowledge_overrides")
+                .select("prompt_id")
+                .eq("module_id", module_id)
+                .eq("pinned", True)
+                .execute()
+            )
+        except Exception:
+            LOGGER.warning(f"Prompt-pin fetch failed for module '{module_id}'", exc_info=True)
+            return []
+        return [row["prompt_id"] for row in (result.data or [])]
+
+    def set_prompt_pins(self, module_id: str, prompt_ids: List[str], actor: str) -> None:
+        """Reconcile this module's pinned prompts to exactly ``prompt_ids``.
+
+        This is the module-authoring counterpart to the per-prompt Knowledge
+        tab's checkboxes: both edit the same ``prompt_knowledge_overrides``
+        row, from opposite ends of the relationship.
+        """
+        if not self._client:
+            return
+        current = set(self.prompts_pinning(module_id))
+        to_add, to_remove = diff_prompt_pins(current, set(prompt_ids))
+        for prompt_id in to_add:
+            self._client.table("prompt_knowledge_overrides").upsert(
+                {
+                    "prompt_id": prompt_id,
+                    "module_id": module_id,
+                    "pinned": True,
+                    "updated_by": actor,
+                }
+            ).execute()
+        for prompt_id in to_remove:
+            self._client.table("prompt_knowledge_overrides").delete().eq(
+                "prompt_id", prompt_id
+            ).eq("module_id", module_id).execute()

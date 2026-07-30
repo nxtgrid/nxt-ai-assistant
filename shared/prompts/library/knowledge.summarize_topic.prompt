@@ -2,6 +2,7 @@
 id: knowledge.summarize_topic
 description: Summarizes retrieved knowledge-base chunks about a topic for the knowledge MCP server.
 owner: ops
+component: mcp_servers
 overridable: true
 output: text
 sections: []

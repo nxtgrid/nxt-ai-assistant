@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 sys.modules.setdefault("nicegui", SimpleNamespace(run=SimpleNamespace(), ui=SimpleNamespace()))
 
-from nicegui_app.pages.prompts import PromptRow, build_rows, diff_lines
+from nicegui_app.pages.prompts import PromptRow, build_rows, diff_lines, group_rows
 
 
 class FakeLibrary:
@@ -123,3 +123,38 @@ def test_build_rows_does_not_render_a_prompt_that_declares_variables(monkeypatch
     rows = build_rows(library, "root@x.com")  # must not raise PromptRenderError
 
     assert [r.prompt_id for r in rows] == ["needs.vars"]
+
+
+def _row(prompt_id: str, component: str = "orchestrator_services") -> PromptRow:
+    return PromptRow(
+        prompt_id=prompt_id,
+        description="d",
+        owner="eng",
+        source="Default",
+        version=None,
+        overridable=False,
+        can_edit=False,
+        can_publish=False,
+        component=component,
+    )
+
+
+def test_group_rows_orders_groups_by_component_order():
+    groups = group_rows([_row("z.z", component="mcp_servers"), _row("a.a")])
+    assert [label for label, _ in groups] == ["Orchestrator — Core services", "MCP Servers"]
+
+
+def test_group_rows_keeps_rows_within_a_group_in_input_order():
+    groups = group_rows([_row("a.a"), _row("b.b")])
+    assert [r.prompt_id for r in groups[0][1]] == ["a.a", "b.b"]
+
+
+def test_group_rows_omits_components_with_no_prompts():
+    groups = group_rows([_row("a.a", component="mcp_servers")])
+    assert [label for label, _ in groups] == ["MCP Servers"]
+
+
+def test_group_rows_puts_unrecognised_components_in_a_trailing_uncategorized_bucket():
+    typo_row = _row("z.z", component="orchestraotr_services")
+    groups = group_rows([_row("a.a"), typo_row])
+    assert groups[-1] == ("Uncategorized", [typo_row])

@@ -2,6 +2,7 @@
 id: conversation.summarize
 description: Summarizes a batch of old conversation messages into a compact context summary.
 owner: ops
+component: orchestrator_services
 overridable: true
 output: text
 sections: []

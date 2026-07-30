@@ -2,6 +2,7 @@
 id: ticketing.correlation
 description: Alert-correlation grouping policy. Versioned with the application; not editable at runtime.
 owner: eng
+component: orchestrator_ticketing
 overridable: false
 output: text
 sections: [system_instructions]
