@@ -251,6 +251,34 @@ def test_list_ticket_page_reads_the_canonical_view_with_database_pagination():
     assert reader.client.queries == ["ticket_list_view"]
 
 
+def test_list_ticket_page_accepts_a_list_of_statuses():
+    seed = _seed()
+    seed["ticket_list_view"] = [
+        {
+            "id": "t-open", "ticket_ref": "OPS-1", "backend": "internal",
+            "created_via": "notification", "status": "open", "summary": "Open one",
+            "has_escalation": False, "latest_activity_at": "2026-07-24T10:00:00",
+        },
+        {
+            "id": "t-progress", "ticket_ref": "OPS-2", "backend": "internal",
+            "created_via": "notification", "status": "in_progress", "summary": "In progress one",
+            "has_escalation": False, "latest_activity_at": "2026-07-23T10:00:00",
+        },
+        {
+            "id": "t-done", "ticket_ref": "OPS-3", "backend": "internal",
+            "created_via": "notification", "status": "done", "summary": "Done one",
+            "has_escalation": False, "latest_activity_at": "2026-07-22T10:00:00",
+        },
+    ]
+    reader = SupabaseReader.__new__(SupabaseReader)
+    reader.client = _FakeClient(seed)
+
+    result = reader.list_ticket_page(status=["open", "in_progress"])
+
+    assert result.total == 2
+    assert {item["ticket_ref"] for item in result.items} == {"OPS-1", "OPS-2"}
+
+
 def test_canonical_ticket_detail_reads_recorded_delivery_with_a_safe_link():
     seed = _seed()
     seed.update(
