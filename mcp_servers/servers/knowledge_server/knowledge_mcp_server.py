@@ -22,6 +22,7 @@ from mcp.types import ServerCapabilities
 from shared_code.tool_registry import ToolRegistry
 
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.prompts import PROMPTS
 
 from .tool_schemas import TOOL_SCHEMAS
 
@@ -177,20 +178,13 @@ async def summarize_with_llm(
                 relevant_tools[:5]
             )
 
-        prompt = f"""Summarize the knowledge base information about "{topic}" in a structured, concise summary.
-
-Available knowledge chunks:
-{chunks_text}
-{tools_text}
-
-Instructions:
-1. Provide a {max_words}-word structured summary of what's in the knowledge base about this topic
-2. Use bullet points for key facts, procedures, or examples
-3. Note if information seems incomplete or if live data tools could provide more current info
-4. Do NOT make up information - only summarize what's in the chunks above
-5. If no relevant information was found, say so clearly
-
-Format the response with markdown for readability."""
+        prompt = PROMPTS.text(
+            "knowledge.summarize_topic",
+            topic=topic,
+            chunks_text=chunks_text,
+            tools_text=tools_text,
+            max_words=max_words,
+        )
 
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],

@@ -601,7 +601,6 @@ def _render_grafana_section(
         "GRAFANA_URL",
         "GRAFANA_USERNAME",
         "GRAFANA_FOLDER_NAME",
-        "GRAFANA_PANEL_DESCRIPTION_PROMPT",
     ):
         if _take(key):
             _render_flag(

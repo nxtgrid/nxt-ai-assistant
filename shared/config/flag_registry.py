@@ -826,20 +826,6 @@ _FLAGS: List[Flag] = [
         group="grafana",
         depends_on="GRAFANA_ENABLED",
     ),
-    _s(
-        "GRAFANA_PANEL_DESCRIPTION_PROMPT",
-        (
-            "You are a system that generates tool descriptions for Grafana dashboard panels. "
-            "Given a panel with title, description, query, and dashboard variables, create a "
-            "concise tool description that explains what data this panel shows and what "
-            "variables it requires. Format: A tool description suitable for an LLM to "
-            "understand when to use this panel."
-        ),
-        "Prompt used to auto-generate Grafana panel tool descriptions.",
-        group="grafana",
-        depends_on="GRAFANA_ENABLED",
-        advanced=True,
-    ),
     _j(
         "GRAFANA_PANELS_METADATA",
         "{}",

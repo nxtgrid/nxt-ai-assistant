@@ -14,6 +14,7 @@ from typing import Any
 
 from googleapiclient.discovery import build
 
+from shared.prompts import PROMPTS
 from shared.utils.apps_script_client import write_doc_markdown
 from shared.utils.google_auth import get_drive_write_credentials
 
@@ -372,30 +373,14 @@ async def generate_replacement_markdown(
     if section_context:
         context_block = f"\nSURROUNDING CONTEXT:\n{section_context[:1500]}"
 
-    prompt = f"""Edit the highlighted text in a Google Doc according to the instruction.
-Return the replacement as **Markdown-formatted text**.
-
-Supported formatting:
-- **bold** and *italic*
-- ## Headings (H2-H4 only — do not use H1)
-- Bullet lists (- item) and numbered lists (1. item)
-- Tables (| col1 | col2 |)
-- [Links](url)
-
-Do NOT use: H1 headings, images, footnotes, HTML tags, code blocks.
-If the original text is a simple sentence, keep it as a plain paragraph.
-
-INSTRUCTION: {instruction}
-
-HIGHLIGHTED TEXT (to be replaced):
-{highlighted_text}
-{context_block}
-{context_summary}
-{reference_block}
-
-Return ONLY the replacement markdown — no explanation, no fences.
-If reference documents were provided, follow their style, structure, and tone closely.
-"""
+    prompt = PROMPTS.text(
+        "doc_editing.edit_highlighted",
+        instruction=instruction,
+        highlighted_text=highlighted_text,
+        context_block=context_block,
+        context_summary=context_summary,
+        reference_block=reference_block,
+    )
 
     response = await gateway.generate(
         [LLMMessage(role="user", text=prompt)],

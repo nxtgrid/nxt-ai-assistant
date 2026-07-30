@@ -1,0 +1,40 @@
+---
+id: doc_editor.locate_edits
+description: Identifies the exact document section to edit for a chat-driven (non-comment) Google Doc edit instruction.
+owner: eng
+overridable: false
+output: json
+schema:
+  type: object
+  required: [text, confidence]
+  properties:
+    text: {type: string}
+    confidence: {type: number}
+    reasoning: {type: string}
+sections: []
+variables: [instruction, markdown]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+Given this document (in markdown) and an edit instruction, identify the EXACT
+text section that should be edited. Return JSON only.
+
+INSTRUCTION: {{instruction}}
+
+DOCUMENT:
+{{markdown}}
+
+Return JSON:
+{
+    "text": "the exact text from the document that should be edited (copy verbatim)",
+    "confidence": 0.0 to 1.0 (how confident you are this is the right section),
+    "reasoning": "why this section was selected"
+}
+
+Rules:
+- The "text" must be an EXACT substring of the document (character-for-character match)
+- If you cannot identify a specific section, set confidence to 0.0
+- If the instruction is ambiguous, set confidence below 0.5
+- Pick the smallest text range that covers the edit target

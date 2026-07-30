@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import aiohttp
 
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -338,15 +339,18 @@ class JiraIssueTypeSelector:
             {"id": item.id, "name": item.name, "description": item.description}
             for item in types
         ]
-        prompt = (
-            "Choose the single most appropriate Jira issue type for this alert. "
-            "Return JSON only: {\"issue_type_id\": \"...\", \"reason\": \"...\"}. "
-            "issue_type_id must be copied exactly from the catalogue.\n\n"
-            f"Catalogue: {json.dumps(catalogue)}\n"
-            f"Alert summary: {summary}\nAlert details: {description[:4000]}"
+        operational_context_block = (
+            f"\nLive grid telemetry: {json.dumps(operational_context, default=str)}"
+            if operational_context
+            else ""
         )
-        if operational_context:
-            prompt += f"\nLive grid telemetry: {json.dumps(operational_context, default=str)}"
+        prompt = PROMPTS.text(
+            "ticketing.jira_issue_types",
+            catalogue_json=json.dumps(catalogue),
+            summary=summary,
+            description=description[:4000],
+            operational_context_block=operational_context_block,
+        )
         try:
             # Keep LLM providers lazy: every ticket service imports this
             # module, while only a configured Jira ticket creation needs an

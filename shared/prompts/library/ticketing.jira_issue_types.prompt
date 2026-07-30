@@ -1,0 +1,24 @@
+---
+id: ticketing.jira_issue_types
+description: Selects the most appropriate Jira issue type for an alert from the project's issue-type catalogue.
+owner: eng
+overridable: false
+output: json
+schema:
+  type: object
+  required: [issue_type_id]
+  properties:
+    issue_type_id: {type: string}
+    reason: {type: string}
+sections: []
+variables: [catalogue_json, summary, description, operational_context_block]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+Choose the single most appropriate Jira issue type for this alert. Return JSON only: {"issue_type_id": "...", "reason": "..."}. issue_type_id must be copied exactly from the catalogue.
+
+Catalogue: {{catalogue_json}}
+Alert summary: {{summary}}
+Alert details: {{description}}{{operational_context_block}}
