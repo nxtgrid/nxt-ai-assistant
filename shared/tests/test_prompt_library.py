@@ -1,0 +1,115 @@
+"""Tests for the PromptLibrary resolution order."""
+
+import pytest
+
+from shared.prompts.bundled import BundledStore
+from shared.prompts.core import PromptLibrary
+from shared.prompts.types import PromptSource
+
+
+@pytest.fixture
+def bundled(tmp_path):
+    (tmp_path / "a.b.prompt").write_text(
+        "---\nid: a.b\ndescription: d\noverridable: true\n"
+        "sections: [system_instructions]\n---\n"
+        "# System Instructions\n\nBundled text.\n"
+    )
+    (tmp_path / "locked.prompt").write_text(
+        "---\nid: locked\ndescription: d\noverridable: false\n---\nLocked text.\n"
+    )
+    (tmp_path / "partials.tone.prompt").write_text(
+        "---\nid: partials.tone\ndescription: d\n---\nBe brief.\n"
+    )
+    return BundledStore(directory=tmp_path)
+
+
+def test_falls_back_to_bundled(bundled):
+    lib = PromptLibrary(bundled=bundled)
+    out = lib.render("a.b")
+    assert out.system_text == "Bundled text."
+    assert out.source is PromptSource.BUNDLED
+    assert out.version is None
+
+
+def test_gdoc_beats_bundled(bundled):
+    lib = PromptLibrary(
+        bundled=bundled,
+        gdoc_body_for=lambda pid: "# System Instructions\n\nDoc text.",
+    )
+    out = lib.render("a.b")
+    assert out.system_text == "Doc text."
+    assert out.source is PromptSource.GDOC
+
+
+def test_db_beats_gdoc(bundled):
+    lib = PromptLibrary(
+        bundled=bundled,
+        gdoc_body_for=lambda pid: "# System Instructions\n\nDoc text.",
+        db_body_for=lambda pid: ("# System Instructions\n\nDb text.", 4),
+    )
+    out = lib.render("a.b")
+    assert out.system_text == "Db text."
+    assert out.source is PromptSource.DB
+    assert out.version == 4
+
+
+def test_non_overridable_ignores_db_and_gdoc(bundled):
+    lib = PromptLibrary(
+        bundled=bundled,
+        gdoc_body_for=lambda pid: "Doc text.",
+        db_body_for=lambda pid: ("Db text.", 4),
+    )
+    out = lib.render("locked")
+    assert out.system_text == "Locked text."
+    assert out.source is PromptSource.BUNDLED
+
+
+def test_db_failure_falls_through_to_bundled(bundled):
+    def boom(prompt_id):
+        raise RuntimeError("db down")
+
+    lib = PromptLibrary(bundled=bundled, db_body_for=boom)
+    out = lib.render("a.b")
+    assert out.system_text == "Bundled text."
+    assert out.source is PromptSource.BUNDLED
+
+
+def test_partials_resolve_from_the_bundled_store(bundled, tmp_path):
+    (tmp_path / "c.d.prompt").write_text(
+        "---\nid: c.d\ndescription: d\n---\n{{> partials.tone}}\n"
+    )
+    bundled.reload()
+    lib = PromptLibrary(bundled=bundled)
+    assert lib.render("c.d").system_text == "Be brief."
+
+
+def test_partials_always_come_from_bundled_even_when_host_is_overridden(bundled, tmp_path):
+    (tmp_path / "c.d.prompt").write_text(
+        "---\nid: c.d\ndescription: d\noverridable: true\n---\nx\n"
+    )
+    bundled.reload()
+    lib = PromptLibrary(
+        bundled=bundled,
+        db_body_for=lambda pid: ("{{> partials.tone}}", 1) if pid == "c.d" else None,
+    )
+    assert lib.render("c.d").system_text == "Be brief."
+
+
+def test_checksum_reflects_the_body_actually_used(bundled):
+    lib = PromptLibrary(
+        bundled=bundled,
+        db_body_for=lambda pid: ("# System Instructions\n\nDb text.", 2),
+    )
+    a = lib.render("a.b")
+    b = PromptLibrary(bundled=bundled).render("a.b")
+    assert a.checksum != b.checksum
+
+
+def test_ids_come_from_the_bundled_store(bundled):
+    lib = PromptLibrary(bundled=bundled)
+    assert "a.b" in lib.ids()
+
+
+def test_spec_exposes_frontmatter(bundled):
+    lib = PromptLibrary(bundled=bundled)
+    assert lib.spec("locked").overridable is False
