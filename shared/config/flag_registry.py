@@ -1431,6 +1431,11 @@ def non_editable_settings() -> set[str]:
     return {f.name for f in FLAGS.values() if not f.editable}
 
 
+def secret_settings() -> set[str]:
+    """Names that must be stored encrypted (DigitalOcean ``type: SECRET``)."""
+    return {f.name for f in FLAGS.values() if f.secret}
+
+
 def groups() -> tuple[Group, ...]:
     """Ordered settings-page sections."""
     return GROUPS

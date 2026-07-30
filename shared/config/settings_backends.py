@@ -247,6 +247,7 @@ class DigitalOceanBackend(SettingsBackend):
     def _merge_env_vars(
         existing_envs: List[Dict[str, str]], settings: Mapping[str, Any]
     ) -> List[Dict[str, str]]:
+        secret_keys = registry.secret_settings()
         env_map = {env["key"]: env for env in existing_envs}
         for key, value in settings.items():
             str_value = _as_env_str(value)
@@ -254,6 +255,8 @@ class DigitalOceanBackend(SettingsBackend):
                 env_map[key]["value"] = str_value
             else:
                 env_map[key] = {"key": key, "value": str_value, "scope": "RUN_TIME"}
+            if key in secret_keys:
+                env_map[key]["type"] = "SECRET"
         return list(env_map.values())
 
 

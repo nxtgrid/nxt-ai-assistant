@@ -39,12 +39,13 @@ class RenderMode(Enum):
     TEXTAREA = "textarea"
     SECRET = "secret"
     READ_ONLY = "read_only"
+    READ_ONLY_SECRET = "read_only_secret"
 
 
 def render_mode(flag: Flag) -> RenderMode:
     """Which widget a flag gets. Read-only and secret win over the value type."""
     if not flag.editable:
-        return RenderMode.READ_ONLY
+        return RenderMode.READ_ONLY_SECRET if flag.secret else RenderMode.READ_ONLY
     if flag.secret:
         return RenderMode.SECRET
     if flag.type is FlagType.BOOL:
