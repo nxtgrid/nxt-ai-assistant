@@ -827,15 +827,25 @@ def _render_flag(
         on_change(n, e.value)
 
     wrapper = ui.column().classes("gap-0 w-full q-mb-sm")
+    # CSS grid items default to min-width: auto, so a value with no natural break
+    # point (a token, a JWT, DigitalOcean's "EV[1:...]" encrypted placeholder)
+    # forces the track wider than the column instead of wrapping, overlapping
+    # the next column. Letting the item shrink is what makes the label's own
+    # overflow-wrap rule actually take effect.
+    wrapper.style("min-width: 0")
     if mode is RenderMode.TEXTAREA:
         # JSON/long-prompt blobs read poorly squeezed into a half-width grid
         # cell — span both columns. A no-op outside a grid container (e.g. the
         # Grafana section's own layout).
         wrapper.style("grid-column: 1 / -1")
     with wrapper:
-        if mode is RenderMode.READ_ONLY:
-            ui.label(f"{label}: {value if value not in (None, '') else '—'}").classes(
-                "text-body2"
+        if mode is RenderMode.READ_ONLY or mode is RenderMode.READ_ONLY_SECRET:
+            if mode is RenderMode.READ_ONLY_SECRET:
+                display_value = secret_placeholder(value not in (None, ""))
+            else:
+                display_value = value if value not in (None, "") else "—"
+            ui.label(f"{label}: {display_value}").classes("text-body2").style(
+                "overflow-wrap: anywhere; word-break: break-word"
             )
             if flag.set_via:
                 ui.label(flag.set_via).classes("text-caption").style("color: #64748b")

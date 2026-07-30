@@ -21,6 +21,9 @@ class TestRenderMode:
     def test_read_only_wins_over_type(self):
         assert render_mode(fr.FLAGS["DEFAULT_TIMEZONE"]) is RenderMode.READ_ONLY
 
+    def test_read_only_secret_is_masked_not_shown_in_plaintext(self):
+        assert render_mode(fr.FLAGS["TELEGRAM_BOT_TOKEN"]) is RenderMode.READ_ONLY_SECRET
+
     def test_json_renders_a_textarea(self):
         assert render_mode(fr.FLAGS["MCP_DISABLED_TOOLS"]) is RenderMode.TEXTAREA
 
