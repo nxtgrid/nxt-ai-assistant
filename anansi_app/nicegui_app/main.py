@@ -153,6 +153,21 @@ async def settings_route() -> None:
         await settings.render()
 
 
+@ui.page("/prompts")
+async def prompts_route() -> None:
+    user = auth.current_user()
+    if not user:
+        ui.navigate.to("/login")
+        return
+    with layout.frame(user, "/prompts"):
+        if not perms.can_view_bot_admin(user["email"]):
+            layout.access_denied()
+            return
+        from nicegui_app.pages import prompts
+
+        await prompts.render(user["email"])
+
+
 @ui.page("/grid/{bare}")
 async def grid_page(bare: str, request: Request) -> None:
     user = auth.current_user()

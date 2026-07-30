@@ -23,6 +23,7 @@ BOT_ADMIN_NAV = [
     ("/conversations", "💬 Chats"),
     ("/documents", "📚 RAG Knowledgebase"),
     ("/agents", "🤖 Agents"),
+    ("/prompts", "📝 Prompts"),
     ("/settings", "⚙️ Settings"),
 ]
 
