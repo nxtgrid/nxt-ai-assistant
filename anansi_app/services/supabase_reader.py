@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from supabase import Client, create_client  # type: ignore[attr-defined]
 
@@ -1750,13 +1750,17 @@ class SupabaseReader:
         *,
         page: int = 1,
         page_size: int = 50,
-        status: Optional[str] = None,
+        status: Optional[Union[str, Sequence[str]]] = None,
         backend: Optional[str] = None,
         created_via: Optional[str] = None,
         has_escalation: Optional[bool] = None,
         search: Optional[str] = None,
     ) -> TicketPage:
-        """Read one canonical ticket page from the database projection."""
+        """Read one canonical ticket page from the database projection.
+
+        ``status`` accepts either a single status or a list (e.g. ["open",
+        "in_progress"] for the default "not done" filter on the Tickets page).
+        """
         if not self.client:
             return TicketPage(items=[], total=0)
 
@@ -1766,7 +1770,10 @@ class SupabaseReader:
         try:
             query = self.client.table("ticket_list_view").select("*", count="exact")
             if status:
-                query = query.eq("status", status)
+                if isinstance(status, str):
+                    query = query.eq("status", status)
+                else:
+                    query = query.in_("status", list(status))
             if backend:
                 query = query.eq("backend", backend)
             if created_via:

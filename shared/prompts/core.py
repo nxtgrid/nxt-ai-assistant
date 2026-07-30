@@ -140,6 +140,18 @@ class PromptLibrary:
         used = [m.slug for m in pinned] + [m.slug for m in on_demand]
         return ("\n\n".join(blocks) or None), used
 
+    def resolve(self, prompt_id: str) -> Tuple[str, PromptSource, Optional[int]]:
+        """The current body exactly as stored (DB, then Doc, then bundled).
+
+        Unlike ``render``, this never substitutes ``{{var}}`` placeholders or
+        inlines partials -- for editors and diff tools that need the raw
+        template, where an edit can be saved straight back through
+        ``propose`` unchanged. ``render`` requires real variable values,
+        which callers here (an admin page listing every prompt) don't have.
+        """
+        spec = self._bundled.get(prompt_id)
+        return self._resolve_body(spec)
+
     def render(
         self,
         prompt_id: str,

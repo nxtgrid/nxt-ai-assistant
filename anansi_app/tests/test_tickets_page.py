@@ -71,6 +71,21 @@ def test_format_time_ago():
     assert tickets_page._format_time_ago(datetime.utcnow().isoformat()) == "just now"
 
 
+def test_status_filter_defaults_to_open_and_in_progress():
+    assert tickets_page._status_filter_value(tickets_page._DEFAULT_STATUS_FILTER) == [
+        "open",
+        "in_progress",
+    ]
+
+
+def test_status_filter_all_means_no_filter():
+    assert tickets_page._status_filter_value("all") is None
+
+
+def test_status_filter_passes_through_a_single_status():
+    assert tickets_page._status_filter_value("done") == "done"
+
+
 # ── read-only guarantee: the page must call NO write paths ─────────────────────
 def test_page_only_calls_readonly_reader_methods():
     src = open(_TICKETS_PATH).read()

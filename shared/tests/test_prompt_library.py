@@ -125,3 +125,36 @@ def test_invalidate_doc_cache_calls_the_hook(bundled):
 def test_invalidate_doc_cache_is_a_noop_without_a_hook(bundled):
     lib = PromptLibrary(bundled=bundled)
     lib.invalidate_doc_cache()  # must not raise
+
+
+def test_resolve_returns_the_raw_body_unsubstituted(bundled, tmp_path):
+    (tmp_path / "v.w.prompt").write_text(
+        "---\nid: v.w\ndescription: d\nvariables: [name]\n---\nHello {{name}}.\n"
+    )
+    bundled.reload()
+    lib = PromptLibrary(bundled=bundled)
+    body, source, version = lib.resolve("v.w")
+    assert body == "Hello {{name}}.\n"
+    assert source is PromptSource.BUNDLED
+    assert version is None
+
+
+def test_resolve_reflects_db_override_unsubstituted(bundled):
+    lib = PromptLibrary(
+        bundled=bundled,
+        db_body_for=lambda pid: ("Hi {{x}}.", 3) if pid == "a.b" else None,
+    )
+    body, source, version = lib.resolve("a.b")
+    assert body == "Hi {{x}}."
+    assert source is PromptSource.DB
+    assert version == 3
+
+
+def test_resolve_never_inlines_partials(bundled, tmp_path):
+    (tmp_path / "c.d.prompt").write_text(
+        "---\nid: c.d\ndescription: d\n---\n{{> partials.tone}}\n"
+    )
+    bundled.reload()
+    lib = PromptLibrary(bundled=bundled)
+    body, _source, _version = lib.resolve("c.d")
+    assert body == "{{> partials.tone}}\n"

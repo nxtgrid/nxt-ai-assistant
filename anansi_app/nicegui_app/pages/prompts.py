@@ -87,14 +87,14 @@ def build_rows(library: Any, email: str) -> List[PromptRow]:
         spec = library.spec(prompt_id)
         if not can_view_prompt(spec, email):
             continue
-        rendered = library.render(prompt_id)
+        _body, source, version = library.resolve(prompt_id)
         rows.append(
             PromptRow(
                 prompt_id=prompt_id,
                 description=spec.description,
                 owner=spec.owner,
-                source=SOURCE_LABELS[rendered.source],
-                version=rendered.version,
+                source=SOURCE_LABELS[source],
+                version=version,
                 overridable=spec.overridable,
                 can_edit=can_edit_prompt(spec, email),
                 can_publish=can_publish_prompt(spec, email),
@@ -172,10 +172,7 @@ def _render_row(row: PromptRow, store: OverrideStore, refresh, user_email: str) 
 
 async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, user_email: str) -> None:
     spec = PROMPTS.spec(row.prompt_id)
-    rendered = PROMPTS.render(row.prompt_id)
-    current_body = rendered.system_text
-    if rendered.context_text:
-        current_body = f"{current_body}\n\n{rendered.context_text}"
+    current_body, _source, _version = PROMPTS.resolve(row.prompt_id)
 
     with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width: 900px"):
         ui.label(row.prompt_id).classes("text-h6")

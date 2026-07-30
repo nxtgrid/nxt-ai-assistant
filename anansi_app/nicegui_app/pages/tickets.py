@@ -26,6 +26,20 @@ _STATUS_LABELS = {"open": "open", "in_progress": "in-progress", "done": "done"}
 _STATUS_COLORS = {"open": "green", "in_progress": "orange", "done": "grey"}
 _PAGE_SIZE = 25
 
+# Default view: open + in-progress only, so a closed backlog doesn't bury
+# what actually needs attention. "All statuses" still shows everything.
+_OPEN_STATUSES = ["open", "in_progress"]
+_DEFAULT_STATUS_FILTER = "open_active"
+
+
+def _status_filter_value(selected: str) -> "list[str] | str | None":
+    """Map the status dropdown's selection to a list_ticket_page ``status`` arg."""
+    if selected == "all":
+        return None
+    if selected == _DEFAULT_STATUS_FILTER:
+        return _OPEN_STATUSES
+    return selected
+
 _COMMENT_SOURCE_LABELS = {
     "customer": "👤 Customer",
     "staff": "🧑‍💼 Staff",
@@ -158,7 +172,7 @@ async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
         return
 
     state: dict[str, Any] = {
-        "status": "all",
+        "status": _DEFAULT_STATUS_FILTER,
         "backend": "all",
         "created_via": "all",
         "has_escalation": "all",
@@ -169,7 +183,12 @@ async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
     # ── filter controls (all read-only) ───────────────────────────────────────
     with ui.row().classes("items-center gap-4 w-full flex-wrap"):
         ui.select(
-            {"all": "All statuses", **_STATUS_LABELS}, value="all"
+            {
+                _DEFAULT_STATUS_FILTER: "Open (open + in-progress)",
+                "all": "All statuses",
+                **_STATUS_LABELS,
+            },
+            value=_DEFAULT_STATUS_FILTER,
         ).bind_value(state, "status").on_value_change(lambda: _reload())
         ui.select(
             {"all": "All backends", "jira": "🎫 Jira", "internal": "🗂 Internal"},
@@ -209,7 +228,7 @@ async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
             lambda: db.list_ticket_page(
                 page=state["page"],
                 page_size=_PAGE_SIZE,
-                status=None if state["status"] == "all" else state["status"],
+                status=_status_filter_value(state["status"]),
                 backend=None if state["backend"] == "all" else state["backend"],
                 created_via=(
                     None if state["created_via"] == "all" else state["created_via"]
