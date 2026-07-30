@@ -22,6 +22,7 @@ from mcp.types import ServerCapabilities
 from shared_code.tool_registry import ToolRegistry
 
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.prompts import PROMPTS
 
 from .tool_schemas import TOOL_SCHEMAS
 
@@ -177,20 +178,13 @@ async def summarize_with_llm(
                 relevant_tools[:5]
             )
 
-        prompt = f"""Summarize the knowledge base information about "{topic}" in a structured, concise summary.
-
-Available knowledge chunks:
-{chunks_text}
-{tools_text}
-
-Instructions:
-1. Provide a {max_words}-word structured summary of what's in the knowledge base about this topic
-2. Use bullet points for key facts, procedures, or examples
-3. Note if information seems incomplete or if live data tools could provide more current info
-4. Do NOT make up information - only summarize what's in the chunks above
-5. If no relevant information was found, say so clearly
-
-Format the response with markdown for readability."""
+        prompt = PROMPTS.text(
+            "knowledge.summarize_topic",
+            topic=topic,
+            chunks_text=chunks_text,
+            tools_text=tools_text,
+            max_words=max_words,
+        )
 
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],
@@ -242,6 +236,34 @@ async def _handle_summarize_knowledge(arguments: dict) -> list[types.TextContent
         footer += f"\n*Live data available via: {', '.join(relevant_tools[:3])}*"
 
     return [types.TextContent(type="text", text=summary + footer)]
+
+
+def fetch_knowledge_module(slug: str, store: Any = None) -> str:
+    """Return one knowledge module's full body by slug.
+
+    Backs the on-demand tier: the model sees only slug and summary in context
+    (the '# Available Knowledge' catalog block PromptLibrary.render composes)
+    and calls this when it decides a module is relevant.
+    """
+    from shared.prompts.knowledge import KnowledgeStore
+
+    store = store or KnowledgeStore.from_env()
+    modules = {m.slug: m for m in store.all_modules()}
+    if not modules:
+        return "No knowledge modules are configured."
+    module = modules.get(slug)
+    if not module:
+        return f"No knowledge module named '{slug}'. Available: " + ", ".join(sorted(modules))
+    return f"# {module.title}\n\n{module.body}"
+
+
+@registry.tool("get_knowledge_module", _SCHEMAS_BY_NAME["get_knowledge_module"])
+async def _handle_get_knowledge_module(arguments: dict) -> list[types.TextContent]:
+    """Handle get_knowledge_module tool call."""
+    slug = arguments.get("slug", "")
+    if not slug:
+        return [types.TextContent(type="text", text="Error: slug is required")]
+    return [types.TextContent(type="text", text=fetch_knowledge_module(slug))]
 
 
 @registry.tool("list_document_types", _SCHEMAS_BY_NAME["list_document_types"])

@@ -1,0 +1,287 @@
+"""Prompts admin page: list, edit, diff, publish, revert.
+
+The prompt library ships with the app (``shared/prompts/library/*.prompt``);
+this page lets an authorized operator override a prompt live, see a diff
+against the shipped default, review version history, and roll back --
+without a redeploy.
+"""
+
+from __future__ import annotations
+
+import difflib
+from dataclasses import dataclass
+from typing import Any, List, Tuple
+
+from nicegui import ui
+
+from shared.prompts import PROMPTS
+from shared.prompts.access import can_edit_prompt, can_publish_prompt, can_view_prompt
+from shared.prompts.overrides import OverrideStore
+from shared.prompts.types import PromptSource
+
+SOURCE_LABELS = {
+    PromptSource.DB: "Overridden",
+    PromptSource.GDOC: "Google Doc",
+    PromptSource.BUNDLED: "Default",
+}
+
+
+@dataclass(frozen=True)
+class PromptRow:
+    prompt_id: str
+    description: str
+    owner: str
+    source: str
+    version: "int | None"
+    overridable: bool
+    can_edit: bool
+    can_publish: bool
+
+
+@dataclass(frozen=True)
+class KnowledgeTabRow:
+    slug: str
+    title: str
+    mode: str
+    chars: int
+    checked: bool
+    origin: str  # "tag" | "override"
+
+
+def build_knowledge_tab(
+    prompt_tags: List[str], modules: List[Any], overrides: dict
+) -> List[KnowledgeTabRow]:
+    """The per-prompt checkbox grid: tag-derived, individually overridable.
+
+    A module appears if it shares a tag with the prompt, or if an override
+    exists for it (a forced-on module the tags didn't select, or a
+    forced-off module they did).
+    """
+    wanted = set(prompt_tags)
+    rows = []
+    for module in sorted(modules, key=lambda m: m.slug):
+        by_tag = bool(wanted & set(module.tags))
+        if module.slug in overrides:
+            checked, origin = overrides[module.slug], "override"
+        else:
+            checked, origin = by_tag, "tag"
+        if not (by_tag or module.slug in overrides):
+            continue
+        rows.append(
+            KnowledgeTabRow(
+                slug=module.slug,
+                title=module.title,
+                mode=module.mode,
+                chars=len(module.body),
+                checked=checked,
+                origin=origin,
+            )
+        )
+    return rows
+
+
+def build_rows(library: Any, email: str) -> List[PromptRow]:
+    """The list view, filtered to what this user may see."""
+    rows: List[PromptRow] = []
+    for prompt_id in sorted(library.ids()):
+        spec = library.spec(prompt_id)
+        if not can_view_prompt(spec, email):
+            continue
+        rendered = library.render(prompt_id)
+        rows.append(
+            PromptRow(
+                prompt_id=prompt_id,
+                description=spec.description,
+                owner=spec.owner,
+                source=SOURCE_LABELS[rendered.source],
+                version=rendered.version,
+                overridable=spec.overridable,
+                can_edit=can_edit_prompt(spec, email),
+                can_publish=can_publish_prompt(spec, email),
+            )
+        )
+    return rows
+
+
+def diff_lines(default_body: str, current_body: str) -> List[Tuple[str, str]]:
+    """Line diff of the shipped default against what is live."""
+    result: List[Tuple[str, str]] = []
+    for line in difflib.ndiff(
+        default_body.strip().splitlines(), current_body.strip().splitlines()
+    ):
+        marker, text = line[:2], line[2:]
+        if marker in ("  ", "- ", "+ "):
+            result.append((marker, text))
+    return result
+
+
+async def render(user_email: str) -> None:
+    ui.label("📝 Prompts").classes("text-h5")
+    ui.label(
+        "Every prompt Anansi sends to a model, in one place. Overridable prompts can be "
+        "edited here without a redeploy; locked prompts are reviewed and shipped with the app."
+    ).classes("text-caption")
+
+    store = OverrideStore.from_env()
+    if not store.is_configured():
+        ui.label(
+            "⚠️ Prompt override storage not configured (CHAT_DB_URL / CHAT_DB_SERVICE_KEY). "
+            "Prompts are readable below but edits can't be saved."
+        ).classes("text-warning")
+
+    search_input = ui.input(placeholder="Search prompts…").classes("w-full")
+    list_container = ui.column().classes("w-full gap-0")
+
+    def refresh() -> None:
+        list_container.clear()
+        rows = build_rows(PROMPTS, user_email)
+        query = (search_input.value or "").strip().lower()
+        if query:
+            rows = [
+                r
+                for r in rows
+                if query in r.prompt_id.lower() or query in r.description.lower()
+            ]
+        with list_container:
+            if not rows:
+                ui.label("No prompts match.").classes("text-italic")
+                return
+            for row in rows:
+                _render_row(row, store, refresh, user_email)
+
+    search_input.on_value_change(lambda: refresh())
+    refresh()
+
+
+def _render_row(row: PromptRow, store: OverrideStore, refresh, user_email: str) -> None:
+    with ui.card().classes("w-full q-my-xs"):
+        with ui.row().classes("items-center justify-between w-full no-wrap"):
+            with ui.column().classes("gap-0").style("flex: 3"):
+                ui.label(row.prompt_id).classes("text-bold")
+                ui.label(row.description).classes("text-caption")
+            ui.badge(row.source, color="primary" if row.source == "Overridden" else "grey")
+            if row.version is not None:
+                ui.label(f"v{row.version}").classes("text-caption")
+            if not row.overridable:
+                ui.badge("locked", color="grey")
+            ui.button(
+                "Open",
+                on_click=lambda r=row: _open_detail_dialog(r, store, refresh, user_email),
+            ).props("flat dense")
+
+
+async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, user_email: str) -> None:
+    spec = PROMPTS.spec(row.prompt_id)
+    rendered = PROMPTS.render(row.prompt_id)
+    current_body = rendered.system_text
+    if rendered.context_text:
+        current_body = f"{current_body}\n\n{rendered.context_text}"
+
+    with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width: 900px"):
+        ui.label(row.prompt_id).classes("text-h6")
+        ui.label(f"Owner: {spec.owner} · Source: {row.source}").classes("text-caption")
+
+        with ui.tabs().classes("w-full") as tabs:
+            edit_tab = ui.tab("Edit")
+            diff_tab = ui.tab("Diff vs default")
+            history_tab = ui.tab("History")
+
+        with ui.tab_panels(tabs, value=edit_tab).classes("w-full"):
+            with ui.tab_panel(edit_tab):
+                body_input = ui.textarea(value=current_body).classes("w-full").props("rows=16")
+                if spec.variables:
+                    ui.label(f"Declared variables: {', '.join(spec.variables)}").classes(
+                        "text-caption"
+                    )
+
+                async def save_draft() -> None:
+                    try:
+                        version = PROMPTS.propose(
+                            row.prompt_id,
+                            body_input.value,
+                            note="Edited from the Prompts page",
+                            actor=user_email,
+                        )
+                        ui.notify(f"Saved as v{version} (not yet live)", type="positive")
+                        dialog.close()
+                        refresh()
+                    except PermissionError as e:
+                        ui.notify(str(e), type="negative")
+                    except RuntimeError as e:
+                        ui.notify(str(e), type="negative")
+
+                async def publish_latest() -> None:
+                    try:
+                        version = PROMPTS.propose(
+                            row.prompt_id,
+                            body_input.value,
+                            note="Published from the Prompts page",
+                            actor=user_email,
+                        )
+                        PROMPTS.publish(row.prompt_id, version, actor=user_email)
+                        ui.notify(f"Published v{version}", type="positive")
+                        dialog.close()
+                        refresh()
+                    except PermissionError as e:
+                        ui.notify(str(e), type="negative")
+                    except RuntimeError as e:
+                        ui.notify(str(e), type="negative")
+
+                async def revert() -> None:
+                    try:
+                        store.revert_to_default(row.prompt_id, actor=user_email)
+                        ui.notify("Reverted to the bundled default", type="positive")
+                        dialog.close()
+                        refresh()
+                    except (PermissionError, RuntimeError) as e:
+                        ui.notify(str(e), type="negative")
+
+                async def reload_cache() -> None:
+                    PROMPTS.reload()
+                    PROMPTS.invalidate_doc_cache()
+                    store.invalidate()
+                    ui.notify("Cache reloaded", type="positive")
+                    dialog.close()
+                    refresh()
+
+                with ui.row().classes("justify-end w-full gap-2 q-mt-sm"):
+                    ui.button("Reload cache", on_click=reload_cache).props("flat")
+                    ui.button("Revert to default", on_click=revert).props("flat color=warning")
+                    ui.button("Save draft", on_click=save_draft).props("flat").set_visibility(
+                        row.can_edit
+                    )
+                    ui.button("Save & Publish", on_click=publish_latest).props(
+                        "color=primary"
+                    ).set_visibility(row.can_publish)
+
+            with ui.tab_panel(diff_tab):
+                lines = diff_lines(spec.body, current_body)
+                if not lines:
+                    ui.label("No changes from the shipped default.").classes("text-caption")
+                else:
+                    with ui.column().classes("gap-0 font-mono"):
+                        for marker, text in lines:
+                            color = (
+                                "text-positive"
+                                if marker == "+ "
+                                else "text-negative"
+                                if marker == "- "
+                                else ""
+                            )
+                            ui.label(f"{marker}{text}").classes(color)
+
+            with ui.tab_panel(history_tab):
+                versions = store.versions(row.prompt_id) if store.is_configured() else []
+                if not versions:
+                    ui.label("No saved versions yet.").classes("text-caption")
+                else:
+                    for v in versions:
+                        with ui.row().classes("items-center gap-2"):
+                            ui.label(f"v{v['version']}").classes("text-bold")
+                            ui.label(v.get("created_by", "")).classes("text-caption")
+                            ui.label(v.get("note", "")).classes("text-caption")
+
+        with ui.row().classes("justify-end w-full"):
+            ui.button("Close", on_click=dialog.close).props("flat")
+
+    dialog.open()

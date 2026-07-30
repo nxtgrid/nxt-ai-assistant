@@ -1,0 +1,44 @@
+---
+id: procedure.suggest
+description: Generates a suggested support-documentation procedure from a support conversation example.
+owner: ops
+overridable: true
+output: text
+sections: []
+variables: [next_number, existing_list, content]
+access:
+  view: [ops, eng]
+  edit: [ops]
+  publish: [ops]
+---
+Analyze this support conversation example and generate a suggested procedure
+that could be added to a Customer Support documentation.
+
+IMPORTANT: Use standard markdown with ## and ### for headers.
+Do NOT use *asterisks* for bold - use proper ## headers instead.
+
+The procedure should follow this exact format:
+
+## Procedure {{next_number}}: [Title]
+
+### Purpose
+
+[1-2 sentence description of what issue/scenario this procedure addresses]
+
+### Prerequisites
+
+- [List any required access, tools, or conditions needed]
+
+### Procedure Steps
+
+1. [First step]
+2. [Second step]
+...
+
+EXISTING PROCEDURES (for context, avoid duplicating):
+{{existing_list}}
+
+SUPPORT EXAMPLE CONTENT:
+{{content}}
+
+Generate ONLY the procedure markdown using ## headers. No *asterisk bold*. No explanation.

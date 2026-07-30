@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from orchestrator.config.settings import get_settings
 from orchestrator.services.command_registry import get_expert_command_mapping
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -108,27 +109,10 @@ async def route_expert_intent(user_input: str) -> Optional[Dict[str, str]]:
         return None
 
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    prompt = (
-        f"TODAY'S DATE AND TIME: {now_str}\n\n"
-        "Decide whether this staff message is clearly asking to start an expert workflow.\n"
-        "Only route when the intent is explicit. Do not route ordinary questions, status checks, "
-        "or vague requests.\n\n"
-        "Supported expert workflows:\n"
-        "- /lpp -> light_preliminary_package: create or generate a Light Preliminary Package "
-        "for a named site or GPS coordinates.\n\n"
-        f"Message: {user_input[:1000]!r}\n\n"
-        "Return only JSON with this shape:\n"
-        "{"
-        '"should_route_to_expert": false, '
-        '"confidence": 0.0, '
-        '"command": "/lpp", '
-        '"packet_type": "light_preliminary_package", '
-        '"key_entity": "site name or coordinate pair, if present", '
-        '"args": "slash-command arguments, if present", '
-        '"latitude": "decimal latitude, if present", '
-        '"longitude": "decimal longitude, if present", '
-        '"raw_request": "original user message"'
-        "}"
+    prompt = PROMPTS.text(
+        "intent_router.route",
+        now_str=now_str,
+        user_input_repr=repr(user_input[:1000]),
     )
 
     try:

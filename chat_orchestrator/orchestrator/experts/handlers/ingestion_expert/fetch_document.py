@@ -17,6 +17,7 @@ from typing import Optional, Tuple
 
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -45,15 +46,8 @@ TYPE_MAP = {
     "5": "policy",
 }
 
-TYPE_SELECTION_PROMPT = (
-    "What type of document are you adding?\n\n"
-    "1. Support Example (customer interaction, chat transcript)\n"
-    "2. Technical (specs, architecture, implementation guide)\n"
-    "3. SOP (standard operating procedure, checklist)\n"
-    "4. FAQ (frequently asked questions)\n"
-    "5. Policy (company rules, guidelines)\n\n"
-    "Reply with a number (1-5), or `cancel` to abort."
-)
+def _type_selection_prompt() -> str:
+    return PROMPTS.text("ingestion.fetch_document.type_selection")
 
 
 def extract_file_id(text: str) -> Optional[str]:
@@ -102,7 +96,7 @@ async def fetch_document(context: StepContext) -> StepResult:
         if user_response not in TYPE_MAP:
             return StepResult(
                 needs_user_input=True,
-                user_prompt=(f"Please reply with a number 1-5.\n\n{TYPE_SELECTION_PROMPT}"),
+                user_prompt=(f"Please reply with a number 1-5.\n\n{_type_selection_prompt()}"),
             )
 
         doc_type = TYPE_MAP[user_response]
@@ -222,7 +216,7 @@ async def fetch_document(context: StepContext) -> StepResult:
                 "awaiting_type_selection": True,
             },
             needs_user_input=True,
-            user_prompt=TYPE_SELECTION_PROMPT,
+            user_prompt=_type_selection_prompt(),
         )
 
     # --- Try name-based resolution (e.g., "/ingest ExampleSite Visit Plan") ---

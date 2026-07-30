@@ -109,6 +109,10 @@ def check_no_dropped_test_files() -> list[str]:
             "--",
             ":(glob)**/tests/**",
             ":(exclude)**/.venv/**",
+            # The pattern above excludes a nested .venv (e.g. chat_orchestrator/.venv)
+            # but not one at the repo root, where "**/" must match zero directory
+            # components and this git version's pathspec glob doesn't do that.
+            ":(exclude).venv/**",
         )
         if TEST_FILE_RE.search(f)
     ]

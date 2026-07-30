@@ -23,31 +23,10 @@ from shared.llm import (
     LLMMessage,
     get_default_generation_gateway,
 )
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
-
-CONTEXT_FILTER_PROMPT = """You are a conversation relevance filter. Given an incoming message and a numbered
-list of prior conversation messages, decide which history messages are relevant
-for understanding or responding to the incoming message.
-
-Include messages that:
-- Discuss the same subject, entity, or topic as the incoming message
-- Provide necessary context (e.g., a question the incoming message follows up on)
-- Are part of the same conversational thread
-
-Exclude messages that:
-- Discuss completely unrelated topics
-- Are outputs from earlier, unrelated interactions
-- Are tool calls/results for different subjects
-
-Incoming message: "{incoming_message}"
-
-Candidate history (index: role - content):
-{formatted_candidates}
-
-Respond ONLY with JSON:
-{{"relevant_indices": [0, 1, 2], "confidence": 0.85}}"""
 
 
 @dataclass
@@ -113,7 +92,8 @@ class ContextFilterService:
 
         formatted_candidates = "\n".join(formatted)
 
-        prompt = CONTEXT_FILTER_PROMPT.format(
+        prompt = PROMPTS.text(
+            "context_filter.relevance",
             incoming_message=incoming_message[:500],
             formatted_candidates=formatted_candidates,
         )

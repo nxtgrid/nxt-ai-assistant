@@ -103,19 +103,19 @@ async def _generate_commands_context(user_context: Optional[UserContext]) -> str
 async def _fetch_instructions(
     user_context: Optional[UserContext],
     entity_context: Optional[EntityContext],
-) -> Tuple[str, Optional[str]]:
-    """Fetch system instructions and context message from Google Docs."""
+) -> Tuple[str, Optional[str], Optional[Dict[str, Any]]]:
+    """Fetch system instructions, context message, and prompt provenance."""
     from orchestrator.services.instructions_provider import InstructionsProvider
 
     instructions_provider = InstructionsProvider(
         supabase_url=os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL"),
         supabase_key=os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY"),
     )
-    result: Tuple[str, Optional[str]] = await instructions_provider.get_instructions(
+    system_instructions, context_message = await instructions_provider.get_instructions(
         user_context=user_context,
         entity_context=entity_context,
     )
-    return result
+    return system_instructions, context_message, instructions_provider.get_last_provenance()
 
 
 async def _fetch_troubleshooting() -> Optional[str]:
@@ -267,7 +267,7 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
 
     # Run all independent fetches concurrently
     (
-        (system_instructions, context_message),
+        (system_instructions, context_message, prompt_provenance),
         troubleshooting_procedures,
         rag_docs,
         verification_instructions,
@@ -289,6 +289,7 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
 
     LOGGER.info(
         f"Retrieved system instructions: "
+        f"prompt={prompt_provenance}, "
         f"system={len(system_instructions)} chars, "
         f"context={len(context_message) if context_message else 0} chars"
     )
@@ -466,6 +467,7 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
     return {
         "system_instructions": system_instructions,
         "context_message": context_message,
+        "prompt_provenance": prompt_provenance,
         "rag_context": rag_context,  # Store RAG context for downstream nodes
         "verification_enabled": verification_enabled,
         "verification_instructions": verification_instructions,

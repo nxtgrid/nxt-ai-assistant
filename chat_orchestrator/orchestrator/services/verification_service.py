@@ -25,6 +25,7 @@ from shared.llm import (
     LLMMessage,
     get_default_generation_gateway,
 )
+from shared.prompts import PROMPTS
 from shared.utils.langfuse_utils import langfuse_observe, score_trace
 from shared.utils.logging import get_logger
 
@@ -382,39 +383,15 @@ Respond with a JSON object (and nothing else):
         if len(response_text) < 20:
             return response_text
 
-        sanitization_prompt = f"""Analyze this response that will be sent to a user. Check if it contains any internal technical details that should not be exposed:
-
-RESPONSE TO CHECK:
-{response_text}
-
-CONTEXT: This response is from a {context}.
-
-Check for these issues:
-1. Internal step/function names (e.g., "step copy_lpp_template", "generate_distribution_map")
-2. Protection markers (e.g., "__PROTECTED_CMD_", "⟦CMD")
-3. File paths (e.g., "/app/orchestrator/...")
-4. Python/code error traces or stack traces
-5. Internal field names with underscores (e.g., "packet_state", "site_id")
-6. Technical jargon the user wouldn't understand
-7. Raw error codes or internal status values
-
-Respond with JSON only:
-{{
-  "has_technical_details": true or false,
-  "issues_found": ["list of specific issues found"],
-  "rewritten_response": "If has_technical_details is true, provide a user-friendly version that conveys the same information without technical details. If false, leave empty."
-}}
-
-Guidelines for rewriting:
-- Keep the same meaning and tone
-- Replace technical terms with plain language
-- If there was an error, explain what the user should do
-- Be helpful and friendly
-- Don't mention internal systems or step names"""
+        sanitization_prompt = PROMPTS.text(
+            "verification.sanitize",
+            response_text=response_text,
+            context=context,
+        )
 
         try:
             result = await self._call_gemini(
-                system_instruction="You are a response quality checker. Detect technical implementation details in user-facing messages and rewrite them to be user-friendly.",
+                system_instruction=PROMPTS.text("verification.sanitize_system"),
                 user_message=sanitization_prompt,
             )
 

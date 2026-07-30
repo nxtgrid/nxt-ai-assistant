@@ -1,0 +1,18 @@
+---
+id: troubleshooting.procedures
+description: Shared troubleshooting procedures appended to customer and staff system instructions.
+owner: ops
+overridable: true
+output: text
+sections: []
+knowledge_tags: [troubleshooting]
+access:
+  view: [ops, eng]
+  edit: [ops]
+  publish: [ops]
+---
+# Troubleshooting Steps For Common Issues
+
+No troubleshooting procedures have been configured yet. Add them here, or
+attach a Google Doc to this prompt, and they will be appended to both the
+customer and staff system instructions.

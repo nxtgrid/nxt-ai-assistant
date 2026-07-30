@@ -2,7 +2,7 @@
 
 > Open-source AI operations assistant for mini-grid operators. Gemini is the default LLM provider; OpenRouter compatibility is available through the shared generation gateway when `LLM_PROVIDER=openrouter` is set.
 
-Anansi combines a chat orchestrator, MCP tool servers, Google Docs system instructions, Supabase-backed conversation storage, RAG ingestion, expert workflows, and operational mini-grid integrations. New adopters should start with the root README and the chat orchestrator environment example.
+Anansi combines a chat orchestrator, MCP tool servers, a prompt library (bundled defaults, live editing via an admin page, optional Google Doc attachment), Supabase-backed conversation storage, RAG ingestion, expert workflows, and operational mini-grid integrations. New adopters should start with the root README and the chat orchestrator environment example.
 
 ## Start Here
 
@@ -17,7 +17,7 @@ Anansi combines a chat orchestrator, MCP tool servers, Google Docs system instru
 - [Chat Orchestrator](chat_orchestrator/): FastAPI conversation service, role-aware instructions, tool execution, and Telegram-facing chat flow.
 - [MCP Servers](mcp_servers/): Tool servers for operational systems such as Supabase, Timescale, Jira, logs, and codebase access.
 - [RAG Pipeline](rag_pipeline/): Knowledge ingestion from GitHub, Google Drive, Telegram, and related sources.
-- [Shared Library](shared/): Common auth, database, logging, Google Docs, configuration, layout, and provider-neutral LLM gateway code.
+- [Shared Library](shared/): Common auth, database, logging, the prompt library (`shared/prompts/`), Google Docs, configuration, layout, and provider-neutral LLM gateway code.
 - [Admin App](anansi_app/): Streamlit admin UI for chat history, broadcasts, and settings.
 - [Mini App](mini_app/): Telegram Mini App frontend.
 

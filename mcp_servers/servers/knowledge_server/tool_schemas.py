@@ -27,6 +27,18 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                   'properties': {'topic': {'type': 'string'}},
                   'required': ['topic']},
   'visible_to_customer': False},
+ {'name': 'get_knowledge_module',
+  'description': "[READ-ONLY] Fetch the full body of a technical knowledge module by slug. "
+                 "System prompts pin a catalog of on-demand modules (slug and one-line summary "
+                 "only) under a '# Available Knowledge' section when relevant -- call this to "
+                 "retrieve a module's full content once you've decided it's relevant to the "
+                 "current question.",
+  'inputSchema': {'type': 'object',
+                  'properties': {'slug': {'type': 'string',
+                                          'description': 'Module slug from the Available '
+                                                         'Knowledge catalog.'}},
+                  'required': ['slug']},
+  'visible_to_customer': False},
  {'name': 'get_grid_review_history',
   'description': '[READ-ONLY] Get monthly Grid Technical Review (GTR) history for a grid. Returns '
                  'distilled monthly reviews with KPIs (CUF, losses, revenue collection, '

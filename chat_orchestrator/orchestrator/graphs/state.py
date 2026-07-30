@@ -101,6 +101,7 @@ class ConversationState(TypedDict, total=False):
     # Instructions and context
     system_instructions: Optional[str]
     context_message: Optional[str]
+    prompt_provenance: Optional[Dict[str, Any]]  # which prompt/version produced system_instructions
 
     # Tool configuration
     tools_payload: Optional[List[Dict[str, Any]]]

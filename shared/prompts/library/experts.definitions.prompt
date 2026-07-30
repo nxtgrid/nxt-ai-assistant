@@ -1,13 +1,16 @@
-<!--
-  FALLBACK INSTRUCTIONS FILE
-  Used when CUSTOMER_SUPPORT_DOC_ID / STAFF_SUPPORT_DOC_ID / EXPERT_INSTRUCTIONS_DOC_ID
-  environment variable is not set.
-
-  These are sanitized generic instructions derived from a production deployment.
-  Customize for your organization before going live.
-  Sensitive company-specific references have been replaced with placeholders.
--->
-
+---
+id: experts.definitions
+description: Expert, workflow and packet-type definitions parsed into ExpertConfig objects.
+owner: eng
+overridable: true
+output: text
+sections: []
+knowledge_tags: []
+access:
+  view: [ops, eng]
+  edit: [eng]
+  publish: [eng]
+---
 Anansi experts system instructions and Interface Artefact Definition
   
 

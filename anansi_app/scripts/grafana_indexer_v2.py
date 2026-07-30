@@ -761,13 +761,9 @@ def main():
     grafana_password = os.getenv("GRAFANA_PASSWORD")
     folder_name = args.folder_name or os.getenv("GRAFANA_FOLDER_NAME", "")
     gemini_api_key = os.getenv("GOOGLE_API_KEY")
-    system_prompt = os.getenv(
-        "GRAFANA_PANEL_DESCRIPTION_PROMPT",
-        "You are a system that generates tool descriptions for Grafana dashboard panels. "
-        "Given a panel with title, description, query, and dashboard variables, create a concise "
-        "tool description that explains what data this panel shows and what variables it requires. "
-        "Format: A tool description suitable for an LLM to understand when to use this panel.",
-    )
+    from shared.prompts import PROMPTS
+
+    system_prompt = PROMPTS.text("grafana.panel_description")
 
     # Validate configuration
     if not all([grafana_url, grafana_username, grafana_password, gemini_api_key]):

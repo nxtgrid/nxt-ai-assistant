@@ -22,6 +22,7 @@ from shared.llm import (
     ToolSpec,
     get_default_generation_gateway,
 )
+from shared.prompts import PROMPTS
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
 
@@ -230,22 +231,7 @@ async def _run_analysis_turn(
     user_question = context.user_input or ""
 
     # Build system prompt
-    system_prompt = (
-        "You are a grid technical reviewer analyzing historical performance data.\n\n"
-        "CRITICAL: ONLY analyze and reference data from the Historical Reviews markdown below "
-        "and from Grafana tool call results. Never invent, estimate, or assume KPI values. "
-        "If data is missing for a period, say so explicitly.\n\n"
-        "When calling Grafana tools, use ISO 8601 format: "
-        'time_from="2025-07-01T00:00:00Z", time_to="2025-07-31T23:59:59Z".\n'
-        "For full year trends, use a single call with the full analysis period range "
-        "rather than individual monthly calls.\n\n"
-        "KPI relationships:\n"
-        "- Financial CUF depends on: uncurtailed loss, battery usage, solar production\n"
-        "- Service uptime: FS Hours (target ≥12h), HPS Hours (target ≥22h)\n"
-        "- Financial CUF target: ≥55%\n"
-        "- Technical Downtime target: 0 days\n\n"
-        "Format responses clearly using markdown. Include specific numbers and trends."
-    )
+    system_prompt = PROMPTS.text("gtr.analysis_conversation")
 
     # Build context block: historical reviews + recent chat chronology
     context_text = f"Here is the historical review data to analyze:\n\n{historical_md}\n\n"

@@ -826,20 +826,6 @@ _FLAGS: List[Flag] = [
         group="grafana",
         depends_on="GRAFANA_ENABLED",
     ),
-    _s(
-        "GRAFANA_PANEL_DESCRIPTION_PROMPT",
-        (
-            "You are a system that generates tool descriptions for Grafana dashboard panels. "
-            "Given a panel with title, description, query, and dashboard variables, create a "
-            "concise tool description that explains what data this panel shows and what "
-            "variables it requires. Format: A tool description suitable for an LLM to "
-            "understand when to use this panel."
-        ),
-        "Prompt used to auto-generate Grafana panel tool descriptions.",
-        group="grafana",
-        depends_on="GRAFANA_ENABLED",
-        advanced=True,
-    ),
     _j(
         "GRAFANA_PANELS_METADATA",
         "{}",
@@ -1170,6 +1156,30 @@ _FLAGS: List[Flag] = [
         editable=False,
         group="documents",
         set_via="Set in the deployment environment alongside GOOGLE_SERVICE_ACCOUNT_JSON.",
+    ),
+    _s(
+        "PROMPT_EDITORS_OPS",
+        "",
+        "Comma-separated emails in the ops prompt-editor group.",
+        editable=False,
+        group="documents",
+        set_via="Set in the deployment environment alongside the other access whitelists.",
+    ),
+    _s(
+        "PROMPT_EDITORS_ENG",
+        "",
+        "Comma-separated emails in the engineering prompt-editor group.",
+        editable=False,
+        group="documents",
+        set_via="Set in the deployment environment alongside the other access whitelists.",
+    ),
+    _s(
+        "PROMPT_ADMINS",
+        "",
+        "Comma-separated emails with full access to every prompt.",
+        editable=False,
+        group="documents",
+        set_via="Set in the deployment environment alongside the other access whitelists.",
     ),
     # These MUST stay show_in_settings=True (the default). The settings page
     # renders them as editable text inputs; when show_in_settings is False the

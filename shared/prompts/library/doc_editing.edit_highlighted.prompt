@@ -1,0 +1,36 @@
+---
+id: doc_editing.edit_highlighted
+description: Generates markdown replacement text for a highlighted section of a Google Doc.
+owner: eng
+overridable: false
+output: text
+sections: []
+variables: [instruction, highlighted_text, context_block, context_summary, reference_block]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+Edit the highlighted text in a Google Doc according to the instruction.
+Return the replacement as **Markdown-formatted text**.
+
+Supported formatting:
+- **bold** and *italic*
+- ## Headings (H2-H4 only — do not use H1)
+- Bullet lists (- item) and numbered lists (1. item)
+- Tables (| col1 | col2 |)
+- [Links](url)
+
+Do NOT use: H1 headings, images, footnotes, HTML tags, code blocks.
+If the original text is a simple sentence, keep it as a plain paragraph.
+
+INSTRUCTION: {{instruction}}
+
+HIGHLIGHTED TEXT (to be replaced):
+{{highlighted_text}}
+{{context_block}}
+{{context_summary}}
+{{reference_block}}
+
+Return ONLY the replacement markdown — no explanation, no fences.
+If reference documents were provided, follow their style, structure, and tone closely.

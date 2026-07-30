@@ -121,3 +121,26 @@ def has_any_access(email: str | None = None) -> bool:
         return True
     email = (email or current_email()).lower()
     return can_view_bot_admin(email) or can_view_grid(email)
+
+
+# ── prompt library (logic lives in shared.prompts.access; delegated so this
+# module stays the app's single RBAC entry point) ─────────────────────────────
+def can_view_prompt(prompt_id: str, email: str | None = None) -> bool:
+    from shared.prompts import PROMPTS
+    from shared.prompts.access import can_view_prompt as _check
+
+    return _check(PROMPTS.spec(prompt_id), email or current_email())
+
+
+def can_edit_prompt(prompt_id: str, email: str | None = None) -> bool:
+    from shared.prompts import PROMPTS
+    from shared.prompts.access import can_edit_prompt as _check
+
+    return _check(PROMPTS.spec(prompt_id), email or current_email())
+
+
+def can_publish_prompt(prompt_id: str, email: str | None = None) -> bool:
+    from shared.prompts import PROMPTS
+    from shared.prompts.access import can_publish_prompt as _check
+
+    return _check(PROMPTS.spec(prompt_id), email or current_email())

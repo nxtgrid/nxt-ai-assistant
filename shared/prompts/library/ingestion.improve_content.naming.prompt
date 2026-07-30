@@ -1,0 +1,26 @@
+---
+id: ingestion.improve_content.naming
+description: Generates a descriptive title for a newly-ingested knowledge base document.
+owner: eng
+overridable: false
+output: text
+sections: []
+variables: [doc_type, content_preview, uploader_name]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+Generate a descriptive title for this {{doc_type}} knowledge base document.
+
+The title MUST be between 5 and 14 words. It should summarize the document's topic and purpose.
+
+Content preview:
+---
+{{content_preview}}
+---
+
+Uploaded by: {{uploader_name}}
+
+Return ONLY the title text. Include the uploader's name at the end, like "... by [Name]".
+Do NOT return a title shorter than 5 words.

@@ -1,13 +1,16 @@
-<!--
-  APPLICATION-VERSIONED CORRELATION POLICY
-  This bundled file is the sole instruction source for alert correlation.
-
-  AlertCorrelator (correlator.py) sends these reviewed rules to the LLM
-  alongside the incoming alert, deterministic grid facts, and open ticket
-  candidates. Policy changes are made here and shipped with an application
-  version; deployments cannot override them with a Google Doc or RAG context.
--->
-
+---
+id: ticketing.correlation
+description: Alert-correlation grouping policy. Versioned with the application; not editable at runtime.
+owner: eng
+overridable: false
+output: text
+sections: [system_instructions]
+knowledge_tags: []
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
 # System Instructions
 
 You are grouping an incoming infrastructure alert against a grid's already-open

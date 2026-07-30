@@ -14,33 +14,13 @@ from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
 # Use higher token limit for thinking models (gemini-flash-latest uses thinking tokens)
 CLASSIFICATION_MAX_TOKENS = 1024
-
-CLASSIFICATION_PROMPT = """Classify this document into exactly one category:
-
-Categories:
-- **sop**: Standard operating procedure with numbered steps, checklists, or workflows
-- **faq**: Frequently asked questions with Q&A format (generic questions, not specific customer interactions)
-- **support_example**: Customer support conversations, chat transcripts, ticket exchanges, or documents containing example support interactions. Look for patterns like "User:", "Customer:", "Response:", "Agent:", or actual conversation exchanges between support and customers.
-- **technical**: Technical documentation, API specs, system architecture, code docs, implementation guides
-- **policy**: Company policies, guidelines, rules, or compliance documents
-
-IMPORTANT: If a document contains EXAMPLES of customer support conversations (even if structured as documentation with headers), classify it as support_example, not technical.
-
-Document (first 4000 characters):
----
-{content}
----
-
-Return a JSON object with these fields:
-- doc_type: one of the category names above
-- confidence: 0.0 to 1.0
-- reasoning: brief explanation of why this category fits"""
 
 
 @register_step("classify_document")
@@ -76,7 +56,7 @@ async def classify_document(context: StepContext) -> StepResult:
     await context.send_progress_to_user("Analyzing document type...")
 
     # Prepare prompt with first 4000 chars
-    prompt = CLASSIFICATION_PROMPT.format(content=content[:4000])
+    prompt = PROMPTS.text("ingestion.classify_document", content=content[:4000])
 
     try:
         model = get_settings().gemini.model

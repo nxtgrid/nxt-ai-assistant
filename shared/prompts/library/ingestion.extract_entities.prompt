@@ -1,0 +1,61 @@
+---
+id: ingestion.extract_entities
+description: Extracts entities and relationships from document content for GraphRAG indexing.
+owner: eng
+overridable: false
+output: json
+schema:
+  type: object
+  required: [entities, relationships]
+  properties:
+    entities:
+      type: array
+      items:
+        type: object
+        properties:
+          name: {type: string}
+          type: {type: string}
+          description: {type: string}
+    relationships:
+      type: array
+      items:
+        type: object
+        properties:
+          source: {type: string}
+          target: {type: string}
+          type: {type: string}
+          description: {type: string}
+sections: []
+variables: [content]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+Analyze this document and extract key entities and their relationships.
+
+**Entity Types to Extract:**
+- person: People mentioned (names, roles)
+- organization: Companies, teams, departments
+- concept: Business concepts, processes, methodologies
+- technology: Software, tools, systems, APIs
+- location: Places, regions, grid locations
+- product: Products, services, offerings
+- metric: KPIs, measurements, statistics
+
+**Relationship Types:**
+- uses: Entity uses another entity
+- belongs_to: Entity is part of another
+- related_to: General relationship
+- manages: Person/team manages something
+- produces: Entity produces/creates another
+- depends_on: Entity depends on another
+
+Document content:
+---
+{{content}}
+---
+
+Return a JSON object with:
+- entities: array of objects with name, type, and description
+- relationships: array of objects with source, target, type, and description

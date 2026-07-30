@@ -13,6 +13,7 @@ from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -20,34 +21,6 @@ LOGGER = get_logger(__name__)
 # Use env var for max tokens, default to 4096 for entity extraction
 # (higher than classification since entity lists can be long)
 ENTITY_EXTRACTION_MAX_TOKENS = int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "4096"))
-
-EXTRACTION_PROMPT = """Analyze this document and extract key entities and their relationships.
-
-**Entity Types to Extract:**
-- person: People mentioned (names, roles)
-- organization: Companies, teams, departments
-- concept: Business concepts, processes, methodologies
-- technology: Software, tools, systems, APIs
-- location: Places, regions, grid locations
-- product: Products, services, offerings
-- metric: KPIs, measurements, statistics
-
-**Relationship Types:**
-- uses: Entity uses another entity
-- belongs_to: Entity is part of another
-- related_to: General relationship
-- manages: Person/team manages something
-- produces: Entity produces/creates another
-- depends_on: Entity depends on another
-
-Document content:
----
-{content}
----
-
-Return a JSON object with:
-- entities: array of objects with name, type, and description
-- relationships: array of objects with source, target, type, and description"""
 
 
 def repair_json(text: str) -> str:
@@ -106,7 +79,7 @@ async def extract_with_gemini(content: str) -> Dict[str, Any]:
         default_model=model,
     )
 
-    prompt = EXTRACTION_PROMPT.format(content=content[:8000])
+    prompt = PROMPTS.text("ingestion.extract_entities", content=content[:8000])
 
     response = await gateway.generate(
         [LLMMessage(role="user", text=prompt)],

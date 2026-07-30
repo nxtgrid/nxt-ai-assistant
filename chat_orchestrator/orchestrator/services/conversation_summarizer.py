@@ -33,30 +33,10 @@ from shared.llm import (
     LLMMessage,
     get_default_generation_gateway,
 )
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
-
-SUMMARIZE_PROMPT = """Summarize the following conversation messages into a concise context summary.
-
-Focus on:
-1. Key topics discussed (grid names, ticket numbers, meter IDs)
-2. Decisions made or questions answered
-3. Open questions or pending items
-4. Any entities mentioned (grid names, people, organizations)
-
-Format the summary as:
-**Topics:** [comma-separated list]
-**Key Points:**
-- [point 1]
-- [point 2]
-**Entities:** [comma-separated list of mentioned grids, tickets, people]
-**Open Items:** [any unresolved questions or pending actions]
-
-Messages to summarize:
-{messages}
-
-Keep the summary under 500 tokens. Be factual and concise."""
 
 # Threshold: summarize when total messages exceed this count
 SUMMARY_THRESHOLD = 40
@@ -156,7 +136,7 @@ class ConversationSummarizer:
                 return None
 
             messages_text = "\n".join(formatted_messages)
-            prompt = SUMMARIZE_PROMPT.format(messages=messages_text)
+            prompt = PROMPTS.text("conversation.summarize", messages=messages_text)
 
             # Generate summary
             summary_text = await self._call_gemini(prompt)

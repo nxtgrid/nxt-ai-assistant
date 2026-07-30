@@ -11,18 +11,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
-
-_MINIMAL_FALLBACK_INSTRUCTIONS = (
-    "You are grouping incoming infrastructure alerts against a grid's already-open "
-    "tickets. Classify each incoming alert as 'new', 'amend', or 'duplicate'. Only "
-    "choose 'duplicate' when the alert is clearly the exact same issue re-firing on "
-    "the exact same component. When uncertain between 'amend' and 'new', prefer "
-    "'amend' if a plausibly-related open ticket exists -- it still surfaces the "
-    "alert either way. Never suppress an alert entirely."
-)
 
 
 @dataclass(frozen=True)
@@ -54,25 +46,16 @@ DEFAULT_CORRELATION_POLICY = CorrelationPolicy()
 
 
 def get_correlation_instructions() -> Dict[str, str]:
-    """Load the bundled correlation rules, with a minimal packaging fallback.
+    """Load the bundled correlation policy.
 
     There is intentionally no document id or other deployment override: rule
-    changes are reviewed and versioned with the application.
+    changes are reviewed and versioned with the application. The
+    ``ticketing.correlation`` prompt is declared ``overridable: false``, so
+    the prompt library always resolves it from the bundled file regardless
+    of any DB or Google Doc state — the guarantee this module's docstring
+    describes is enforced one layer down now, not duplicated here.
     """
-    from orchestrator.services.instructions_provider import _load_fallback_instructions
-
-    sections: Optional[Dict[str, str]] = None
-    try:
-        sections = _load_fallback_instructions("alert_correlation_instructions.md")
-    except Exception:
-        LOGGER.warning(
-            "Failed to load bundled alert_correlation_instructions.md", exc_info=True
-        )
-
-    if not sections:
-        sections = {"system_instructions": _MINIMAL_FALLBACK_INSTRUCTIONS}
-
-    return sections
+    return {"system_instructions": PROMPTS.render("ticketing.correlation").system_text}
 
 
 async def get_rag_context(

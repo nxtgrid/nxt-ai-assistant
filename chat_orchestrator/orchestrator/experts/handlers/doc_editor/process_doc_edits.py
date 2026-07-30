@@ -15,6 +15,7 @@ from typing import Any, Dict
 
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
+from shared.prompts import PROMPTS
 
 LOGGER = logging.getLogger(__name__)
 
@@ -35,27 +36,11 @@ async def _identify_section(markdown: str, instruction: str) -> Dict[str, Any]:
         default_model=settings.gemini.model,
     )
 
-    prompt = f"""Given this document (in markdown) and an edit instruction, identify the EXACT
-text section that should be edited. Return JSON only.
-
-INSTRUCTION: {instruction}
-
-DOCUMENT:
-{markdown[:8000]}
-
-Return JSON:
-{{
-    "text": "the exact text from the document that should be edited (copy verbatim)",
-    "confidence": 0.0 to 1.0 (how confident you are this is the right section),
-    "reasoning": "why this section was selected"
-}}
-
-Rules:
-- The "text" must be an EXACT substring of the document (character-for-character match)
-- If you cannot identify a specific section, set confidence to 0.0
-- If the instruction is ambiguous, set confidence below 0.5
-- Pick the smallest text range that covers the edit target
-"""
+    prompt = PROMPTS.text(
+        "doc_editor.locate_edits",
+        instruction=instruction,
+        markdown=markdown[:8000],
+    )
 
     response = await gateway.generate(
         [LLMMessage(role="user", text=prompt)],

@@ -1,13 +1,16 @@
-<!--
-  FALLBACK INSTRUCTIONS FILE
-  Used when CUSTOMER_SUPPORT_DOC_ID / STAFF_SUPPORT_DOC_ID / EXPERT_INSTRUCTIONS_DOC_ID
-  environment variable is not set.
-
-  These are sanitized generic instructions derived from a production deployment.
-  Customize for your organization before going live.
-  Sensitive company-specific references have been replaced with placeholders.
--->
-
+---
+id: customer.system
+description: Customer-mode system instructions and context for Telegram support.
+owner: ops
+overridable: true
+output: text
+sections: [system_instructions]
+knowledge_tags: [customer_support, troubleshooting]
+access:
+  view: [ops, eng]
+  edit: [ops]
+  publish: [ops]
+---
 # System Instructions
 
 ## Purpose

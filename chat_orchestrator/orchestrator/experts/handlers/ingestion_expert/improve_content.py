@@ -15,6 +15,7 @@ from typing import Optional
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -22,68 +23,6 @@ LOGGER = get_logger(__name__)
 CANCEL_WORDS = {"cancel", "skip", "abort", "quit", "exit", "stop", "no"}
 
 MAX_QUALITY_ITERATIONS = 3
-
-# --- LLM Prompts ---
-
-QUALITY_EVAL_PROMPT = """You are a content quality evaluator for a **{doc_type}** knowledge base document.
-
-Evaluate whether this content is well-structured and ready for storage.
-
-Guidelines by type:
-- **support_example**: Should have clear user question and agent response. Conversation flow should be easy to follow.
-- **sop**: Should have numbered steps or a checklist. Steps should be actionable.
-- **faq**: Should have clear question-answer pairs. Questions should be distinct.
-- **technical**: Should have clear sections, consistent formatting, and accurate terminology.
-- **policy**: Should have clear rules/guidelines with scope and applicability stated.
-
-General quality checks:
-- Grammar and spelling are acceptable
-- Content is organized with headers or clear sections where appropriate
-- No excessive repetition or filler text
-- Key information is easy to find
-
-Document content:
----
-{content}
----
-
-Return a JSON object:
-{{
-  "is_good": true/false,
-  "reasoning": "Brief explanation of your assessment",
-  "suggested_version": "If is_good is false, provide an improved version preserving all factual content. Fix only structure, grammar, and formatting. If is_good is true, set to empty string."
-}}"""
-
-MODIFICATION_PROMPT = """You have the original content and a previous suggested version for a **{doc_type}** knowledge base document.
-
-Original content:
----
-{original}
----
-
-Previous suggested version:
----
-{suggestion}
----
-
-The user wants these changes: {user_instructions}
-
-Produce a new version incorporating the user's feedback. Preserve all factual content.
-Return ONLY the improved document text, no JSON wrapping or explanation."""
-
-NAMING_PROMPT = """Generate a descriptive title for this {doc_type} knowledge base document.
-
-The title MUST be between 5 and 14 words. It should summarize the document's topic and purpose.
-
-Content preview:
----
-{content_preview}
----
-
-Uploaded by: {uploader_name}
-
-Return ONLY the title text. Include the uploader's name at the end, like "... by [Name]".
-Do NOT return a title shorter than 5 words."""
 
 
 async def _call_gemini(
@@ -180,7 +119,8 @@ async def _auto_generate_title(content: str, doc_type: str, uploader_name: str) 
     Ensures the title is at least 5 words. Retries once if too short,
     then falls back to a content-derived title.
     """
-    prompt = NAMING_PROMPT.format(
+    prompt = PROMPTS.text(
+        "ingestion.improve_content.naming",
         doc_type=doc_type,
         content_preview=content[:1000],
         uploader_name=uploader_name,
@@ -305,7 +245,8 @@ async def improve_content(context: StepContext) -> StepResult:
 
         await context.send_progress_to_user("Applying your changes...")
 
-        prompt = MODIFICATION_PROMPT.format(
+        prompt = PROMPTS.text(
+            "ingestion.improve_content.modification",
             doc_type=doc_type,
             original=original[:6000],
             suggestion=current_suggestion[:6000],
@@ -355,7 +296,8 @@ async def improve_content(context: StepContext) -> StepResult:
 
     await context.send_progress_to_user("Checking content quality...")
 
-    prompt = QUALITY_EVAL_PROMPT.format(
+    prompt = PROMPTS.text(
+        "ingestion.improve_content.quality_eval",
         doc_type=doc_type,
         content=content[:6000],
     )

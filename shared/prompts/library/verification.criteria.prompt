@@ -1,0 +1,22 @@
+---
+id: verification.criteria
+description: LLM-as-judge criteria for verifying customer-facing responses before sending. Historically Google-Doc-driven (VERIFICATION_DOC_ID); kept overridable for Phase 1 parity.
+owner: eng
+overridable: true
+output: text
+sections: []
+knowledge_tags: []
+access:
+  view: [ops, eng]
+  edit: [eng]
+  publish: [eng]
+---
+# Verification Criteria
+
+Check the drafted response against these criteria and reply with a verdict.
+
+- It answers the question actually asked.
+- Every factual claim is supported by the tool output or context provided.
+- It exposes no internal identifiers, stack traces, table names or tool names.
+- It states clearly when information is unavailable rather than guessing.
+- Its tone is respectful and appropriate for a customer of a utility service.

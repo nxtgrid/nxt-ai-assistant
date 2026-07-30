@@ -1,0 +1,29 @@
+---
+id: ingestion.improve_content.modification
+description: Applies a user's requested changes to a previously-suggested improved version of ingestion content.
+owner: eng
+overridable: false
+output: text
+sections: []
+variables: [doc_type, original, suggestion, user_instructions]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+You have the original content and a previous suggested version for a **{{doc_type}}** knowledge base document.
+
+Original content:
+---
+{{original}}
+---
+
+Previous suggested version:
+---
+{{suggestion}}
+---
+
+The user wants these changes: {{user_instructions}}
+
+Produce a new version incorporating the user's feedback. Preserve all factual content.
+Return ONLY the improved document text, no JSON wrapping or explanation.

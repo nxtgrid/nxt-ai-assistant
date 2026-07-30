@@ -18,13 +18,13 @@ matching capabilities for support example ingestion. Procedures follow the forma
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from typing import List, Optional
 
 from orchestrator.config.settings import get_settings
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -48,40 +48,24 @@ class ProcedureProvider:
     a specific format with ## Procedure N: Title headers.
     """
 
-    def __init__(self) -> None:
-        """Initialize the provider."""
-        self._cached_procedures: Optional[List[Procedure]] = None
-
     def get_procedures(self, force_reload: bool = False) -> List[Procedure]:
-        """Fetch and parse procedures from CUSTOMER_SUPPORT_DOC_ID.
+        """Fetch and parse procedures from the customer.system prompt
+        (bundled default, or its Google Doc / DB override).
 
         Args:
-            force_reload: If True, bypass cache and reload from Google Doc
+            force_reload: If True, bypass the prompt library's doc cache and
+                re-fetch before parsing.
 
         Returns:
             List of Procedure objects found in the document
         """
-        if self._cached_procedures is not None and not force_reload:
-            LOGGER.debug(f"Returning {len(self._cached_procedures)} cached procedures")
-            return self._cached_procedures
-
-        doc_id = os.getenv("CUSTOMER_SUPPORT_DOC_ID", "").strip()
-        if not doc_id:
-            LOGGER.warning("CUSTOMER_SUPPORT_DOC_ID not configured")
-            return []
+        if force_reload:
+            PROMPTS.invalidate_doc_cache()
 
         try:
-            from shared.utils.gdrive_doc_fetcher import fetch_google_doc_markdown
-
-            content = fetch_google_doc_markdown(doc_id)
-            if not content:
-                LOGGER.error(f"Failed to fetch Customer Support Doc: {doc_id}")
-                return []
-
+            content = PROMPTS.text("customer.system")
             procedures = self._parse_procedures(content)
-            self._cached_procedures = procedures
-
-            LOGGER.info(f"Parsed {len(procedures)} procedures from Customer Support Doc")
+            LOGGER.info(f"Parsed {len(procedures)} procedures from customer.system")
             return procedures
 
         except Exception as e:
@@ -89,8 +73,9 @@ class ProcedureProvider:
             return []
 
     def clear_cache(self) -> None:
-        """Clear the cached procedures to force reload on next call."""
-        self._cached_procedures = None
+        """Force the next get_procedures() call to re-fetch rather than use
+        the prompt library's cached Google Doc body."""
+        PROMPTS.invalidate_doc_cache()
         LOGGER.info("Cleared procedure cache")
 
     def _parse_procedures(self, content: str) -> List[Procedure]:
@@ -192,37 +177,12 @@ async def generate_suggested_procedure(
     existing_list = "\n".join(f"- Procedure {p.number}: {p.title}" for p in existing_procedures)
     next_number = max((p.number for p in existing_procedures), default=0) + 1
 
-    prompt = f"""Analyze this support conversation example and generate a suggested procedure
-that could be added to a Customer Support documentation.
-
-IMPORTANT: Use standard markdown with ## and ### for headers.
-Do NOT use *asterisks* for bold - use proper ## headers instead.
-
-The procedure should follow this exact format:
-
-## Procedure {next_number}: [Title]
-
-### Purpose
-
-[1-2 sentence description of what issue/scenario this procedure addresses]
-
-### Prerequisites
-
-- [List any required access, tools, or conditions needed]
-
-### Procedure Steps
-
-1. [First step]
-2. [Second step]
-...
-
-EXISTING PROCEDURES (for context, avoid duplicating):
-{existing_list}
-
-SUPPORT EXAMPLE CONTENT:
-{content[:8000]}
-
-Generate ONLY the procedure markdown using ## headers. No *asterisk bold*. No explanation."""
+    prompt = PROMPTS.text(
+        "procedure.suggest",
+        next_number=next_number,
+        existing_list=existing_list,
+        content=content[:8000],
+    )
 
     try:
         response = await gateway.generate(
@@ -267,22 +227,11 @@ async def match_content_to_procedures(
         for p in procedures
     )
 
-    prompt = f"""Analyze this support conversation example and determine which procedure it best matches.
-
-AVAILABLE PROCEDURES:
-{procedure_descriptions}
-
-SUPPORT EXAMPLE CONTENT (first 4000 chars):
-{content[:4000]}
-
-Respond in this exact format:
-MATCH: [procedure number, or NONE if no good match]
-CONFIDENCE: [0.0 to 1.0]
-REASONING: [1 sentence explanation]
-
-Only output MATCH with a procedure number if you are confident the support example
-demonstrates or is directly related to that procedure. If the content doesn't clearly
-fit any procedure, output MATCH: NONE."""
+    prompt = PROMPTS.text(
+        "procedure.match",
+        procedure_descriptions=procedure_descriptions,
+        content=content[:4000],
+    )
 
     try:
         response = await gateway.generate(
