@@ -135,9 +135,12 @@ class PromptLibrary:
 
 def _build_default_library() -> PromptLibrary:
     from shared.prompts.gdoc import GDocStore
+    from shared.prompts.overrides import OverrideStore
 
-    gdoc_store = GDocStore()
+    overrides = OverrideStore.from_env()
+    gdoc_store = GDocStore(doc_id_for=overrides.doc_id_for)
     return PromptLibrary(
+        db_body_for=overrides.body_for,
         gdoc_body_for=gdoc_store.body_for,
         invalidate_gdoc=gdoc_store.invalidate,
     )
