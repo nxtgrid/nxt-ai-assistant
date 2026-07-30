@@ -1,0 +1,40 @@
+---
+id: ingestion.classify_document
+description: Classifies an ingested document into exactly one knowledge-base category.
+owner: eng
+overridable: false
+output: json
+schema:
+  type: object
+  required: [doc_type]
+  properties:
+    doc_type: {type: string}
+    confidence: {type: number}
+    reasoning: {type: string}
+sections: []
+variables: [content]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+Classify this document into exactly one category:
+
+Categories:
+- **sop**: Standard operating procedure with numbered steps, checklists, or workflows
+- **faq**: Frequently asked questions with Q&A format (generic questions, not specific customer interactions)
+- **support_example**: Customer support conversations, chat transcripts, ticket exchanges, or documents containing example support interactions. Look for patterns like "User:", "Customer:", "Response:", "Agent:", or actual conversation exchanges between support and customers.
+- **technical**: Technical documentation, API specs, system architecture, code docs, implementation guides
+- **policy**: Company policies, guidelines, rules, or compliance documents
+
+IMPORTANT: If a document contains EXAMPLES of customer support conversations (even if structured as documentation with headers), classify it as support_example, not technical.
+
+Document (first 4000 characters):
+---
+{{content}}
+---
+
+Return a JSON object with these fields:
+- doc_type: one of the category names above
+- confidence: 0.0 to 1.0
+- reasoning: brief explanation of why this category fits

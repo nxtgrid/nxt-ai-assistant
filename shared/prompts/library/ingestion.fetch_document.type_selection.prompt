@@ -1,0 +1,22 @@
+---
+id: ingestion.fetch_document.type_selection
+description: User-facing message asking which document type is being ingested (interactive /learn flow). Not an LLM prompt — sent verbatim to the user.
+owner: ops
+overridable: true
+output: text
+sections: []
+variables: []
+access:
+  view: [ops, eng]
+  edit: [ops]
+  publish: [ops]
+---
+What type of document are you adding?
+
+1. Support Example (customer interaction, chat transcript)
+2. Technical (specs, architecture, implementation guide)
+3. SOP (standard operating procedure, checklist)
+4. FAQ (frequently asked questions)
+5. Policy (company rules, guidelines)
+
+Reply with a number (1-5), or `cancel` to abort.
