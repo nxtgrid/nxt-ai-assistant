@@ -14,7 +14,9 @@ UNCATEGORIZED = "uncategorized"
 COMPONENT_LABELS: "dict[str, str]" = {
     "orchestrator_services": "Orchestrator — Core services",
     "orchestrator_ticketing": "Orchestrator — Ticketing",
-    "orchestrator_experts": "Orchestrator — Expert handlers",
+    "orchestrator_experts_ingestion": "Orchestrator — Ingestion Expert",
+    "orchestrator_experts_doc_editor": "Orchestrator — Doc Editor",
+    "orchestrator_experts_gtr": "Orchestrator — Grids Technical Reviewer",
     "mcp_servers": "MCP Servers",
     "anansi_app": "Anansi App / Scripts",
     "shared": "Shared / Cross-cutting",

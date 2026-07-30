@@ -2,7 +2,7 @@
 id: ingestion.improve_content.quality_eval
 description: Evaluates whether manually-pasted ingestion content is well-structured and ready for storage.
 owner: eng
-component: orchestrator_experts
+component: orchestrator_experts_ingestion
 overridable: false
 output: json
 schema:

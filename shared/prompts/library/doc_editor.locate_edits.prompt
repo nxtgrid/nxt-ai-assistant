@@ -2,7 +2,7 @@
 id: doc_editor.locate_edits
 description: Identifies the exact document section to edit for a chat-driven (non-comment) Google Doc edit instruction.
 owner: eng
-component: orchestrator_experts
+component: orchestrator_experts_doc_editor
 overridable: false
 output: json
 schema:
