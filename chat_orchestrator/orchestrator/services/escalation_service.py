@@ -31,6 +31,7 @@ from orchestrator.services.escalation_repository import EscalationRepository
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
 from orchestrator.services.ticketing.delivery_repository import DeliveryRepository
 from orchestrator.services.ticketing.service import TicketService
+from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 from shared.utils.telegram_buttons import build_escalation_track_keyboard
 from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
@@ -497,10 +498,12 @@ class EscalationService:
 
             # Pre-generate mapping UUID for the callback button
             mapping_id = str(uuid.uuid4())
-            # After-hours: auto-Jira will be created in background; hide Track button.
+            # After-hours (or ALWAYS_FILE_ESCALATION_AS_TICKET): auto-Jira will be
+            # created in background; hide Track button.
             after_hours = _is_after_hours()
+            auto_file_ticket = after_hours or fr.get("ALWAYS_FILE_ESCALATION_AS_TICKET")
             track_keyboard = build_escalation_track_keyboard(
-                mapping_id, include_track=not after_hours
+                mapping_id, include_track=not auto_file_ticket
             )
 
             # Resolve org's forum topic (lazy get-or-create)
@@ -581,8 +584,9 @@ class EscalationService:
                             "No Supabase client available - escalation not persisted to database"
                         )
 
-                # After-hours: create Jira ticket and update the message before returning.
-                if after_hours and escalation_message_id:
+                # After-hours (or ALWAYS_FILE_ESCALATION_AS_TICKET): create Jira ticket
+                # and update the message before returning.
+                if auto_file_ticket and escalation_message_id:
                     await self._auto_create_jira_and_edit_message(
                         mapping_id=mapping_id,
                         escalation_message_id=escalation_message_id,
@@ -2225,6 +2229,12 @@ class EscalationService:
                 if sent_any:
                     notified_groups += 1
 
+        # The reconciliation loop above only reaches tickets tied to an active
+        # escalation mapping. Sync every open Jira-backed canonical ticket too,
+        # so /notify-filed tickets (and anything the loop above missed) also
+        # get their status pulled in from Jira.
+        ticket_sync = await self._tickets.sync_jira_ticket_statuses()
+
         summary = {
             "eligible": len(eligible),
             "filed": filed,
@@ -2232,6 +2242,8 @@ class EscalationService:
             "failed": failed,
             "reconciled": reconciled,
             "notified_groups": notified_groups,
+            "ticket_status_checked": ticket_sync["checked"],
+            "ticket_status_closed": ticket_sync["closed"],
         }
         LOGGER.info("Escalation sweep complete: {}", summary)
         return summary
@@ -2586,6 +2598,21 @@ class EscalationService:
         escalation_topic_id = ctx["escalation_topic_id"]
         jira_orgs = ctx["jira_orgs"]
         escalation_org_name = ctx["escalation_org_name"]
+
+        # Close the canonical ticket record too -- this is the only place a
+        # human closing the ticket directly in Jira flows into the internal
+        # tickets admin view. jira_backend.transition_to_done() only calls the
+        # Jira API, so without this the canonical row stays "open" forever.
+        ticket_ref = mapping.get("ticket_ref")
+        if ticket_ref:
+            try:
+                await self._tickets.transition_to_done(ticket_ref)
+            except Exception:
+                LOGGER.warning(
+                    "Jira webhook closure: failed to close canonical ticket {}",
+                    ticket_ref,
+                    exc_info=True,
+                )
 
         # Notify escalation group
         await self._send_telegram_message(

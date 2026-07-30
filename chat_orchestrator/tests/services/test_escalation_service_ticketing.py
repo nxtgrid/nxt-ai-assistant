@@ -65,6 +65,10 @@ class _FakeQuery:
         self._filters[col] = value
         return self
 
+    def neq(self, col: str, value: Any) -> "_FakeQuery":
+        self._filters[col] = f"neq:{value}"
+        return self
+
     def limit(self, *_a, **_k) -> "_FakeQuery":
         return self
 
@@ -186,6 +190,9 @@ class _FakeSupabase:
     async def get_escalation_mapping(self, _msg_id):
         return self.mapping_for_reply
 
+    async def get_escalation_by_session(self, _session_id):
+        return None
+
     async def save_messages(self, **_k):
         return self.saved_messages_return
 
@@ -239,11 +246,17 @@ class _FakeTickets:
         self,
         status: Optional[TicketStatus] = None,
         by_ref: Optional[Dict[str, Optional[TicketStatus]]] = None,
+        sync_jira_ticket_statuses_result: Optional[Dict[str, int]] = None,
     ) -> None:
         self._status = status
         self._by_ref = by_ref or {}
         self.get_status_calls: List[str] = []
         self.add_comment_calls: List[tuple] = []
+        self.sync_jira_ticket_statuses_calls = 0
+        self._sync_jira_ticket_statuses_result = sync_jira_ticket_statuses_result or {
+            "checked": 0,
+            "closed": 0,
+        }
 
     async def get_status(self, ref: str):
         self.get_status_calls.append(ref)
@@ -254,6 +267,10 @@ class _FakeTickets:
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
         self.add_comment_calls.append((ref, body, public))
         return True
+
+    async def sync_jira_ticket_statuses(self) -> Dict[str, int]:
+        self.sync_jira_ticket_statuses_calls += 1
+        return self._sync_jira_ticket_statuses_result
 
 
 class _CanonicalDedupTickets:
@@ -817,6 +834,25 @@ async def test_sweep_reconciles_closed_ticket_and_notifies_open_one():
     assert calls["messages"][-1]["chat_id"] == "222"
 
 
+async def test_sweep_also_syncs_canonical_jira_ticket_statuses():
+    """The escalation-mapping reconciliation loop above only catches tickets
+    tied to an active escalation mapping. Tickets filed via /notify (or any
+    Jira ticket whose mapping already went inactive) have no mapping to
+    reconcile through, so the sweep must separately sync canonical ticket
+    status for every open Jira ticket, and surface those counts."""
+    supa = _FakeSupabase(_FakeRaw())
+    svc = _make_service(supa)
+
+    tickets = _FakeTickets(sync_jira_ticket_statuses_result={"checked": 5, "closed": 2})
+    svc._tickets = tickets
+
+    result = await svc.run_escalation_ticket_sweep()
+
+    assert tickets.sync_jira_ticket_statuses_calls == 1
+    assert result["ticket_status_checked"] == 5
+    assert result["ticket_status_closed"] == 2
+
+
 # ---------------------------------------------------------------------------
 # handle_support_reply — chat-message tagging
 # ---------------------------------------------------------------------------
@@ -897,3 +933,91 @@ async def test_handle_support_reply_tags_via_legacy_jira_ticket_key_fallback():
     await svc.handle_support_reply(reply_to_message_id=555, reply_text="hi there")
 
     assert supa.tag_calls == [("msg-1", "OPS-99", "comment")]
+
+
+# ---------------------------------------------------------------------------
+# ALWAYS_FILE_ESCALATION_AS_TICKET
+# ---------------------------------------------------------------------------
+
+
+def _new_escalation_kwargs(**overrides) -> Dict[str, Any]:
+    defaults: Dict[str, Any] = dict(
+        question_summary="my meter is broken",
+        session_id="telegram_xyz",
+        customer_chat_id="12345",
+        customer_topic_id=None,
+        organization_id=None,  # skips forum-topic resolution
+    )
+    defaults.update(overrides)
+    return defaults
+
+
+async def test_always_file_flag_off_keeps_the_track_button_during_business_hours(monkeypatch):
+    """Default (flag unset) behavior must be unchanged: the Track button still
+    shows during business hours, and no ticket is auto-filed."""
+    monkeypatch.delenv("ALWAYS_FILE_ESCALATION_AS_TICKET", raising=False)
+    supa = _FakeSupabase(_FakeRaw())
+    svc = _make_service(supa)
+    monkeypatch.setattr(
+        "orchestrator.services.escalation_service._is_after_hours", lambda: False
+    )
+    auto_create_calls: List[Any] = []
+
+    async def fake_auto_create(**kwargs):
+        auto_create_calls.append(kwargs)
+
+    svc._auto_create_jira_and_edit_message = fake_auto_create
+
+    sent: List[Dict[str, Any]] = []
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        sent.append({"reply_markup": reply_markup})
+        return {"ok": True, "result": {"message_id": 42}}
+
+    svc._send_telegram_message = fake_send
+
+    result = await svc.escalate_to_support(**_new_escalation_kwargs())
+
+    assert result["success"] is True
+    assert auto_create_calls == []
+    track_row_texts = [
+        button["text"] for row in sent[0]["reply_markup"]["inline_keyboard"] for button in row
+    ]
+    assert any("Track as ticket" in text for text in track_row_texts)
+
+
+async def test_always_file_flag_on_hides_track_button_and_auto_files_during_business_hours(
+    monkeypatch,
+):
+    """The flag must behave like after-hours auto-filing even when it isn't
+    after hours: no Track button, ticket filed automatically."""
+    monkeypatch.setenv("ALWAYS_FILE_ESCALATION_AS_TICKET", "true")
+    supa = _FakeSupabase(_FakeRaw())
+    svc = _make_service(supa)
+    monkeypatch.setattr(
+        "orchestrator.services.escalation_service._is_after_hours", lambda: False
+    )
+    auto_create_calls: List[Any] = []
+
+    async def fake_auto_create(**kwargs):
+        auto_create_calls.append(kwargs)
+
+    svc._auto_create_jira_and_edit_message = fake_auto_create
+
+    sent: List[Dict[str, Any]] = []
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        sent.append({"reply_markup": reply_markup})
+        return {"ok": True, "result": {"message_id": 42}}
+
+    svc._send_telegram_message = fake_send
+
+    result = await svc.escalate_to_support(**_new_escalation_kwargs())
+
+    assert result["success"] is True
+    assert len(auto_create_calls) == 1
+    assert auto_create_calls[0]["escalation_message_id"] == 42
+    track_row_texts = [
+        button["text"] for row in sent[0]["reply_markup"]["inline_keyboard"] for button in row
+    ]
+    assert not any("Track as ticket" in text for text in track_row_texts)

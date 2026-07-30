@@ -229,6 +229,32 @@ class TicketRepository:
         ticket_rows = getattr(ticket_response, "data", None) or []
         return ticket_rows[0].get("ticket_ref") if ticket_rows else None
 
+    async def list_open_by_backend(self, backend: str, *, limit: int = 200) -> list[str]:
+        """Return ticket_refs for active, non-done tickets on the given backend.
+
+        Used by the ticket-status sync sweep to find Jira-backed tickets whose
+        canonical status may be stale -- unlike ``find_open_internal_by_grid``,
+        this isn't scoped to a grid since the sweep walks every open ticket.
+        """
+        try:
+            response = (
+                self._raw_client()
+                .table("tickets")
+                .select("ticket_ref")
+                .eq("backend", backend)
+                .eq("provisioning_state", "active")
+                .neq("status", "done")
+                .limit(limit)
+                .execute()
+            )
+        except TicketRepositoryError:
+            raise
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to list open {backend} tickets: {exc}") from exc
+
+        rows = getattr(response, "data", None) or []
+        return [row["ticket_ref"] for row in rows if row.get("ticket_ref")]
+
     async def find_open_internal_by_grid(
         self, grid_name: str, *, limit: int = 20
     ) -> list[TicketSummary]:

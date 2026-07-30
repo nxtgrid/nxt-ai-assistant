@@ -51,6 +51,9 @@ class TestRegistryIntegrity:
     def test_urgent_live_output_timeout_defaults_to_three_seconds(self):
         assert fr.get("URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS", env={}) == 3
 
+    def test_always_file_escalation_as_ticket_defaults_to_false(self):
+        assert fr.get("ALWAYS_FILE_ESCALATION_AS_TICKET", env={}) is False
+
 
 # --------------------------------------------------------------------------- #
 # Generated example file is current

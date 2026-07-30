@@ -667,6 +667,16 @@ _FLAGS: List[Flag] = [
         advanced=True,
     ),
     _b(
+        "ALWAYS_FILE_ESCALATION_AS_TICKET",
+        False,
+        "File a ticket automatically for every new escalation, same as the existing "
+        "after-hours behavior, instead of showing staff the Track button to opt in. "
+        "Off (default) keeps today's staff-triggered tracking.",
+        scope=SERVICE_BOT,
+        group="ticketing",
+        label="Always file escalations as tickets",
+    ),
+    _b(
         "ALERT_CORRELATION_ENABLED",
         False,
         "Master switch for /notify ticket_id='auto' correlation. Off: 'auto' behaves "

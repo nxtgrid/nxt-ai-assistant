@@ -22,6 +22,7 @@ class JiraCreateContext:
     assignee_account_id: str | None = None
     organization_id: str | None = None
     priority_id: str | None = None
+    reporter_account_id: str | None = None
 
 
 _STANDARD_FIELDS = {"project", "summary", "description", "issuetype", "labels"}
@@ -58,6 +59,8 @@ def _resolve_field_value(field: JiraFieldDefinition, context: JiraCreateContext)
     ``incompatible_issue_type_reason`` so the two never drift out of sync."""
     if field.id == "assignee" and context.assignee_account_id:
         return {"accountId": context.assignee_account_id}
+    if field.id == "reporter" and context.reporter_account_id:
+        return {"accountId": context.reporter_account_id}
     if field.id == "priority" and context.priority_id:
         return {"id": context.priority_id}
     if _field_name(field) in _ORGANIZATION_FIELD_NAMES and context.organization_id:

@@ -262,6 +262,16 @@ class JiraTicketBackend:
             issue_type.field("priority") is not None for issue_type in available_types
         ):
             highest_priority_id = await self.resolve_priority_id("highest")
+        reporter_account_id = None
+        if any(
+            (field := issue_type.field("reporter")) is not None and field.required
+            for issue_type in available_types
+        ):
+            # Jira Service Management projects commonly require a reporter on
+            # every issue type. Customers aren't Jira users, so the bot's own
+            # account is the only reporter identity this integration can
+            # always supply -- without it, no issue type is ever compatible.
+            reporter_account_id = await self._resolve_own_account_id()
         context = JiraCreateContext(
             project_key=self._jira_project_key,
             summary=req.summary,
@@ -271,6 +281,7 @@ class JiraTicketBackend:
             assignee_account_id=assignee_account_id,
             organization_id=organization_id,
             priority_id=highest_priority_id,
+            reporter_account_id=reporter_account_id,
         )
         compatible = compatible_issue_types(context, available_types)
         selection = await self._choose_issue_type(req, compatible)
@@ -565,6 +576,20 @@ class JiraTicketBackend:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+    async def _resolve_own_account_id(self) -> Optional[str]:
+        """Resolve (and cache) this integration's own Jira account id.
+
+        Used as ``reporter`` on issue types that require it -- unlike
+        ``assignee_account_id`` (caller-supplied), this is always resolvable
+        from ``self._jira_email``, so it's cached for the backend's lifetime
+        rather than re-fetched on every ticket.
+        """
+        if not hasattr(self, "_cached_own_account_id"):
+            self._cached_own_account_id = await self._resolve_jira_account_id(
+                self._jira_email, self._jira_auth_headers()
+            )
+        return self._cached_own_account_id
 
     async def _resolve_jira_account_id(
         self,

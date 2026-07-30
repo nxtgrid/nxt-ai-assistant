@@ -207,6 +207,28 @@ def _queue_createmeta_with_optional_priority(fake_session: FakeJiraSession) -> N
     )
 
 
+def _queue_createmeta_with_required_reporter(fake_session: FakeJiraSession) -> None:
+    _queue_createmeta(
+        fake_session,
+        "OPS",
+        [
+            {
+                "id": "email-request-id",
+                "name": "Email request",
+                "fields": {"reporter": {"name": "Reporter", "required": True}},
+            }
+        ],
+    )
+
+
+def _queue_user_search(fake_session: FakeJiraSession, email: str, account_id: str) -> None:
+    fake_session.queue(
+        "GET",
+        "/rest/api/3/user/search",
+        _FakeResponse(200, [{"emailAddress": email, "accountId": account_id}]),
+    )
+
+
 def _queue_createmeta_with_required_priority(fake_session: FakeJiraSession) -> None:
     _queue_createmeta(
         fake_session,
@@ -650,6 +672,61 @@ class TestCreateTicket:
         _queue_createmeta(fake_session, "OPS", [])
 
         with pytest.raises(TicketBackendError, match="no issue types"):
+            await _make_backend().create_ticket(TicketCreateRequest(summary="Help"))
+
+    @pytest.mark.asyncio
+    async def test_resolves_own_account_as_reporter_when_required(self, fake_session):
+        """Jira Service Management projects commonly require ``reporter`` on
+        every issue type; customers aren't Jira users, so the integration's
+        own (bot) account is the only reporter identity it can always supply.
+        Without this, every issue type is permanently incompatible and every
+        ticket silently falls back to the internal backend."""
+        _queue_createmeta_with_required_reporter(fake_session)
+        _queue_user_search(fake_session, "bot@example.com", "bot-account-1")
+        fake_session.queue(
+            "POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-50"})
+        )
+
+        result = await _make_backend().create_ticket(TicketCreateRequest(summary="Help"))
+
+        assert result.ref == "OPS-50"
+        assert _posted_fields(fake_session)["reporter"] == {"accountId": "bot-account-1"}
+
+    @pytest.mark.asyncio
+    async def test_own_account_lookup_is_cached_across_creates(self, fake_session):
+        _queue_createmeta_with_required_reporter(fake_session)
+        _queue_user_search(fake_session, "bot@example.com", "bot-account-1")
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-51"}))
+        backend = _make_backend()
+        await backend.create_ticket(TicketCreateRequest(summary="Help"))
+
+        # Second create: no user/search response queued -- must reuse the cached id.
+        _queue_createmeta_with_required_reporter(fake_session)
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-52"}))
+
+        await backend.create_ticket(TicketCreateRequest(summary="Help again"))
+
+        assert _posted_fields(fake_session)["reporter"] == {"accountId": "bot-account-1"}
+
+    @pytest.mark.asyncio
+    async def test_does_not_look_up_own_account_when_reporter_not_required(self, fake_session):
+        """No user/search response is queued -- resolving unconditionally would
+        raise the fake session's unmatched-request assertion, so this also
+        guards against a regression that makes every ticket pay for a lookup
+        it doesn't need."""
+        _queue_createmeta_with_only("Task", fake_session, project_key="OPS")
+        fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-53"}))
+
+        result = await _make_backend().create_ticket(TicketCreateRequest(summary="Help"))
+
+        assert result.ref == "OPS-53"
+
+    @pytest.mark.asyncio
+    async def test_names_reporter_when_own_account_cannot_be_resolved(self, fake_session):
+        _queue_createmeta_with_required_reporter(fake_session)
+        fake_session.queue("GET", "/rest/api/3/user/search", _FakeResponse(200, []))
+
+        with pytest.raises(TicketBackendError, match="Email request.*[Rr]eporter"):
             await _make_backend().create_ticket(TicketCreateRequest(summary="Help"))
 
 
