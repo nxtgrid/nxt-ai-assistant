@@ -410,7 +410,18 @@ async def test_handle_notify_create_ticket_returns_ref_in_response(monkeypatch):
     import json
 
     content = json.loads(response.body)
-    assert content == {"ok": True, "ticket_ref": "TKT-000001"}
+    # A blank ticket_id now runs through the same correlation path as "auto"
+    # (ALERT_CORRELATION_ENABLED is off by default here, so it fails open to
+    # a plain "new" ticket via decided_by="flag_off") -- the ticket_ref is
+    # still what matters for existing callers.
+    assert content == {
+        "ok": True,
+        "ticket_ref": "TKT-000001",
+        "decision": "new",
+        "decided_by": "flag_off",
+        "confidence": None,
+        "correlated_with": None,
+    }
 
 
 async def test_handle_notify_falls_open_to_internal_when_jira_has_no_compatible_type(
@@ -1185,6 +1196,44 @@ class TestResolveNotifyTicketAutoDuplicate:
         assert _FakeTicketService.instances[-1].create_ticket_calls == []
         assert delivery is not None
         assert delivery.suppress is True  # occurrence 5 is not a rollup-every-10th
+
+    async def test_blank_ticket_id_gets_same_duplicate_treatment_as_auto(
+        self, fake_apply_amendment, monkeypatch
+    ):
+        """A blank ticket_id ("") must run the same correlation pipeline as
+        "auto" -- see _resolve_notify_ticket_full's docstring. Regression
+        test for the bug where "" silently bypassed correlation entirely
+        (no candidate lookup, no ticket_correlations row), so a caller that
+        stopped sending "auto" got a fresh Jira ticket per identical alert
+        forever instead of an error or a dropped alert."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="OPS-3368",
+            decision="duplicate",
+            escalated=False,
+            affected_keys_count=1,
+            occurrence_count=2,
+            telegram_chat_id="-100555",
+            telegram_topic_id="42",
+            telegram_message_id=123,
+        )
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="duplicate",
+            ticket_ref="OPS-3368",
+            confidence=1.0,
+            decided_by="signature",
+        )
+        body = _notify_body(ticket_id="")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "OPS-3368"
+        assert extra["decision"] == "duplicate"
+        assert extra["decided_by"] == "signature"
+        assert _FakeTicketService.instances[-1].create_ticket_calls == []
+        assert delivery is not None
 
 
 class TestResolveNotifyTicketAutoRootCauseFirst:
