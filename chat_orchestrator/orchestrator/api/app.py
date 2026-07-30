@@ -1802,14 +1802,14 @@ async def _resolve_notify_ticket_auto(
     backend_override: str,
     alert_context: UrgentAlertContext,
 ) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
-    """``ticket_id == "auto"``: smart alert correlation (see
+    """``ticket_id in ("", "auto")``: smart alert correlation (see
     docs/superpowers/plans/2026-07-27-smart-alert-correlation-notify.md).
 
     Fails open at every step -- ``ALERT_CORRELATION_ENABLED`` off, a grid-lock
     timeout, or the correlator/executor raising all fall back to filing a
-    plain new ticket via ``_create_notify_ticket`` (the exact same path as
-    ``ticket_id=""``). An alert is never dropped; correlation only ever adds
-    grouping on top, never a new way to fail.
+    plain new ticket via ``_create_notify_ticket``. An alert is never
+    dropped; correlation only ever adds grouping on top, never a new way to
+    fail.
     """
     from orchestrator.services.supabase_client import get_supabase_client
     from orchestrator.services.ticketing.alert_facts import enrich_alert_facts
@@ -2034,9 +2034,10 @@ async def _resolve_notify_ticket_full(
     request must fail fast with ``response`` before any delivery is
     scheduled. ``extra`` (decision/correlated_with/confidence/decided_by) and
     ``delivery`` (how ``_deliver_notification`` should post/suppress/reply)
-    are only ever populated for ``ticket_id="auto"`` -- every other path
-    returns ``None`` for both, so neither the response body nor the Telegram
-    send behavior changes for existing callers.
+    are only ever populated for the ticket-filing paths (blank or ``"auto"``)
+    -- the populated-``ticket_id`` comment/close path returns ``None`` for
+    both, so neither the response body nor the Telegram send behavior changes
+    for existing callers of that path.
 
     Runs synchronously in the handler (not the background delivery task) so
     ticket failures reach the caller in the HTTP response, same rationale as
@@ -2046,6 +2047,16 @@ async def _resolve_notify_ticket_full(
     independent of TICKET_BACKEND_OVERRIDE (which only governs customer
     escalations) -- so Grafana/n8n/VRM alerts never land in the Jira OPS
     project unless an operator explicitly opts them into 'auto'.
+
+    A blank ``ticket_id`` ("") is routed through the same correlation pipeline
+    as ``"auto"``. They used to diverge -- blank meant "always file a new
+    ticket, no dedup" -- but that made ALERT_CORRELATION_ENABLED a trap: a
+    caller that quietly stopped sending "auto" (or never sent it) got zero
+    correlation and zero signal that anything had changed, since blank still
+    filed tickets successfully, just one per alert forever. Correlation's own
+    kill switch (``ALERT_CORRELATION_ENABLED``, checked inside
+    ``_resolve_notify_ticket_auto``) is what actually turns grouping off; a
+    request-level flag shouldn't be a second, silent way to bypass it.
     """
     if alert_context is None:
         alert_context = _build_notify_alert_context(body, target)
@@ -2058,16 +2069,7 @@ async def _resolve_notify_ticket_full(
     backend_override = fr.get("NOTIFY_TICKETS_BACKEND") or "internal"
     normalized = body.ticket_id.strip().lower()
 
-    if body.ticket_id == "":
-        result, error = await _create_notify_ticket(
-            body, target, backend_override, alert_context=alert_context
-        )
-        if error is not None:
-            return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
-        ticket = _notification_ticket_from_result(result)
-        return ticket.ref, None, None, _new_ticket_delivery(ticket, alert_context)
-
-    if normalized == "auto":
+    if body.ticket_id == "" or normalized == "auto":
         return await _resolve_notify_ticket_auto(body, target, backend_override, alert_context)
 
     # Populated ticket_id: comment on (and optionally close) an existing ticket.
