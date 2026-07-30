@@ -123,6 +123,8 @@ mcp_servers/tests/test_meter_actions.py
 # logic (no org IDs/secrets/site names), tracked with git add -f
 # Exception: seed_knowledge_modules.py is generic doc-to-knowledge-module
 # extraction logic (no org IDs/secrets/site names), tracked with git add -f
+# Exception: migrate_docs_to_db.py is generic Doc-to-DB-override migration
+# logic (no org IDs/secrets/site names), tracked with git add -f
 scripts/*.py
 scripts/*.sh
 scripts/*.png
