@@ -47,12 +47,47 @@ class _Query:
         self.filters.append(("neq", column, value))
         return self
 
+    def is_(self, column: str, value: Any) -> "_Query":
+        self.filters.append(("is", column, value))
+        return self
+
+    def gt(self, column: str, value: Any) -> "_Query":
+        self.filters.append(("gt", column, value))
+        return self
+
+    def lt(self, column: str, value: Any) -> "_Query":
+        self.filters.append(("lt", column, value))
+        return self
+
+    def gte(self, column: str, value: Any) -> "_Query":
+        self.filters.append(("gte", column, value))
+        return self
+
+    def order(self, column: str) -> "_Query":
+        self.filters.append(("order", column, None))
+        return self
+
+    @property
+    def not_(self) -> "_Not":
+        return _Not(self)
+
     def limit(self, _limit: int) -> "_Query":
         return self
 
     def execute(self) -> _Response:
         self.client.calls.append((self.table_name, self.mode, self.payload, self.filters))
         return _Response(self.client.responses.pop(0))
+
+
+class _Not:
+    """Mirrors the supabase-py `query.not_.is_(...)` chaining shim."""
+
+    def __init__(self, query: _Query) -> None:
+        self._query = query
+
+    def is_(self, column: str, value: Any) -> _Query:
+        self._query.filters.append(("not_is", column, value))
+        return self._query
 
 
 class _Client:
@@ -127,6 +162,115 @@ async def test_reopen_sets_state_open_and_clears_resolved_at():
             "update",
             {"state": "open", "resolved_at": None},
             [("eq", "id", "esc-1")],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_unfiled_builds_state_ticket_and_age_bound_filters():
+    client = _Client([[{"id": "esc-1", "created_at": "2026-01-01T00:00:00Z"}]])
+
+    rows = await EscalationRepository(client=client).list_unfiled(
+        state="open",
+        created_after="2025-12-31T00:00:00Z",
+        created_before="2026-01-02T00:00:00Z",
+        exclude_reasons=("safety_escalation",),
+        limit=20,
+    )
+
+    assert rows == [{"id": "esc-1", "created_at": "2026-01-01T00:00:00Z"}]
+    assert client.calls == [
+        (
+            "escalations",
+            "select",
+            None,
+            [
+                ("eq", "state", "open"),
+                ("is", "ticket_id", "null"),
+                ("neq", "reason", "safety_escalation"),
+                ("gt", "created_at", "2025-12-31T00:00:00Z"),
+                ("lt", "created_at", "2026-01-02T00:00:00Z"),
+                ("order", "created_at", None),
+            ],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_unfiled_omits_age_bounds_when_not_given():
+    client = _Client([[]])
+
+    await EscalationRepository(client=client).list_unfiled(state="open")
+
+    assert client.calls == [
+        (
+            "escalations",
+            "select",
+            None,
+            [("eq", "state", "open"), ("is", "ticket_id", "null"), ("order", "created_at", None)],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_claimed_orphans_filters_processing_untracked_unresolved():
+    client = _Client([[{"id": "esc-1", "created_at": "t"}]])
+
+    rows = await EscalationRepository(client=client).list_claimed_orphans(limit=50)
+
+    assert rows == [{"id": "esc-1", "created_at": "t"}]
+    assert client.calls == [
+        (
+            "escalations",
+            "select",
+            None,
+            [
+                ("eq", "state", "processing"),
+                ("is", "ticket_id", "null"),
+                ("is", "resolved_at", "null"),
+            ],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_claimed_orphans_applies_created_after_when_given():
+    client = _Client([[]])
+
+    await EscalationRepository(client=client).list_claimed_orphans(created_after="2026-01-01T00:00:00Z")
+
+    assert client.calls == [
+        (
+            "escalations",
+            "select",
+            None,
+            [
+                ("eq", "state", "processing"),
+                ("is", "ticket_id", "null"),
+                ("is", "resolved_at", "null"),
+                ("gte", "created_at", "2026-01-01T00:00:00Z"),
+            ],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_list_active_tracked_filters_open_with_ticket_attached():
+    client = _Client([[{"id": "esc-1", "created_at": "t"}]])
+
+    rows = await EscalationRepository(client=client).list_active_tracked(limit=100)
+
+    assert rows == [{"id": "esc-1", "created_at": "t"}]
+    assert client.calls == [
+        (
+            "escalations",
+            "select",
+            None,
+            [
+                ("eq", "state", "open"),
+                ("not_is", "ticket_id", "null"),
+                ("order", "created_at", None),
+            ],
         )
     ]
 

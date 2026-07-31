@@ -15,6 +15,7 @@ TicketService, and the run_escalation_ticket_sweep rename + alias.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -42,6 +43,7 @@ class _FakeQuery:
         self._op = op
         self._payload = payload
         self._filters: Dict[str, Any] = {}
+        self._range_filters: List[tuple] = []
         self._order: Optional[tuple] = None
 
     def select(self, *_a, **_k) -> "_FakeQuery":
@@ -74,6 +76,26 @@ class _FakeQuery:
         self._filters[col] = ("in", list(values))
         return self
 
+    def is_(self, col: str, value: Any) -> "_FakeQuery":
+        self._range_filters.append(("is_null" if value == "null" else "is", col, value))
+        return self
+
+    def gt(self, col: str, value: Any) -> "_FakeQuery":
+        self._range_filters.append(("gt", col, value))
+        return self
+
+    def lt(self, col: str, value: Any) -> "_FakeQuery":
+        self._range_filters.append(("lt", col, value))
+        return self
+
+    def gte(self, col: str, value: Any) -> "_FakeQuery":
+        self._range_filters.append(("gte", col, value))
+        return self
+
+    @property
+    def not_(self) -> "_FakeNot":
+        return _FakeNot(self)
+
     def order(self, col: str, desc: bool = False) -> "_FakeQuery":
         self._order = (col, desc)
         return self
@@ -85,6 +107,7 @@ class _FakeQuery:
         self._t.calls.append((self._op, dict(self._filters), self._payload))
         if self._op == "select":
             matches = self._t.rows_matching(self._filters)
+            matches = self._t.rows_matching_range(matches, self._range_filters)
             if self._order is not None:
                 col, desc = self._order
                 matches = sorted(matches, key=lambda r: r.get(col), reverse=desc)
@@ -102,6 +125,19 @@ class _FakeQuery:
         return _FakeResponse([{"id": self._filters.get("id")}])
 
 
+class _FakeNot:
+    """Mirrors the supabase-py `query.not_.is_(...)` chaining shim."""
+
+    def __init__(self, query: _FakeQuery) -> None:
+        self._query = query
+
+    def is_(self, col: str, value: Any) -> _FakeQuery:
+        self._query._range_filters.append(
+            ("not_null" if value == "null" else "not_is", col, value)
+        )
+        return self._query
+
+
 class _FakeTable:
     def __init__(self, rows: Optional[List[Dict[str, Any]]] = None) -> None:
         self.rows = rows or []
@@ -116,6 +152,31 @@ class _FakeTable:
             return row.get(col) == val
 
         return [r for r in self.rows if all(match(r, k, v) for k, v in filters.items())]
+
+    def rows_matching_range(
+        self, rows: List[Dict[str, Any]], range_filters: List[tuple]
+    ) -> List[Dict[str, Any]]:
+        def keep(row: Dict[str, Any]) -> bool:
+            for op, col, val in range_filters:
+                v = row.get(col)
+                if op == "is_null":
+                    if v is not None:
+                        return False
+                elif op == "not_null":
+                    if v is None:
+                        return False
+                elif op == "gt":
+                    if v is None or not (v > val):
+                        return False
+                elif op == "lt":
+                    if v is None or not (v < val):
+                        return False
+                elif op == "gte":
+                    if v is None or not (v >= val):
+                        return False
+            return True
+
+        return [r for r in rows if keep(r)]
 
     def select(self, *_a, **_k) -> _FakeQuery:
         return _FakeQuery(self, "select")
@@ -285,9 +346,13 @@ class _FakeTickets:
         status: Optional[TicketStatus] = None,
         by_ref: Optional[Dict[str, Optional[TicketStatus]]] = None,
         sync_jira_ticket_statuses_result: Optional[Dict[str, int]] = None,
+        ref_by_ticket_id: Optional[Dict[str, str]] = None,
+        backend_by_ref: Optional[Dict[str, str]] = None,
     ) -> None:
         self._status = status
         self._by_ref = by_ref or {}
+        self._ref_by_ticket_id = ref_by_ticket_id or {}
+        self._backend_by_ref = backend_by_ref or {}
         self.get_status_calls: List[str] = []
         self.add_comment_calls: List[tuple] = []
         self.sync_jira_ticket_statuses_calls = 0
@@ -312,6 +377,12 @@ class _FakeTickets:
 
     async def get_id_by_ref(self, _ref: str) -> Optional[str]:
         return None
+
+    async def get_ref_by_id(self, ticket_id: str) -> Optional[str]:
+        return self._ref_by_ticket_id.get(ticket_id)
+
+    async def get_backend_name(self, ref: str) -> str:
+        return self._backend_by_ref.get(ref, "jira")
 
 
 class _CanonicalDedupTickets:
@@ -1196,6 +1267,220 @@ async def test_sweep_also_syncs_canonical_jira_ticket_statuses():
     assert tickets.sync_jira_ticket_statuses_calls == 1
     assert result["ticket_status_checked"] == 5
     assert result["ticket_status_closed"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Sweep — canonical query rewrite (STOP_LEGACY_ESCALATION_WRITES)
+# ---------------------------------------------------------------------------
+
+
+def _canonical_escalation_row(
+    escalation_id: str = "esc-1", *, age_hours: float = 2, ticket_id: Optional[str] = None
+) -> Dict[str, Any]:
+    created_at = (datetime.now(timezone.utc) - timedelta(hours=age_hours)).isoformat()
+    return {
+        "id": escalation_id,
+        "state": "open",
+        "chat_session_id": "11111111-1111-1111-1111-111111111111",
+        "ticket_id": ticket_id,
+        "reason": "general",
+        "org_hashtag": "#acme",
+        "customer_username": None,
+        "customer_email": None,
+        "question_text": "my meter is broken",
+        "created_at": created_at,
+        "resolved_at": None,
+    }
+
+
+def _wire_canonical_session(supa: _FakeSupabase, *, chat_id: str = "12345") -> None:
+    supa.session_by_id_result = SimpleNamespace(
+        session_id="telegram_abc",
+        telegram_chat_id=chat_id,
+        telegram_topic_id=None,
+        organization_id=7,
+    )
+
+
+async def test_sweep_canonical_eligible_list_files_ticket_via_list_unfiled(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [_canonical_escalation_row("esc-1")]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-1", "purpose": "escalation", "external_message_id": 555}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    _wire_sweep_telegram(svc)
+
+    jira = _FakeBackend("jira", available=True, ref="OPS-42", url="https://jira.test/browse/OPS-42")
+    internal = _FakeBackend("internal", ref="TKT-000001", url=None)
+    _install_ticket_service(svc, jira, internal)
+
+    result = await svc.run_escalation_ticket_sweep()
+
+    assert result["filed"] == 1
+    escalation_row = raw.table("escalations").rows[0]
+    assert escalation_row["state"] == "tracked"
+    assert escalation_row["ticket_id"]
+
+
+async def test_sweep_canonical_query_failure_yields_zero_eligible_without_raising(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    supa = _FakeSupabase(_FakeRaw())
+    svc = _make_service(supa)
+
+    async def _boom(**_k):
+        raise RuntimeError("db down")
+
+    svc._escalations.list_unfiled = _boom
+
+    result = await svc.run_escalation_ticket_sweep()
+
+    assert result["eligible"] == 0
+    assert result["filed"] == 0
+    assert result["skipped"] == 0
+    assert result["failed"] == 0
+
+
+async def test_sweep_canonical_releases_claim_on_track_as_ticket_failure(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [_canonical_escalation_row("esc-1")]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-1", "purpose": "escalation", "external_message_id": 555}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    _wire_sweep_telegram(svc)
+
+    async def _fail_track(**_k):
+        return {"success": False, "error": "backend down"}
+
+    svc.track_as_ticket = _fail_track
+
+    result = await svc.run_escalation_ticket_sweep()
+
+    assert result["failed"] == 1
+    # Claim was released back to "open" via the canonical repository -- not
+    # the legacy reactivate_escalation path.
+    assert raw.table("escalations").rows[0]["state"] == "open"
+    assert supa.reactivate_calls == []
+
+
+async def test_sweep_canonical_old_escalations_alert_uses_list_unfiled_upper_bound_only(
+    monkeypatch,
+):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    # Aged out (30h > default max_age_hours=24) -- must surface in the alert
+    # even though it's outside the eligible-filing window.
+    raw.table("escalations").rows = [_canonical_escalation_row("esc-old", age_hours=30)]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    assert calls["messages"], "expected an aged-out-orphan alert"
+    assert "older than 24h" in calls["messages"][-1]["text"]
+
+
+async def test_sweep_canonical_tracked_reconciliation_resolves_and_skips_legacy_update(
+    monkeypatch,
+):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [
+        _canonical_escalation_row("esc-tracked", ticket_id="ticket-1")
+    ]
+    raw.table("escalations").rows[0]["state"] = "open"  # tracked-but-open: follow-up prelink
+    raw.table("tickets").rows = [
+        {
+            "id": "ticket-1",
+            "ticket_ref": "OPS-1",
+            "backend": "jira",
+            "created_via": "escalation",
+            "provisioning_state": "active",
+        }
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    _wire_sweep_telegram(svc)
+    svc._tickets = _FakeTickets(
+        status=TicketStatus(summary="Meter issue", is_done=True),
+        ref_by_ticket_id={"ticket-1": "OPS-1"},
+        backend_by_ref={"OPS-1": "jira"},
+    )
+
+    result = await svc.run_escalation_ticket_sweep()
+
+    assert result["reconciled"] == 1
+    # Legacy escalation_mappings table must never be touched once legacy
+    # writes are stopped.
+    assert raw.table("escalation_mappings").calls == []
+    # Canonical mirror: resolve() moved the escalation to "resolved".
+    assert raw.table("escalations").rows[0]["state"] == "resolved"
+    assert raw.table("escalations").rows[0]["resolved_at"] is not None
+
+
+# ---------------------------------------------------------------------------
+# recover_orphaned_claims -- canonical release once legacy writes are stopped
+# ---------------------------------------------------------------------------
+
+
+async def test_recover_orphaned_claims_uses_legacy_when_flag_off(monkeypatch):
+    monkeypatch.delenv("STOP_LEGACY_ESCALATION_WRITES", raising=False)
+    supa = _FakeSupabase(_FakeRaw())
+    supa.reactivate_calls = []
+
+    async def fake_get_orphaned(**_k):
+        return [{"id": "m1"}]
+
+    supa.get_orphaned_claimed_escalations = fake_get_orphaned
+    svc = _make_service(supa)
+
+    await svc.recover_orphaned_claims()
+
+    assert supa.reactivate_calls == ["m1"]
+
+
+async def test_recover_orphaned_claims_releases_canonical_claims_when_flag_on(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [
+        {
+            "id": "esc-orphan",
+            "state": "processing",
+            "ticket_id": None,
+            "resolved_at": None,
+            "created_at": "2026-01-01T00:00:00+00:00",
+        }
+    ]
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+
+    await svc.recover_orphaned_claims()
+
+    assert raw.table("escalations").rows[0]["state"] == "open"
+    assert supa.reactivate_calls == []
+
+
+async def test_recover_orphaned_claims_canonical_query_failure_is_swallowed(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    supa = _FakeSupabase(_FakeRaw())
+    svc = _make_service(supa)
+
+    async def _boom(**_k):
+        raise RuntimeError("db down")
+
+    svc._escalations.list_claimed_orphans = _boom
+
+    await svc.recover_orphaned_claims()  # must not raise
 
 
 # ---------------------------------------------------------------------------
