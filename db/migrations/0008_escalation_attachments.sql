@@ -1,3 +1,8 @@
+-- 0008_escalation_attachments.sql
+--
+-- Apply by hand in the Supabase SQL editor against chat_db. Idempotent: safe
+-- to re-run -- all statements use IF NOT EXISTS / ON CONFLICT.
+
 BEGIN;
 
 -- Media attachments captured from the chat turn that triggers an escalation.
