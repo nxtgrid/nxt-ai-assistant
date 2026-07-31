@@ -106,6 +106,9 @@ class _FakeTable:
     def insert(self, payload: Dict[str, Any]) -> _FakeQuery:
         return _FakeQuery(self, "insert", payload)
 
+    def upsert(self, payload: Dict[str, Any], **_kwargs) -> _FakeQuery:
+        return _FakeQuery(self, "upsert", payload)
+
 
 class _FakeRaw:
     def __init__(self) -> None:
@@ -466,6 +469,33 @@ async def test_track_as_ticket_records_the_customer_notification_delivery():
     ]
 
 
+async def test_track_as_ticket_creates_canonical_escalation_with_resolved_chat_session_uuid():
+    """Regression: escalations.chat_session_id is a UUID FK to chat_sessions.id,
+    not the text session_id ("telegram_abc") escalation_mappings.session_id
+    stores. Passing the raw text (as this call site did before the fix) fails
+    against real Postgres -- the fake table here doesn't enforce column types,
+    which is exactly why that bug shipped silently. Deliberately does not
+    pre-seed the escalations table, so the create() path actually runs."""
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    resolved_uuid = uuid.uuid4()
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=resolved_uuid)
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+    jira = _FakeBackend("jira", available=True, ref="OPS-100")
+    internal = _FakeBackend("internal")
+    _install_ticket_service(svc, jira, internal)
+
+    await svc.track_as_ticket(escalation_mapping=_base_mapping())
+
+    escalation_rows = raw.tables["escalations"].rows
+    assert escalation_rows, "expected a canonical escalation row to be created"
+    assert escalation_rows[0]["chat_session_id"] == str(resolved_uuid)
+
+
 async def test_track_as_ticket_dedup_hit_jira_writes_jira_key():
     raw = _FakeRaw()
     supa = _FakeSupabase(raw)  # no internal_tickets rows -> recovered ref is Jira
@@ -634,6 +664,69 @@ async def test_auto_create_internal_renders_plain_bold():
     assert "TKT" in text  # ref rendered as plain text
     # No jira_ticket_key for internal.
     assert all("jira_ticket_key" not in p for p in supa.em_update_payloads())
+
+
+# ---------------------------------------------------------------------------
+# Canonical escalation + delivery dual-write (inside _escalate_to_telegram)
+# ---------------------------------------------------------------------------
+
+
+async def test_new_escalation_dual_writes_canonical_escalation_and_delivery():
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    resolved_uuid = uuid.uuid4()
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=resolved_uuid)
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 42}}
+
+    svc._send_telegram_message = fake_send
+
+    result = await svc.escalate_to_support(**_new_escalation_kwargs())
+    assert result["success"] is True
+
+    escalation_rows = raw.tables["escalations"].rows
+    assert len(escalation_rows) == 1
+    assert escalation_rows[0]["chat_session_id"] == str(resolved_uuid)
+    assert escalation_rows[0]["state"] == "open"
+
+    delivery_rows = raw.tables["message_deliveries"].rows
+    assert len(delivery_rows) == 1
+    delivery = delivery_rows[0]
+    assert delivery["escalation_id"] == escalation_rows[0]["id"]
+    assert delivery["ticket_id"] is None
+    assert delivery["purpose"] == "escalation"
+    assert delivery["external_message_id"] == 42
+
+
+async def test_followup_escalation_dual_writes_canonical_escalation_and_delivery():
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    resolved_uuid = uuid.uuid4()
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=resolved_uuid)
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    tickets = await _drive_followup(svc, is_done=False)
+    assert tickets.get_status_calls == ["OPS-77"]
+
+    escalation_rows = raw.tables["escalations"].rows
+    assert len(escalation_rows) == 1
+    assert escalation_rows[0]["chat_session_id"] == str(resolved_uuid)
+
+    delivery_rows = raw.tables["message_deliveries"].rows
+    assert len(delivery_rows) == 1
+    assert delivery_rows[0]["escalation_id"] == escalation_rows[0]["id"]
+    assert delivery_rows[0]["purpose"] == "escalation"
+    assert delivery_rows[0]["external_message_id"] == 200  # fake_reply's message_id
 
 
 # ---------------------------------------------------------------------------

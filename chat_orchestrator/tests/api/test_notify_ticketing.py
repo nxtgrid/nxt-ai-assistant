@@ -1716,6 +1716,39 @@ class TestDeliverNotificationDelivery:
             "external_chat_id": "-100555", "external_topic_id": "42", "external_message_id": 999,
         }]
 
+    async def test_records_purpose_update_for_an_amend_rollup_reply(
+        self, fake_telegram_send, monkeypatch
+    ):
+        """An amend/roll-up reply is a short update to an already-notified
+        ticket (text_override set), not the original alert -- its delivery
+        receipt must be purpose="update", not "notification" (see the design
+        doc's three delivery-link kinds: Escalation/Notification/Update)."""
+        from orchestrator.api.app import _deliver_notification
+
+        calls: list[dict[str, Any]] = []
+
+        class _Deliveries:
+            def __init__(self, **_kwargs):
+                pass
+
+            async def record(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.delivery_repository.DeliveryRepository", _Deliveries
+        )
+        ticket = NotificationTicket(ref="TKT-9", backend="internal", ticket_id="ticket-9")
+
+        await _deliver_notification(
+            _notify_body(),
+            _target(),
+            ticket.ref,
+            NotificationDelivery(ticket=ticket, text_override="Added MPPT A7 (2 affected components)"),
+        )
+
+        assert len(calls) == 1
+        assert calls[0]["purpose"] == "update"
+
     async def test_ticketed_jira_notification_links_only_the_reference(self, fake_telegram_send):
         from orchestrator.api.app import _deliver_notification
 

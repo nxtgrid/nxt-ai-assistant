@@ -154,6 +154,62 @@ class EscalationService:
             return None
         return supabase_client._get_client()
 
+    async def _resolve_chat_session_uuid(self, session_id: str) -> Optional[str]:
+        """Resolve the ``chat_sessions.id`` UUID for a business-level ``session_id``.
+
+        ``escalations.chat_session_id`` is a UUID FK to ``chat_sessions.id``,
+        not the text ``session_id`` (e.g. "telegram_abc123") used everywhere
+        else in this service -- callers must resolve it before writing to the
+        canonical ``escalations`` table.
+        """
+        supabase_client = self._get_supabase_client()
+        if supabase_client is None:
+            return None
+        try:
+            session_obj = await supabase_client.get_session(session_id)
+        except Exception:
+            LOGGER.warning(
+                "Could not resolve chat_sessions.id for session {}", session_id, exc_info=True
+            )
+            return None
+        return str(session_obj.id) if session_obj and session_obj.id else None
+
+    async def _record_canonical_escalation(
+        self,
+        escalation_id: str,
+        session_id: Optional[str],
+        *,
+        message_id: int,
+        topic_id: Optional[int],
+    ) -> None:
+        """Best-effort dual-write: canonical ``escalations`` row + its Telegram
+        delivery receipt, mirroring the legacy ``escalation_mappings`` insert
+        this always follows. A failure here only leaves the canonical mirror
+        incomplete for this escalation -- the legacy row (already written)
+        remains the source of truth until cutover.
+        """
+        if not session_id:
+            return
+        try:
+            chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
+            if chat_session_uuid is None:
+                return
+            await self._escalations.create(escalation_id, chat_session_uuid)
+            await self._deliveries.record(
+                ticket_id=None,
+                escalation_id=escalation_id,
+                purpose="escalation",
+                external_chat_id=str(self._escalation_chat_id),
+                external_topic_id=str(topic_id) if topic_id is not None else None,
+                external_message_id=int(message_id),
+            )
+        except Exception:
+            LOGGER.warning(
+                "Failed to dual-write canonical escalation {} to canonical tables",
+                escalation_id,
+                exc_info=True,
+            )
+
     async def escalate_to_support(
         self,
         question_summary: str,
@@ -428,7 +484,7 @@ class EscalationService:
                             existing_backend == "jira"
                             or (not existing_backend and _ref_from_jira_key)
                         )
-                        await supabase_client.save_escalation_mapping(
+                        saved_followup_id = await supabase_client.save_escalation_mapping(
                             escalation_message_id=followup_msg_id,
                             customer_chat_id=customer_chat_id,
                             session_id=session_id,
@@ -449,6 +505,13 @@ class EscalationService:
                             ticket_backend=existing_backend if existing_ref else None,
                             jira_ticket_key=existing_ref if followup_is_jira else None,
                         )
+                        if saved_followup_id:
+                            await self._record_canonical_escalation(
+                                saved_followup_id,
+                                session_id,
+                                message_id=followup_msg_id,
+                                topic_id=followup_topic_id,
+                            )
 
                     return {
                         "success": True,
@@ -558,7 +621,7 @@ class EscalationService:
                 if escalation_message_id and customer_chat_id and session_id:
                     supabase_client = self._get_supabase_client()
                     if supabase_client:
-                        await supabase_client.save_escalation_mapping(
+                        saved_mapping_id = await supabase_client.save_escalation_mapping(
                             escalation_message_id=escalation_message_id,
                             customer_chat_id=customer_chat_id,
                             session_id=session_id,
@@ -574,6 +637,13 @@ class EscalationService:
                             question_text=question_summary,
                             thread_id=thread_id,
                         )
+                        if saved_mapping_id:
+                            await self._record_canonical_escalation(
+                                saved_mapping_id,
+                                session_id,
+                                message_id=escalation_message_id,
+                                topic_id=escalation_topic_id,
+                            )
                         LOGGER.info(
                             f"Saved escalation to database: msg_id={escalation_message_id} → "
                             f"chat_id={customer_chat_id}, session={session_id}, "
@@ -1845,7 +1915,9 @@ class EscalationService:
             # dedup backstop is lost for this attempt, not the ticket itself.
             try:
                 if await self._escalations.get(mapping_id) is None:
-                    await self._escalations.create(mapping_id, session_id)
+                    chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
+                    if chat_session_uuid is not None:
+                        await self._escalations.create(mapping_id, chat_session_uuid)
                 await self._escalations.claim(mapping_id)
             except Exception:
                 LOGGER.warning(
@@ -2933,7 +3005,7 @@ class EscalationService:
                         clean_tag = None
                         if organization_short_name:
                             clean_tag = "".join(c for c in organization_short_name if c.isalnum())
-                        await supabase_client.save_escalation_mapping(
+                        saved_verification_id = await supabase_client.save_escalation_mapping(
                             escalation_message_id=escalation_message_id,
                             customer_chat_id=customer_chat_id,
                             session_id=session_id,
@@ -2946,6 +3018,13 @@ class EscalationService:
                             question_text=original_message[:2000] if original_message else None,
                             thread_id=thread_id,
                         )
+                        if saved_verification_id:
+                            await self._record_canonical_escalation(
+                                saved_verification_id,
+                                session_id,
+                                message_id=escalation_message_id,
+                                topic_id=escalation_topic_id,
+                            )
                         LOGGER.info(
                             f"Saved verification failure escalation to database: "
                             f"msg_id={escalation_message_id} → session={session_id}, "

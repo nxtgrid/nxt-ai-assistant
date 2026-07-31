@@ -1092,7 +1092,7 @@ async def _deliver_notification(
             await receipts.record(
                 ticket_id=delivery.ticket.ticket_id,
                 escalation_id=None,
-                purpose="notification",
+                purpose="update" if delivery.text_override else "notification",
                 external_chat_id=str(target.chat_id),
                 external_topic_id=str(target.topic_id) if target.topic_id is not None else None,
                 external_message_id=int(message_id),
@@ -1285,6 +1285,7 @@ async def _record_new_correlation(
             severity=alert.severity,
             telegram_chat_id=target.chat_id,
             telegram_topic_id=target.topic_id,
+            ticket_id=getattr(result, "ticket_id", None),
         )
     except Exception:
         logger.warning(
