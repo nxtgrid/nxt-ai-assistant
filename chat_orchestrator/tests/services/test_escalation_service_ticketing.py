@@ -158,6 +158,7 @@ class _FakeSupabase:
         self.session_by_id_result: Optional[SimpleNamespace] = None
         self.escalation_by_session_result: Optional[Dict[str, Any]] = None
         self.reopen_escalation_result: bool = True
+        self.reopen_escalation_calls: List[tuple] = []
         self.internal_ticket_lookup_calls: List[str] = []
         # Sweep fixtures — configure per-test, default to empty/no-op.
         self.stale_unfiled: List[Dict[str, Any]] = []
@@ -216,7 +217,8 @@ class _FakeSupabase:
     async def update_session_escalation_status(self, **_k):
         return None
 
-    async def reopen_escalation(self, _session_id, _escalation_message_id):
+    async def reopen_escalation(self, session_id, escalation_message_id):
+        self.reopen_escalation_calls.append((session_id, escalation_message_id))
         return self.reopen_escalation_result
 
     async def save_escalation_mapping(self, **kwargs):
@@ -1747,3 +1749,38 @@ async def test_reopen_escalation_succeeds_even_when_no_canonical_delivery_found(
     result = await svc.reopen_escalation("telegram_abc", 555)
 
     assert result == {"success": True, "message": "Escalation reopened"}
+
+
+async def test_reopen_escalation_uses_canonical_only_once_legacy_writes_stopped(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-1", "external_message_id": 555, "purpose": "escalation"}
+    ]
+    raw.table("escalations").rows = [{"id": "esc-1", "state": "resolved", "resolved_at": "t"}]
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+
+    result = await svc.reopen_escalation("telegram_abc", 555)
+
+    assert result == {"success": True, "message": "Escalation reopened"}
+    assert supa.reopen_escalation_calls == []  # legacy reopen skipped entirely
+    escalation_row = raw.table("escalations").rows[0]
+    assert escalation_row["state"] == "open"
+    assert escalation_row["resolved_at"] is None
+
+
+async def test_reopen_escalation_fails_when_no_canonical_delivery_once_legacy_writes_stopped(
+    monkeypatch,
+):
+    """Without a legacy fallback to lean on, an unresolvable escalation must
+    be reported as a failure rather than silently claiming success."""
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()  # no message_deliveries rows
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+
+    result = await svc.reopen_escalation("telegram_abc", 555)
+
+    assert result["success"] is False
+    assert supa.reopen_escalation_calls == []

@@ -20,7 +20,11 @@ from orchestrator.services import callback_handlers as ch
 
 
 class _FakeSupabase:
-    def __init__(self, claim_row: Optional[Dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        claim_row: Optional[Dict[str, Any]],
+        escalations_state: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> None:
         self._claim_row = claim_row
         self.reactivate_calls: List[str] = []
         self.resolved_at_calls: List[str] = []
@@ -28,21 +32,36 @@ class _FakeSupabase:
         # issued through _get_client() -- covers both the legacy resolved_at
         # write and EscalationRepository's canonical resolve()/release() calls.
         self.canonical_calls: List[tuple] = []
+        # In-memory canonical `escalations` rows, keyed by id. Gives
+        # EscalationRepository's conditional updates (claim/resolve/release/
+        # reopen) real match/no-match semantics instead of always touching
+        # zero rows.
+        self.escalations_state: Dict[str, Dict[str, Any]] = escalations_state or {}
+        self.count_active_blocking_escalations_calls: List[str] = []
+        self.update_session_escalation_status_calls: List[Dict[str, Any]] = []
+        self.claim_escalation_for_tracking_calls: List[str] = []
 
     async def claim_escalation_for_tracking(self, mapping_id: str):
+        self.claim_escalation_for_tracking_calls.append(mapping_id)
         return self._claim_row
 
     async def reactivate_escalation(self, mapping_id: str):
         self.reactivate_calls.append(mapping_id)
 
-    async def count_active_blocking_escalations(self, _sid):
+    async def count_active_blocking_escalations(self, session_id):
+        self.count_active_blocking_escalations_calls.append(session_id)
         return 0
 
-    async def update_session_escalation_status(self, **_k):
+    async def update_session_escalation_status(self, **kwargs):
+        self.update_session_escalation_status_calls.append(kwargs)
         return None
 
     def _get_client(self):
         supa = self
+
+        class _Response:
+            def __init__(self, data):
+                self.data = data
 
         class _Query:
             def __init__(self, table_name: str, payload: Dict[str, Any]):
@@ -62,7 +81,23 @@ class _FakeSupabase:
                 supa.canonical_calls.append(
                     (self._table_name, self._payload, list(self._filters))
                 )
-                return None
+                if self._table_name != "escalations":
+                    return _Response(None)
+                def _matches(eid: str, row: Dict[str, Any]) -> bool:
+                    for col, val in self._filters:
+                        actual = eid if col == "id" else row.get(col)
+                        if actual != val:
+                            return False
+                    return True
+
+                matched_ids = [
+                    eid for eid, row in supa.escalations_state.items() if _matches(eid, row)
+                ]
+                updated = []
+                for eid in matched_ids:
+                    supa.escalations_state[eid].update(self._payload)
+                    updated.append({"id": eid, **supa.escalations_state[eid]})
+                return _Response(updated)
 
         class _Table:
             def __init__(self, name: str):
@@ -97,6 +132,9 @@ class _FakeEscalationService:
             return_value={"success": True, "ticket_ref": "TKT-000005", "ticket_backend": "internal", "ticket_url": None}
         )
         self.notify_customer_resolved = AsyncMock(return_value=None)
+        self.get_escalation_by_id_canonical = AsyncMock(
+            return_value={"id": "m1", "session_id": "telegram_abc", "customer_chat_id": "123"}
+        )
         self._tickets = _FakeTickets()
         _FakeEscalationService.instances.append(self)
 
@@ -230,6 +268,88 @@ async def test_track_callback_reactivates_on_failure(monkeypatch):
     ]
 
 
+async def test_track_callback_uses_canonical_claim_once_legacy_writes_stopped(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    mapping_id = "00000000-0000-0000-0000-000000000001"
+    supa = _FakeSupabase(
+        claim_row=None,  # legacy claim must never be consulted
+        escalations_state={mapping_id: {"state": "open"}},
+    )
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+
+    result = await ch._handle_escalation_track_callback(
+        callback_id="cb1",
+        mapping_id=mapping_id,
+        chat_id="-100999",
+        message_id=42,
+        original_text="original escalation text",
+    )
+
+    assert result["success"] is True
+    assert "TKT-000005" in result["message"]
+    assert supa.claim_escalation_for_tracking_calls == []
+    assert supa.escalations_state[mapping_id]["state"] == "processing"
+    svc = _FakeEscalationService.instances[-1]
+    svc.get_escalation_by_id_canonical.assert_awaited_once_with(mapping_id)
+    svc.track_as_ticket.assert_awaited_once()
+
+
+async def test_track_callback_canonical_claim_fails_when_already_processing(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    mapping_id = "00000000-0000-0000-0000-000000000001"
+    supa = _FakeSupabase(
+        claim_row=None,
+        escalations_state={mapping_id: {"state": "processing"}},  # already claimed
+    )
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+
+    result = await ch._handle_escalation_track_callback(
+        callback_id="cb1",
+        mapping_id=mapping_id,
+        chat_id="-100999",
+        message_id=42,
+        original_text="original escalation text",
+    )
+
+    assert result["message"] == "Already claimed"
+    svc = _FakeEscalationService.instances[-1]
+    svc.track_as_ticket.assert_not_awaited()
+    svc.get_escalation_by_id_canonical.assert_not_awaited()
+
+
+async def test_track_callback_releases_canonical_claim_on_failure_once_legacy_writes_stopped(
+    monkeypatch,
+):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    mapping_id = "00000000-0000-0000-0000-000000000001"
+    supa = _FakeSupabase(
+        claim_row=None,
+        escalations_state={mapping_id: {"state": "open"}},
+    )
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+
+    def _install_failing(*_a, **_k):
+        svc = _FakeEscalationService()
+        svc.track_as_ticket = AsyncMock(return_value={"success": False, "error": "boom"})
+        return svc
+
+    monkeypatch.setattr(
+        "orchestrator.services.escalation_service.EscalationService", _install_failing
+    )
+
+    result = await ch._handle_escalation_track_callback(
+        callback_id="cb1",
+        mapping_id=mapping_id,
+        chat_id="-100999",
+        message_id=42,
+        original_text="original escalation text",
+    )
+
+    assert result["message"] == "Escalation tracking: failed"
+    assert supa.reactivate_calls == []  # legacy reactivate skipped
+    assert supa.escalations_state[mapping_id]["state"] == "open"  # released back
+
+
 # ---------------------------------------------------------------------------
 # Close callback — transition-to-done routing
 # ---------------------------------------------------------------------------
@@ -269,6 +389,59 @@ async def test_close_callback_resolves_canonical_escalation(monkeypatch):
     assert payload["state"] == "resolved"
     assert "resolved_at" in payload
     assert filters == [("id", "00000000-0000-0000-0000-000000000009")]
+
+
+async def test_close_callback_uses_canonical_claim_once_legacy_writes_stopped(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    mapping_id = "00000000-0000-0000-0000-000000000009"
+    supa = _FakeSupabase(
+        claim_row=None,  # legacy claim must never be consulted
+        escalations_state={mapping_id: {"state": "open"}},
+    )
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+
+    result = await ch._handle_escalation_close_callback(
+        callback_id="cb1",
+        mapping_id=mapping_id,
+        chat_id="-100999",
+        message_id=42,
+        original_text="original escalation text",
+        notify_customer=False,
+    )
+
+    assert result["success"] is True
+    assert supa.claim_escalation_for_tracking_calls == []
+    assert supa.escalations_state[mapping_id]["state"] == "resolved"
+
+    # Legacy resolved_at write skipped entirely -- no escalation_mappings call at all.
+    assert all(c[0] != "escalation_mappings" for c in supa.canonical_calls)
+
+    # Legacy session-status bookkeeping skipped too (nothing left to release
+    # once chat_sessions.is_escalated is no longer read).
+    assert supa.count_active_blocking_escalations_calls == []
+    assert supa.update_session_escalation_status_calls == []
+
+
+async def test_close_callback_canonical_claim_fails_when_already_processing(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    mapping_id = "00000000-0000-0000-0000-000000000009"
+    supa = _FakeSupabase(
+        claim_row=None,
+        escalations_state={mapping_id: {"state": "processing"}},  # already claimed
+    )
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+
+    result = await ch._handle_escalation_close_callback(
+        callback_id="cb1",
+        mapping_id=mapping_id,
+        chat_id="-100999",
+        message_id=42,
+        original_text="original escalation text",
+        notify_customer=False,
+    )
+
+    assert result["message"] == "Already claimed"
+    assert supa.escalations_state[mapping_id]["state"] == "processing"  # untouched
 
 
 async def test_close_callback_transitions_internal_ticket_to_done(monkeypatch):

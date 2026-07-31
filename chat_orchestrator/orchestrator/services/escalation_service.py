@@ -1613,6 +1613,62 @@ class EscalationService:
             )
             return None
 
+    async def get_escalation_by_id_canonical(self, escalation_id: str) -> Optional[Dict[str, Any]]:
+        """Canonical, legacy-escalation_mappings-shaped dict for a known
+        escalation id -- used by callback_handlers.py's track/close flows
+        once STOP_LEGACY_ESCALATION_WRITES means there's no legacy row left
+        to read. Returns None whenever resolution is inconclusive.
+        """
+        supabase_client = self._get_supabase_client()
+        if supabase_client is None:
+            return None
+        try:
+            escalation = await self._escalations.get(escalation_id)
+            if escalation is None:
+                return None
+            chat_session_uuid = escalation.get("chat_session_id")
+            session = (
+                await supabase_client.get_session_by_id(chat_session_uuid)
+                if chat_session_uuid
+                else None
+            )
+            if session is None:
+                return None
+
+            delivery = await self._deliveries.find_by_escalation(escalation_id)
+
+            ticket_ref: Optional[str] = None
+            ticket_backend: Optional[str] = None
+            ticket_id = escalation.get("ticket_id")
+            if ticket_id:
+                ticket_ref = await self._tickets.get_ref_by_id(ticket_id)
+                if ticket_ref:
+                    ticket_backend = await self._tickets.get_backend_name(ticket_ref)
+
+            return {
+                "id": escalation_id,
+                "session_id": session.session_id,
+                "customer_chat_id": session.telegram_chat_id,
+                "customer_topic_id": session.telegram_topic_id,
+                "organization_id": session.organization_id,
+                "org_hashtag": escalation.get("org_hashtag"),
+                "question_text": escalation.get("question_text"),
+                "escalation_message_id": (
+                    delivery.get("external_message_id") if delivery else None
+                ),
+                "escalation_topic_id": delivery.get("external_topic_id") if delivery else None,
+                "ticket_ref": ticket_ref,
+                "ticket_backend": ticket_backend,
+                "jira_ticket_key": None,  # canonical rows never carry this legacy-only column
+            }
+        except Exception:
+            LOGGER.warning(
+                "Canonical escalation lookup failed for id {}",
+                escalation_id,
+                exc_info=True,
+            )
+            return None
+
     async def get_escalation_info(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
         Get escalation info for a session.
@@ -3101,6 +3157,31 @@ class EscalationService:
                 "success": False,
                 "error": "Database not available",
             }
+
+        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+            try:
+                delivery = await self._deliveries.find_escalation_delivery(
+                    external_message_id=escalation_message_id
+                )
+                escalation_id = delivery.get("escalation_id") if delivery else None
+                if not escalation_id:
+                    LOGGER.warning(
+                        "Could not resolve canonical escalation for session {} "
+                        "message {}",
+                        session_id,
+                        escalation_message_id,
+                    )
+                    return {"success": False, "error": "Failed to reopen escalation"}
+                await self._escalations.reopen(escalation_id)
+            except Exception:
+                LOGGER.warning(
+                    "Failed to reopen canonical escalation for session {}",
+                    session_id,
+                    exc_info=True,
+                )
+                return {"success": False, "error": "Failed to reopen escalation"}
+            LOGGER.info(f"Reopened escalation for session {session_id}")
+            return {"success": True, "message": "Escalation reopened"}
 
         success = await supabase_client.reopen_escalation(session_id, escalation_message_id)
 
