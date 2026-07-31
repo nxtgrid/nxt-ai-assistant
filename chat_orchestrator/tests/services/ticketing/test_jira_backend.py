@@ -1231,3 +1231,65 @@ class TestAddAttachments:
         )
         results = await backend.add_attachments("OPS-1", [_attachment()])
         assert results == []
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_and_does_not_raise_when_get_storage_client_raises(
+        self, fake_session: FakeJiraSession
+    ) -> None:
+        def _raising_get_storage_client() -> Any:
+            raise RuntimeError("storage client factory blew up")
+
+        backend = JiraTicketBackend(
+            base_url="https://example.atlassian.net",
+            email="bot@example.com",
+            api_token="tok",
+            get_storage_client=_raising_get_storage_client,
+        )
+
+        results = await backend.add_attachments("OPS-1", [_attachment()])
+
+        assert results == []
+        assert fake_session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_malformed_response_body_does_not_raise(
+        self, fake_session: FakeJiraSession
+    ) -> None:
+        backend = JiraTicketBackend(
+            base_url="https://example.atlassian.net",
+            email="bot@example.com",
+            api_token="tok",
+            get_storage_client=lambda: _FakeSupabaseClient({"esc-1/photo.jpg": b"fake-image-bytes"}),
+        )
+        # 200/201 response whose JSON body is a list of non-dict elements --
+        # entries[0].get("id") would raise AttributeError uncaught if that
+        # check ever escaped the try/except wrapping response.json().
+        fake_session.queue(
+            "POST",
+            "/issue/OPS-1/attachments",
+            _FakeResponse(200, json_data=["not-a-dict"]),
+        )
+
+        results = await backend.add_attachments("OPS-1", [_attachment()])
+
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_non_list_response_body_does_not_raise(
+        self, fake_session: FakeJiraSession
+    ) -> None:
+        backend = JiraTicketBackend(
+            base_url="https://example.atlassian.net",
+            email="bot@example.com",
+            api_token="tok",
+            get_storage_client=lambda: _FakeSupabaseClient({"esc-1/photo.jpg": b"fake-image-bytes"}),
+        )
+        fake_session.queue(
+            "POST",
+            "/issue/OPS-1/attachments",
+            _FakeResponse(200, json_data={"unexpected": "shape"}),
+        )
+
+        results = await backend.add_attachments("OPS-1", [_attachment()])
+
+        assert results == []

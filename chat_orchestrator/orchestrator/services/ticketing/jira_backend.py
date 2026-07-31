@@ -584,7 +584,15 @@ class JiraTicketBackend:
     def _download_attachment_bytes(self, storage_path: str) -> Optional[bytes]:
         if self._get_storage_client is None:
             return None
-        client = self._get_storage_client()
+        try:
+            client = self._get_storage_client()
+        except Exception:
+            LOGGER.warning(
+                "get_storage_client() raised -- skipping download for attachment {}",
+                storage_path,
+                exc_info=True,
+            )
+            return None
         if client is None:
             return None
         try:
@@ -628,15 +636,16 @@ class JiraTicketBackend:
                     )
                     return None
                 result = await response.json()
+                entries = result if isinstance(result, list) else []
+                if not entries or not entries[0].get("id"):
+                    LOGGER.warning(
+                        "Jira attachment upload for {} returned no attachment id", issue_key
+                    )
+                    return None
+                return str(entries[0]["id"])
         except Exception:
             LOGGER.warning("Jira attachment upload failed for {}", issue_key, exc_info=True)
             return None
-
-        entries = result if isinstance(result, list) else []
-        if not entries or not entries[0].get("id"):
-            LOGGER.warning("Jira attachment upload for {} returned no attachment id", issue_key)
-            return None
-        return str(entries[0]["id"])
 
     async def add_attachments(
         self, ticket_ref: str, attachments: List[EscalationAttachment]
