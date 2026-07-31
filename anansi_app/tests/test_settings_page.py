@@ -60,6 +60,15 @@ class TestGroupIsInert:
     def test_a_group_with_no_shared_dependency_is_never_inert(self):
         assert page.group_is_inert("bot_control", _pending()) is False
 
+    def test_a_group_is_not_inert_when_only_one_flag_depends_on_an_unrelated_toggle(self):
+        """"models" hosts LLM_PROVIDER/GEMINI_MODEL/etc alongside
+        THREAD_CLASSIFIER_MODEL, whose depends_on (THREAD_DISENTANGLEMENT_ENABLED)
+        belongs to a different feature entirely. That one flag being
+        off must not hide the whole provider/model section.
+        """
+        pending = _pending(THREAD_DISENTANGLEMENT_ENABLED=False)
+        assert page.group_is_inert("models", pending) is False
+
 
 def test_page_contains_no_hardcoded_flag_names():
     """Adding a flag to the registry must require no edit to this page.
