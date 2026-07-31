@@ -1254,6 +1254,28 @@ async def test_handle_support_reply_falls_back_to_legacy_when_canonical_incomple
     assert supa.tag_calls == [("msg-1", "OPS-77", "comment")]
 
 
+async def test_handle_support_reply_does_not_fall_back_once_legacy_writes_stopped(monkeypatch):
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()  # no message_deliveries rows -- canonical resolution fails
+    supa = _FakeSupabase(raw)
+    supa.mapping_for_reply = {
+        "is_active": True,
+        "customer_chat_id": "123",
+        "customer_topic_id": None,
+        "customer_email": None,
+        "session_id": "telegram_abc",
+        "ticket_ref": "OPS-77",
+        "escalation_topic_id": None,
+    }
+    svc = _make_service(supa)
+
+    result = await svc.handle_support_reply(reply_to_message_id=555, reply_text="hi there")
+
+    assert result["success"] is False
+    assert supa.tag_calls == []
+
+
 async def test_handle_support_reply_uses_legacy_when_flag_off(monkeypatch):
     monkeypatch.delenv("CANONICAL_ESCALATION_READS_ENABLED", raising=False)
     raw = _FakeRaw()
@@ -1428,6 +1450,20 @@ async def test_is_session_escalated_falls_back_to_legacy_on_canonical_error(monk
     assert await svc.is_session_escalated("telegram_abc") is True
 
 
+async def test_is_session_escalated_does_not_fall_back_once_legacy_writes_stopped(monkeypatch):
+    """Once STOP_LEGACY_ESCALATION_WRITES is on, legacy is guaranteed stale --
+    an inconclusive canonical check must not trust it, even though the
+    legacy row here claims the session is escalated."""
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    supa = _FakeSupabase(_FakeRaw())
+    supa.session_escalation_info = {"is_escalated": True}
+    svc = _make_service(supa)
+    svc._escalations = _FakeEscalationsRepo(result=RuntimeError("db down"))
+
+    assert await svc.is_session_escalated("telegram_abc") is False
+
+
 async def test_is_session_escalated_falls_back_to_legacy_when_session_unresolvable(monkeypatch):
     monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
     supa = _FakeSupabase(_FakeRaw())
@@ -1536,6 +1572,24 @@ async def test_get_escalation_info_falls_back_to_legacy_when_no_active_canonical
     result = await svc.get_escalation_info("telegram_abc")
 
     assert result == {"is_active": True, "escalation_message_id": 42}
+
+
+async def test_get_escalation_info_does_not_fall_back_once_legacy_writes_stopped(monkeypatch):
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()  # no escalations rows -- canonical finds nothing
+    supa = _FakeSupabase(raw)
+    supa.escalation_by_session_result = {"is_active": True, "escalation_message_id": 42}
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=uuid.uuid4(), organization_id=7)
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    result = await svc.get_escalation_info("telegram_abc")
+
+    assert result is None
 
 
 # ---------------------------------------------------------------------------

@@ -1352,7 +1352,11 @@ class EscalationService:
         if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
             mapping = await self._resolve_support_reply_canonical(reply_to_message_id)
 
-        if mapping is None and supabase_client:
+        if mapping is None and supabase_client and not fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+            # Once legacy writes have stopped, a legacy row here (if one even
+            # exists) may be stale -- an unresolved canonical lookup is
+            # treated as "no escalation found" rather than risk routing a
+            # reply using out-of-date data.
             mapping = await supabase_client.get_escalation_mapping(reply_to_message_id)
 
         if not mapping:
@@ -1497,6 +1501,18 @@ class EscalationService:
             canonical_result = await self._is_session_escalated_canonical(session_id)
             if canonical_result is not None:
                 return canonical_result
+            if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+                # Legacy is no longer written to once this flag is on, so an
+                # unmaintained legacy row is worse than no answer here --
+                # degrade to "not escalated" (lets the bot keep responding)
+                # rather than trust data that may predate a canonical-only
+                # close/reopen since.
+                LOGGER.warning(
+                    "Canonical escalation check inconclusive for session {} "
+                    "and legacy writes are stopped -- treating as not escalated",
+                    session_id,
+                )
+                return False
             # Canonical check was inconclusive (no client, unresolved chat
             # session, or a store error) -- fall through to the legacy check
             # below rather than risk a false "not escalated".
@@ -1609,6 +1625,12 @@ class EscalationService:
             canonical_result = await self._get_escalation_info_canonical(session_id)
             if canonical_result is not None:
                 return canonical_result
+            if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+                # Legacy is no longer written to once this flag is on -- a
+                # legacy row here may be stale (e.g. resolved canonically
+                # but never updated in escalation_mappings), so treat "no
+                # canonical result" as authoritative rather than trust it.
+                return None
 
         result: Optional[Dict[str, Any]] = await supabase_client.get_escalation_by_session(
             session_id
