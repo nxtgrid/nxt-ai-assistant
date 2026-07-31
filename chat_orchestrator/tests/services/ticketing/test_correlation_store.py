@@ -142,6 +142,7 @@ class FakeRawClient:
         self.tables: Dict[str, List[Dict[str, Any]]] = {
             "ticket_correlations": [],
             "ticket_correlation_events": [],
+            "tickets": [],
         }
         self.raise_on_execute: Dict[str, Exception] = {}
 
@@ -302,6 +303,88 @@ class TestUpsertCorrelation:
         )
 
         assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_persists_a_caller_provided_ticket_id_without_a_lookup(self):
+        """When the caller already has the canonical ticket_id (e.g. fresh off
+        ticket creation), it's used directly -- no need to round-trip through
+        the tickets table."""
+        store, fake = _make_store()
+
+        ok = await store.upsert_correlation(
+            ticket_ref="TKT-1",
+            ticket_backend="internal",
+            grid_name="Kudi",
+            organization_id=None,
+            root_cause_kind=None,
+            primary_signature="sig-a",
+            signatures=["sig-a"],
+            affected_keys=[],
+            summary_base="s",
+            description_base="d",
+            severity="warning",
+            telegram_chat_id=None,
+            telegram_topic_id=None,
+            ticket_id="ticket-uuid-provided",
+        )
+
+        assert ok is True
+        assert fake.tables["ticket_correlations"][0]["ticket_id"] == "ticket-uuid-provided"
+        assert fake.tables["tickets"] == []  # no lookup happened
+
+    @pytest.mark.asyncio
+    async def test_resolves_ticket_id_by_ticket_ref_when_not_provided(self):
+        """Regression: CorrelationStore never set ticket_id on write, so every
+        row created after 0005a's one-time backfill ran has ticket_id=NULL
+        (see db/migrations/0007_backfill_ticket_correlations_ticket_id.sql).
+        Callers without a ready-made ticket_id (e.g. the amend-seed fallback
+        in correlation_render.py) must still get it populated via a lookup."""
+        store, fake = _make_store()
+        fake.tables["tickets"] = [
+            {"id": "ticket-uuid-1", "ticket_ref": "TKT-1", "backend": "internal"}
+        ]
+
+        ok = await store.upsert_correlation(
+            ticket_ref="TKT-1",
+            ticket_backend="internal",
+            grid_name="Kudi",
+            organization_id=None,
+            root_cause_kind=None,
+            primary_signature="sig-a",
+            signatures=["sig-a"],
+            affected_keys=[],
+            summary_base="s",
+            description_base="d",
+            severity="warning",
+            telegram_chat_id=None,
+            telegram_topic_id=None,
+        )
+
+        assert ok is True
+        assert fake.tables["ticket_correlations"][0]["ticket_id"] == "ticket-uuid-1"
+
+    @pytest.mark.asyncio
+    async def test_ticket_id_is_none_when_lookup_finds_no_match(self):
+        store, fake = _make_store()
+
+        ok = await store.upsert_correlation(
+            ticket_ref="TKT-missing",
+            ticket_backend="internal",
+            grid_name="Kudi",
+            organization_id=None,
+            root_cause_kind=None,
+            primary_signature="sig-a",
+            signatures=["sig-a"],
+            affected_keys=[],
+            summary_base="s",
+            description_base="d",
+            severity="warning",
+            telegram_chat_id=None,
+            telegram_topic_id=None,
+        )
+
+        assert ok is True
+        assert fake.tables["ticket_correlations"][0]["ticket_id"] is None
 
 
 class TestMergeAffectedKey:

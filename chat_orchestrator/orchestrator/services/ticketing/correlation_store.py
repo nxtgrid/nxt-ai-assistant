@@ -243,21 +243,47 @@ class CorrelationStore:
         severity: str,
         telegram_chat_id: Optional[str],
         telegram_topic_id: Optional[str],
+        ticket_id: Optional[str] = None,
     ) -> bool:
         """Create (or, on a retry, update) a ticket's correlation row.
 
         This seeds both newly-filed tickets and externally discovered tickets
         the first time correlation amends them. Upserting on ``ticket_ref``
         makes either path idempotent at the UNIQUE constraint.
+
+        ``ticket_id`` is the canonical ``tickets.id`` this row belongs to --
+        the eventual replacement identity for ``ticket_ref`` (see
+        db/migrations/0005b). Pass it when the caller already has it (e.g.
+        fresh from ticket creation); otherwise it's resolved here by looking
+        up ``tickets`` via ``ticket_ref``/``ticket_backend``, so every write
+        path keeps the column populated going forward.
         """
         client = self._client()
         if client is None:
             return False
+        resolved_ticket_id = ticket_id
+        if resolved_ticket_id is None:
+            try:
+                ticket_rows = (
+                    client.table("tickets")
+                    .select("id")
+                    .eq("ticket_ref", ticket_ref)
+                    .eq("backend", ticket_backend)
+                    .limit(1)
+                    .execute()
+                )
+                rows = getattr(ticket_rows, "data", None) or []
+                resolved_ticket_id = rows[0]["id"] if rows else None
+            except Exception as e:
+                LOGGER.warning(
+                    "correlation store: could not resolve ticket_id for {}: {}", ticket_ref, e
+                )
         try:
             client.table("ticket_correlations").upsert(
                 {
                     "ticket_ref": ticket_ref,
                     "ticket_backend": ticket_backend,
+                    "ticket_id": resolved_ticket_id,
                     "grid_name": grid_name,
                     "organization_id": organization_id,
                     "root_cause_kind": root_cause_kind,
