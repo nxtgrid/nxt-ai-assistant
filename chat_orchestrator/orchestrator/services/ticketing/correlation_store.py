@@ -154,6 +154,34 @@ class CorrelationStore:
     # ticket_correlations
     # ------------------------------------------------------------------
 
+    async def _correlation_filter(self, client: Any, ticket_ref: str) -> tuple[str, Any]:
+        """Column/value to filter ``ticket_correlations`` by for a given
+        ``ticket_ref``.
+
+        Prefers ``ticket_id`` -- the eventual sole identity for this table
+        (see db/migrations/0005b, which drops ``ticket_ref`` as a column) --
+        resolved via a ``tickets`` lookup, matching ``upsert_correlation``'s
+        own resolution. Falls back to filtering by ``ticket_ref`` directly
+        if that lookup comes up empty, so a row somehow not yet linked to a
+        canonical ticket is still found.
+        """
+        try:
+            ticket_rows = (
+                client.table("tickets")
+                .select("id")
+                .eq("ticket_ref", ticket_ref)
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(ticket_rows, "data", None) or []
+            if rows:
+                return ("ticket_id", rows[0]["id"])
+        except Exception as e:
+            LOGGER.warning(
+                "correlation store: could not resolve ticket_id for {}: {}", ticket_ref, e
+            )
+        return ("ticket_ref", ticket_ref)
+
     async def get_correlation(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
         """Fetch a single correlation row by ``ticket_ref`` -- used by the
         amend executor (``correlation_render.apply_amendment``) to read the
@@ -162,12 +190,9 @@ class CorrelationStore:
         if client is None:
             return None
         try:
+            col, val = await self._correlation_filter(client, ticket_ref)
             response = (
-                client.table("ticket_correlations")
-                .select("*")
-                .eq("ticket_ref", ticket_ref)
-                .limit(1)
-                .execute()
+                client.table("ticket_correlations").select("*").eq(col, val).limit(1).execute()
             )
         except Exception as e:
             LOGGER.warning("correlation store: get_correlation({}) failed: {}", ticket_ref, e)
@@ -193,9 +218,8 @@ class CorrelationStore:
         if escalated:
             payload["escalated_at"] = datetime.now(timezone.utc).isoformat()
         try:
-            client.table("ticket_correlations").update(payload).eq(
-                "ticket_ref", ticket_ref
-            ).execute()
+            col, val = await self._correlation_filter(client, ticket_ref)
+            client.table("ticket_correlations").update(payload).eq(col, val).execute()
             return True
         except Exception as e:
             LOGGER.warning("correlation store: record_amendment({}) failed: {}", ticket_ref, e)
@@ -327,12 +351,9 @@ class CorrelationStore:
             return None
         occurred_at = occurred_at or datetime.now(timezone.utc).isoformat()
         try:
+            col, val = await self._correlation_filter(client, ticket_ref)
             existing = (
-                client.table("ticket_correlations")
-                .select("*")
-                .eq("ticket_ref", ticket_ref)
-                .limit(1)
-                .execute()
+                client.table("ticket_correlations").select("*").eq(col, val).limit(1).execute()
             )
             rows = getattr(existing, "data", None) or []
             if not rows:
@@ -366,9 +387,7 @@ class CorrelationStore:
                     signatures.append(signature)
                     update_payload["signatures"] = signatures
 
-            client.table("ticket_correlations").update(update_payload).eq(
-                "ticket_ref", ticket_ref
-            ).execute()
+            client.table("ticket_correlations").update(update_payload).eq(col, val).execute()
             return AffectedKeyMerge(affected_keys=affected_keys, added=added)
         except Exception as e:
             LOGGER.warning("correlation store: merge_affected_key({}) failed: {}", ticket_ref, e)
@@ -386,10 +405,11 @@ class CorrelationStore:
             return False
         occurred_at = occurred_at or datetime.now(timezone.utc).isoformat()
         try:
+            col, val = await self._correlation_filter(client, ticket_ref)
             existing = (
                 client.table("ticket_correlations")
                 .select("occurrence_count")
-                .eq("ticket_ref", ticket_ref)
+                .eq(col, val)
                 .limit(1)
                 .execute()
             )
@@ -399,7 +419,7 @@ class CorrelationStore:
             current = int(rows[0].get("occurrence_count") or 0)
             client.table("ticket_correlations").update(
                 {"occurrence_count": current + 1, "last_alert_at": occurred_at}
-            ).eq("ticket_ref", ticket_ref).execute()
+            ).eq(col, val).execute()
             return True
         except Exception as e:
             LOGGER.warning("correlation store: bump_occurrence({}) failed: {}", ticket_ref, e)
@@ -412,9 +432,10 @@ class CorrelationStore:
         if client is None:
             return False
         try:
+            col, val = await self._correlation_filter(client, ticket_ref)
             client.table("ticket_correlations").update(
                 {"telegram_message_id": message_id}
-            ).eq("ticket_ref", ticket_ref).execute()
+            ).eq(col, val).execute()
             return True
         except Exception as e:
             LOGGER.warning("correlation store: record_message_id({}) failed: {}", ticket_ref, e)
@@ -430,9 +451,8 @@ class CorrelationStore:
         if client is None:
             return False
         try:
-            client.table("ticket_correlations").update({"status": "done"}).eq(
-                "ticket_ref", ticket_ref
-            ).execute()
+            col, val = await self._correlation_filter(client, ticket_ref)
+            client.table("ticket_correlations").update({"status": "done"}).eq(col, val).execute()
             return True
         except Exception as e:
             LOGGER.warning("correlation store: mark_closed({}) failed: {}", ticket_ref, e)

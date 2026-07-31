@@ -58,6 +58,47 @@ class DeliveryRepository:
             raise RuntimeError("delivery receipt write returned no row")
         return rows[0]
 
+    async def find_escalation_delivery(
+        self,
+        *,
+        external_message_id: int,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the 'escalation' delivery receipt for a Telegram message id.
+
+        Used to resolve a staff reply (which arrives keyed by the message it
+        replied to) back to the ``escalation_id`` it belongs to, without
+        going through the legacy ``escalation_mappings`` table.
+        """
+        response = (
+            self._raw_client()
+            .table("message_deliveries")
+            .select("escalation_id,external_topic_id")
+            .eq("external_message_id", external_message_id)
+            .eq("purpose", "escalation")
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None
+
+    async def find_by_escalation(self, escalation_id: str) -> Optional[Dict[str, Any]]:
+        """Return the 'escalation' delivery receipt for a given escalation_id
+        -- the reverse direction of find_escalation_delivery. Used to recover
+        the Telegram message/topic a canonical-reads consumer needs to
+        reference the original escalation post (e.g. get_escalation_info)."""
+        response = (
+            self._raw_client()
+            .table("message_deliveries")
+            .select("external_message_id,external_topic_id,external_chat_id")
+            .eq("escalation_id", escalation_id)
+            .eq("purpose", "escalation")
+            .order("sent_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None
+
     async def find_notification(
         self,
         *,

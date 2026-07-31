@@ -43,6 +43,10 @@ class _Query:
         self.filters.append(("in", column, values))
         return self
 
+    def neq(self, column: str, value: Any) -> "_Query":
+        self.filters.append(("neq", column, value))
+        return self
+
     def limit(self, _limit: int) -> "_Query":
         return self
 
@@ -109,3 +113,44 @@ async def test_lifecycle_transitions_remain_explicit_and_session_scoped():
         "escalations", "select", None,
         [("eq", "chat_session_id", "session-1"), ("in", "state", ["open", "processing"])],
     )
+
+
+@pytest.mark.asyncio
+async def test_reopen_sets_state_open_and_clears_resolved_at():
+    client = _Client([[{"id": "esc-1", "state": "open", "resolved_at": None}]])
+
+    await EscalationRepository(client=client).reopen("esc-1")
+
+    assert client.calls == [
+        (
+            "escalations",
+            "update",
+            {"state": "open", "resolved_at": None},
+            [("eq", "id", "esc-1")],
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_has_blocking_escalation_excludes_given_reasons():
+    """Regression: a canonical-reads consumer must be able to reproduce the
+    legacy "non-blocking reasons don't hold the session" distinction (see
+    supabase_client.save_escalation_mapping's NON_BLOCKING_REASONS)."""
+    client = _Client([[{"id": "esc-1"}]])
+
+    result = await EscalationRepository(client=client).has_blocking_escalation(
+        "session-1", exclude_reasons=("safety_escalation", "system_error")
+    )
+
+    assert result is True
+    assert client.calls == [
+        (
+            "escalations", "select", None,
+            [
+                ("eq", "chat_session_id", "session-1"),
+                ("in", "state", ["open", "processing"]),
+                ("neq", "reason", "safety_escalation"),
+                ("neq", "reason", "system_error"),
+            ],
+        )
+    ]

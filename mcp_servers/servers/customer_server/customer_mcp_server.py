@@ -20,6 +20,7 @@ from servers.customer_server.tool_schemas import TOOL_SCHEMAS
 from shared_code.stdio_runner import run_stdio_server
 from shared_code.tool_registry import ToolRegistry
 
+from shared.config import flag_registry as fr
 from shared.utils.response_formatters import compose_json_response
 
 # Configure logging to stderr for Claude Desktop visibility
@@ -235,6 +236,49 @@ async def get_last_gtr_summary(grid_name: str) -> Dict[str, Any]:
         executor.shutdown(wait=False)
 
 
+_OPEN_ISSUE_COLUMNS = (
+    "id, question_text, reason, action_type, created_at, thread_id, chat_threads(issue_type)"
+)
+
+
+def _get_my_open_issues_canonical(client: Any, organization_id: int) -> Optional[List[Dict[str, Any]]]:
+    """Canonical (escalations table) equivalent of the legacy escalation_mappings
+    query below. Returns None -- not [] -- whenever resolution is inconclusive,
+    so the caller falls back to the proven legacy query rather than risk
+    returning incomplete or wrong-tenant data from an org-isolation boundary.
+
+    escalations has no organization_id column (unlike escalation_mappings),
+    so this resolves it in a separate step via chat_sessions rather than a
+    single embedded-filter query -- a plain .in_() on a resolved id list is
+    unambiguous and easy to verify; PostgREST's embedded-relationship filter
+    syntax is not something to guess at for a multi-tenant boundary.
+    """
+    try:
+        session_response = (
+            client.table("chat_sessions")
+            .select("id")
+            .eq("organization_id", organization_id)
+            .limit(5000)
+            .execute()
+        )
+        session_ids = [row["id"] for row in (session_response.data or []) if row.get("id")]
+        if not session_ids:
+            return []
+        response = (
+            client.table("escalations")
+            .select(_OPEN_ISSUE_COLUMNS)
+            .in_("chat_session_id", session_ids)
+            .in_("state", ["open", "processing"])
+            .order("created_at", desc=True)
+            .limit(50)
+            .execute()
+        )
+        return response.data or []
+    except Exception as e:
+        logger.warning(f"Canonical open-issues lookup failed for org={organization_id}: {e}")
+        return None
+
+
 async def get_my_open_issues(
     organization_id: int,
     issue_type: Optional[str] = None,
@@ -250,19 +294,21 @@ async def get_my_open_issues(
 
         client = create_client(chat_db_url, chat_db_key)
 
-        query = (
-            client.table("escalation_mappings")
-            .select(
-                "id, question_text, reason, action_type, created_at, thread_id, "
-                "chat_threads(issue_type)"
+        rows = None
+        if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+            rows = _get_my_open_issues_canonical(client, organization_id)
+
+        if rows is None:
+            query = (
+                client.table("escalation_mappings")
+                .select(_OPEN_ISSUE_COLUMNS)
+                .eq("organization_id", organization_id)
+                .eq("is_active", True)
+                .order("created_at", desc=True)
+                .limit(50)
             )
-            .eq("organization_id", organization_id)
-            .eq("is_active", True)
-            .order("created_at", desc=True)
-            .limit(50)
-        )
-        response = query.execute()
-        rows = response.data or []
+            response = query.execute()
+            rows = response.data or []
 
         results = []
         for row in rows:

@@ -24,6 +24,10 @@ class _FakeSupabase:
         self._claim_row = claim_row
         self.reactivate_calls: List[str] = []
         self.resolved_at_calls: List[str] = []
+        # (table_name, payload, [(col, val), ...]) for every .update(...).eq(...).execute()
+        # issued through _get_client() -- covers both the legacy resolved_at
+        # write and EscalationRepository's canonical resolve()/release() calls.
+        self.canonical_calls: List[tuple] = []
 
     async def claim_escalation_for_tracking(self, mapping_id: str):
         return self._claim_row
@@ -38,19 +42,38 @@ class _FakeSupabase:
         return None
 
     def _get_client(self):
-        class _Table:
-            def update(_self, payload):
-                return _self
+        supa = self
 
-            def eq(_self, *_a, **_k):
-                return _self
+        class _Query:
+            def __init__(self, table_name: str, payload: Dict[str, Any]):
+                self._table_name = table_name
+                self._payload = payload
+                self._filters: List[tuple] = []
 
-            def execute(_self):
+            def update(self, payload):
+                self._payload = payload
+                return self
+
+            def eq(self, col, val):
+                self._filters.append((col, val))
+                return self
+
+            def execute(self):
+                supa.canonical_calls.append(
+                    (self._table_name, self._payload, list(self._filters))
+                )
                 return None
 
+        class _Table:
+            def __init__(self, name: str):
+                self._name = name
+
+            def update(self, payload):
+                return _Query(self._name, payload)
+
         class _Raw:
-            def table(_self, _name):
-                return _Table()
+            def table(_self, name):
+                return _Table(name)
 
         return _Raw()
 
@@ -192,11 +215,60 @@ async def test_track_callback_reactivates_on_failure(monkeypatch):
 
     assert result["message"] == "Escalation tracking: failed"
     assert supa.reactivate_calls == ["00000000-0000-0000-0000-000000000001"]
+    canonical_release_calls = [
+        c for c in supa.canonical_calls if c[0] == "escalations" and c[1].get("state") == "open"
+    ]
+    assert canonical_release_calls == [
+        (
+            "escalations",
+            {"state": "open"},
+            [
+                ("id", "00000000-0000-0000-0000-000000000001"),
+                ("state", "processing"),
+            ],
+        )
+    ]
 
 
 # ---------------------------------------------------------------------------
 # Close callback — transition-to-done routing
 # ---------------------------------------------------------------------------
+
+
+async def test_close_callback_resolves_canonical_escalation(monkeypatch):
+    """Regression: a close that never goes through track_as_ticket (no ticket
+    filed) is the only escalation lifecycle exit that had zero canonical
+    dual-write -- without this, escalations.state stays stuck at
+    open/processing forever for a silently- or notify-closed escalation."""
+    supa = _FakeSupabase(
+        claim_row={
+            "id": "m1",
+            "session_id": "telegram_abc",
+            "ticket_ref": None,
+            "jira_ticket_key": None,
+            "customer_chat_id": "123",
+            "customer_topic_id": None,
+        }
+    )
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+
+    await ch._handle_escalation_close_callback(
+        callback_id="cb1",
+        mapping_id="00000000-0000-0000-0000-000000000009",
+        chat_id="-100999",
+        message_id=42,
+        original_text="original escalation text",
+        notify_customer=False,
+    )
+
+    resolve_calls = [
+        c for c in supa.canonical_calls if c[0] == "escalations" and c[1].get("state") == "resolved"
+    ]
+    assert len(resolve_calls) == 1
+    _table, payload, filters = resolve_calls[0]
+    assert payload["state"] == "resolved"
+    assert "resolved_at" in payload
+    assert filters == [("id", "00000000-0000-0000-0000-000000000009")]
 
 
 async def test_close_callback_transitions_internal_ticket_to_done(monkeypatch):

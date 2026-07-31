@@ -677,6 +677,19 @@ _FLAGS: List[Flag] = [
         group="ticketing",
         advanced=True,
     ),
+    _b(
+        "CANONICAL_ESCALATION_READS_ENABLED",
+        False,
+        "Read escalation state from the canonical `escalations` table instead "
+        "of legacy escalation_mappings/chat_sessions columns (ticket-schema "
+        "cutover Phase 2). Off until escalation receipts from the Phase 1 "
+        "dual-write have covered every escalation open at deploy time -- "
+        "flipping this on too early can make an escalation opened before "
+        "cutover look unescalated.",
+        group="ticketing",
+        label="Read escalations from canonical tables",
+        advanced=True,
+    ),
     # --- Alerts & Notifications ------------------------------------------------
     _b(
         "NOTIFY_ENDPOINT_ENABLED",

@@ -29,6 +29,7 @@ from shared_code.tool_registry import ToolRegistry
 from supabase import Client, create_client
 
 from shared.charts import apply_theme
+from shared.config import flag_registry as fr
 from shared.config.db_credentials import chat_db_service_key, chat_db_url
 from shared.utils.date_utils import parse_iso_with_timezone
 from shared.utils.logging import get_logger
@@ -161,6 +162,83 @@ def _build_pie_chart(
     return png_bytes
 
 
+def _canonical_escalations_query(
+    client: Client,
+    start_date: datetime,
+    end_date: datetime,
+    organization_id: Optional[int],
+    columns: str,
+    *,
+    extra_eq: Optional[tuple] = None,
+    require_not_null: Optional[str] = None,
+    order_by: Optional[tuple] = None,
+    limit: int = 2000,
+) -> Optional[List[Dict[str, Any]]]:
+    """Canonical (escalations table) equivalent of an escalation_mappings
+    analytics query, filtered to a date window and optional organization.
+
+    escalations has no organization_id column (unlike escalation_mappings),
+    so an organization filter is resolved as a separate chat_sessions lookup
+    first, same pattern as customer_mcp_server.get_my_open_issues -- not an
+    embedded-filter query. Returns None (not []) on any failure so callers
+    fall back to the legacy query rather than silently under-report.
+    """
+    try:
+        session_ids: Optional[List[str]] = None
+        if organization_id:
+            session_response = (
+                client.table("chat_sessions")
+                .select("id")
+                .eq("organization_id", organization_id)
+                .limit(5000)
+                .execute()
+            )
+            session_ids = [r["id"] for r in (session_response.data or []) if r.get("id")]
+            if not session_ids:
+                return []
+
+        query = (
+            client.table("escalations")
+            .select(columns)
+            .gte("created_at", start_date.isoformat())
+            .lt("created_at", end_date.isoformat())
+        )
+        if extra_eq is not None:
+            query = query.eq(*extra_eq)
+        if require_not_null is not None:
+            query = query.not_.is_(require_not_null, "null")
+        if session_ids is not None:
+            query = query.in_("chat_session_id", session_ids)
+        if order_by is not None:
+            order_column, order_desc = order_by
+            query = query.order(order_column, desc=order_desc)
+        response = query.limit(limit).execute()
+        return response.data or []
+    except Exception as e:
+        logger.warning(f"Canonical escalations analytics query failed: {e}")
+        return None
+
+
+def _canonical_escalated_session_ids(
+    client: Client,
+    start_date: datetime,
+    end_date: datetime,
+    organization_id: Optional[int],
+) -> Optional[set]:
+    """Canonical equivalent of the session_id set _get_response_distribution
+    derives from escalation_mappings. Unlike that legacy query (whose
+    session_id is text, not directly comparable to chat_messages.session_id
+    which is a uuid), escalations.chat_session_id is already the same uuid
+    identity as chat_messages.session_id -- this is a correctness fix as
+    much as a table swap. Returns None on failure, not an empty set."""
+    rows = _canonical_escalations_query(
+        client, start_date, end_date, organization_id, "chat_session_id"
+    )
+    if rows is None:
+        return None
+    return {row["chat_session_id"] for row in rows if row.get("chat_session_id")}
+
+
 async def _get_response_distribution(
     client: Client,
     start_date: datetime,
@@ -193,19 +271,26 @@ async def _get_response_distribution(
 
     # Sessions with ANY escalation event — direct query, not cross-joined against
     # active_session_ids, so agent-initiated escalations are not silently dropped.
-    esc_query = (
-        client.table("escalation_mappings")
-        .select("session_id")
-        .gte("created_at", start_date.isoformat())
-        .lt("created_at", end_date.isoformat())
-        .limit(2000)
-    )
-    if organization_id:
-        esc_query = esc_query.eq("organization_id", organization_id)
-    esc_response = esc_query.execute()
-    escalated_session_ids: set[str] = set(
-        row["session_id"] for row in esc_response.data or [] if row.get("session_id")
-    )
+    escalated_session_ids: Optional[set] = None
+    if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+        escalated_session_ids = _canonical_escalated_session_ids(
+            client, start_date, end_date, organization_id
+        )
+
+    if escalated_session_ids is None:
+        esc_query = (
+            client.table("escalation_mappings")
+            .select("session_id")
+            .gte("created_at", start_date.isoformat())
+            .lt("created_at", end_date.isoformat())
+            .limit(2000)
+        )
+        if organization_id:
+            esc_query = esc_query.eq("organization_id", organization_id)
+        esc_response = esc_query.execute()
+        escalated_session_ids = set(
+            row["session_id"] for row in esc_response.data or [] if row.get("session_id")
+        )
 
     all_relevant_ids = active_session_ids | escalated_session_ids
     if not all_relevant_ids:
@@ -283,21 +368,25 @@ async def _get_escalation_reasons(
     Returns:
         Dict mapping reason to count
     """
-    query = (
-        client.table("escalation_mappings")
-        .select("reason")
-        .gte("created_at", start_date.isoformat())
-        .lt("created_at", end_date.isoformat())
-        .limit(2000)
-    )
+    rows = None
+    if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+        rows = _canonical_escalations_query(client, start_date, end_date, organization_id, "reason")
 
-    if organization_id:
-        query = query.eq("organization_id", organization_id)
-
-    response = query.execute()
+    if rows is None:
+        query = (
+            client.table("escalation_mappings")
+            .select("reason")
+            .gte("created_at", start_date.isoformat())
+            .lt("created_at", end_date.isoformat())
+            .limit(2000)
+        )
+        if organization_id:
+            query = query.eq("organization_id", organization_id)
+        response = query.execute()
+        rows = response.data or []
 
     reasons: Dict[str, int] = {}
-    for row in response.data or []:
+    for row in rows:
         reason = row.get("reason") or "unknown"
         reasons[reason] = reasons.get(reason, 0) + 1
 
@@ -316,22 +405,33 @@ async def _get_action_types(
     Returns:
         Dict mapping action_type to count
     """
-    query = (
-        client.table("escalation_mappings")
-        .select("action_type")
-        .eq("reason", "staff_action_required")
-        .gte("created_at", start_date.isoformat())
-        .lt("created_at", end_date.isoformat())
-        .limit(2000)
-    )
+    rows = None
+    if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+        rows = _canonical_escalations_query(
+            client,
+            start_date,
+            end_date,
+            organization_id,
+            "action_type",
+            extra_eq=("reason", "staff_action_required"),
+        )
 
-    if organization_id:
-        query = query.eq("organization_id", organization_id)
-
-    response = query.execute()
+    if rows is None:
+        query = (
+            client.table("escalation_mappings")
+            .select("action_type")
+            .eq("reason", "staff_action_required")
+            .gte("created_at", start_date.isoformat())
+            .lt("created_at", end_date.isoformat())
+            .limit(2000)
+        )
+        if organization_id:
+            query = query.eq("organization_id", organization_id)
+        response = query.execute()
+        rows = response.data or []
 
     action_types: Dict[str, int] = {}
-    for row in response.data or []:
+    for row in rows:
         action_type = row.get("action_type") or "unknown"
         action_types[action_type] = action_types.get(action_type, 0) + 1
 
@@ -353,25 +453,38 @@ async def _get_avg_time_to_close(
     Returns:
         Average minutes to close, or None if no closed escalations exist.
     """
-    query = (
-        client.table("escalation_mappings")
-        .select("created_at, resolved_at")
-        .gte("created_at", start_date.isoformat())
-        .lt("created_at", end_date.isoformat())
-        .not_.is_("resolved_at", "null")
-        .limit(2000)
-    )
-    if organization_id:
-        query = query.eq("organization_id", organization_id)
-    try:
-        response = query.execute()
-    except Exception as e:
-        logger.error(f"Error fetching avg time to close: {e}")
-        return None
+    rows = None
+    if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+        rows = _canonical_escalations_query(
+            client,
+            start_date,
+            end_date,
+            organization_id,
+            "created_at, resolved_at",
+            require_not_null="resolved_at",
+        )
+
+    if rows is None:
+        query = (
+            client.table("escalation_mappings")
+            .select("created_at, resolved_at")
+            .gte("created_at", start_date.isoformat())
+            .lt("created_at", end_date.isoformat())
+            .not_.is_("resolved_at", "null")
+            .limit(2000)
+        )
+        if organization_id:
+            query = query.eq("organization_id", organization_id)
+        try:
+            response = query.execute()
+        except Exception as e:
+            logger.error(f"Error fetching avg time to close: {e}")
+            return None
+        rows = response.data or []
 
     total_minutes = 0.0
     count = 0
-    for row in response.data or []:
+    for row in rows:
         created_raw = row.get("created_at")
         resolved_raw = row.get("resolved_at")
         if not created_raw or not resolved_raw:
@@ -470,24 +583,40 @@ async def _get_escalated_messages(
     Returns:
         List of escalation details with message preview
     """
-    query = (
-        client.table("escalation_mappings")
-        .select("session_id, reason, action_type, org_hashtag, created_at, customer_email")
-        .gte("created_at", start_date.isoformat())
-        .lt("created_at", end_date.isoformat())
-        .order("created_at", desc=True)
-        .limit(50)  # Fetch more than needed, will filter by char limit
-    )
+    rows = None
+    if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+        # session_id:chat_session_id aliases the canonical column back to the
+        # name every reader below expects -- and, unlike the legacy text
+        # session_id, is directly usable against chat_messages.session_id
+        # (a uuid) in the per-row lookup further down.
+        rows = _canonical_escalations_query(
+            client,
+            start_date,
+            end_date,
+            organization_id,
+            "session_id:chat_session_id, reason, action_type, org_hashtag, created_at, customer_email",
+            order_by=("created_at", True),
+            limit=50,
+        )
 
-    if organization_id:
-        query = query.eq("organization_id", organization_id)
-
-    response = query.execute()
+    if rows is None:
+        query = (
+            client.table("escalation_mappings")
+            .select("session_id, reason, action_type, org_hashtag, created_at, customer_email")
+            .gte("created_at", start_date.isoformat())
+            .lt("created_at", end_date.isoformat())
+            .order("created_at", desc=True)
+            .limit(50)  # Fetch more than needed, will filter by char limit
+        )
+        if organization_id:
+            query = query.eq("organization_id", organization_id)
+        response = query.execute()
+        rows = response.data or []
 
     results = []
     total_chars = 0
 
-    for row in response.data or []:
+    for row in rows:
         # Get the user message that triggered escalation
         session_id = row.get("session_id")
         user_message = ""

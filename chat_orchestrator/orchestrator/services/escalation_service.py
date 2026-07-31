@@ -42,6 +42,13 @@ LOGGER = get_logger(__name__)
 
 _DEFAULT_TZ = ZoneInfo(os.getenv("DEFAULT_TIMEZONE", "UTC"))
 
+# Escalation reasons that must not hold a chat session for the bot -- kept in
+# sync with supabase_client.save_escalation_mapping's NON_BLOCKING_REASONS,
+# which decides whether the legacy chat_sessions.is_escalated flag gets set.
+# The canonical is_session_escalated check needs the same exclusion so it
+# doesn't over-block sessions the legacy check never blocked.
+_NON_BLOCKING_ESCALATION_REASONS = ("safety_escalation", "system_error")
+
 # ---------------------------------------------------------------------------
 # Module-level shared resources
 # ---------------------------------------------------------------------------
@@ -181,12 +188,25 @@ class EscalationService:
         *,
         message_id: int,
         topic_id: Optional[int],
+        reason: Optional[str] = None,
+        ticket_id: Optional[str] = None,
     ) -> None:
         """Best-effort dual-write: canonical ``escalations`` row + its Telegram
         delivery receipt, mirroring the legacy ``escalation_mappings`` insert
         this always follows. A failure here only leaves the canonical mirror
         incomplete for this escalation -- the legacy row (already written)
         remains the source of truth until cutover.
+
+        ``reason`` is persisted so a canonical-reads consumer (see
+        ``is_session_escalated``) can reproduce the legacy "non-blocking
+        reasons don't hold the session" distinction (NON_BLOCKING_REASONS in
+        supabase_client.save_escalation_mapping).
+
+        ``ticket_id`` is set when the caller already knows this escalation is
+        pre-linked to an existing ticket (a follow-up escalation reusing the
+        parent's ticket) -- otherwise track_as_ticket's own attach_ticket()
+        call is the only thing that ever sets it, which a follow-up
+        escalation never goes through directly.
         """
         if not session_id:
             return
@@ -194,9 +214,11 @@ class EscalationService:
             chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
             if chat_session_uuid is None:
                 return
-            await self._escalations.create(escalation_id, chat_session_uuid)
+            await self._escalations.create(
+                escalation_id, chat_session_uuid, reason=reason, ticket_id=ticket_id
+            )
             await self._deliveries.record(
-                ticket_id=None,
+                ticket_id=ticket_id,
                 escalation_id=escalation_id,
                 purpose="escalation",
                 external_chat_id=str(self._escalation_chat_id),
@@ -506,11 +528,18 @@ class EscalationService:
                             jira_ticket_key=existing_ref if followup_is_jira else None,
                         )
                         if saved_followup_id:
+                            prelinked_ticket_id = (
+                                await self._tickets.get_id_by_ref(existing_ref)
+                                if existing_ref
+                                else None
+                            )
                             await self._record_canonical_escalation(
                                 saved_followup_id,
                                 session_id,
                                 message_id=followup_msg_id,
                                 topic_id=followup_topic_id,
+                                reason=reason,
+                                ticket_id=prelinked_ticket_id,
                             )
 
                     return {
@@ -643,6 +672,7 @@ class EscalationService:
                                 session_id,
                                 message_id=escalation_message_id,
                                 topic_id=escalation_topic_id,
+                                reason=reason,
                             )
                         LOGGER.info(
                             f"Saved escalation to database: msg_id={escalation_message_id} → "
@@ -1243,6 +1273,61 @@ class EscalationService:
             topic_id=topic_id,
         )
 
+    async def _resolve_support_reply_canonical(
+        self, reply_to_message_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Canonical-table equivalent of get_escalation_mapping(reply_to_message_id).
+
+        Returns a dict shaped like the fields handle_support_reply reads off
+        the legacy mapping row, or None if any step is inconclusive --
+        callers fall back to the legacy lookup rather than treat "couldn't
+        resolve" as "no escalation found".
+        """
+        supabase_client = self._get_supabase_client()
+        if supabase_client is None:
+            return None
+        try:
+            delivery = await self._deliveries.find_escalation_delivery(
+                external_message_id=reply_to_message_id
+            )
+            if delivery is None:
+                return None
+            escalation_id = delivery.get("escalation_id")
+            if not escalation_id:
+                return None
+            escalation = await self._escalations.get(escalation_id)
+            if escalation is None:
+                return None
+            chat_session_uuid = escalation.get("chat_session_id")
+            session = (
+                await supabase_client.get_session_by_id(chat_session_uuid)
+                if chat_session_uuid
+                else None
+            )
+            if session is None or not session.telegram_chat_id:
+                return None
+            ticket_ref = None
+            ticket_id = escalation.get("ticket_id")
+            if ticket_id:
+                ticket_ref = await self._tickets.get_ref_by_id(ticket_id)
+            return {
+                "is_active": escalation.get("state") == "open",
+                "customer_chat_id": session.telegram_chat_id,
+                "customer_topic_id": session.telegram_topic_id,
+                "customer_email": escalation.get("customer_email"),
+                "escalation_topic_id": delivery.get("external_topic_id"),
+                "session_id": session.session_id,
+                "ticket_ref": ticket_ref,
+            }
+        except Exception:
+            LOGGER.warning(
+                "Canonical support-reply resolution failed for message_id {} -- "
+                "falling back to legacy",
+                reply_to_message_id,
+                exc_info=True,
+            )
+            return None
+
     async def handle_support_reply(
         self,
         reply_to_message_id: int,
@@ -1264,7 +1349,10 @@ class EscalationService:
         supabase_client = self._get_supabase_client()
         mapping = None
 
-        if supabase_client:
+        if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+            mapping = await self._resolve_support_reply_canonical(reply_to_message_id)
+
+        if mapping is None and supabase_client:
             mapping = await supabase_client.get_escalation_mapping(reply_to_message_id)
 
         if not mapping:
@@ -1405,12 +1493,103 @@ class EscalationService:
         Returns:
             True if session has active escalation, False otherwise
         """
+        if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+            canonical_result = await self._is_session_escalated_canonical(session_id)
+            if canonical_result is not None:
+                return canonical_result
+            # Canonical check was inconclusive (no client, unresolved chat
+            # session, or a store error) -- fall through to the legacy check
+            # below rather than risk a false "not escalated".
+
         supabase_client = self._get_supabase_client()
         if not supabase_client:
             return False
 
         info = await supabase_client.get_session_escalation_info(session_id)
         return info is not None and info.get("is_escalated", False)
+
+    async def _is_session_escalated_canonical(self, session_id: str) -> Optional[bool]:
+        """Canonical-table check for is_session_escalated. Returns None (not
+        False) when the check couldn't be completed, so the caller falls back
+        to the legacy read instead of treating "couldn't check" as "not
+        escalated" -- see CANONICAL_ESCALATION_READS_ENABLED's docstring."""
+        chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
+        if chat_session_uuid is None:
+            return None
+        try:
+            return await self._escalations.has_blocking_escalation(
+                chat_session_uuid, exclude_reasons=_NON_BLOCKING_ESCALATION_REASONS
+            )
+        except Exception:
+            LOGGER.warning(
+                "Canonical escalation check failed for session {} -- falling back to legacy",
+                session_id,
+                exc_info=True,
+            )
+            return None
+
+    async def _get_escalation_info_canonical(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Canonical equivalent of supabase_client.get_escalation_by_session:
+        the most recent still-open/processing escalation for a chat session,
+        shaped like the legacy escalation_mappings fields callers read
+        (_escalate_to_telegram's follow-up branch, forward_customer_message).
+        Returns None whenever resolution is inconclusive, so the caller
+        falls back to the legacy lookup."""
+        supabase_client = self._get_supabase_client()
+        if supabase_client is None:
+            return None
+        try:
+            session = await supabase_client.get_session(session_id)
+            if session is None or session.id is None:
+                return None
+            chat_session_uuid = str(session.id)
+
+            raw_client = self._get_raw_client()
+            if raw_client is None:
+                return None
+            response = (
+                raw_client.table("escalations")
+                .select("*")
+                .eq("chat_session_id", chat_session_uuid)
+                .in_("state", ["open", "processing"])
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(response, "data", None) or []
+            if not rows:
+                return None
+            escalation = rows[0]
+
+            delivery = await self._deliveries.find_by_escalation(escalation["id"])
+
+            ticket_ref: Optional[str] = None
+            ticket_backend: Optional[str] = None
+            ticket_id = escalation.get("ticket_id")
+            if ticket_id:
+                ticket_ref = await self._tickets.get_ref_by_id(ticket_id)
+                if ticket_ref:
+                    ticket_backend = await self._tickets.get_backend_name(ticket_ref)
+
+            return {
+                "is_active": True,  # state was filtered to open/processing above
+                "session_id": session_id,
+                "escalation_message_id": delivery.get("external_message_id") if delivery else None,
+                "escalation_topic_id": delivery.get("external_topic_id") if delivery else None,
+                "organization_id": session.organization_id,
+                "org_hashtag": escalation.get("org_hashtag"),
+                "ticket_ref": ticket_ref,
+                "ticket_backend": ticket_backend,
+                "jira_ticket_key": None,  # canonical rows never carry the legacy-only column
+            }
+        except Exception:
+            LOGGER.warning(
+                "Canonical escalation-info resolution failed for session {} -- "
+                "falling back to legacy",
+                session_id,
+                exc_info=True,
+            )
+            return None
 
     async def get_escalation_info(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -1425,6 +1604,11 @@ class EscalationService:
         supabase_client = self._get_supabase_client()
         if not supabase_client:
             return None
+
+        if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+            canonical_result = await self._get_escalation_info_canonical(session_id)
+            if canonical_result is not None:
+                return canonical_result
 
         result: Optional[Dict[str, Any]] = await supabase_client.get_escalation_by_session(
             session_id
@@ -2893,6 +3077,22 @@ class EscalationService:
         success = await supabase_client.reopen_escalation(session_id, escalation_message_id)
 
         if success:
+            # Canonical mirror: the escalation this reply reopens was resolved
+            # (state="resolved") by the close flow -- without this, a
+            # canonical-reads consumer would keep seeing it as closed even
+            # though the legacy row (source of truth here) is active again.
+            try:
+                delivery = await self._deliveries.find_escalation_delivery(
+                    external_message_id=escalation_message_id
+                )
+                if delivery and delivery.get("escalation_id"):
+                    await self._escalations.reopen(delivery["escalation_id"])
+            except Exception:
+                LOGGER.warning(
+                    "Could not reopen canonical escalation for session {}",
+                    session_id,
+                    exc_info=True,
+                )
             LOGGER.info(f"Reopened escalation for session {session_id}")
             return {"success": True, "message": "Escalation reopened"}
         else:
@@ -3024,6 +3224,7 @@ class EscalationService:
                                 session_id,
                                 message_id=escalation_message_id,
                                 topic_id=escalation_topic_id,
+                                reason="verification_failed",
                             )
                         LOGGER.info(
                             f"Saved verification failure escalation to database: "
