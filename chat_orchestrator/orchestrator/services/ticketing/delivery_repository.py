@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Callable, Dict, Literal, Optional
 
 
 class DeliveryRepository:
@@ -57,3 +57,26 @@ class DeliveryRepository:
         if not rows:
             raise RuntimeError("delivery receipt write returned no row")
         return rows[0]
+
+    async def find_notification(
+        self,
+        *,
+        escalation_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the most recent 'notification' delivery for *escalation_id*, or None.
+
+        Used by ``_notify_customer`` to decide whether to edit an existing message
+        (sweep promoting TKT → OPS) rather than sending a duplicate new one.
+        """
+        response = (
+            self._raw_client()
+            .table("message_deliveries")
+            .select("external_chat_id,external_topic_id,external_message_id")
+            .eq("escalation_id", escalation_id)
+            .eq("purpose", "notification")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None

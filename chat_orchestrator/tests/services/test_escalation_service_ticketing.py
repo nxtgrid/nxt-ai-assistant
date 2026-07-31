@@ -366,8 +366,13 @@ async def test_track_as_ticket_jira_success_writes_jira_key_and_returns_ticket_r
     payloads = supa.em_update_payloads()
     # TicketService stamped ticket_ref/ticket_backend ...
     assert {"ticket_ref": "OPS-100", "ticket_backend": "jira"} in payloads
-    # ... and the legacy jira_ticket_key column was ALSO written (webhook back-compat).
-    assert {"jira_ticket_key": "OPS-100"} in payloads
+    # ... and _store_jira_key's own stamp ALSO carries the legacy jira_ticket_key
+    # column in the same update (webhook back-compat).
+    assert {
+        "ticket_ref": "OPS-100",
+        "ticket_backend": "jira",
+        "jira_ticket_key": "OPS-100",
+    } in payloads
 
     # Customer wording unchanged from today's ref-number based text.
     assert any(
@@ -507,6 +512,50 @@ async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
     assert canonical_tickets.find_calls == ["mapping-abcd1234"]
     assert canonical_tickets.backend_calls == ["TKT-9"]
     assert supa.internal_ticket_lookup_calls == []
+
+
+async def test_track_as_ticket_second_call_dedupes_via_canonical_escalation():
+    """Regression: a second track_as_ticket() call for the same escalation
+    (e.g. a sweep retry after the legacy ticket_ref stamp failed, or a race
+    with the staff Track button) must reuse the already-filed ticket instead
+    of filing a second one on whatever backend happens to be healthy the
+    second time around.
+
+    Deliberately does NOT pre-seed the `escalations` table (unlike
+    test_track_as_ticket_attaches_the_canonical_ticket_to_the_escalation,
+    which seeds state="processing" by hand) -- this exercises the real
+    create()/claim()/attach_ticket() wiring end to end through the actual
+    TicketService.find_by_escalation() chain, not the _CanonicalDedupTickets
+    test double the dedup-hit tests above use.
+    """
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+    # First call: Jira down -> files an internal (TKT-*) ticket.
+    jira = _FakeBackend("jira", available=False, ref="OPS-100")
+    internal = _FakeBackend("internal", ref="TKT-000001", url=None)
+    _install_ticket_service(svc, jira, internal)
+
+    async def fake_send(*_a, **_k):
+        return {"ok": True, "result": {"message_id": 1}}
+
+    svc._send_telegram_message = fake_send
+
+    mapping = _base_mapping()
+    first = await svc.track_as_ticket(escalation_mapping=mapping)
+    assert first["ticket_ref"] == "TKT-000001"
+    assert first["ticket_backend"] == "internal"
+
+    # Jira recovers before the retry -- this is what makes a broken dedup
+    # guard file the second ticket on a *different* backend (TKT -> OPS).
+    jira._available = True
+
+    second = await svc.track_as_ticket(escalation_mapping=mapping)
+
+    assert second["ticket_ref"] == "TKT-000001"
+    assert second["ticket_backend"] == "internal"
+    assert internal.create_calls == 1
+    assert jira.create_calls == 0
 
 
 async def test_track_as_ticket_creation_failure_returns_error():

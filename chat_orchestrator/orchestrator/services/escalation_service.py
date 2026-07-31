@@ -1832,6 +1832,29 @@ class EscalationService:
                     "ticket_url": recovered_url,
                 }
 
+            # Claim the canonical escalation so attach_ticket() below can
+            # actually persist the durable dedup link the guard above reads
+            # (find_by_escalation only ever sees a ticket_id once
+            # attach_ticket's conditional UPDATE finds state="processing" --
+            # see EscalationRepository.claim()/.attach_ticket()). Lazily
+            # create the canonical row for escalations that predate it or
+            # were never given a client-side mapping_id at creation time
+            # (claim() requires the row to already exist). Best-effort: if
+            # this fails, ticket creation still proceeds on the legacy
+            # escalation_mappings.ticket_ref stamp alone -- only the durable
+            # dedup backstop is lost for this attempt, not the ticket itself.
+            try:
+                if await self._escalations.get(mapping_id) is None:
+                    await self._escalations.create(mapping_id, session_id)
+                await self._escalations.claim(mapping_id)
+            except Exception:
+                LOGGER.warning(
+                    "Could not claim canonical escalation {} before ticket "
+                    "creation -- durable dedup won't apply if this call is retried",
+                    mapping_id,
+                    exc_info=True,
+                )
+
             try:
                 result = await self._tickets.create_ticket(
                     TicketCreateRequest(
@@ -1857,30 +1880,48 @@ class EscalationService:
 
             if not result.ticket_id:
                 return {"success": False, "error": "canonical ticket id missing after creation"}
-            await self._escalations.attach_ticket(mapping_id, result.ticket_id)
+            # Best-effort: a DB hiccup here must not turn an already-created
+            # ticket into a reported failure -- that would trigger the
+            # sweep's reactivate-and-retry path, and the retry is exactly
+            # what files a duplicate ticket if this attach silently didn't
+            # persist the dedup link the first time either.
+            try:
+                await self._escalations.attach_ticket(mapping_id, result.ticket_id)
+            except Exception:
+                LOGGER.warning(
+                    "Could not attach canonical escalation {} to ticket {} -- "
+                    "durable dedup won't find this ticket on a future retry",
+                    mapping_id,
+                    ticket_ref,
+                    exc_info=True,
+                )
 
             # 6+7+8. Run independent post-ticket operations concurrently.
             async def _store_jira_key():
-                # Backward-compat: TicketService.create_ticket already stamped
-                # ticket_ref/ticket_backend, but the legacy jira_ticket_key column
-                # (read by inbound Jira webhook handlers) is Jira-specific and only
-                # written here — skip it entirely for internal tickets.
-                # Retry up to 3 times — a transient DB error here causes the sweep to
-                # reactivate and re-file a duplicate ticket on the next run.
-                if result.backend != "jira":
+                # Stamp ticket_ref + ticket_backend for ALL backends with retry so that
+                # get_stale_unfiled_escalations (which filters ticket_ref IS NULL) won't
+                # re-process this escalation on the next sweep run and fire a duplicate
+                # notification.  For Jira, also write jira_ticket_key so inbound webhook
+                # handlers can route comments back to the right escalation.
+                if not supabase_client:
                     return
-                if supabase_client:
-                    _client = supabase_client._get_client()
-                    for _attempt in range(3):
-                        try:
-                            _client.table("escalation_mappings").update(
-                                {"jira_ticket_key": ticket_ref}
-                            ).eq("id", mapping_id).execute()
-                            return
-                        except Exception:
-                            if _attempt == 2:
-                                raise
-                            await asyncio.sleep(0.5 * (_attempt + 1))
+                _client = supabase_client._get_client()
+                update_payload: dict = {
+                    "ticket_ref": ticket_ref,
+                    "ticket_backend": result.backend,
+                }
+                if result.backend == "jira":
+                    update_payload["jira_ticket_key"] = ticket_ref
+                for _attempt in range(3):
+                    try:
+                        _client.table("escalation_mappings").update(
+                            update_payload
+                        ).eq("id", mapping_id).execute()
+                        return
+                    except Exception:
+                        if _attempt == 2:
+                            raise
+                        await asyncio.sleep(0.5 * (_attempt + 1))
 
             async def _release_session():
                 # Release session back to bot only if no other blocking escalations
@@ -1906,23 +1947,61 @@ class EscalationService:
                             f"Your issue is being tracked (ref: {issue_number}). "
                             "The team is working on it. You'll hear back when it's resolved."
                         )
-                    delivery = await self._send_telegram_message(
-                        chat_id=customer_chat_id,
-                        text=text,
-                        topic_id=int(customer_topic_id) if customer_topic_id else None,
-                    )
-                    message_id = (delivery.get("result") or {}).get("message_id")
-                    if message_id:
+
+                    # If a prior notification was already sent for this escalation
+                    # (e.g. a TKT was issued before Jira came back up and is now
+                    # being promoted to an OPS ticket), edit that message in-place
+                    # rather than sending a duplicate. Fall back to a new message if
+                    # the lookup fails or no prior delivery exists.
+                    prior: Optional[dict] = None
+                    try:
+                        prior = await self._deliveries.find_notification(
+                            escalation_id=mapping_id
+                        )
+                    except Exception as _lookup_err:
+                        LOGGER.debug(
+                            "delivery lookup failed for escalation {}: {}",
+                            mapping_id,
+                            _lookup_err,
+                        )
+
+                    if prior and prior.get("external_message_id") and customer_chat_id:
+                        prior_msg_id = int(prior["external_message_id"])
+                        prior_chat_id = prior.get("external_chat_id") or str(customer_chat_id)
+                        await self._edit_telegram_message(
+                            chat_id=prior_chat_id,
+                            message_id=prior_msg_id,
+                            text=text,
+                        )
+                        # Update the delivery record so it points to the new ticket.
                         await self._deliveries.record(
                             ticket_id=result.ticket_id,
                             escalation_id=mapping_id,
                             purpose="notification",
-                            external_chat_id=str(customer_chat_id),
-                            external_topic_id=(
-                                str(customer_topic_id) if customer_topic_id is not None else None
-                            ),
-                            external_message_id=int(message_id),
+                            external_chat_id=prior_chat_id,
+                            external_topic_id=prior.get("external_topic_id"),
+                            external_message_id=prior_msg_id,
                         )
+                    else:
+                        delivery = await self._send_telegram_message(
+                            chat_id=customer_chat_id,
+                            text=text,
+                            topic_id=int(customer_topic_id) if customer_topic_id else None,
+                        )
+                        message_id = (delivery.get("result") or {}).get("message_id")
+                        if message_id:
+                            await self._deliveries.record(
+                                ticket_id=result.ticket_id,
+                                escalation_id=mapping_id,
+                                purpose="notification",
+                                external_chat_id=str(customer_chat_id),
+                                external_topic_id=(
+                                    str(customer_topic_id)
+                                    if customer_topic_id is not None
+                                    else None
+                                ),
+                                external_message_id=int(message_id),
+                            )
                 except Exception as e:
                     LOGGER.warning(f"Failed to notify customer about ticket {ticket_ref}: {e}")
 
@@ -2018,7 +2097,10 @@ class EscalationService:
             # 2. Post-claim check — guard against concurrent after-hours auto-create
             # (_auto_create_jira_and_edit_message does not use claim; it writes the key
             # directly.  If it ran concurrently, the fetched row will now have the key.)
-            if claimed_mapping.get("jira_ticket_key"):
+            # Also guard ticket_ref: internal (TKT) tickets don't set jira_ticket_key,
+            # but _store_jira_key now stamps ticket_ref for all backends, so either
+            # column being populated means this escalation is already filed.
+            if claimed_mapping.get("jira_ticket_key") or claimed_mapping.get("ticket_ref"):
                 await supabase_client.reactivate_escalation(mapping_id)
                 skipped += 1
                 continue
