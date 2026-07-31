@@ -449,13 +449,19 @@ async def _send_telegram_response(
         raise
 
 
-async def download_telegram_photo(file_id: str, bot_token: str) -> tuple:
+async def download_telegram_photo(
+    file_id: str, bot_token: str, max_size_bytes: int = MAX_MEDIA_SIZE_BYTES
+) -> tuple:
     """
     Download a photo from Telegram using the Bot API.
 
     Args:
         file_id: Telegram file_id of the photo
         bot_token: Telegram bot token
+        max_size_bytes: Reject files larger than this. Defaults to
+            MAX_MEDIA_SIZE_BYTES (the LLM-vision path's cap). Callers
+            downloading for ticket-attachment purposes should pass a
+            higher, separate limit -- see MAX_TICKET_ATTACHMENT_SIZE_BYTES.
 
     Returns:
         Tuple of (base64_data, mime_type) or (None, None) on failure
@@ -483,8 +489,8 @@ async def download_telegram_photo(file_id: str, bot_token: str) -> tuple:
                     return None, None
 
                 # Check file size
-                if file_size > MAX_MEDIA_SIZE_BYTES:
-                    LOGGER.warning(f"File too large: {file_size} bytes > {MAX_MEDIA_SIZE_BYTES}")
+                if file_size > max_size_bytes:
+                    LOGGER.warning(f"File too large: {file_size} bytes > {max_size_bytes}")
                     return None, None
 
             # Download the file
