@@ -690,6 +690,21 @@ _FLAGS: List[Flag] = [
         label="Read escalations from canonical tables",
         advanced=True,
     ),
+    _b(
+        "STOP_LEGACY_ESCALATION_WRITES",
+        False,
+        "Stop writing escalation_mappings/chat_sessions.is_escalated "
+        "(ticket-schema cutover Phase 3) -- escalation creation, claim, "
+        "close, reopen, and the ticket-filing sweep all become canonical-"
+        "only. Requires CANONICAL_ESCALATION_READS_ENABLED to have been on "
+        "and verified first: once this is on, canonical-reads consumers "
+        "stop falling back to legacy (which is now guaranteed stale) on an "
+        "inconclusive lookup, rather than risk serving stale data.",
+        group="ticketing",
+        label="Stop legacy escalation writes",
+        advanced=True,
+        depends_on="CANONICAL_ESCALATION_READS_ENABLED",
+    ),
     # --- Alerts & Notifications ------------------------------------------------
     _b(
         "NOTIFY_ENDPOINT_ENABLED",

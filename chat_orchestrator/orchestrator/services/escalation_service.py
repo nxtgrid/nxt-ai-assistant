@@ -21,7 +21,7 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, cast
 from zoneinfo import ZoneInfo
 
@@ -506,27 +506,31 @@ class EscalationService:
                             existing_backend == "jira"
                             or (not existing_backend and _ref_from_jira_key)
                         )
-                        saved_followup_id = await supabase_client.save_escalation_mapping(
-                            escalation_message_id=followup_msg_id,
-                            customer_chat_id=customer_chat_id,
-                            session_id=session_id,
-                            customer_topic_id=customer_topic_id,
-                            org_hashtag=(
-                                f"#{organization_short_name}" if organization_short_name else None
-                            ),
-                            customer_email=customer_email,
-                            customer_username=customer_username,
-                            reason=reason,
-                            action_type=action_type,
-                            mapping_id=followup_mapping_id,
-                            organization_id=organization_id,
-                            escalation_topic_id=followup_topic_id,
-                            question_text=question_summary,
-                            thread_id=thread_id,
-                            ticket_ref=existing_ref,
-                            ticket_backend=existing_backend if existing_ref else None,
-                            jira_ticket_key=existing_ref if followup_is_jira else None,
-                        )
+                        saved_followup_id = followup_mapping_id
+                        if not fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+                            saved_followup_id = await supabase_client.save_escalation_mapping(
+                                escalation_message_id=followup_msg_id,
+                                customer_chat_id=customer_chat_id,
+                                session_id=session_id,
+                                customer_topic_id=customer_topic_id,
+                                org_hashtag=(
+                                    f"#{organization_short_name}"
+                                    if organization_short_name
+                                    else None
+                                ),
+                                customer_email=customer_email,
+                                customer_username=customer_username,
+                                reason=reason,
+                                action_type=action_type,
+                                mapping_id=followup_mapping_id,
+                                organization_id=organization_id,
+                                escalation_topic_id=followup_topic_id,
+                                question_text=question_summary,
+                                thread_id=thread_id,
+                                ticket_ref=existing_ref,
+                                ticket_backend=existing_backend if existing_ref else None,
+                                jira_ticket_key=existing_ref if followup_is_jira else None,
+                            )
                         if saved_followup_id:
                             prelinked_ticket_id = (
                                 await self._tickets.get_id_by_ref(existing_ref)
@@ -650,22 +654,24 @@ class EscalationService:
                 if escalation_message_id and customer_chat_id and session_id:
                     supabase_client = self._get_supabase_client()
                     if supabase_client:
-                        saved_mapping_id = await supabase_client.save_escalation_mapping(
-                            escalation_message_id=escalation_message_id,
-                            customer_chat_id=customer_chat_id,
-                            session_id=session_id,
-                            customer_topic_id=customer_topic_id,
-                            org_hashtag=f"#{clean_tag}" if clean_tag else None,
-                            customer_email=customer_email,
-                            customer_username=customer_username,
-                            reason=reason,
-                            action_type=action_type,
-                            mapping_id=mapping_id,
-                            organization_id=organization_id,
-                            escalation_topic_id=escalation_topic_id,
-                            question_text=question_summary,
-                            thread_id=thread_id,
-                        )
+                        saved_mapping_id = mapping_id
+                        if not fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+                            saved_mapping_id = await supabase_client.save_escalation_mapping(
+                                escalation_message_id=escalation_message_id,
+                                customer_chat_id=customer_chat_id,
+                                session_id=session_id,
+                                customer_topic_id=customer_topic_id,
+                                org_hashtag=f"#{clean_tag}" if clean_tag else None,
+                                customer_email=customer_email,
+                                customer_username=customer_username,
+                                reason=reason,
+                                action_type=action_type,
+                                mapping_id=mapping_id,
+                                organization_id=organization_id,
+                                escalation_topic_id=escalation_topic_id,
+                                question_text=question_summary,
+                                thread_id=thread_id,
+                            )
                         if saved_mapping_id:
                             await self._record_canonical_escalation(
                                 saved_mapping_id,
@@ -1352,7 +1358,11 @@ class EscalationService:
         if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
             mapping = await self._resolve_support_reply_canonical(reply_to_message_id)
 
-        if mapping is None and supabase_client:
+        if mapping is None and supabase_client and not fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+            # Once legacy writes have stopped, a legacy row here (if one even
+            # exists) may be stale -- an unresolved canonical lookup is
+            # treated as "no escalation found" rather than risk routing a
+            # reply using out-of-date data.
             mapping = await supabase_client.get_escalation_mapping(reply_to_message_id)
 
         if not mapping:
@@ -1497,6 +1507,18 @@ class EscalationService:
             canonical_result = await self._is_session_escalated_canonical(session_id)
             if canonical_result is not None:
                 return canonical_result
+            if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+                # Legacy is no longer written to once this flag is on, so an
+                # unmaintained legacy row is worse than no answer here --
+                # degrade to "not escalated" (lets the bot keep responding)
+                # rather than trust data that may predate a canonical-only
+                # close/reopen since.
+                LOGGER.warning(
+                    "Canonical escalation check inconclusive for session {} "
+                    "and legacy writes are stopped -- treating as not escalated",
+                    session_id,
+                )
+                return False
             # Canonical check was inconclusive (no client, unresolved chat
             # session, or a store error) -- fall through to the legacy check
             # below rather than risk a false "not escalated".
@@ -1591,6 +1613,65 @@ class EscalationService:
             )
             return None
 
+    async def get_escalation_by_id_canonical(self, escalation_id: str) -> Optional[Dict[str, Any]]:
+        """Canonical, legacy-escalation_mappings-shaped dict for a known
+        escalation id -- used by callback_handlers.py's track/close flows
+        once STOP_LEGACY_ESCALATION_WRITES means there's no legacy row left
+        to read. Returns None whenever resolution is inconclusive.
+        """
+        supabase_client = self._get_supabase_client()
+        if supabase_client is None:
+            return None
+        try:
+            escalation = await self._escalations.get(escalation_id)
+            if escalation is None:
+                return None
+            chat_session_uuid = escalation.get("chat_session_id")
+            session = (
+                await supabase_client.get_session_by_id(chat_session_uuid)
+                if chat_session_uuid
+                else None
+            )
+            if session is None:
+                return None
+
+            delivery = await self._deliveries.find_by_escalation(escalation_id)
+
+            ticket_ref: Optional[str] = None
+            ticket_backend: Optional[str] = None
+            ticket_id = escalation.get("ticket_id")
+            if ticket_id:
+                ticket_ref = await self._tickets.get_ref_by_id(ticket_id)
+                if ticket_ref:
+                    ticket_backend = await self._tickets.get_backend_name(ticket_ref)
+
+            return {
+                "id": escalation_id,
+                "session_id": session.session_id,
+                "customer_chat_id": session.telegram_chat_id,
+                "customer_topic_id": session.telegram_topic_id,
+                "organization_id": session.organization_id,
+                "org_hashtag": escalation.get("org_hashtag"),
+                "customer_username": escalation.get("customer_username"),
+                "customer_email": escalation.get("customer_email"),
+                "question_text": escalation.get("question_text"),
+                "created_at": escalation.get("created_at"),
+                "escalation_message_id": (
+                    delivery.get("external_message_id") if delivery else None
+                ),
+                "escalation_topic_id": delivery.get("external_topic_id") if delivery else None,
+                "ticket_ref": ticket_ref,
+                "ticket_backend": ticket_backend,
+                "jira_ticket_key": None,  # canonical rows never carry this legacy-only column
+            }
+        except Exception:
+            LOGGER.warning(
+                "Canonical escalation lookup failed for id {}",
+                escalation_id,
+                exc_info=True,
+            )
+            return None
+
     async def get_escalation_info(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
         Get escalation info for a session.
@@ -1609,6 +1690,12 @@ class EscalationService:
             canonical_result = await self._get_escalation_info_canonical(session_id)
             if canonical_result is not None:
                 return canonical_result
+            if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+                # Legacy is no longer written to once this flag is on -- a
+                # legacy row here may be stale (e.g. resolved canonically
+                # but never updated in escalation_mappings), so treat "no
+                # canonical result" as authoritative rather than trust it.
+                return None
 
         result: Optional[Dict[str, Any]] = await supabase_client.get_escalation_by_session(
             session_id
@@ -2328,11 +2415,31 @@ class EscalationService:
             LOGGER.error("Escalation sweep: no Supabase client, aborting")
             return {"eligible": 0, "filed": 0, "skipped": 0, "failed": 0}
 
-        eligible = await supabase_client.get_stale_unfiled_escalations(
-            min_age_hours=min_age_hours,
-            max_age_hours=max_age_hours,
-            limit=limit,
-        )
+        stop_legacy_writes = fr.get("STOP_LEGACY_ESCALATION_WRITES")
+
+        if stop_legacy_writes:
+            now = datetime.now(timezone.utc)
+            cutoff_recent = (now - timedelta(hours=min_age_hours)).isoformat()
+            cutoff_old = (now - timedelta(hours=max_age_hours)).isoformat()
+            try:
+                eligible = await self._escalations.list_unfiled(
+                    state="open",
+                    created_after=cutoff_old,
+                    created_before=cutoff_recent,
+                    exclude_reasons=("safety_escalation",),
+                    limit=limit,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Escalation sweep: canonical eligible-list query failed", exc_info=True
+                )
+                eligible = []
+        else:
+            eligible = await supabase_client.get_stale_unfiled_escalations(
+                min_age_hours=min_age_hours,
+                max_age_hours=max_age_hours,
+                limit=limit,
+            )
 
         if len(eligible) == limit:
             LOGGER.warning(
@@ -2341,11 +2448,30 @@ class EscalationService:
 
         filed = skipped = failed = 0
 
+        async def _release_claim(mapping_id: str) -> None:
+            if stop_legacy_writes:
+                try:
+                    await self._escalations.release(mapping_id)
+                except Exception:
+                    LOGGER.warning(
+                        "Sweep: could not release canonical claim {}", mapping_id, exc_info=True
+                    )
+            else:
+                await supabase_client.reactivate_escalation(mapping_id)
+
         for idx, mapping in enumerate(eligible):
             mapping_id = mapping["id"]
 
             # 1. Atomic claim — prevents race with staff clicking Track button
-            claimed_mapping = await supabase_client.claim_escalation_for_tracking(mapping_id)
+            if stop_legacy_writes:
+                claimed_row = await self._escalations.claim(mapping_id)
+                claimed_mapping = (
+                    await self.get_escalation_by_id_canonical(mapping_id)
+                    if claimed_row
+                    else None
+                )
+            else:
+                claimed_mapping = await supabase_client.claim_escalation_for_tracking(mapping_id)
             if not claimed_mapping:
                 skipped += 1
                 continue
@@ -2357,7 +2483,7 @@ class EscalationService:
             # but _store_jira_key now stamps ticket_ref for all backends, so either
             # column being populated means this escalation is already filed.
             if claimed_mapping.get("jira_ticket_key") or claimed_mapping.get("ticket_ref"):
-                await supabase_client.reactivate_escalation(mapping_id)
+                await _release_claim(mapping_id)
                 skipped += 1
                 continue
 
@@ -2420,12 +2546,12 @@ class EscalationService:
                         mapping_id,
                         result.get("error"),
                     )
-                    await supabase_client.reactivate_escalation(mapping_id)
+                    await _release_claim(mapping_id)
 
             except Exception:
                 failed += 1
                 LOGGER.exception("Sweep error for escalation {}", mapping_id)
-                await supabase_client.reactivate_escalation(mapping_id)
+                await _release_claim(mapping_id)
 
             # Brief delay between calls to respect Jira rate limits (skip after last item)
             if idx < len(eligible) - 1:
@@ -2434,9 +2560,29 @@ class EscalationService:
         # Alert staff about escalations that aged out of the sweep window.
         # Always check — the batch cap guards against processing too many, but old
         # stragglers exist even when the batch is small.
-        old_escalations = await supabase_client.get_old_unfiled_escalations(
-            max_age_hours=max_age_hours
-        )
+        if stop_legacy_writes:
+            cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+            try:
+                old_rows = await self._escalations.list_unfiled(
+                    state="open",
+                    created_before=cutoff,
+                    exclude_reasons=("safety_escalation",),
+                    limit=20,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Escalation sweep: canonical old-unfiled query failed", exc_info=True
+                )
+                old_rows = []
+            old_escalations = []
+            for row in old_rows:
+                full = await self.get_escalation_by_id_canonical(row["id"])
+                if full:
+                    old_escalations.append(full)
+        else:
+            old_escalations = await supabase_client.get_old_unfiled_escalations(
+                max_age_hours=max_age_hours
+            )
         if old_escalations and self._escalation_chat_id:
             old_count = len(old_escalations)
             lines = [
@@ -2469,7 +2615,21 @@ class EscalationService:
         # path, then notify each customer group of their remaining open issues in one message.
         reconciled = 0
         notified_groups = 0
-        tracked = await supabase_client.get_active_tracked_escalations()
+        if stop_legacy_writes:
+            try:
+                tracked_rows = await self._escalations.list_active_tracked()
+            except Exception:
+                LOGGER.warning(
+                    "Escalation sweep: canonical active-tracked query failed", exc_info=True
+                )
+                tracked_rows = []
+            tracked = []
+            for row in tracked_rows:
+                full = await self.get_escalation_by_id_canonical(row["id"])
+                if full:
+                    tracked.append(full)
+        else:
+            tracked = await supabase_client.get_active_tracked_escalations()
         if tracked:
             open_tracked: List[tuple] = []
             # Fetch all ticket statuses concurrently (cap at 10 parallel to avoid rate limits).
@@ -2501,17 +2661,34 @@ class EscalationService:
                 if fields and fields["is_done"]:
                     # Ticket closed outside the webhook path — close the mapping silently
                     LOGGER.info("Reconciling closed ticket {} (mapping {})", ref, esc["id"])
-                    try:
-                        client = supabase_client._get_client()
-                        client.table("escalation_mappings").update(
-                            {
-                                "is_active": False,
-                                "resolved_at": datetime.now(timezone.utc).isoformat(),
-                            }
-                        ).eq("id", esc["id"]).eq("is_active", True).execute()
+                    if stop_legacy_writes:
                         reconciled += 1
+                    else:
+                        try:
+                            client = supabase_client._get_client()
+                            client.table("escalation_mappings").update(
+                                {
+                                    "is_active": False,
+                                    "resolved_at": datetime.now(timezone.utc).isoformat(),
+                                }
+                            ).eq("id", esc["id"]).eq("is_active", True).execute()
+                            reconciled += 1
+                        except Exception:
+                            LOGGER.warning(
+                                "Could not reconcile mapping {}", esc["id"], exc_info=True
+                            )
+                    # Canonical mirror -- a ticket closed directly (outside our
+                    # button flow) never transitioned escalations.state before;
+                    # without this a canonical-reads consumer would keep
+                    # seeing this escalation as open.
+                    try:
+                        await self._escalations.resolve(esc["id"])
                     except Exception:
-                        LOGGER.warning("Could not reconcile mapping {}", esc["id"], exc_info=True)
+                        LOGGER.warning(
+                            "Could not resolve canonical escalation {}",
+                            esc["id"],
+                            exc_info=True,
+                        )
                 else:
                     open_tracked.append((esc, fields))
 
@@ -2594,6 +2771,30 @@ class EscalationService:
         unconditionally, and active rows are not returned by get_orphaned_claimed_escalations
         (which filters is_active=False).
         """
+        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+            try:
+                orphaned = await self._escalations.list_claimed_orphans(limit=50)
+            except Exception:
+                LOGGER.warning("Orphan recovery: canonical query failed", exc_info=True)
+                return
+            if len(orphaned) == 50:
+                LOGGER.warning("Orphan recovery: hit row cap, may have more orphans")
+            for row in orphaned:
+                LOGGER.warning(
+                    "Startup recovery: orphaned escalation claim {} — releasing", row["id"]
+                )
+                try:
+                    await self._escalations.release(row["id"])
+                except Exception:
+                    LOGGER.warning(
+                        "Orphan recovery: could not release {}", row["id"], exc_info=True
+                    )
+            if orphaned:
+                LOGGER.info(
+                    "Startup recovery: released {} orphaned escalation claim(s)", len(orphaned)
+                )
+            return
+
         supabase_client = self._get_supabase_client()
         if not supabase_client:
             return
@@ -2792,6 +2993,28 @@ class EscalationService:
         matched, _, _ = find_best_grid_match(jira_org_name, [escalation_org_name])
         return matched is not None
 
+    async def _get_mapping_by_ticket_ref_canonical(
+        self, ticket_ref: str
+    ) -> Optional[Dict[str, Any]]:
+        """Canonical equivalent of get_escalation_mapping_by_jira_key --
+        Jira's issue key is the same value stored as tickets.ticket_ref for
+        Jira-backed tickets, so this resolves ticket_ref -> ticket_id ->
+        the (single) escalation attached to it.
+        """
+        try:
+            ticket_id = await self._tickets.get_id_by_ref(ticket_ref)
+            if not ticket_id:
+                return None
+            escalation = await self._escalations.get_by_ticket_id(ticket_id)
+            if not escalation:
+                return None
+            return await self.get_escalation_by_id_canonical(escalation["id"])
+        except Exception:
+            LOGGER.warning(
+                "Canonical mapping lookup failed for ticket ref {}", ticket_ref, exc_info=True
+            )
+            return None
+
     async def _resolve_escalation_context_for_jira_key(
         self, issue_key: str, issue_fields: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
@@ -2805,7 +3028,10 @@ class EscalationService:
             LOGGER.error("No Supabase client — cannot route Jira event for {}", issue_key)
             return None
 
-        mapping = await supabase_client.get_escalation_mapping_by_jira_key(issue_key)
+        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+            mapping = await self._get_mapping_by_ticket_ref_canonical(issue_key)
+        else:
+            mapping = await supabase_client.get_escalation_mapping_by_jira_key(issue_key)
         if not mapping:
             LOGGER.debug("No active escalation mapping for Jira ticket {}", issue_key)
             return None
@@ -2979,28 +3205,49 @@ class EscalationService:
 
         # Atomically claim the close. If another handler already closed this mapping,
         # the UPDATE affects 0 rows and we skip the customer notification.
-        supabase_client = self._get_supabase_client()
-        if supabase_client and mapping_id:
-            try:
-                client = supabase_client._get_client()
-                result = (
-                    client.table("escalation_mappings")
-                    .update(
-                        {"is_active": False, "resolved_at": datetime.now(timezone.utc).isoformat()}
+        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+            claimed = False
+            if mapping_id:
+                try:
+                    claimed = await self._escalations.resolve_if_active(mapping_id)
+                except Exception:
+                    LOGGER.warning(
+                        "Could not atomically close canonical escalation {}",
+                        mapping_id,
+                        exc_info=True,
                     )
-                    .eq("id", mapping_id)
-                    .eq("is_active", True)  # only update if currently active
-                    .execute()
+            if not claimed:
+                LOGGER.info(
+                    "Mapping {} already closed by concurrent handler — skipping", mapping_id
                 )
-                if not result.data:
-                    LOGGER.info(
-                        "Mapping {} already closed by concurrent handler — skipping", mapping_id
+                return
+        else:
+            supabase_client = self._get_supabase_client()
+            if supabase_client and mapping_id:
+                try:
+                    client = supabase_client._get_client()
+                    result = (
+                        client.table("escalation_mappings")
+                        .update(
+                            {
+                                "is_active": False,
+                                "resolved_at": datetime.now(timezone.utc).isoformat(),
+                            }
+                        )
+                        .eq("id", mapping_id)
+                        .eq("is_active", True)  # only update if currently active
+                        .execute()
                     )
-                    return
-            except Exception as e:
-                LOGGER.warning(
-                    "Could not atomically close mapping {}: {} — proceeding", mapping_id, e
-                )
+                    if not result.data:
+                        LOGGER.info(
+                            "Mapping {} already closed by concurrent handler — skipping",
+                            mapping_id,
+                        )
+                        return
+                except Exception as e:
+                    LOGGER.warning(
+                        "Could not atomically close mapping {}: {} — proceeding", mapping_id, e
+                    )
 
         if notify_customer:
             customer_chat_id = mapping.get("customer_chat_id", "")
@@ -3027,6 +3274,25 @@ class EscalationService:
         Returns:
             Dict with success status
         """
+        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+            chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
+            if not chat_session_uuid:
+                LOGGER.warning(
+                    "Could not resolve chat session for {} — cannot close escalation", session_id
+                )
+                return {"success": False, "error": "Could not resolve session"}
+            try:
+                await self._escalations.resolve_all_for_session(chat_session_uuid)
+            except Exception:
+                LOGGER.warning(
+                    "Failed to close canonical escalations for session {}",
+                    session_id,
+                    exc_info=True,
+                )
+                return {"success": False, "error": "Failed to close escalation"}
+            LOGGER.info(f"Closed escalation for session {session_id}")
+            return {"success": True, "message": "Escalation closed"}
+
         supabase_client = self._get_supabase_client()
         if not supabase_client:
             LOGGER.error("No Supabase client available - cannot close escalation")
@@ -3073,6 +3339,31 @@ class EscalationService:
                 "success": False,
                 "error": "Database not available",
             }
+
+        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+            try:
+                delivery = await self._deliveries.find_escalation_delivery(
+                    external_message_id=escalation_message_id
+                )
+                escalation_id = delivery.get("escalation_id") if delivery else None
+                if not escalation_id:
+                    LOGGER.warning(
+                        "Could not resolve canonical escalation for session {} "
+                        "message {}",
+                        session_id,
+                        escalation_message_id,
+                    )
+                    return {"success": False, "error": "Failed to reopen escalation"}
+                await self._escalations.reopen(escalation_id)
+            except Exception:
+                LOGGER.warning(
+                    "Failed to reopen canonical escalation for session {}",
+                    session_id,
+                    exc_info=True,
+                )
+                return {"success": False, "error": "Failed to reopen escalation"}
+            LOGGER.info(f"Reopened escalation for session {session_id}")
+            return {"success": True, "message": "Escalation reopened"}
 
         success = await supabase_client.reopen_escalation(session_id, escalation_message_id)
 
@@ -3205,19 +3496,28 @@ class EscalationService:
                         clean_tag = None
                         if organization_short_name:
                             clean_tag = "".join(c for c in organization_short_name if c.isalnum())
-                        saved_verification_id = await supabase_client.save_escalation_mapping(
-                            escalation_message_id=escalation_message_id,
-                            customer_chat_id=customer_chat_id,
-                            session_id=session_id,
-                            customer_topic_id=customer_topic_id,
-                            org_hashtag=f"#{clean_tag}" if clean_tag else None,
-                            customer_username=customer_username,
-                            reason="verification_failed",
-                            organization_id=organization_id,
-                            escalation_topic_id=escalation_topic_id,
-                            question_text=original_message[:2000] if original_message else None,
-                            thread_id=thread_id,
-                        )
+                        saved_verification_id = None
+                        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+                            # This call site (unlike the other two) never
+                            # pre-generates a mapping id -- save_escalation_mapping
+                            # otherwise does that internally.
+                            saved_verification_id = str(uuid.uuid4())
+                        else:
+                            saved_verification_id = await supabase_client.save_escalation_mapping(
+                                escalation_message_id=escalation_message_id,
+                                customer_chat_id=customer_chat_id,
+                                session_id=session_id,
+                                customer_topic_id=customer_topic_id,
+                                org_hashtag=f"#{clean_tag}" if clean_tag else None,
+                                customer_username=customer_username,
+                                reason="verification_failed",
+                                organization_id=organization_id,
+                                escalation_topic_id=escalation_topic_id,
+                                question_text=(
+                                    original_message[:2000] if original_message else None
+                                ),
+                                thread_id=thread_id,
+                            )
                         if saved_verification_id:
                             await self._record_canonical_escalation(
                                 saved_verification_id,
