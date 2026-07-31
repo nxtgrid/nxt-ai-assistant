@@ -1896,6 +1896,14 @@ class SupabaseReader:
                 .limit(200)
                 .execute()
             ).data or []
+            attachments = (
+                self.client.table("escalation_attachments")
+                .select("id, storage_path, media_type, mime_type, size_bytes, created_at")
+                .eq("ticket_id", ticket_id)
+                .order("created_at", desc=False)
+                .limit(50)
+                .execute()
+            ).data or []
         except Exception as exc:
             logger.error("Error fetching canonical ticket detail for %s: %s", ticket_id, exc)
             return None
@@ -1923,6 +1931,16 @@ class SupabaseReader:
                 ),
             }
             for delivery in deliveries
+        ]
+        ticket["attachments"] = [
+            {
+                "media_type": attachment.get("media_type"),
+                "mime_type": attachment.get("mime_type"),
+                "size_bytes": attachment.get("size_bytes"),
+                "created_at": attachment.get("created_at"),
+                "signed_url": self._signed_attachment_url(attachment.get("storage_path")),
+            }
+            for attachment in attachments
         ]
         return ticket
 
@@ -2284,6 +2302,19 @@ class SupabaseReader:
             row["occurrence_count"] = corr.get("occurrence_count") if corr else None
             row["root_cause_kind"] = corr.get("root_cause_kind") if corr else None
             row["escalated"] = bool(corr.get("escalated_at")) if corr else False
+
+    def _signed_attachment_url(self, storage_path: Optional[str]) -> Optional[str]:
+        """Return a short-lived signed URL for a private escalation-media object."""
+        if not storage_path or not self.client:
+            return None
+        try:
+            response = self.client.storage.from_("escalation-media").create_signed_url(
+                storage_path, 3600
+            )
+            return response.get("signedURL") or response.get("signedUrl")
+        except Exception as exc:
+            logger.error("Error signing attachment URL for %s: %s", storage_path, exc)
+            return None
 
     def _fetch_correlation(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
         """Full ticket_correlations row for one ticket, or None if the
