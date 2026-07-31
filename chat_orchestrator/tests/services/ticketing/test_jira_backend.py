@@ -19,6 +19,7 @@ import pytest
 from loguru import logger
 
 from orchestrator.services.ticketing import jira_backend as jira_backend_module
+from orchestrator.services.ticketing.attachment_repository import EscalationAttachment
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
 from orchestrator.services.ticketing.jira_backend import JiraTicketBackend
 from orchestrator.services.ticketing.jira_issue_types import (
@@ -1121,3 +1122,112 @@ class TestAdfRoundTrip:
     def test_empty_text_produces_valid_empty_doc(self):
         adf = jira_backend_module._text_to_adf("")
         assert jira_backend_module._adf_to_text(adf) == ""
+
+
+class _FakeStorageBucket:
+    def __init__(self, contents: Dict[str, bytes]) -> None:
+        self._contents = contents
+
+    def download(self, path: str) -> bytes:
+        return self._contents[path]
+
+
+class _FakeStorage:
+    def __init__(self, bucket: _FakeStorageBucket) -> None:
+        self._bucket = bucket
+
+    def from_(self, name: str) -> _FakeStorageBucket:
+        assert name == "escalation-media"
+        return self._bucket
+
+
+class _FakeSupabaseClient:
+    def __init__(self, contents: Dict[str, bytes]) -> None:
+        self.storage = _FakeStorage(_FakeStorageBucket(contents))
+
+
+def _attachment(**overrides: Any) -> EscalationAttachment:
+    defaults = dict(
+        id="att-1",
+        escalation_id="esc-1",
+        ticket_id="ticket-1",
+        storage_path="esc-1/photo.jpg",
+        media_type="image",
+        mime_type="image/jpeg",
+        size_bytes=10,
+        jira_attachment_id=None,
+    )
+    defaults.update(overrides)
+    return EscalationAttachment(**defaults)
+
+
+class TestAddAttachments:
+    @pytest.mark.asyncio
+    async def test_uploads_each_unsynced_attachment_and_returns_sync_results(
+        self, fake_session: FakeJiraSession
+    ) -> None:
+        backend = JiraTicketBackend(
+            base_url="https://example.atlassian.net",
+            email="bot@example.com",
+            api_token="tok",
+            get_storage_client=lambda: _FakeSupabaseClient({"esc-1/photo.jpg": b"fake-image-bytes"}),
+        )
+        fake_session.queue(
+            "POST",
+            "/issue/OPS-1/attachments",
+            _FakeResponse(200, json_data=[{"id": "10050", "filename": "esc-1_photo.jpg"}]),
+        )
+
+        results = await backend.add_attachments("OPS-1", [_attachment()])
+
+        assert len(results) == 1
+        assert results[0].attachment_id == "att-1"
+        assert results[0].external_id == "10050"
+
+        post_calls = [c for c in fake_session.calls if c[0] == "POST"]
+        assert len(post_calls) == 1
+        _, url, kwargs = post_calls[0]
+        assert "/issue/OPS-1/attachments" in url
+        assert kwargs["headers"]["X-Atlassian-Token"] == "no-check"
+        assert "Content-Type" not in kwargs["headers"]
+
+    @pytest.mark.asyncio
+    async def test_skips_attachments_already_synced(self, fake_session: FakeJiraSession) -> None:
+        backend = JiraTicketBackend(
+            base_url="https://example.atlassian.net",
+            email="bot@example.com",
+            api_token="tok",
+            get_storage_client=lambda: _FakeSupabaseClient({}),
+        )
+        already_synced = _attachment(jira_attachment_id="99999")
+
+        results = await backend.add_attachments("OPS-1", [already_synced])
+
+        assert results == []
+        assert fake_session.calls == []
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_and_does_not_raise_on_upload_failure(
+        self, fake_session: FakeJiraSession
+    ) -> None:
+        backend = JiraTicketBackend(
+            base_url="https://example.atlassian.net",
+            email="bot@example.com",
+            api_token="tok",
+            get_storage_client=lambda: _FakeSupabaseClient({"esc-1/photo.jpg": b"fake-image-bytes"}),
+        )
+        fake_session.queue(
+            "POST", "/issue/OPS-1/attachments", _FakeResponse(500, text_data="server error")
+        )
+
+        results = await backend.add_attachments("OPS-1", [_attachment()])
+
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_when_no_storage_client_configured(self) -> None:
+        backend = JiraTicketBackend(
+            base_url="https://example.atlassian.net", email="bot@example.com", api_token="tok"
+        )
+        results = await backend.add_attachments("OPS-1", [_attachment()])
+        assert results == []

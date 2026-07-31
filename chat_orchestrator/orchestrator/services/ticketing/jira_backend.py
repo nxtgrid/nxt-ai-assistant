@@ -12,7 +12,7 @@ import base64
 import os
 import re
 import time
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import aiohttp
 
@@ -20,7 +20,9 @@ from orchestrator.config.settings import get_settings
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
+from .attachment_repository import BUCKET_NAME, EscalationAttachment
 from .backend import (
+    AttachmentSyncResult,
     TicketBackendError,
     TicketCreateRequest,
     TicketResult,
@@ -168,6 +170,7 @@ class JiraTicketBackend:
         api_token: Optional[str] = None,
         project_key: Optional[str] = None,
         issue_type: Optional[str] = None,
+        get_storage_client: Optional[Callable[[], Optional[Any]]] = None,
     ) -> None:
         # Same env var names/defaults as EscalationService.__init__ -- this is now
         # a standalone class, not relying on EscalationService's state.
@@ -182,6 +185,7 @@ class JiraTicketBackend:
         self._jira_issue_type = (
             issue_type if issue_type is not None else os.getenv("JIRA_ISSUE_TYPE", "Task")
         )
+        self._get_storage_client = get_storage_client
 
         # Cached (TTL) health probe state for is_available().
         self._probe_cache_ok: bool = False
@@ -576,6 +580,85 @@ class JiraTicketBackend:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+    def _download_attachment_bytes(self, storage_path: str) -> Optional[bytes]:
+        if self._get_storage_client is None:
+            return None
+        client = self._get_storage_client()
+        if client is None:
+            return None
+        try:
+            return client.storage.from_(BUCKET_NAME).download(storage_path)
+        except Exception:
+            LOGGER.warning(
+                "Failed to download attachment {} from storage", storage_path, exc_info=True
+            )
+            return None
+
+    async def _upload_jira_attachment(
+        self, issue_key: str, filename: str, content: bytes, mime_type: str
+    ) -> Optional[str]:
+        """POST one file to Jira's attachment endpoint. Returns the Jira
+        attachment id on success, None on any failure (never raises).
+
+        Jira's attachment endpoint requires multipart/form-data and the
+        X-Atlassian-Token header -- unlike every other Jira call in this
+        class, it must NOT send Content-Type: application/json, so this
+        builds its own headers rather than reusing _jira_auth_headers().
+        """
+        url = f"{self._jira_base_url}/rest/api/3/issue/{issue_key}/attachments"
+        headers = {
+            "Authorization": self._jira_auth_headers()["Authorization"],
+            "X-Atlassian-Token": "no-check",
+        }
+        form = aiohttp.FormData()
+        form.add_field("file", content, filename=filename, content_type=mime_type)
+        try:
+            session = _get_jira_session()
+            async with session.post(
+                url, data=form, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
+            ) as response:
+                if response.status not in (200, 201):
+                    body = await response.text()
+                    LOGGER.warning(
+                        "Jira attachment upload failed for {}: HTTP {}: {}",
+                        issue_key,
+                        response.status,
+                        body,
+                    )
+                    return None
+                result = await response.json()
+        except Exception:
+            LOGGER.warning("Jira attachment upload failed for {}", issue_key, exc_info=True)
+            return None
+
+        entries = result if isinstance(result, list) else []
+        if not entries or not entries[0].get("id"):
+            LOGGER.warning("Jira attachment upload for {} returned no attachment id", issue_key)
+            return None
+        return str(entries[0]["id"])
+
+    async def add_attachments(
+        self, ticket_ref: str, attachments: List[EscalationAttachment]
+    ) -> List[AttachmentSyncResult]:
+        results: List[AttachmentSyncResult] = []
+        for attachment in attachments:
+            if attachment.jira_attachment_id:
+                continue
+            content = self._download_attachment_bytes(attachment.storage_path)
+            if content is None:
+                continue
+            filename = attachment.storage_path.rsplit("/", 1)[-1]
+            jira_attachment_id = await self._upload_jira_attachment(
+                ticket_ref, filename, content, attachment.mime_type
+            )
+            if jira_attachment_id:
+                results.append(
+                    AttachmentSyncResult(
+                        attachment_id=attachment.id, external_id=jira_attachment_id
+                    )
+                )
+        return results
 
     async def _resolve_own_account_id(self) -> Optional[str]:
         """Resolve (and cache) this integration's own Jira account id.
