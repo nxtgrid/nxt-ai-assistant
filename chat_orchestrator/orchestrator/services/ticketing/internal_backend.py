@@ -16,7 +16,9 @@ from typing import Any, Callable, List, Optional
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
+from .attachment_repository import EscalationAttachment
 from .backend import (
+    AttachmentSyncResult,
     TicketBackendError,
     TicketCreateRequest,
     TicketResult,
@@ -170,3 +172,14 @@ class InternalTicketBackend:
         except Exception as e:
             LOGGER.warning("Failed to find open internal tickets for grid {}: {}", grid_name, e)
             return []
+
+    async def add_attachments(
+        self, ref: str, attachments: List[EscalationAttachment]
+    ) -> List[AttachmentSyncResult]:
+        """No-op: internal tickets have no external system to push bytes to.
+
+        Linking (escalation_attachments.ticket_id) already happened in
+        TicketService.create_ticket() before this is called -- there is
+        nothing backend-specific left to do.
+        """
+        return []

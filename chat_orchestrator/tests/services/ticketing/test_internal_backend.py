@@ -14,9 +14,11 @@ this backend must never write the legacy ``internal_tickets`` relation.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from unittest.mock import MagicMock
 
 import pytest
 
+from orchestrator.services.ticketing.attachment_repository import EscalationAttachment
 from orchestrator.services.ticketing.backend import (
     TicketBackendError,
     TicketCreateRequest,
@@ -607,3 +609,20 @@ class TestFindOpenByGrid:
         fake.canonical_tickets.raise_on_find = RuntimeError("db down")
 
         assert await backend.find_open_by_grid("Kudi") == []
+
+
+class TestAddAttachments:
+    @pytest.mark.asyncio
+    async def test_returns_empty_list_without_touching_anything(self) -> None:
+        backend = InternalTicketBackend(client=MagicMock())
+        attachment = EscalationAttachment(
+            id="att-1",
+            escalation_id="esc-1",
+            ticket_id="ticket-1",
+            storage_path="esc-1/a.jpg",
+            media_type="image",
+            mime_type="image/jpeg",
+            size_bytes=10,
+        )
+        result = await backend.add_attachments("INT-1", [attachment])
+        assert result == []
