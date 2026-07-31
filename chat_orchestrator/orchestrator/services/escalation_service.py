@@ -42,6 +42,13 @@ LOGGER = get_logger(__name__)
 
 _DEFAULT_TZ = ZoneInfo(os.getenv("DEFAULT_TIMEZONE", "UTC"))
 
+# Escalation reasons that must not hold a chat session for the bot -- kept in
+# sync with supabase_client.save_escalation_mapping's NON_BLOCKING_REASONS,
+# which decides whether the legacy chat_sessions.is_escalated flag gets set.
+# The canonical is_session_escalated check needs the same exclusion so it
+# doesn't over-block sessions the legacy check never blocked.
+_NON_BLOCKING_ESCALATION_REASONS = ("safety_escalation", "system_error")
+
 # ---------------------------------------------------------------------------
 # Module-level shared resources
 # ---------------------------------------------------------------------------
@@ -181,12 +188,18 @@ class EscalationService:
         *,
         message_id: int,
         topic_id: Optional[int],
+        reason: Optional[str] = None,
     ) -> None:
         """Best-effort dual-write: canonical ``escalations`` row + its Telegram
         delivery receipt, mirroring the legacy ``escalation_mappings`` insert
         this always follows. A failure here only leaves the canonical mirror
         incomplete for this escalation -- the legacy row (already written)
         remains the source of truth until cutover.
+
+        ``reason`` is persisted so a canonical-reads consumer (see
+        ``is_session_escalated``) can reproduce the legacy "non-blocking
+        reasons don't hold the session" distinction (NON_BLOCKING_REASONS in
+        supabase_client.save_escalation_mapping).
         """
         if not session_id:
             return
@@ -194,7 +207,7 @@ class EscalationService:
             chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
             if chat_session_uuid is None:
                 return
-            await self._escalations.create(escalation_id, chat_session_uuid)
+            await self._escalations.create(escalation_id, chat_session_uuid, reason=reason)
             await self._deliveries.record(
                 ticket_id=None,
                 escalation_id=escalation_id,
@@ -511,6 +524,7 @@ class EscalationService:
                                 session_id,
                                 message_id=followup_msg_id,
                                 topic_id=followup_topic_id,
+                                reason=reason,
                             )
 
                     return {
@@ -643,6 +657,7 @@ class EscalationService:
                                 session_id,
                                 message_id=escalation_message_id,
                                 topic_id=escalation_topic_id,
+                                reason=reason,
                             )
                         LOGGER.info(
                             f"Saved escalation to database: msg_id={escalation_message_id} → "
@@ -1405,12 +1420,40 @@ class EscalationService:
         Returns:
             True if session has active escalation, False otherwise
         """
+        if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+            canonical_result = await self._is_session_escalated_canonical(session_id)
+            if canonical_result is not None:
+                return canonical_result
+            # Canonical check was inconclusive (no client, unresolved chat
+            # session, or a store error) -- fall through to the legacy check
+            # below rather than risk a false "not escalated".
+
         supabase_client = self._get_supabase_client()
         if not supabase_client:
             return False
 
         info = await supabase_client.get_session_escalation_info(session_id)
         return info is not None and info.get("is_escalated", False)
+
+    async def _is_session_escalated_canonical(self, session_id: str) -> Optional[bool]:
+        """Canonical-table check for is_session_escalated. Returns None (not
+        False) when the check couldn't be completed, so the caller falls back
+        to the legacy read instead of treating "couldn't check" as "not
+        escalated" -- see CANONICAL_ESCALATION_READS_ENABLED's docstring."""
+        chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
+        if chat_session_uuid is None:
+            return None
+        try:
+            return await self._escalations.has_blocking_escalation(
+                chat_session_uuid, exclude_reasons=_NON_BLOCKING_ESCALATION_REASONS
+            )
+        except Exception:
+            LOGGER.warning(
+                "Canonical escalation check failed for session {} -- falling back to legacy",
+                session_id,
+                exc_info=True,
+            )
+            return None
 
     async def get_escalation_info(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -3024,6 +3067,7 @@ class EscalationService:
                                 session_id,
                                 message_id=escalation_message_id,
                                 topic_id=escalation_topic_id,
+                                reason="verification_failed",
                             )
                         LOGGER.info(
                             f"Saved verification failure escalation to database: "

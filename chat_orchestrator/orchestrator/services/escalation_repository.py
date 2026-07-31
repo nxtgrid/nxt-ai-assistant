@@ -99,17 +99,20 @@ class EscalationRepository:
         except Exception as exc:
             raise EscalationRepositoryError(f"failed to resolve escalation: {exc}") from exc
 
-    async def has_blocking_escalation(self, chat_session_id: str) -> bool:
+    async def has_blocking_escalation(
+        self, chat_session_id: str, *, exclude_reasons: Optional[tuple[str, ...]] = None
+    ) -> bool:
         try:
-            rows = self._rows(
+            query = (
                 self._raw_client()
                 .table("escalations")
                 .select("id")
                 .eq("chat_session_id", chat_session_id)
                 .in_("state", ["open", "processing"])
-                .limit(1)
-                .execute()
             )
+            for reason in exclude_reasons or ():
+                query = query.neq("reason", reason)
+            rows = self._rows(query.limit(1).execute())
         except EscalationRepositoryError:
             raise
         except Exception as exc:

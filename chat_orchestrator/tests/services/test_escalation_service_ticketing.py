@@ -134,6 +134,7 @@ class _FakeSupabase:
         self.tag_calls: List[tuple] = []
         self.saved_messages_return: List[Any] = [SimpleNamespace(id="msg-1")]
         self.mapping_for_reply: Optional[Dict[str, Any]] = None
+        self.session_escalation_info: Optional[Dict[str, Any]] = None
         self.internal_ticket_lookup_calls: List[str] = []
         # Sweep fixtures — configure per-test, default to empty/no-op.
         self.stale_unfiled: List[Dict[str, Any]] = []
@@ -182,6 +183,9 @@ class _FakeSupabase:
 
     async def count_active_blocking_escalations(self, _sid):
         return 0
+
+    async def get_session_escalation_info(self, _session_id):
+        return self.session_escalation_info
 
     async def update_session_escalation_status(self, **_k):
         return None
@@ -687,13 +691,16 @@ async def test_new_escalation_dual_writes_canonical_escalation_and_delivery():
 
     svc._send_telegram_message = fake_send
 
-    result = await svc.escalate_to_support(**_new_escalation_kwargs())
+    result = await svc.escalate_to_support(
+        **_new_escalation_kwargs(reason="could_not_answer")
+    )
     assert result["success"] is True
 
     escalation_rows = raw.tables["escalations"].rows
     assert len(escalation_rows) == 1
     assert escalation_rows[0]["chat_session_id"] == str(resolved_uuid)
     assert escalation_rows[0]["state"] == "open"
+    assert escalation_rows[0]["reason"] == "could_not_answer"
 
     delivery_rows = raw.tables["message_deliveries"].rows
     assert len(delivery_rows) == 1
@@ -1163,3 +1170,73 @@ async def test_always_file_flag_on_hides_track_button_and_auto_files_during_busi
         button["text"] for row in sent[0]["reply_markup"]["inline_keyboard"] for button in row
     ]
     assert not any("Track as ticket" in text for text in track_row_texts)
+
+
+# ---------------------------------------------------------------------------
+# is_session_escalated -- CANONICAL_ESCALATION_READS_ENABLED flag flip
+# ---------------------------------------------------------------------------
+
+
+class _FakeEscalationsRepo:
+    def __init__(self, result: Any = False):
+        self._result = result
+        self.calls: List[tuple] = []
+
+    async def has_blocking_escalation(self, chat_session_id, *, exclude_reasons=None):
+        self.calls.append((chat_session_id, exclude_reasons))
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+async def test_is_session_escalated_uses_legacy_when_flag_off(monkeypatch):
+    monkeypatch.delenv("CANONICAL_ESCALATION_READS_ENABLED", raising=False)
+    supa = _FakeSupabase(_FakeRaw())
+    supa.session_escalation_info = {"is_escalated": True}
+    svc = _make_service(supa)
+    canonical = _FakeEscalationsRepo(result=False)
+    svc._escalations = canonical
+
+    assert await svc.is_session_escalated("telegram_abc") is True
+    assert canonical.calls == []  # canonical check never consulted
+
+
+async def test_is_session_escalated_uses_canonical_when_flag_on(monkeypatch):
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    supa = _FakeSupabase(_FakeRaw())
+    supa.session_escalation_info = {"is_escalated": False}  # legacy disagrees
+    svc = _make_service(supa)
+    canonical = _FakeEscalationsRepo(result=True)
+    svc._escalations = canonical
+
+    assert await svc.is_session_escalated("telegram_abc") is True
+    assert len(canonical.calls) == 1
+    _chat_session_uuid, exclude_reasons = canonical.calls[0]
+    assert set(exclude_reasons) == {"safety_escalation", "system_error"}
+
+
+async def test_is_session_escalated_falls_back_to_legacy_on_canonical_error(monkeypatch):
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    supa = _FakeSupabase(_FakeRaw())
+    supa.session_escalation_info = {"is_escalated": True}
+    svc = _make_service(supa)
+    svc._escalations = _FakeEscalationsRepo(result=RuntimeError("db down"))
+
+    assert await svc.is_session_escalated("telegram_abc") is True
+
+
+async def test_is_session_escalated_falls_back_to_legacy_when_session_unresolvable(monkeypatch):
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    supa = _FakeSupabase(_FakeRaw())
+    supa.session_escalation_info = {"is_escalated": True}
+
+    async def fake_get_session(_sid):
+        return None  # unknown session -- can't resolve a chat_sessions.id
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+    canonical = _FakeEscalationsRepo(result=False)
+    svc._escalations = canonical
+
+    assert await svc.is_session_escalated("telegram_abc") is True
+    assert canonical.calls == []
