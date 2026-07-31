@@ -308,6 +308,9 @@ class _FakeTickets:
         self.sync_jira_ticket_statuses_calls += 1
         return self._sync_jira_ticket_statuses_result
 
+    async def get_id_by_ref(self, _ref: str) -> Optional[str]:
+        return None
+
 
 class _CanonicalDedupTickets:
     """Ticket-service seam for an already-attached canonical escalation."""
@@ -763,6 +766,61 @@ async def test_followup_escalation_dual_writes_canonical_escalation_and_delivery
     assert delivery_rows[0]["escalation_id"] == escalation_rows[0]["id"]
     assert delivery_rows[0]["purpose"] == "escalation"
     assert delivery_rows[0]["external_message_id"] == 200  # fake_reply's message_id
+
+
+async def test_followup_escalation_attaches_ticket_id_when_prelinked_to_existing_ticket():
+    """Regression: attach_ticket() only ever fires for the escalation that
+    originally filed a ticket. A follow-up pre-linked to that same ticket
+    (existing_ref) must still get its canonical row's ticket_id set at
+    creation time, or a Jira-key-based lookup would never find it."""
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=uuid.uuid4())
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    existing = {
+        "is_active": True,
+        "escalation_message_id": 100,
+        "escalation_topic_id": None,
+        "ticket_ref": "OPS-77",
+        "ticket_backend": "jira",
+        "jira_ticket_key": "OPS-77",
+        "organization_id": None,
+    }
+
+    async def fake_get_info(_sid):
+        return existing
+
+    svc.get_escalation_info = fake_get_info
+
+    async def fake_reply(chat_id, reply_to_message_id, text, reply_markup=None, topic_id=None):
+        return {"ok": True, "result": {"message_id": 201}}
+
+    svc._send_telegram_reply = fake_reply
+
+    async def fake_get_id_by_ref(_ref: str):
+        return "ticket-1"
+
+    tickets = _FakeTickets(status=TicketStatus(summary="s", is_done=False))
+    tickets.get_id_by_ref = fake_get_id_by_ref
+    svc._tickets = tickets
+
+    await svc.escalate_to_support(
+        question_summary="follow up q",
+        session_id="telegram_abc",
+        customer_chat_id="123",
+    )
+
+    escalation_rows = raw.tables["escalations"].rows
+    assert len(escalation_rows) == 1
+    assert escalation_rows[0]["ticket_id"] == "ticket-1"
+
+    delivery_rows = raw.tables["message_deliveries"].rows
+    assert delivery_rows[0]["ticket_id"] == "ticket-1"
 
 
 # ---------------------------------------------------------------------------

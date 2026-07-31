@@ -189,6 +189,7 @@ class EscalationService:
         message_id: int,
         topic_id: Optional[int],
         reason: Optional[str] = None,
+        ticket_id: Optional[str] = None,
     ) -> None:
         """Best-effort dual-write: canonical ``escalations`` row + its Telegram
         delivery receipt, mirroring the legacy ``escalation_mappings`` insert
@@ -200,6 +201,12 @@ class EscalationService:
         ``is_session_escalated``) can reproduce the legacy "non-blocking
         reasons don't hold the session" distinction (NON_BLOCKING_REASONS in
         supabase_client.save_escalation_mapping).
+
+        ``ticket_id`` is set when the caller already knows this escalation is
+        pre-linked to an existing ticket (a follow-up escalation reusing the
+        parent's ticket) -- otherwise track_as_ticket's own attach_ticket()
+        call is the only thing that ever sets it, which a follow-up
+        escalation never goes through directly.
         """
         if not session_id:
             return
@@ -207,9 +214,11 @@ class EscalationService:
             chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
             if chat_session_uuid is None:
                 return
-            await self._escalations.create(escalation_id, chat_session_uuid, reason=reason)
+            await self._escalations.create(
+                escalation_id, chat_session_uuid, reason=reason, ticket_id=ticket_id
+            )
             await self._deliveries.record(
-                ticket_id=None,
+                ticket_id=ticket_id,
                 escalation_id=escalation_id,
                 purpose="escalation",
                 external_chat_id=str(self._escalation_chat_id),
@@ -519,12 +528,18 @@ class EscalationService:
                             jira_ticket_key=existing_ref if followup_is_jira else None,
                         )
                         if saved_followup_id:
+                            prelinked_ticket_id = (
+                                await self._tickets.get_id_by_ref(existing_ref)
+                                if existing_ref
+                                else None
+                            )
                             await self._record_canonical_escalation(
                                 saved_followup_id,
                                 session_id,
                                 message_id=followup_msg_id,
                                 topic_id=followup_topic_id,
                                 reason=reason,
+                                ticket_id=prelinked_ticket_id,
                             )
 
                     return {
