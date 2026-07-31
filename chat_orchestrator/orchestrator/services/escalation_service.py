@@ -141,9 +141,14 @@ class EscalationService:
         # ``_get_supabase_client`` (as tests commonly do) would silently be
         # invisible to ``self._tickets``.
         self._tickets = TicketService(get_supabase_client=lambda: self._get_supabase_client())
-        self._escalations = EscalationRepository(get_client=self._get_raw_client)
-        self._deliveries = DeliveryRepository(get_client=self._get_raw_client)
-        self._attachments = AttachmentRepository(get_client=self._get_raw_client)
+        # Same late-binding reasoning as self._tickets above -- these three
+        # currently avoid the staleness bug only because _get_raw_client's
+        # own body re-reads self._get_supabase_client() dynamically, which is
+        # an implementation detail of _get_raw_client, not a guarantee. A
+        # lambda makes these safe on their own terms too.
+        self._escalations = EscalationRepository(get_client=lambda: self._get_raw_client())
+        self._deliveries = DeliveryRepository(get_client=lambda: self._get_raw_client())
+        self._attachments = AttachmentRepository(get_client=lambda: self._get_raw_client())
 
     def is_enabled(self) -> bool:
         """Check if escalation service is properly configured."""
