@@ -115,9 +115,10 @@ class JiraClient(HTTPClientMixin):
             if db is None:
                 return None
             response = (
-                db.table("internal_tickets")
+                db.table("tickets")
                 .select("*")
                 .eq("ticket_ref", ticket_ref)
+                .eq("backend", "internal")
                 .limit(1)
                 .execute()
             )
@@ -135,14 +136,16 @@ class JiraClient(HTTPClientMixin):
         if row is None:
             return None
 
+        ticket_id = row.get("id")
+
         def comments() -> List[Dict[str, Any]]:
             db = self._get_chat_supabase()
-            if db is None:
+            if db is None or ticket_id is None:
                 return []
             response = (
-                db.table("internal_ticket_comments")
+                db.table("ticket_comments")
                 .select("author,body,is_public,source,created_at")
-                .eq("ticket_ref", ticket_ref)
+                .eq("ticket_id", ticket_id)
                 .order("created_at")
                 .execute()
             )
@@ -160,8 +163,19 @@ class JiraClient(HTTPClientMixin):
             db = self._get_chat_supabase()
             if db is None:
                 return False
-            db.table("internal_ticket_comments").insert(
-                {"ticket_ref": ticket_ref, "body": body, "is_public": False, "source": "staff"}
+            ticket_rows = (
+                db.table("tickets")
+                .select("id")
+                .eq("ticket_ref", ticket_ref)
+                .eq("backend", "internal")
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(ticket_rows, "data", None) or []
+            if not rows:
+                return False
+            db.table("ticket_comments").insert(
+                {"ticket_id": rows[0]["id"], "body": body, "is_public": False, "source": "staff"}
             ).execute()
             return True
 
@@ -176,9 +190,9 @@ class JiraClient(HTTPClientMixin):
             db = self._get_chat_supabase()
             if db is None:
                 return False
-            db.table("internal_tickets").update(
+            db.table("tickets").update(
                 {"status": "done", "resolved_at": datetime.utcnow().isoformat() + "Z"}
-            ).eq("ticket_ref", ticket_ref).execute()
+            ).eq("ticket_ref", ticket_ref).eq("backend", "internal").execute()
             return True
 
         try:
