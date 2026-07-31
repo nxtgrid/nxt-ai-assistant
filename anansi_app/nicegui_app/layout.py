@@ -18,11 +18,14 @@ SIDEBAR_BG = "#141824"
 ACCENT = "#4da6ff"
 PAGE_BG = "#f0f2f6"
 
-BOT_ADMIN_NAV = [
+OPERATIONS_NAV = [
     ("/tickets", "🎫 Tickets"),
     ("/conversations", "💬 Chats"),
-    ("/documents", "📚 RAG Knowledgebase"),
     ("/agents", "🤖 Agents"),
+]
+
+BOT_ADMIN_NAV = [
+    ("/documents", "📚 RAG Knowledgebase"),
     ("/prompts", "📝 Prompts"),
     ("/knowledge-modules", "🧠 Knowledge Modules"),
     ("/settings", "⚙️ Settings"),
@@ -48,6 +51,12 @@ def _nav_button(label: str, target: str, selected: bool) -> None:
         )
     else:
         btn.style("color: #cbd5e1;")
+
+
+def _render_operations_nav(current_path: str, expanded: bool) -> None:
+    with ui.expansion("🛠️ Operations", value=expanded).classes("w-full").style("color: #e2e8f0"):
+        for target, label in OPERATIONS_NAV:
+            _nav_button(label, target, selected=current_path == target)
 
 
 def _render_bot_admin_nav(current_path: str, expanded: bool) -> None:
@@ -145,6 +154,7 @@ def frame(user: dict[str, Any], current_path: str):
     can_admin = perms.can_view_bot_admin(email)
     can_grid = perms.can_view_grid(email)
 
+    is_operations_page = any(current_path == target for target, _ in OPERATIONS_NAV)
     is_bot_admin_page = any(current_path == target for target, _ in BOT_ADMIN_NAV)
     is_grid_page = current_path.startswith("/grid")
 
@@ -171,6 +181,8 @@ def frame(user: dict[str, Any], current_path: str):
         ui.separator().style("background-color: #334155")
 
         if can_admin:
+            _render_operations_nav(current_path, expanded=is_operations_page)
+            ui.separator().style("background-color: #334155")
             _render_bot_admin_nav(current_path, expanded=is_bot_admin_page)
         if can_grid:
             if can_admin:

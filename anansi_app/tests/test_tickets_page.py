@@ -175,7 +175,7 @@ def test_index_page_lands_bot_admin_on_tickets_first():
     assert isinstance(elif_node.test, ast.Name) and elif_node.test.id == "can_grid"
 
 
-def test_bot_admin_nav_lists_tickets_first():
+def test_operations_nav_lists_tickets_first():
     from nicegui_app import layout
 
-    assert layout.BOT_ADMIN_NAV[0] == ("/tickets", "🎫 Tickets")
+    assert layout.OPERATIONS_NAV[0] == ("/tickets", "🎫 Tickets")
