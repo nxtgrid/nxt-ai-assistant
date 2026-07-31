@@ -77,7 +77,17 @@ async def capture_escalation_media(
     if not media_file_ids:
         return
 
-    client = get_client()
+    try:
+        client = get_client()
+    except Exception:
+        LOGGER.warning(
+            "capture_escalation_media: get_client() raised -- skipping capture "
+            "for escalation {}",
+            escalation_id,
+            exc_info=True,
+        )
+        return
+
     if client is None:
         LOGGER.warning(
             "capture_escalation_media: no Supabase client available -- skipping capture "
@@ -92,8 +102,16 @@ async def capture_escalation_media(
         download_fn = download_telegram_photo
 
     for item in media_file_ids:
-        file_id = item["file_id"]
-        media_type = item["type"]
+        file_id = item.get("file_id")
+        media_type = item.get("type")
+        if not file_id or not media_type:
+            LOGGER.warning(
+                "capture_escalation_media: malformed media item {} -- skipping "
+                "(escalation {})",
+                item,
+                escalation_id,
+            )
+            continue
         try:
             base64_data, mime_type = await download_fn(
                 file_id, bot_token, MAX_TICKET_ATTACHMENT_SIZE_BYTES

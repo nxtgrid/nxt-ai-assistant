@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from orchestrator.services.ticketing.attachment_capture import (
+    MAX_TICKET_ATTACHMENT_SIZE_BYTES,
     capture_escalation_media,
     extract_media_file_ids,
 )
@@ -181,3 +182,144 @@ async def test_no_op_when_no_supabase_client_available(repo: AttachmentRepositor
         download_fn=AsyncMock(),
     )
     repo.insert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_no_op_when_get_client_raises(repo: AttachmentRepository) -> None:
+    def raising_get_client() -> None:
+        raise RuntimeError("bad Supabase config")
+
+    await capture_escalation_media(
+        escalation_id="esc-1",
+        media_file_ids=[{"type": "image", "file_id": "file123"}],
+        bot_token="token",
+        get_client=raising_get_client,
+        attachment_repository=repo,
+        download_fn=AsyncMock(),
+    )
+    repo.insert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_malformed_item_missing_file_id_does_not_block_the_rest(
+    bucket: _FakeStorageBucket, repo: AttachmentRepository
+) -> None:
+    async def fake_download(file_id: str, bot_token: str, max_size_bytes: int):
+        return "ZmFrZS1ieXRlcw==", "image/jpeg"
+
+    await capture_escalation_media(
+        escalation_id="esc-1",
+        media_file_ids=[
+            {"type": "image"},  # missing file_id
+            {"type": "image", "file_id": "good"},
+        ],
+        bot_token="token",
+        get_client=lambda: _FakeSupabaseClient(bucket),
+        attachment_repository=repo,
+        download_fn=fake_download,
+    )
+
+    assert len(bucket.uploaded) == 1
+    repo.insert.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_malformed_item_missing_type_does_not_block_the_rest(
+    bucket: _FakeStorageBucket, repo: AttachmentRepository
+) -> None:
+    async def fake_download(file_id: str, bot_token: str, max_size_bytes: int):
+        return "ZmFrZS1ieXRlcw==", "image/jpeg"
+
+    await capture_escalation_media(
+        escalation_id="esc-1",
+        media_file_ids=[
+            {"file_id": "orphan"},  # missing type
+            {"type": "image", "file_id": "good"},
+        ],
+        bot_token="token",
+        get_client=lambda: _FakeSupabaseClient(bucket),
+        attachment_repository=repo,
+        download_fn=fake_download,
+    )
+
+    assert len(bucket.uploaded) == 1
+    repo.insert.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_repository_insert_raising_is_logged_and_does_not_raise(
+    bucket: _FakeStorageBucket, repo: AttachmentRepository
+) -> None:
+    async def fake_download(file_id: str, bot_token: str, max_size_bytes: int):
+        return "ZmFrZS1ieXRlcw==", "image/jpeg"
+
+    repo.insert.side_effect = RuntimeError("db write failed")
+
+    await capture_escalation_media(
+        escalation_id="esc-1",
+        media_file_ids=[{"type": "image", "file_id": "file123"}],
+        bot_token="token",
+        get_client=lambda: _FakeSupabaseClient(bucket),
+        attachment_repository=repo,
+        download_fn=fake_download,
+    )
+
+    # Upload happened before the DB write failed.
+    assert len(bucket.uploaded) == 1
+    repo.insert.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_storage_upload_raising_is_logged_and_does_not_raise(
+    repo: AttachmentRepository,
+) -> None:
+    class _RaisingBucket:
+        def upload(self, path: str, file: bytes, file_options: Dict[str, Any]) -> None:
+            raise RuntimeError("storage upload failed")
+
+    class _RaisingStorage:
+        def from_(self, name: str) -> "_RaisingBucket":
+            return _RaisingBucket()
+
+    class _RaisingClient:
+        def __init__(self) -> None:
+            self.storage = _RaisingStorage()
+
+    async def fake_download(file_id: str, bot_token: str, max_size_bytes: int):
+        return "ZmFrZS1ieXRlcw==", "image/jpeg"
+
+    await capture_escalation_media(
+        escalation_id="esc-1",
+        media_file_ids=[{"type": "image", "file_id": "file123"}],
+        bot_token="token",
+        get_client=lambda: _RaisingClient(),
+        attachment_repository=repo,
+        download_fn=fake_download,
+    )
+
+    repo.insert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_default_download_fn_resolves_to_download_telegram_photo(
+    bucket: _FakeStorageBucket, repo: AttachmentRepository
+) -> None:
+    with patch(
+        "orchestrator.services.telegram_transport.download_telegram_photo",
+        new=AsyncMock(return_value=("ZmFrZS1ieXRlcw==", "image/jpeg")),
+    ) as mock_download:
+        await capture_escalation_media(
+            escalation_id="esc-1",
+            media_file_ids=[{"type": "image", "file_id": "file123"}],
+            bot_token="token",
+            get_client=lambda: _FakeSupabaseClient(bucket),
+            attachment_repository=repo,
+            # download_fn intentionally omitted to exercise the lazy-import
+            # default-resolution path.
+        )
+
+    mock_download.assert_awaited_once_with(
+        "file123", "token", MAX_TICKET_ATTACHMENT_SIZE_BYTES
+    )
+    assert len(bucket.uploaded) == 1
+    repo.insert.assert_awaited_once()
