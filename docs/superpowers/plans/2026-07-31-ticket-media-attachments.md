@@ -382,7 +382,7 @@ class AttachmentRepository:
 cd chat_orchestrator && python -m pytest tests/services/ticketing/test_attachment_repository.py -v
 ```
 
-Expected: PASS (6 tests).
+Expected: PASS (5 tests).
 
 - [ ] **Step 5: Commit**
 
