@@ -116,6 +116,22 @@ async def test_lifecycle_transitions_remain_explicit_and_session_scoped():
 
 
 @pytest.mark.asyncio
+async def test_reopen_sets_state_open_and_clears_resolved_at():
+    client = _Client([[{"id": "esc-1", "state": "open", "resolved_at": None}]])
+
+    await EscalationRepository(client=client).reopen("esc-1")
+
+    assert client.calls == [
+        (
+            "escalations",
+            "update",
+            {"state": "open", "resolved_at": None},
+            [("eq", "id", "esc-1")],
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_has_blocking_escalation_excludes_given_reasons():
     """Regression: a canonical-reads consumer must be able to reproduce the
     legacy "non-blocking reasons don't hold the session" distinction (see

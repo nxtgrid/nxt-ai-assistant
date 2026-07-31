@@ -99,6 +99,17 @@ class EscalationRepository:
         except Exception as exc:
             raise EscalationRepositoryError(f"failed to resolve escalation: {exc}") from exc
 
+    async def reopen(self, escalation_id: str) -> None:
+        """Unconditionally move a resolved escalation back to "open" --
+        the counterpart to resolve(), for the "reply Reopen" flow."""
+        payload = {"state": "open", "resolved_at": None}
+        try:
+            self._raw_client().table("escalations").update(payload).eq("id", escalation_id).execute()
+        except EscalationRepositoryError:
+            raise
+        except Exception as exc:
+            raise EscalationRepositoryError(f"failed to reopen escalation: {exc}") from exc
+
     async def has_blocking_escalation(
         self, chat_session_id: str, *, exclude_reasons: Optional[tuple[str, ...]] = None
     ) -> bool:

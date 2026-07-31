@@ -42,6 +42,7 @@ class _FakeQuery:
         self._op = op
         self._payload = payload
         self._filters: Dict[str, Any] = {}
+        self._order: Optional[tuple] = None
 
     def select(self, *_a, **_k) -> "_FakeQuery":
         return self
@@ -69,13 +70,25 @@ class _FakeQuery:
         self._filters[col] = f"neq:{value}"
         return self
 
+    def in_(self, col: str, values: Any) -> "_FakeQuery":
+        self._filters[col] = ("in", list(values))
+        return self
+
+    def order(self, col: str, desc: bool = False) -> "_FakeQuery":
+        self._order = (col, desc)
+        return self
+
     def limit(self, *_a, **_k) -> "_FakeQuery":
         return self
 
     def execute(self) -> _FakeResponse:
         self._t.calls.append((self._op, dict(self._filters), self._payload))
         if self._op == "select":
-            return _FakeResponse(self._t.rows_matching(self._filters))
+            matches = self._t.rows_matching(self._filters)
+            if self._order is not None:
+                col, desc = self._order
+                matches = sorted(matches, key=lambda r: r.get(col), reverse=desc)
+            return _FakeResponse(matches)
         if self._op in {"insert", "upsert"}:
             row = {"id": f"ticket-{len(self._t.rows) + 1}", **(self._payload or {})}
             self._t.rows.append(row)
@@ -95,7 +108,14 @@ class _FakeTable:
         self.calls: List[tuple] = []
 
     def rows_matching(self, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
-        return [r for r in self.rows if all(r.get(k) == v for k, v in filters.items())]
+        def match(row: Dict[str, Any], col: str, val: Any) -> bool:
+            if isinstance(val, tuple) and len(val) == 2 and val[0] == "in":
+                return row.get(col) in val[1]
+            if isinstance(val, str) and val.startswith("neq:"):
+                return str(row.get(col)) != val[len("neq:") :]
+            return row.get(col) == val
+
+        return [r for r in self.rows if all(match(r, k, v) for k, v in filters.items())]
 
     def select(self, *_a, **_k) -> _FakeQuery:
         return _FakeQuery(self, "select")
@@ -136,6 +156,8 @@ class _FakeSupabase:
         self.mapping_for_reply: Optional[Dict[str, Any]] = None
         self.session_escalation_info: Optional[Dict[str, Any]] = None
         self.session_by_id_result: Optional[SimpleNamespace] = None
+        self.escalation_by_session_result: Optional[Dict[str, Any]] = None
+        self.reopen_escalation_result: bool = True
         self.internal_ticket_lookup_calls: List[str] = []
         # Sweep fixtures — configure per-test, default to empty/no-op.
         self.stale_unfiled: List[Dict[str, Any]] = []
@@ -194,6 +216,9 @@ class _FakeSupabase:
     async def update_session_escalation_status(self, **_k):
         return None
 
+    async def reopen_escalation(self, _session_id, _escalation_message_id):
+        return self.reopen_escalation_result
+
     async def save_escalation_mapping(self, **kwargs):
         self.save_calls.append(kwargs)
         return "new-mapping-id"
@@ -202,7 +227,7 @@ class _FakeSupabase:
         return self.mapping_for_reply
 
     async def get_escalation_by_session(self, _session_id):
-        return None
+        return self.escalation_by_session_result
 
     async def save_messages(self, **_k):
         return self.saved_messages_return
@@ -1360,3 +1385,146 @@ async def test_is_session_escalated_falls_back_to_legacy_when_session_unresolvab
 
     assert await svc.is_session_escalated("telegram_abc") is True
     assert canonical.calls == []
+
+
+# ---------------------------------------------------------------------------
+# get_escalation_info -- CANONICAL_ESCALATION_READS_ENABLED flag flip
+# ---------------------------------------------------------------------------
+
+
+async def test_get_escalation_info_uses_legacy_when_flag_off(monkeypatch):
+    monkeypatch.delenv("CANONICAL_ESCALATION_READS_ENABLED", raising=False)
+    supa = _FakeSupabase(_FakeRaw())
+    supa.escalation_by_session_result = {"is_active": True, "escalation_message_id": 42}
+    svc = _make_service(supa)
+
+    result = await svc.get_escalation_info("telegram_abc")
+
+    assert result == {"is_active": True, "escalation_message_id": 42}
+
+
+async def test_get_escalation_info_resolves_via_canonical_tables_when_flag_on(monkeypatch):
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [
+        {
+            "id": "esc-1",
+            "chat_session_id": "11111111-1111-1111-1111-111111111111",
+            "state": "processing",
+            "org_hashtag": "#acme",
+            "ticket_id": "ticket-1",
+            "created_at": "2026-01-01T00:00:00Z",
+        }
+    ]
+    raw.table("message_deliveries").rows = [
+        {
+            "escalation_id": "esc-1",
+            "purpose": "escalation",
+            "external_message_id": 555,
+            "external_topic_id": "9",
+        }
+    ]
+    raw.table("tickets").rows = [
+        {
+            "id": "ticket-1",
+            "ticket_ref": "OPS-77",
+            "backend": "jira",
+            "created_via": "escalation",
+            "provisioning_state": "active",
+            "summary": "Meter offline",
+        }
+    ]
+    supa = _FakeSupabase(raw)
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(
+            id=uuid.UUID("11111111-1111-1111-1111-111111111111"), organization_id=7
+        )
+
+    supa.get_session = fake_get_session
+    # Legacy path must never be consulted when the canonical path succeeds.
+    supa.escalation_by_session_result = None
+    svc = _make_service(supa)
+
+    result = await svc.get_escalation_info("telegram_abc")
+
+    assert result == {
+        "is_active": True,
+        "session_id": "telegram_abc",
+        "escalation_message_id": 555,
+        "escalation_topic_id": "9",
+        "organization_id": 7,
+        "org_hashtag": "#acme",
+        "ticket_ref": "OPS-77",
+        "ticket_backend": "jira",
+        "jira_ticket_key": None,
+    }
+
+
+async def test_get_escalation_info_falls_back_to_legacy_when_no_active_canonical_escalation(
+    monkeypatch,
+):
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    raw = _FakeRaw()  # no escalations rows -- e.g. a pre-Phase-1 escalation
+    supa = _FakeSupabase(raw)
+    supa.escalation_by_session_result = {"is_active": True, "escalation_message_id": 42}
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=uuid.uuid4(), organization_id=7)
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    result = await svc.get_escalation_info("telegram_abc")
+
+    assert result == {"is_active": True, "escalation_message_id": 42}
+
+
+# ---------------------------------------------------------------------------
+# reopen_escalation -- canonical dual-write (mirrors the close/resolve fix)
+# ---------------------------------------------------------------------------
+
+
+async def test_reopen_escalation_reopens_the_canonical_escalation_row():
+    raw = _FakeRaw()
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-1", "external_message_id": 555, "purpose": "escalation"}
+    ]
+    raw.table("escalations").rows = [{"id": "esc-1", "state": "resolved", "resolved_at": "t"}]
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+
+    result = await svc.reopen_escalation("telegram_abc", 555)
+
+    assert result == {"success": True, "message": "Escalation reopened"}
+    escalation_row = raw.table("escalations").rows[0]
+    assert escalation_row["state"] == "open"
+    assert escalation_row["resolved_at"] is None
+
+
+async def test_reopen_escalation_does_not_dual_write_when_legacy_reopen_fails():
+    raw = _FakeRaw()
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-1", "external_message_id": 555, "purpose": "escalation"}
+    ]
+    raw.table("escalations").rows = [{"id": "esc-1", "state": "resolved"}]
+    supa = _FakeSupabase(raw)
+    supa.reopen_escalation_result = False
+    svc = _make_service(supa)
+
+    result = await svc.reopen_escalation("telegram_abc", 555)
+
+    assert result["success"] is False
+    assert raw.table("escalations").rows[0]["state"] == "resolved"
+
+
+async def test_reopen_escalation_succeeds_even_when_no_canonical_delivery_found():
+    """No message_deliveries row (e.g. an escalation that predates Phase 1)
+    must not turn a successful legacy reopen into a reported failure."""
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+
+    result = await svc.reopen_escalation("telegram_abc", 555)
+
+    assert result == {"success": True, "message": "Escalation reopened"}
