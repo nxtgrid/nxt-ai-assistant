@@ -130,7 +130,17 @@ class EscalationService:
         # Backend-agnostic ticketing seam. Routes to Jira or the internal ticket
         # backend per TICKET_BACKEND_OVERRIDE / Jira health. Shares this service's
         # own lazy-singleton Supabase getter so both see the same client.
-        self._tickets = TicketService(get_supabase_client=self._get_supabase_client)
+        #
+        # Wrapped in a lambda (rather than passing the bound method directly)
+        # so this always resolves ``self._get_supabase_client`` fresh at call
+        # time -- same as every other in-class caller of it, and the same
+        # late-binding ``self._get_raw_client`` already gets for free because
+        # its own body calls ``self._get_supabase_client()`` dynamically.
+        # Passing the bound method directly would freeze in *this* method
+        # object at construction time, so a later instance-level override of
+        # ``_get_supabase_client`` (as tests commonly do) would silently be
+        # invisible to ``self._tickets``.
+        self._tickets = TicketService(get_supabase_client=lambda: self._get_supabase_client())
         self._escalations = EscalationRepository(get_client=self._get_raw_client)
         self._deliveries = DeliveryRepository(get_client=self._get_raw_client)
         self._attachments = AttachmentRepository(get_client=self._get_raw_client)
