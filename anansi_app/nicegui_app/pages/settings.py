@@ -248,19 +248,30 @@ def visible_flags(
 
 
 def group_is_inert(group_id: str, pending: dict[str, Any]) -> bool:
-    """True when every flag in the group hangs off one switch that is off.
+    """True when the group is essentially *about* one switch that is off.
 
     Showing Grafana's dashboard/panel pickers when the Grafana server is
     disabled, or the Layout Engine's knobs when grid design is off, is the
-    single largest source of noise on this page.
+    single largest source of noise on this page. But a group can also host a
+    lone flag that depends on some unrelated toggle defined elsewhere (e.g.
+    "models" has THREAD_CLASSIFIER_MODEL, gated by the "conversation" group's
+    THREAD_DISENTANGLEMENT_ENABLED) without the group itself being about that
+    toggle — that single flag being off must not hide LLM_PROVIDER and the
+    rest of an otherwise unconditional group. Require most of the group's
+    flags to share the dependency before treating the whole section as inert.
     """
     flags = [f for f in registry.flags_in_group(group_id) if f.show_in_settings]
+    if not flags:
+        return False
     dependencies = {f.depends_on for f in flags if f.depends_on}
     if len(dependencies) != 1:
         return False
     dependency = dependencies.pop()
     if any(f.name == dependency for f in flags):
         return False  # the master switch lives in this group; keep it reachable
+    gated = sum(1 for f in flags if f.depends_on == dependency)
+    if gated * 2 <= len(flags):
+        return False  # only a minority of flags depend on it; not really about it
     return not bool(pending.get(dependency))
 
 
