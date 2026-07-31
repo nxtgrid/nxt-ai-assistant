@@ -135,6 +135,7 @@ class _FakeSupabase:
         self.saved_messages_return: List[Any] = [SimpleNamespace(id="msg-1")]
         self.mapping_for_reply: Optional[Dict[str, Any]] = None
         self.session_escalation_info: Optional[Dict[str, Any]] = None
+        self.session_by_id_result: Optional[SimpleNamespace] = None
         self.internal_ticket_lookup_calls: List[str] = []
         # Sweep fixtures — configure per-test, default to empty/no-op.
         self.stale_unfiled: List[Dict[str, Any]] = []
@@ -173,6 +174,9 @@ class _FakeSupabase:
 
     async def get_session_by_chat_id(self, **_k):
         return SimpleNamespace(id=uuid.uuid4())
+
+    async def get_session_by_id(self, _session_uuid):
+        return self.session_by_id_result
 
     async def get_messages(self, **_k):
         return []
@@ -1082,6 +1086,122 @@ async def test_handle_support_reply_tags_via_legacy_jira_ticket_key_fallback():
     await svc.handle_support_reply(reply_to_message_id=555, reply_text="hi there")
 
     assert supa.tag_calls == [("msg-1", "OPS-99", "comment")]
+
+
+# ---------------------------------------------------------------------------
+# handle_support_reply -- canonical lookup via message_deliveries
+# ---------------------------------------------------------------------------
+
+
+async def test_handle_support_reply_resolves_via_canonical_tables_when_flag_on(monkeypatch):
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    raw = _FakeRaw()
+    raw.table("message_deliveries").rows = [
+        {
+            "escalation_id": "esc-1",
+            "external_message_id": 555,
+            "purpose": "escalation",
+            "external_topic_id": "9",
+        }
+    ]
+    raw.table("escalations").rows = [
+        {
+            "id": "esc-1",
+            "chat_session_id": "session-uuid-1",
+            "state": "open",
+            "customer_email": "cust@example.com",
+            "ticket_id": "ticket-1",
+        }
+    ]
+    raw.table("tickets").rows = [
+        {
+            "id": "ticket-1",
+            "ticket_ref": "OPS-77",
+            "created_via": "escalation",
+            "provisioning_state": "active",
+            "summary": "Meter offline",
+        }
+    ]
+    supa = _FakeSupabase(raw)
+    supa.session_by_id_result = SimpleNamespace(
+        telegram_chat_id="123", telegram_topic_id=None, session_id="telegram_abc"
+    )
+    # Legacy lookup must never be consulted when the canonical path succeeds.
+    supa.mapping_for_reply = None
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 1}}
+
+    svc._send_telegram_message = fake_send
+
+    result = await svc.handle_support_reply(reply_to_message_id=555, reply_text="hi there")
+
+    assert result["success"] is True
+    assert supa.tag_calls == [("msg-1", "OPS-77", "comment")]
+
+
+async def test_handle_support_reply_falls_back_to_legacy_when_canonical_incomplete(monkeypatch):
+    """If any step of the canonical resolution comes up empty (e.g. no
+    matching delivery row -- an escalation created before Phase 1 shipped),
+    the legacy lookup still runs rather than reporting "escalation not
+    found"."""
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    raw = _FakeRaw()  # no message_deliveries rows at all
+    supa = _FakeSupabase(raw)
+    supa.mapping_for_reply = {
+        "is_active": True,
+        "customer_chat_id": "123",
+        "customer_topic_id": None,
+        "customer_email": None,
+        "session_id": "telegram_abc",
+        "ticket_ref": "OPS-77",
+        "escalation_topic_id": None,
+    }
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 1}}
+
+    svc._send_telegram_message = fake_send
+
+    result = await svc.handle_support_reply(reply_to_message_id=555, reply_text="hi there")
+
+    assert result["success"] is True
+    assert supa.tag_calls == [("msg-1", "OPS-77", "comment")]
+
+
+async def test_handle_support_reply_uses_legacy_when_flag_off(monkeypatch):
+    monkeypatch.delenv("CANONICAL_ESCALATION_READS_ENABLED", raising=False)
+    raw = _FakeRaw()
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-1", "external_message_id": 555, "purpose": "escalation"}
+    ]
+    raw.table("escalations").rows = [
+        {"id": "esc-1", "chat_session_id": "session-uuid-1", "state": "open"}
+    ]
+    supa = _FakeSupabase(raw)
+    supa.mapping_for_reply = {
+        "is_active": True,
+        "customer_chat_id": "123",
+        "customer_topic_id": None,
+        "customer_email": None,
+        "session_id": "telegram_abc",
+        "ticket_ref": "OPS-77",
+        "escalation_topic_id": None,
+    }
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 1}}
+
+    svc._send_telegram_message = fake_send
+
+    result = await svc.handle_support_reply(reply_to_message_id=555, reply_text="hi there")
+
+    assert result["success"] is True
+    # Legacy path used even though canonical rows exist -- flag is off.
+    assert supa.tag_calls == [("msg-1", "OPS-77", "comment")]
 
 
 # ---------------------------------------------------------------------------

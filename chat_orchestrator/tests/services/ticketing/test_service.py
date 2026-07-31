@@ -82,6 +82,7 @@ class _FakeTicketRepository:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.records_by_ref: dict[str, TicketRecord] = {}
+        self.records_by_id: dict[str, TicketRecord] = {}
         self.refs_by_escalation: dict[str, str] = {}
         self.find_ref_for_escalation_calls: list[str] = []
         self.transition_to_done_by_ref_calls: list[str] = []
@@ -107,6 +108,9 @@ class _FakeTicketRepository:
 
     async def get_by_ref(self, ref: str) -> Optional[TicketRecord]:
         return self.records_by_ref.get(ref)
+
+    async def get_by_id(self, ticket_id: str) -> Optional[TicketRecord]:
+        return self.records_by_id.get(ticket_id)
 
     async def find_ref_for_escalation(self, escalation_id: str) -> Optional[str]:
         self.find_ref_for_escalation_calls.append(escalation_id)
@@ -452,6 +456,34 @@ class TestFindByEscalation:
         assert repository.find_ref_for_escalation_calls == ["mapping-3"]
         assert jira.find_by_escalation_calls == []
         assert internal.find_by_escalation_calls == []
+
+
+class TestGetRefById:
+    @pytest.mark.asyncio
+    async def test_resolves_ticket_ref_from_canonical_id(self):
+        jira = _FakeBackend("jira")
+        internal = _FakeBackend("internal")
+        repository = _FakeTicketRepository()
+        repository.records_by_id["ticket-9"] = TicketRecord(
+            id="ticket-9", ticket_ref="TKT-9", backend="internal",
+            summary="x", created_via="escalation", provisioning_state="active",
+        )
+        service = _make_service(
+            raw_client=None, jira=jira, internal=internal, ticket_repository=repository
+        )
+
+        assert await service.get_ref_by_id("ticket-9") == "TKT-9"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_ticket_id_unknown(self):
+        jira = _FakeBackend("jira")
+        internal = _FakeBackend("internal")
+        repository = _FakeTicketRepository()
+        service = _make_service(
+            raw_client=None, jira=jira, internal=internal, ticket_repository=repository
+        )
+
+        assert await service.get_ref_by_id("missing") is None
 
 
 class TestTransitionToDone:

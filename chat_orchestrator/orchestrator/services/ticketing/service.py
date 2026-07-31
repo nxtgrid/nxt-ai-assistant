@@ -255,6 +255,16 @@ class TicketService:
         """
         return (await self._backend_for_ref(ref)).name
 
+    async def get_ref_by_id(self, ticket_id: str) -> Optional[str]:
+        """Return the backend-agnostic ``ticket_ref`` for a canonical ticket id.
+
+        Used by canonical-reads consumers that only have ``tickets.id``
+        (e.g. an ``escalations.ticket_id`` fk) and need the ref for display
+        or comment tagging.
+        """
+        ticket = await self._tickets.get_by_id(ticket_id)
+        return ticket.ticket_ref if ticket else None
+
     async def transition_to_done(self, ref: str) -> None:
         backend = await self._backend_for_ref(ref)
         await backend.transition_to_done(ref)

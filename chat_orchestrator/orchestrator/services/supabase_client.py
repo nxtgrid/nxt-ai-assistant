@@ -204,6 +204,22 @@ class EnhancedSupabaseClient:
             LOGGER.error(f"Error getting session: {e}")
             return None
 
+    async def get_session_by_id(self, session_uuid: str) -> Optional[ChatSessionModel]:
+        """Get session by its chat_sessions.id uuid (the canonical FK
+        escalations.chat_session_id points at) rather than the text
+        session_id column get_session() looks up by."""
+        try:
+            client = self._get_client()
+            response = client.table("chat_sessions").select("*").eq("id", session_uuid).execute()
+
+            if response.data:
+                return ChatSessionModel(**response.data[0])
+            return None
+
+        except Exception as e:
+            LOGGER.error(f"Error getting session by id: {e}")
+            return None
+
     async def get_session_by_chat_id(
         self, source: str, chat_id: str, topic_id: str | None = None
     ) -> Optional[ChatSessionModel]:

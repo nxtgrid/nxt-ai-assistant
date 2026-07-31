@@ -41,6 +41,18 @@ from shared.utils.telegram_buttons import (
 LOGGER = get_logger(__name__)
 
 
+def _canonical_escalations(supabase_client) -> Any:
+    """EscalationRepository bound to this handler's Supabase client.
+
+    Local import avoids a module-load-time cycle (escalation_repository has
+    no reason to import callback_handlers, but keeping the import lazy here
+    matches this file's existing pattern for cross-service imports).
+    """
+    from orchestrator.services.escalation_repository import EscalationRepository
+
+    return EscalationRepository(get_client=supabase_client._get_client)
+
+
 async def _handle_callback_query(args: Dict[str, Any]) -> Dict[str, Any]:
     """
     Handle Telegram callback_query updates (inline button clicks).
@@ -836,6 +848,12 @@ async def _handle_escalation_track_callback(
         else:
             # Revert: re-activate the escalation since ticket creation failed
             await supabase_client.reactivate_escalation(mapping_id)
+            try:
+                await _canonical_escalations(supabase_client).release(mapping_id)
+            except Exception:
+                LOGGER.warning(
+                    "Could not release canonical escalation {}", mapping_id, exc_info=True
+                )
             error_msg = result.get("error", "Unknown error")
             LOGGER.error(f"Failed to track escalation {mapping_id}: {error_msg}")
             # Edit message to show failure (can't answer callback twice)
@@ -910,6 +928,18 @@ async def _handle_escalation_close_callback(
             ).eq("id", mapping_id).execute()
         except Exception:
             LOGGER.warning("Could not set resolved_at for mapping {}", mapping_id, exc_info=True)
+
+        # Canonical mirror: nothing else transitions escalations.state to
+        # "resolved" for a close that never goes through track_as_ticket (no
+        # ticket filed), so without this the canonical row would stay stuck
+        # at "open"/"processing" forever -- making a canonical-reads consumer
+        # (e.g. is_session_escalated) think this escalation is still active.
+        try:
+            await _canonical_escalations(supabase_client).resolve(mapping_id)
+        except Exception:
+            LOGGER.warning(
+                "Could not resolve canonical escalation {}", mapping_id, exc_info=True
+            )
 
         session_id = escalation.get("session_id")
         if not session_id:

@@ -1258,6 +1258,61 @@ class EscalationService:
             topic_id=topic_id,
         )
 
+    async def _resolve_support_reply_canonical(
+        self, reply_to_message_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Canonical-table equivalent of get_escalation_mapping(reply_to_message_id).
+
+        Returns a dict shaped like the fields handle_support_reply reads off
+        the legacy mapping row, or None if any step is inconclusive --
+        callers fall back to the legacy lookup rather than treat "couldn't
+        resolve" as "no escalation found".
+        """
+        supabase_client = self._get_supabase_client()
+        if supabase_client is None:
+            return None
+        try:
+            delivery = await self._deliveries.find_escalation_delivery(
+                external_message_id=reply_to_message_id
+            )
+            if delivery is None:
+                return None
+            escalation_id = delivery.get("escalation_id")
+            if not escalation_id:
+                return None
+            escalation = await self._escalations.get(escalation_id)
+            if escalation is None:
+                return None
+            chat_session_uuid = escalation.get("chat_session_id")
+            session = (
+                await supabase_client.get_session_by_id(chat_session_uuid)
+                if chat_session_uuid
+                else None
+            )
+            if session is None or not session.telegram_chat_id:
+                return None
+            ticket_ref = None
+            ticket_id = escalation.get("ticket_id")
+            if ticket_id:
+                ticket_ref = await self._tickets.get_ref_by_id(ticket_id)
+            return {
+                "is_active": escalation.get("state") == "open",
+                "customer_chat_id": session.telegram_chat_id,
+                "customer_topic_id": session.telegram_topic_id,
+                "customer_email": escalation.get("customer_email"),
+                "escalation_topic_id": delivery.get("external_topic_id"),
+                "session_id": session.session_id,
+                "ticket_ref": ticket_ref,
+            }
+        except Exception:
+            LOGGER.warning(
+                "Canonical support-reply resolution failed for message_id {} -- "
+                "falling back to legacy",
+                reply_to_message_id,
+                exc_info=True,
+            )
+            return None
+
     async def handle_support_reply(
         self,
         reply_to_message_id: int,
@@ -1279,7 +1334,10 @@ class EscalationService:
         supabase_client = self._get_supabase_client()
         mapping = None
 
-        if supabase_client:
+        if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+            mapping = await self._resolve_support_reply_canonical(reply_to_message_id)
+
+        if mapping is None and supabase_client:
             mapping = await supabase_client.get_escalation_mapping(reply_to_message_id)
 
         if not mapping:

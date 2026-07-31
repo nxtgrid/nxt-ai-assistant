@@ -190,6 +190,7 @@ class _FakeRawClient:
             "internal_tickets": _FakeTable(tables.get("internal_tickets")),
             "internal_ticket_comments": _FakeTable(tables.get("internal_ticket_comments")),
             "chat_messages": _FakeTable(tables.get("chat_messages")),
+            "chat_sessions": _FakeTable(tables.get("chat_sessions")),
         }
 
     def table(self, name: str) -> Any:
@@ -211,6 +212,42 @@ def test_does_not_expose_legacy_internal_ticket_helpers():
         "get_ticket_comments",
     ):
         assert not hasattr(SupabaseClient, method_name)
+
+
+# ---------------------------------------------------------------------------
+# get_session_by_id
+# ---------------------------------------------------------------------------
+
+
+class TestGetSessionById:
+    @pytest.mark.asyncio
+    async def test_looks_up_by_uuid_not_text_session_id(self):
+        raw = _FakeRawClient(
+            tables={
+                "chat_sessions": [
+                    {
+                        "id": "11111111-1111-1111-1111-111111111111",
+                        "session_id": "telegram_abc",
+                        "telegram_chat_id": "123",
+                        "telegram_topic_id": "9",
+                    }
+                ]
+            }
+        )
+        client = _make_client(raw)
+
+        session = await client.get_session_by_id("11111111-1111-1111-1111-111111111111")
+
+        assert session is not None
+        assert session.session_id == "telegram_abc"
+        assert session.telegram_chat_id == "123"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_not_found(self):
+        raw = _FakeRawClient()
+        client = _make_client(raw)
+
+        assert await client.get_session_by_id("missing") is None
 
 
 # ---------------------------------------------------------------------------
