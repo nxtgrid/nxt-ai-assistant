@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
+from .attachment_repository import AttachmentRepository
 from .backend import (
     TicketBackend,
     TicketBackendError,
@@ -62,11 +63,14 @@ class TicketService:
         """
         self._supabase_client_instance = supabase_client
         self._get_supabase_client_fn = get_supabase_client
-        self._jira: TicketBackend = jira_backend or JiraTicketBackend()
+        self._jira: TicketBackend = jira_backend or JiraTicketBackend(
+            get_storage_client=self._raw_client
+        )
         self._tickets = ticket_repository or TicketRepository(get_client=self._raw_client)
         self._internal: TicketBackend = internal_backend or InternalTicketBackend(
             get_client=self._raw_client, ticket_repository=self._tickets
         )
+        self._attachments = AttachmentRepository(get_client=self._raw_client)
 
     # ------------------------------------------------------------------
     # Supabase access (wrapper -> raw client, matching EscalationService's
@@ -192,7 +196,36 @@ class TicketService:
             await self._stamp_escalation_mapping(
                 req.escalation_mapping_id, result.ref, result.backend
             )
+            await self._sync_attachments(req.escalation_mapping_id, intent.id, result.ref, backend)
         return result.model_copy(update={"ticket_id": intent.id})
+
+    async def _sync_attachments(
+        self, escalation_id: str, ticket_id: str, ticket_ref: str, backend: TicketBackend
+    ) -> None:
+        """Link any escalation-time attachments to the new ticket and push
+        them to the backend (a no-op for internal, a real upload for Jira).
+
+        Best-effort: a failure here must not turn an already-created ticket
+        into a reported failure -- the ticket exists either way, only the
+        attachment sync is incomplete.
+        """
+        try:
+            attachments = await self._attachments.list_by_escalation(escalation_id)
+            if not attachments:
+                return
+            await self._attachments.link_ticket(escalation_id, ticket_id)
+            synced = await backend.add_attachments(ticket_ref, attachments)
+            for sync_result in synced:
+                await self._attachments.mark_synced(
+                    sync_result.attachment_id, sync_result.external_id
+                )
+        except Exception:
+            LOGGER.warning(
+                "Failed to sync attachments for escalation {} / ticket {}",
+                escalation_id,
+                ticket_ref,
+                exc_info=True,
+            )
 
     async def create_ticket_with_internal_fallback(
         self, req: TicketCreateRequest, backend_override: Optional[str] = None

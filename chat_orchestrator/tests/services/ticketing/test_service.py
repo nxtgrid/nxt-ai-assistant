@@ -12,10 +12,14 @@ resolve_backend() itself is covered by test_service_resolve_backend.py.
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from orchestrator.services.ticketing.attachment_repository import EscalationAttachment
 from orchestrator.services.ticketing.backend import (
+    AttachmentSyncResult,
+    BackendTicketResult,
     TicketBackendError,
     TicketCreateRequest,
     TicketResult,
@@ -639,3 +643,128 @@ class TestFindOpenByGrid:
 
         assert jira.find_open_by_grid_calls == [("Kudi", 20)]
         assert internal.find_open_by_grid_calls == []
+
+
+class TestDefaultJiraBackendGetsStorageGetter:
+    def test_default_constructed_jira_backend_can_download_attachments(self) -> None:
+        """Regression guard for the exact bug caught in this task's self-review:
+        TicketService's default `self._jira = jira_backend or JiraTicketBackend()`
+        must pass get_storage_client=self._raw_client, or add_attachments()
+        silently no-ops in production (only the DI'd tests in Task 8 supply one)."""
+        service = TicketService(supabase_client=MagicMock())
+        assert service._jira._get_storage_client is not None
+        assert service._jira._get_storage_client == service._raw_client
+
+
+class TestCreateTicketAttachments:
+    @pytest.mark.asyncio
+    async def test_links_and_syncs_attachments_when_present_for_the_escalation(self) -> None:
+        attachment = EscalationAttachment(
+            id="att-1",
+            escalation_id="mapping-1",
+            storage_path="mapping-1/a.jpg",
+            media_type="image",
+            mime_type="image/jpeg",
+            size_bytes=10,
+        )
+        internal_backend = MagicMock()
+        internal_backend.name = "internal"
+        internal_backend.create_ticket = AsyncMock(
+            return_value=BackendTicketResult(ref="INT-1", backend="internal")
+        )
+        internal_backend.add_attachments = AsyncMock(
+            return_value=[AttachmentSyncResult(attachment_id="att-1", external_id="ext-1")]
+        )
+
+        service = TicketService(supabase_client=MagicMock(), internal_backend=internal_backend)
+        service._tickets = MagicMock()
+        service._tickets.create_intent = AsyncMock(
+            return_value=TicketRecord(
+                id="ticket-1",
+                created_via="escalation",
+                provisioning_state="pending",
+                summary="s",
+            )
+        )
+        service._tickets.set_pending_backend = AsyncMock()
+        service._tickets.activate = AsyncMock()
+        service._attachments = MagicMock()
+        service._attachments.list_by_escalation = AsyncMock(return_value=[attachment])
+        service._attachments.link_ticket = AsyncMock()
+        service._attachments.mark_synced = AsyncMock()
+
+        await service.create_ticket(
+            TicketCreateRequest(
+                summary="s", escalation_mapping_id="mapping-1", source="escalation"
+            ),
+            backend_override="internal",
+        )
+
+        service._attachments.list_by_escalation.assert_awaited_once_with("mapping-1")
+        service._attachments.link_ticket.assert_awaited_once_with("mapping-1", "ticket-1")
+        internal_backend.add_attachments.assert_awaited_once_with("INT-1", [attachment])
+        service._attachments.mark_synced.assert_awaited_once_with("att-1", "ext-1")
+
+    @pytest.mark.asyncio
+    async def test_skips_attachment_work_when_none_exist_for_the_escalation(self) -> None:
+        internal_backend = MagicMock()
+        internal_backend.name = "internal"
+        internal_backend.create_ticket = AsyncMock(
+            return_value=BackendTicketResult(ref="INT-1", backend="internal")
+        )
+        internal_backend.add_attachments = AsyncMock(return_value=[])
+
+        service = TicketService(supabase_client=MagicMock(), internal_backend=internal_backend)
+        service._tickets = MagicMock()
+        service._tickets.create_intent = AsyncMock(
+            return_value=TicketRecord(
+                id="ticket-1",
+                created_via="escalation",
+                provisioning_state="pending",
+                summary="s",
+            )
+        )
+        service._tickets.set_pending_backend = AsyncMock()
+        service._tickets.activate = AsyncMock()
+        service._attachments = MagicMock()
+        service._attachments.list_by_escalation = AsyncMock(return_value=[])
+        service._attachments.link_ticket = AsyncMock()
+
+        await service.create_ticket(
+            TicketCreateRequest(
+                summary="s", escalation_mapping_id="mapping-1", source="escalation"
+            ),
+            backend_override="internal",
+        )
+
+        service._attachments.link_ticket.assert_not_awaited()
+        internal_backend.add_attachments.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_skips_attachment_lookup_when_no_escalation_mapping_id(self) -> None:
+        internal_backend = MagicMock()
+        internal_backend.name = "internal"
+        internal_backend.create_ticket = AsyncMock(
+            return_value=BackendTicketResult(ref="INT-1", backend="internal")
+        )
+
+        service = TicketService(supabase_client=MagicMock(), internal_backend=internal_backend)
+        service._tickets = MagicMock()
+        service._tickets.create_intent = AsyncMock(
+            return_value=TicketRecord(
+                id="ticket-1",
+                created_via="notification",
+                provisioning_state="pending",
+                summary="s",
+            )
+        )
+        service._tickets.set_pending_backend = AsyncMock()
+        service._tickets.activate = AsyncMock()
+        service._attachments = MagicMock()
+        service._attachments.list_by_escalation = AsyncMock()
+
+        await service.create_ticket(
+            TicketCreateRequest(summary="s", source="notify"), backend_override="internal"
+        )
+
+        service._attachments.list_by_escalation.assert_not_awaited()
