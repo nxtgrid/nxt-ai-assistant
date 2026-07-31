@@ -743,6 +743,39 @@ async def test_new_escalation_dual_writes_canonical_escalation_and_delivery():
     assert delivery["external_message_id"] == 42
 
 
+async def test_new_escalation_skips_legacy_write_once_legacy_writes_stopped(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    resolved_uuid = uuid.uuid4()
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=resolved_uuid)
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 42}}
+
+    svc._send_telegram_message = fake_send
+
+    result = await svc.escalate_to_support(**_new_escalation_kwargs(reason="could_not_answer"))
+
+    assert result["success"] is True
+    assert supa.save_calls == []  # legacy escalation_mappings write skipped entirely
+
+    escalation_rows = raw.tables["escalations"].rows
+    assert len(escalation_rows) == 1
+    assert escalation_rows[0]["chat_session_id"] == str(resolved_uuid)
+    assert escalation_rows[0]["state"] == "open"
+
+    delivery_rows = raw.tables["message_deliveries"].rows
+    assert len(delivery_rows) == 1
+    assert delivery_rows[0]["escalation_id"] == escalation_rows[0]["id"]
+    assert delivery_rows[0]["external_message_id"] == 42
+
+
 async def test_followup_escalation_dual_writes_canonical_escalation_and_delivery():
     raw = _FakeRaw()
     supa = _FakeSupabase(raw)
@@ -821,6 +854,80 @@ async def test_followup_escalation_attaches_ticket_id_when_prelinked_to_existing
 
     delivery_rows = raw.tables["message_deliveries"].rows
     assert delivery_rows[0]["ticket_id"] == "ticket-1"
+
+
+async def test_followup_escalation_skips_legacy_write_once_legacy_writes_stopped(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    resolved_uuid = uuid.uuid4()
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=resolved_uuid)
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    tickets = await _drive_followup(svc, is_done=False)
+    assert tickets.get_status_calls == ["OPS-77"]
+
+    assert supa.save_calls == []  # legacy escalation_mappings write skipped entirely
+
+    escalation_rows = raw.tables["escalations"].rows
+    assert len(escalation_rows) == 1
+    assert escalation_rows[0]["chat_session_id"] == str(resolved_uuid)
+
+    delivery_rows = raw.tables["message_deliveries"].rows
+    assert len(delivery_rows) == 1
+    assert delivery_rows[0]["escalation_id"] == escalation_rows[0]["id"]
+
+
+# ---------------------------------------------------------------------------
+# escalate_verification_failure -- canonical dual-write, generates its own id
+# (unlike the other two escalation-creation paths) since this call site
+# never pre-generates a mapping id client-side.
+# ---------------------------------------------------------------------------
+
+
+async def test_verification_failure_escalation_skips_legacy_write_once_legacy_writes_stopped(
+    monkeypatch,
+):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    resolved_uuid = uuid.uuid4()
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=resolved_uuid)
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 77}}
+
+    svc._send_telegram_message = fake_send
+
+    result = await svc.escalate_verification_failure(
+        original_message="what is my balance",
+        failed_response="bad response",
+        verification_feedback="hallucinated a number",
+        session_id="telegram_abc",
+        customer_chat_id="123",
+    )
+
+    assert result["success"] is True
+    assert supa.save_calls == []  # legacy escalation_mappings write skipped entirely
+
+    escalation_rows = raw.tables["escalations"].rows
+    assert len(escalation_rows) == 1
+    assert escalation_rows[0]["chat_session_id"] == str(resolved_uuid)
+    assert escalation_rows[0]["reason"] == "verification_failed"
+
+    delivery_rows = raw.tables["message_deliveries"].rows
+    assert len(delivery_rows) == 1
+    assert delivery_rows[0]["escalation_id"] == escalation_rows[0]["id"]
+    assert delivery_rows[0]["external_message_id"] == 77
 
 
 # ---------------------------------------------------------------------------

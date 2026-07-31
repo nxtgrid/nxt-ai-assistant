@@ -506,27 +506,31 @@ class EscalationService:
                             existing_backend == "jira"
                             or (not existing_backend and _ref_from_jira_key)
                         )
-                        saved_followup_id = await supabase_client.save_escalation_mapping(
-                            escalation_message_id=followup_msg_id,
-                            customer_chat_id=customer_chat_id,
-                            session_id=session_id,
-                            customer_topic_id=customer_topic_id,
-                            org_hashtag=(
-                                f"#{organization_short_name}" if organization_short_name else None
-                            ),
-                            customer_email=customer_email,
-                            customer_username=customer_username,
-                            reason=reason,
-                            action_type=action_type,
-                            mapping_id=followup_mapping_id,
-                            organization_id=organization_id,
-                            escalation_topic_id=followup_topic_id,
-                            question_text=question_summary,
-                            thread_id=thread_id,
-                            ticket_ref=existing_ref,
-                            ticket_backend=existing_backend if existing_ref else None,
-                            jira_ticket_key=existing_ref if followup_is_jira else None,
-                        )
+                        saved_followup_id = followup_mapping_id
+                        if not fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+                            saved_followup_id = await supabase_client.save_escalation_mapping(
+                                escalation_message_id=followup_msg_id,
+                                customer_chat_id=customer_chat_id,
+                                session_id=session_id,
+                                customer_topic_id=customer_topic_id,
+                                org_hashtag=(
+                                    f"#{organization_short_name}"
+                                    if organization_short_name
+                                    else None
+                                ),
+                                customer_email=customer_email,
+                                customer_username=customer_username,
+                                reason=reason,
+                                action_type=action_type,
+                                mapping_id=followup_mapping_id,
+                                organization_id=organization_id,
+                                escalation_topic_id=followup_topic_id,
+                                question_text=question_summary,
+                                thread_id=thread_id,
+                                ticket_ref=existing_ref,
+                                ticket_backend=existing_backend if existing_ref else None,
+                                jira_ticket_key=existing_ref if followup_is_jira else None,
+                            )
                         if saved_followup_id:
                             prelinked_ticket_id = (
                                 await self._tickets.get_id_by_ref(existing_ref)
@@ -650,22 +654,24 @@ class EscalationService:
                 if escalation_message_id and customer_chat_id and session_id:
                     supabase_client = self._get_supabase_client()
                     if supabase_client:
-                        saved_mapping_id = await supabase_client.save_escalation_mapping(
-                            escalation_message_id=escalation_message_id,
-                            customer_chat_id=customer_chat_id,
-                            session_id=session_id,
-                            customer_topic_id=customer_topic_id,
-                            org_hashtag=f"#{clean_tag}" if clean_tag else None,
-                            customer_email=customer_email,
-                            customer_username=customer_username,
-                            reason=reason,
-                            action_type=action_type,
-                            mapping_id=mapping_id,
-                            organization_id=organization_id,
-                            escalation_topic_id=escalation_topic_id,
-                            question_text=question_summary,
-                            thread_id=thread_id,
-                        )
+                        saved_mapping_id = mapping_id
+                        if not fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+                            saved_mapping_id = await supabase_client.save_escalation_mapping(
+                                escalation_message_id=escalation_message_id,
+                                customer_chat_id=customer_chat_id,
+                                session_id=session_id,
+                                customer_topic_id=customer_topic_id,
+                                org_hashtag=f"#{clean_tag}" if clean_tag else None,
+                                customer_email=customer_email,
+                                customer_username=customer_username,
+                                reason=reason,
+                                action_type=action_type,
+                                mapping_id=mapping_id,
+                                organization_id=organization_id,
+                                escalation_topic_id=escalation_topic_id,
+                                question_text=question_summary,
+                                thread_id=thread_id,
+                            )
                         if saved_mapping_id:
                             await self._record_canonical_escalation(
                                 saved_mapping_id,
@@ -3227,19 +3233,28 @@ class EscalationService:
                         clean_tag = None
                         if organization_short_name:
                             clean_tag = "".join(c for c in organization_short_name if c.isalnum())
-                        saved_verification_id = await supabase_client.save_escalation_mapping(
-                            escalation_message_id=escalation_message_id,
-                            customer_chat_id=customer_chat_id,
-                            session_id=session_id,
-                            customer_topic_id=customer_topic_id,
-                            org_hashtag=f"#{clean_tag}" if clean_tag else None,
-                            customer_username=customer_username,
-                            reason="verification_failed",
-                            organization_id=organization_id,
-                            escalation_topic_id=escalation_topic_id,
-                            question_text=original_message[:2000] if original_message else None,
-                            thread_id=thread_id,
-                        )
+                        saved_verification_id = None
+                        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+                            # This call site (unlike the other two) never
+                            # pre-generates a mapping id -- save_escalation_mapping
+                            # otherwise does that internally.
+                            saved_verification_id = str(uuid.uuid4())
+                        else:
+                            saved_verification_id = await supabase_client.save_escalation_mapping(
+                                escalation_message_id=escalation_message_id,
+                                customer_chat_id=customer_chat_id,
+                                session_id=session_id,
+                                customer_topic_id=customer_topic_id,
+                                org_hashtag=f"#{clean_tag}" if clean_tag else None,
+                                customer_username=customer_username,
+                                reason="verification_failed",
+                                organization_id=organization_id,
+                                escalation_topic_id=escalation_topic_id,
+                                question_text=(
+                                    original_message[:2000] if original_message else None
+                                ),
+                                thread_id=thread_id,
+                            )
                         if saved_verification_id:
                             await self._record_canonical_escalation(
                                 saved_verification_id,
