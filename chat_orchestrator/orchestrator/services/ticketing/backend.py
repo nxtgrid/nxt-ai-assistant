@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Literal, Optional, Protocol, runtime_checkab
 
 from pydantic import BaseModel, Field
 
+from .attachment_repository import EscalationAttachment
+
 TicketSourceLiteral = Literal["escalation", "notify"]
 TicketBackendName = Literal["jira", "internal"]
 
@@ -120,6 +122,18 @@ class TicketBackendError(RuntimeError):
     """
 
 
+class AttachmentSyncResult(BaseModel):
+    """One attachment successfully pushed to an external backend (e.g. Jira).
+
+    Returned by TicketBackend.add_attachments() so TicketService can persist
+    the external id (escalation_attachments.jira_attachment_id) without the
+    backend needing its own AttachmentRepository reference.
+    """
+
+    attachment_id: str
+    external_id: str
+
+
 @runtime_checkable
 class TicketBackend(Protocol):
     """Interface implemented by ``JiraTicketBackend`` and ``InternalTicketBackend``.
@@ -178,5 +192,20 @@ class TicketBackend(Protocol):
         Never raises -- returns ``[]`` on any failure so a backend outage
         degrades correlation to "no candidates found" (i.e. file a new
         ticket) rather than a hard error.
+        """
+        ...
+
+    async def add_attachments(
+        self, ticket_ref: str, attachments: List["EscalationAttachment"]
+    ) -> List["AttachmentSyncResult"]:
+        """Push attachments to this backend's external system, if any.
+
+        Attachments are already linked to the ticket (escalation_attachments.
+        ticket_id is set by TicketService before this is called) and already
+        live in Storage -- this method only needs to do backend-specific I/O.
+        The internal backend has nothing external to push to and always
+        returns []. Never raises -- a failed upload is logged and simply
+        omitted from the returned list, leaving that attachment's
+        jira_attachment_id NULL for a future retry.
         """
         ...

@@ -1008,6 +1008,10 @@ class ConversationGraphBuilder:
             escalation_service = EscalationService()
 
             if escalation_service.is_enabled():
+                from orchestrator.services.ticketing.attachment_capture import (
+                    extract_media_file_ids,
+                )
+
                 result = await escalation_service.escalate_to_support(
                     question_summary=f"[CONTENT BLOCKED - {finish_reason}] User message was blocked by AI safety filters",
                     session_id=session_id or "",
@@ -1024,6 +1028,7 @@ class ConversationGraphBuilder:
                     ),
                     reason="content_blocked",
                     thread_id=state.get("thread_id"),
+                    media_file_ids=extract_media_file_ids(metadata),
                 )
 
                 if result.get("success"):
@@ -1071,6 +1076,10 @@ class ConversationGraphBuilder:
             escalation_service = EscalationService()
 
             if escalation_service.is_enabled():
+                from orchestrator.services.ticketing.attachment_capture import (
+                    extract_media_file_ids,
+                )
+
                 result = await escalation_service.escalate_to_support(
                     question_summary=(
                         f"[LOOP DETECTED] Bot stuck in repetitive loop "
@@ -1093,6 +1102,7 @@ class ConversationGraphBuilder:
                     ),
                     reason="loop_detected",
                     thread_id=state.get("thread_id"),
+                    media_file_ids=extract_media_file_ids(metadata),
                 )
 
                 if result.get("success"):
@@ -1460,6 +1470,9 @@ class ConversationGraphBuilder:
                 LOGGER.info("escalate_to_support: calling EscalationService directly")
                 try:
                     from orchestrator.services.escalation_service import EscalationService
+                    from orchestrator.services.ticketing.attachment_capture import (
+                        extract_media_file_ids,
+                    )
 
                     esc_service = EscalationService()
                     args = call.arguments or {}
@@ -1478,6 +1491,7 @@ class ConversationGraphBuilder:
                         reason=args.get("reason"),
                         action_type=args.get("action_type"),
                         thread_id=metadata.get("thread_id"),
+                        media_file_ids=extract_media_file_ids(metadata),
                     )
                     if not esc_result.get("success"):
                         # Add explicit instruction so Gemini doesn't claim success

@@ -15,6 +15,7 @@ from typing import Any, Dict
 from loguru import logger as LOGGER
 
 from orchestrator.graphs.state import ConversationState
+from orchestrator.services.ticketing.attachment_capture import extract_media_file_ids
 from shared.auth import get_auth_service
 from shared.utils.error_messages import ErrorCategory, get_user_message
 
@@ -202,6 +203,7 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
             customer_email=user_context.user_email if user_context else None,
             conversation_context=esc_context,
             reason="safety_escalation",
+            media_file_ids=extract_media_file_ids(state.get("metadata", {})),
         )
 
         if safety_result.get("success"):

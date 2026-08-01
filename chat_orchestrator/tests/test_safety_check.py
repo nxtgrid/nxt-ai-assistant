@@ -27,6 +27,7 @@ def _make_state(**overrides):
         "user_context": None,
         "session_id": "session-123",
         "user_input": "Purchasing new meter for customer at Kudi, drop me the designated account",
+        "metadata": {},
     }
     base.update(overrides)
     return base
@@ -140,3 +141,13 @@ def test_extract_kwargs_from_tool_call_text_recovers_arguments():
 
 def test_extract_kwargs_from_tool_call_text_returns_empty_on_no_match():
     assert safety_check_module._extract_kwargs_from_tool_call_text("no call here", "escalate_to_support") == {}
+
+
+@pytest.mark.asyncio
+async def test_raw_tool_call_leak_forwards_media_file_ids(fake_escalation_service):
+    state = _make_state(final_response=LEAKED_TEXT, metadata={"photo_file_id": "photo1"})
+
+    await safety_check(state)
+
+    _, kwargs = fake_escalation_service.escalate_to_support.await_args
+    assert kwargs["media_file_ids"] == [{"type": "image", "file_id": "photo1"}]

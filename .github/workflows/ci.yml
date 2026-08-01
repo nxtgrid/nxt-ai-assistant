@@ -25,15 +25,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: chat_orchestrator/uv.lock
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Install dependencies
         working-directory: chat_orchestrator
-        run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          pip install -e .[dev]
+        run: uv sync --extra dev
       - name: Run tests
         working-directory: chat_orchestrator
         env:
@@ -41,17 +42,13 @@ jobs:
           GOOGLE_API_KEY: test-key  # pragma: allowlist secret
           CHAT_DB_URL: https://placeholder.supabase.co  # pragma: allowlist secret
           CHAT_DB_SERVICE_KEY: placeholder  # pragma: allowlist secret
-        run: |
-          source .venv/bin/activate
-          pytest tests/ -x -q
+        run: uv run pytest tests/ -x -q
       # shared/ has no venv of its own; chat_orchestrator's dependency set covers
       # it, and chat_orchestrator imports it, so it is tested here rather than in
       # a job that would install the same packages a second time.
       - name: Run tests (shared)
         working-directory: chat_orchestrator
-        run: |
-          source .venv/bin/activate
-          pytest ../shared -q
+        run: uv run pytest ../shared -q
 
   validate:
     name: Validate (mcp_servers, anansi_app)
@@ -80,27 +77,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: chat_orchestrator/uv.lock
       - uses: actions/setup-python@v6
         with:
           python-version: "3.11"
       - name: Install dependencies
         working-directory: chat_orchestrator
         run: |
-          python -m venv .venv
-          source .venv/bin/activate
-          pip install --upgrade pip "setuptools>=83"
-          pip install -e .[dev]
-          pip install pip-audit
+          uv sync --extra dev
+          uv pip install pip-audit
       - name: Audit installed environment
         working-directory: chat_orchestrator
         run: |
-          source .venv/bin/activate
           # PYSEC-2026-1845: pytest local tmpdir DoS/race, only exploitable by another
           # local user racing the same CI runner's /tmp - not applicable to GitHub's
           # single-tenant, ephemeral runners, and pytest is a dev-only dependency never
           # shipped in the deployed container. Fixed in 9.0.3, above our <9 cap; not
           # worth a major-version test-runner bump for a finding that doesn't apply here.
-          pip-audit --progress-spinner off --ignore-vuln PYSEC-2026-1845
+          uv run pip-audit --progress-spinner off --ignore-vuln PYSEC-2026-1845
 
   audit-requirements:
     name: Dependency CVE audit

@@ -367,6 +367,13 @@ def _render_detail_body(container, detail: dict) -> None:
 
         _correlation_section(detail)
 
+        attachments = detail.get("attachments") or []
+        if attachments:
+            ui.label(f"Attachments ({len(attachments)})").classes("text-bold q-mt-sm")
+            with ui.column().classes("gap-1"):
+                for attachment in attachments:
+                    _attachment_card(attachment)
+
         ui.label("Comment timeline (read-only)").classes("text-bold q-mt-sm")
         comments = detail.get("comments") or []
         if not comments:
@@ -443,6 +450,26 @@ def _correlation_section(detail: dict) -> None:
                     f"via {decided_by}{confidence_text}"
                     + (f": {reason}" if reason else "")
                 ).classes("text-caption")
+
+
+def _attachment_card(attachment: dict) -> None:
+    with ui.card().classes("w-full q-pa-sm").style("border: 1px solid #e2e8f0"):
+        with ui.row().classes("items-center gap-2 w-full"):
+            ui.label(f"📎 {attachment.get('media_type', 'file')}").classes("text-caption text-bold")
+            if attachment.get("size_bytes"):
+                kb = attachment["size_bytes"] / 1024
+                ui.label(f"{kb:.0f} KB").classes("text-caption text-grey")
+            ui.space()
+            ui.label(_format_time_ago(attachment.get("created_at"))).classes(
+                "text-caption text-grey"
+            )
+        if attachment.get("signed_url"):
+            if (attachment.get("media_type") or "").startswith("image"):
+                ui.image(attachment["signed_url"]).classes("q-mt-xs").style("max-width: 300px")
+            else:
+                ui.link("↗ View attachment", attachment["signed_url"], new_tab=True)
+        else:
+            ui.label("(attachment unavailable)").classes("text-caption text-grey")
 
 
 def _comment_card(comment: dict) -> None:

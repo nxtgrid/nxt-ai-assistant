@@ -28,6 +28,8 @@ from zoneinfo import ZoneInfo
 import aiohttp
 
 from orchestrator.services.escalation_repository import EscalationRepository
+from orchestrator.services.ticketing.attachment_capture import capture_escalation_media
+from orchestrator.services.ticketing.attachment_repository import AttachmentRepository
 from orchestrator.services.ticketing.backend import TicketBackendError, TicketCreateRequest
 from orchestrator.services.ticketing.delivery_repository import DeliveryRepository
 from orchestrator.services.ticketing.service import TicketService
@@ -135,9 +137,25 @@ class EscalationService:
         # Backend-agnostic ticketing seam. Routes to Jira or the internal ticket
         # backend per TICKET_BACKEND_OVERRIDE / Jira health. Shares this service's
         # own lazy-singleton Supabase getter so both see the same client.
-        self._tickets = TicketService(get_supabase_client=self._get_supabase_client)
-        self._escalations = EscalationRepository(get_client=self._get_raw_client)
-        self._deliveries = DeliveryRepository(get_client=self._get_raw_client)
+        #
+        # Wrapped in a lambda (rather than passing the bound method directly)
+        # so this always resolves ``self._get_supabase_client`` fresh at call
+        # time -- same as every other in-class caller of it, and the same
+        # late-binding ``self._get_raw_client`` already gets for free because
+        # its own body calls ``self._get_supabase_client()`` dynamically.
+        # Passing the bound method directly would freeze in *this* method
+        # object at construction time, so a later instance-level override of
+        # ``_get_supabase_client`` (as tests commonly do) would silently be
+        # invisible to ``self._tickets``.
+        self._tickets = TicketService(get_supabase_client=lambda: self._get_supabase_client())
+        # Same late-binding reasoning as self._tickets above -- these three
+        # currently avoid the staleness bug only because _get_raw_client's
+        # own body re-reads self._get_supabase_client() dynamically, which is
+        # an implementation detail of _get_raw_client, not a guarantee. A
+        # lambda makes these safe on their own terms too.
+        self._escalations = EscalationRepository(get_client=lambda: self._get_raw_client())
+        self._deliveries = DeliveryRepository(get_client=lambda: self._get_raw_client())
+        self._attachments = AttachmentRepository(get_client=lambda: self._get_raw_client())
 
     def is_enabled(self) -> bool:
         """Check if escalation service is properly configured."""
@@ -247,6 +265,7 @@ class EscalationService:
         reason: Optional[str] = None,
         action_type: Optional[str] = None,
         thread_id: Optional[str] = None,
+        media_file_ids: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """
         Escalate a customer support question to internal support group or Jira.
@@ -281,6 +300,10 @@ class EscalationService:
                 - meter_replacement: Physical meter swap
                 - commissioning_retry: Manual commissioning retry
                 - other_action: Other staff action
+            media_file_ids: Optional [{type, file_id}] pairs from the triggering turn's
+                Telegram metadata (see attachment_capture.extract_media_file_ids) --
+                captured to the new ticket-attachment pipeline, independent of the
+                LLM-vision media path.
 
         Returns:
             Dict with success status and message
@@ -305,6 +328,7 @@ class EscalationService:
             reason=reason,
             action_type=action_type,
             thread_id=thread_id,
+            media_file_ids=media_file_ids,
         )
 
     async def _get_or_create_escalation_topic(
@@ -360,6 +384,7 @@ class EscalationService:
         reason: Optional[str] = None,
         action_type: Optional[str] = None,
         thread_id: Optional[str] = None,
+        media_file_ids: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """Escalate to Telegram (debug mode)."""
 
@@ -680,6 +705,21 @@ class EscalationService:
                                 topic_id=escalation_topic_id,
                                 reason=reason,
                             )
+                        if saved_mapping_id and media_file_ids:
+                            try:
+                                await capture_escalation_media(
+                                    escalation_id=saved_mapping_id,
+                                    media_file_ids=media_file_ids,
+                                    bot_token=self._bot_token,
+                                    get_client=self._get_raw_client,
+                                    attachment_repository=self._attachments,
+                                )
+                            except Exception:
+                                LOGGER.warning(
+                                    "Failed to capture escalation media for mapping {}",
+                                    saved_mapping_id,
+                                    exc_info=True,
+                                )
                         LOGGER.info(
                             f"Saved escalation to database: msg_id={escalation_message_id} → "
                             f"chat_id={customer_chat_id}, session={session_id}, "

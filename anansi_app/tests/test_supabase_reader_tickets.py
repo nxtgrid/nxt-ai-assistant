@@ -325,6 +325,40 @@ def test_canonical_ticket_detail_reads_recorded_delivery_with_a_safe_link():
     ]
 
 
+def test_get_canonical_ticket_detail_includes_attachments():
+    seed = _seed()
+    seed.update(
+        {
+            "tickets": [
+                {
+                    "id": "ticket-1", "ticket_ref": "OPS-9", "backend": "internal",
+                    "created_via": "escalation", "status": "open", "summary": "s",
+                }
+            ],
+            "escalation_attachments": [
+                {
+                    "id": "att-1",
+                    "escalation_id": "esc-1",
+                    "ticket_id": "ticket-1",
+                    "storage_path": "esc-1/a.jpg",
+                    "media_type": "image",
+                    "mime_type": "image/jpeg",
+                    "size_bytes": 10,
+                    "created_at": "2026-07-31T00:00:00Z",
+                }
+            ],
+        }
+    )
+    reader = SupabaseReader.__new__(SupabaseReader)
+    reader.client = _FakeClient(seed)
+
+    detail = reader.get_canonical_ticket_detail("ticket-1")
+
+    assert len(detail["attachments"]) == 1
+    assert detail["attachments"][0]["media_type"] == "image"
+    assert detail["attachments"][0]["mime_type"] == "image/jpeg"
+
+
 def test_list_tickets_unifies_both_backends():
     rows = _reader().list_tickets()
     refs = [r["ticket_ref"] for r in rows]
