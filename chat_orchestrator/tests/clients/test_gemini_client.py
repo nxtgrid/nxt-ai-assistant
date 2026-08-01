@@ -200,6 +200,51 @@ async def test_gemini_client_generates_from_conversation_messages():
 
 
 @pytest.mark.asyncio
+async def test_gemini_client_omits_deprecated_sampling_params_for_gemini_3():
+    """Gemini 3.x rejects candidateCount/topK/topP with 400 INVALID_ARGUMENT.
+
+    Regression test: gemini-3.1-flash-lite in production returned
+    INVALID_ARGUMENT on every single call because these fields were sent
+    unconditionally, and categorize_error()'s "invalid" keyword match then
+    mislabeled the failure as a user-input rephrase problem.
+    """
+    gateway = FakeGateway()
+    gateway.generate_content = _async_returning(
+        gateway,
+        {
+            "candidates": [
+                {
+                    "finishReason": "STOP",
+                    "content": {"parts": [{"text": "ok"}]},
+                }
+            ],
+            "usageMetadata": {"promptTokenCount": 1, "candidatesTokenCount": 1},
+        },
+    )
+    client = GeminiClient(
+        api_key="test-key",
+        model_config=GeminiModelConfig(
+            model="gemini-3.1-flash-lite",
+            fallback_model="gemini-2.5-flash",
+            max_output_tokens=512,
+            thinking_budget=1024,
+        ),
+        gateway=gateway,
+    )
+
+    await client.generate_messages([ConversationMessage(role="user", content="hi")])
+
+    payload, model = gateway.calls[0]
+    generation_config = payload["generationConfig"]
+    assert "candidateCount" not in generation_config
+    assert "topK" not in generation_config
+    assert "topP" not in generation_config
+    assert generation_config["maxOutputTokens"] == 512
+    assert generation_config["thinkingConfig"] == {"thinkingLevel": "medium"}
+    assert model == "gemini-3.1-flash-lite"
+
+
+@pytest.mark.asyncio
 async def test_gemini_client_extracts_tool_calls_from_response():
     gateway = FakeGateway()
     gateway.generate_content = _async_returning(
