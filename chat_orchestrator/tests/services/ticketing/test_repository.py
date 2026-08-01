@@ -152,6 +152,30 @@ async def test_get_by_ref_returns_the_persisted_backend_instead_of_inferring_it(
 
 
 @pytest.mark.asyncio
+async def test_get_by_id_returns_the_ticket_for_its_own_uuid():
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "OPS-123", "backend": "jira",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+    }]
+
+    record = await TicketRepository(client=client).get_by_id("ticket-1")
+
+    assert record is not None
+    assert record.ticket_ref == "OPS-123"
+    table, mode, _payload, filters = client.calls[0]
+    assert (table, mode, filters) == ("tickets", "select", [("id", "ticket-1")])
+
+
+@pytest.mark.asyncio
+async def test_get_by_id_returns_none_when_not_found():
+    client = _Client()
+    client.select_rows = []
+
+    assert await TicketRepository(client=client).get_by_id("missing") is None
+
+
+@pytest.mark.asyncio
 async def test_get_status_by_ref_reads_the_canonical_ticket_projection():
     client = _Client()
     client.select_rows = [{

@@ -19,10 +19,68 @@ from typing import Any, Dict, List, Optional
 from orchestrator.services.escalation_service import EscalationService
 from orchestrator.services.supabase_client import SupabaseClient
 from shared.auth.auth_service import AuthService, get_auth_service
+from shared.config import flag_registry as fr
 from shared.utils.date_utils import parse_iso_with_timezone
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+
+
+def _canonical_escalation_metrics_rows(
+    client: Any, start_date: datetime, end_date: datetime
+) -> Optional[List[Dict[str, Any]]]:
+    """Canonical (escalations table) equivalent of the escalation_mappings
+    query in collect_metrics_for_date.
+
+    escalations has no customer_chat_id column (unlike escalation_mappings),
+    so this resolves each row's chat_session_id to a telegram_chat_id via a
+    batched chat_sessions lookup -- same pattern as meta_mcp_server's
+    _get_response_distribution. Returns None (not []) on any failure so the
+    caller falls back to the legacy query.
+    """
+    try:
+        response = (
+            client.table("escalations")
+            .select("chat_session_id, created_at, resolved_at")
+            .gte("created_at", start_date.isoformat())
+            .lt("created_at", end_date.isoformat())
+            .execute()
+        )
+        rows = response.data or []
+        session_ids = list({r["chat_session_id"] for r in rows if r.get("chat_session_id")})
+        if not session_ids:
+            return []
+
+        chat_id_by_session: Dict[str, str] = {}
+        batch_size = 50
+        for i in range(0, len(session_ids), batch_size):
+            batch = session_ids[i : i + batch_size]
+            session_response = (
+                client.table("chat_sessions")
+                .select("id, telegram_chat_id")
+                .in_("id", batch)
+                .execute()
+            )
+            for session in session_response.data or []:
+                if session.get("id") and session.get("telegram_chat_id"):
+                    chat_id_by_session[session["id"]] = session["telegram_chat_id"]
+
+        result: List[Dict[str, Any]] = []
+        for row in rows:
+            chat_id = chat_id_by_session.get(row.get("chat_session_id"))
+            if chat_id is None:
+                continue
+            result.append(
+                {
+                    "customer_chat_id": chat_id,
+                    "created_at": row.get("created_at"),
+                    "resolved_at": row.get("resolved_at"),
+                }
+            )
+        return result
+    except Exception as e:
+        LOGGER.warning(f"Canonical escalation metrics query failed: {e}")
+        return None
 
 
 class MetricsService:
@@ -196,17 +254,25 @@ class MetricsService:
         total_close_minutes = 0.0
         close_count = 0
         try:
-            # Fetch created_at and resolved_at to compute avg time to close
-            escalations_response = (
-                client.table("escalation_mappings")
-                .select("customer_chat_id, created_at, resolved_at")
-                .gte("created_at", start_of_day.isoformat())
-                .lt("created_at", end_of_range.isoformat())
-                .execute()
-            )
+            escalation_rows = None
+            if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+                escalation_rows = _canonical_escalation_metrics_rows(
+                    client, start_of_day, end_of_range
+                )
+
+            if escalation_rows is None:
+                # Fetch created_at and resolved_at to compute avg time to close
+                escalations_response = (
+                    client.table("escalation_mappings")
+                    .select("customer_chat_id, created_at, resolved_at")
+                    .gte("created_at", start_of_day.isoformat())
+                    .lt("created_at", end_of_range.isoformat())
+                    .execute()
+                )
+                escalation_rows = escalations_response.data or []
 
             # Count escalations per user and accumulate close times
-            for row in escalations_response.data or []:
+            for row in escalation_rows:
                 chat_id = row.get("customer_chat_id") or "unknown"
 
                 # Skip excluded chat IDs
@@ -240,7 +306,7 @@ class MetricsService:
                     except (ValueError, AttributeError):
                         LOGGER.debug(f"Skipping malformed escalation timestamp: {row!r}")
 
-            escalation_count = len(escalations_response.data or [])
+            escalation_count = len(escalation_rows)
             LOGGER.info(f"Escalation query returned {escalation_count} records")
 
         except Exception as e:

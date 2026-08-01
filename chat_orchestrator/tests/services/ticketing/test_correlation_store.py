@@ -614,6 +614,19 @@ class TestMarkClosed:
 
         assert await store.mark_closed("TKT-1") is False
 
+    @pytest.mark.asyncio
+    async def test_updates_by_ticket_id_when_the_ticket_is_known(self):
+        store, fake = _make_store()
+        fake.tables["tickets"] = [{"id": "ticket-abc", "ticket_ref": "TKT-1"}]
+        fake.tables["ticket_correlations"] = [
+            {"ticket_ref": "TKT-OLD", "ticket_id": "ticket-abc", "status": "open"}
+        ]
+
+        ok = await store.mark_closed("TKT-1")
+
+        assert ok is True
+        assert fake.tables["ticket_correlations"][0]["status"] == "done"
+
 
 class TestRecordEvent:
     @pytest.mark.asyncio
@@ -718,6 +731,25 @@ class TestGetCorrelation:
         fake.tables["ticket_correlations"] = [
             {"ticket_ref": "TKT-1", "grid_name": "Kudi"},
             {"ticket_ref": "TKT-2", "grid_name": "Other"},
+        ]
+
+        row = await store.get_correlation("TKT-1")
+
+        assert row is not None
+        assert row["grid_name"] == "Kudi"
+
+    @pytest.mark.asyncio
+    async def test_resolves_by_ticket_id_when_the_ticket_is_known(self):
+        """Regression: the correlation row is looked up by ticket_id (the
+        table's eventual sole identity, see db/migrations/0005b) whenever the
+        ticket is resolvable -- not by ticket_ref, which can go stale (e.g. a
+        pre-migration row never updated) while ticket_id stays correct."""
+        store, fake = _make_store()
+        fake.tables["tickets"] = [{"id": "ticket-abc", "ticket_ref": "TKT-1"}]
+        fake.tables["ticket_correlations"] = [
+            # Stale ticket_ref -- would not match "TKT-1" directly -- but the
+            # correct ticket_id, proving the lookup actually keyed on it.
+            {"ticket_ref": "TKT-OLD", "ticket_id": "ticket-abc", "grid_name": "Kudi"},
         ]
 
         row = await store.get_correlation("TKT-1")

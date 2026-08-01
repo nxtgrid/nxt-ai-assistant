@@ -34,9 +34,14 @@ class TestRegistryIntegrity:
                 assert isinstance(value, str), name
 
     def test_scopes_are_valid(self):
-        valid = {fr.SCOPE_GLOBAL, fr.SERVICE_BOT}
+        # Every flag is app-level today: DigitalOcean's per-service env block
+        # required an exact service name match, and the one non-global scope
+        # ("anansi-bot") pointed at a service that no longer exists once the
+        # app split into chat-orchestrator/tools-service/anansi-app, so saves
+        # for those flags were silently dropped. Global envs are inherited by
+        # every service, which is what all of them actually need.
         for name, flag in fr.FLAGS.items():
-            assert flag.scope in valid, f"{name} has unexpected scope {flag.scope}"
+            assert flag.scope == fr.SCOPE_GLOBAL, f"{name} has unexpected scope {flag.scope}"
 
     def test_coerce_falls_back_to_default_when_unset(self):
         assert fr.get("MAX_TOOL_ROUNDS", env={}) == 5
@@ -136,14 +141,10 @@ class TestSettingsServiceConsistency:
             assert name not in read_only
 
     def test_service_specific_routing(self):
-        ss = fr.service_specific_settings()
-        # Bot-scoped flags route to anansi-bot; everything in the map is non-global.
-        assert ss["VERIFICATION_ENABLED"] == fr.SERVICE_BOT
-        assert ss["LAYOUT_POLE_SPACING_M"] == fr.SERVICE_BOT
-        assert all(v != fr.SCOPE_GLOBAL for v in ss.values())
-        # Global flags are absent from the routing map.
-        assert "JIRA_ENABLED" not in ss
-        assert "MAX_TOOL_ROUNDS" not in ss
+        # No flag opts into a specific DigitalOcean service today (see
+        # test_scopes_are_valid) — every flag is global, so the routing map
+        # this feeds DigitalOceanBackend._apply_to_spec with is empty.
+        assert fr.service_specific_settings() == {}
 
     def test_settings_defaults_includes_deployment_flags_as_read_only(self):
         # DEFAULT_TIMEZONE / STAFF_ORG_ID / SETTINGS_BACKEND / SETTINGS_FILE were
@@ -241,23 +242,22 @@ class TestBackends:
         assert isinstance(get_backend(), DigitalOceanBackend)
 
     def test_do_backend_spec_routing(self):
-        """Global vs service-specific flags land in the right spec block."""
+        """All writable flags land in the app-level spec block (see test_scopes_are_valid)."""
         backend = DigitalOceanBackend(app_id="x", api_token="y")
-        spec = {"envs": [], "services": [{"name": fr.SERVICE_BOT, "envs": []}]}
+        spec = {"envs": [], "services": [{"name": "chat-orchestrator", "envs": []}]}
         backend._apply_to_spec(
             spec,
             {
-                "JIRA_ENABLED": False,  # global
-                "VERIFICATION_ENABLED": True,  # anansi-bot
-                "GEMINI_MODEL": "gemini-2.5-flash",  # editable via picker
+                "JIRA_ENABLED": False,
+                "VERIFICATION_ENABLED": True,
+                "GEMINI_MODEL": "gemini-2.5-flash",
+                "LLM_PROVIDER": "openrouter",
             },
         )
         global_keys = {e["key"] for e in spec["envs"]}
-        bot_keys = {e["key"] for e in spec["services"][0]["envs"]}
-        assert "JIRA_ENABLED" in global_keys
-        assert "VERIFICATION_ENABLED" in bot_keys
-        assert "GEMINI_MODEL" in global_keys
-        assert "GEMINI_MODEL" not in bot_keys
+        service_keys = {e["key"] for e in spec["services"][0]["envs"]}
+        assert global_keys == {"JIRA_ENABLED", "VERIFICATION_ENABLED", "GEMINI_MODEL", "LLM_PROVIDER"}
+        assert service_keys == set()
 
 
 # --------------------------------------------------------------------------- #

@@ -133,6 +133,25 @@ class TicketRepository:
         rows = getattr(response, "data", None) or []
         return TicketRecord.model_validate(rows[0]) if rows else None
 
+    async def get_by_id(self, ticket_id: str) -> TicketRecord | None:
+        """Return canonical ticket identity by its own uuid, if known."""
+        try:
+            response = (
+                self._raw_client()
+                .table("tickets")
+                .select("*")
+                .eq("id", ticket_id)
+                .limit(1)
+                .execute()
+            )
+        except TicketRepositoryError:
+            raise
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to read canonical ticket: {exc}") from exc
+
+        rows = getattr(response, "data", None) or []
+        return TicketRecord.model_validate(rows[0]) if rows else None
+
     async def get_status_by_ref(self, ref: str) -> TicketStatus | None:
         ticket = await self.get_by_ref(ref)
         if ticket is None:

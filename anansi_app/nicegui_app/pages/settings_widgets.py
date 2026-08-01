@@ -22,12 +22,17 @@ _CSV_LIST_FLAGS = frozenset(
         "GRID_DESIGN_EDITORS",
         "GRID_PROCUREMENT_EDITORS",
         "NO_REPLY_CHAT_IDS",
+        # Its options are fetched live from OpenRouter per selected model, so
+        # settings.py's _render_flag special-cases this name (checked before the
+        # generic MULTI_SELECT branch) to populate the picker from the live-fetched
+        # routes instead of just the flags's own current value. It still needs to
+        # land on MULTI_SELECT here, though: leaving it a plain TEXT field routed
+        # its default "" straight into nicegui's ui.select as a single value, which
+        # isn't one of the route keys -- ValueError, crashing the whole settings
+        # page and everything below "AI Models & Providers" in the group list.
+        "OPENROUTER_PROVIDER_ORDER",
     }
 )
-# OPENROUTER_PROVIDER_ORDER is deliberately absent: it is also a comma-separated
-# list, but its options are fetched live from OpenRouter per selected model, so
-# it keeps the bespoke picker in settings.py rather than a generic chip input
-# that would drop the discovered routes.
 
 
 class RenderMode(Enum):

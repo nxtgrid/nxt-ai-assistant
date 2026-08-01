@@ -30,6 +30,15 @@ class TestRenderMode:
     def test_email_lists_render_as_chips(self):
         assert render_mode(fr.FLAGS["ALLOWED_VIEWER_EMAILS"]) is RenderMode.MULTI_SELECT
 
+    def test_openrouter_provider_order_renders_as_chips_not_text(self):
+        """Must be MULTI_SELECT so _render_flag's bespoke OPENROUTER_PROVIDER_ORDER
+        branch (which renders value=[] for the default "") actually runs, instead
+        of falling through to the generic single-select branch, which crashes
+        nicegui's ui.select with ValueError on an empty-string value that isn't
+        one of the live-fetched route keys.
+        """
+        assert render_mode(fr.FLAGS["OPENROUTER_PROVIDER_ORDER"]) is RenderMode.MULTI_SELECT
+
 
 class TestSecretPlaceholder:
     def test_set_secret_shows_a_masked_marker_and_no_value(self):
