@@ -1,0 +1,565 @@
+# =============================================================================
+# DigitalOcean App Platform Spec — PREBUILT IMAGE VARIANT (EXAMPLE TEMPLATE)
+#
+# Identical to app.example.yaml except each service's source is a prebuilt
+# GHCR image (published by .github/workflows/build-images.yml) instead of
+# `github:` + `dockerfile_path:`. Use this if you want App Platform to pull
+# a ready-made image on deploy instead of building the Dockerfile itself —
+# see the README's "Faster deploys: prebuilt images" section for the
+# tradeoffs and the safe cutover/rollback procedure.
+#
+# MAINTENANCE NOTE: this file must be kept in sync with app.example.yaml —
+# everything below except the three `image:` blocks (chat-orchestrator,
+# tools-service, anansi-app) should mirror that file exactly. Diff them
+# when either one changes.
+#
+# Copy this file to app.yaml and replace all "your-*" placeholders,
+# including `registry: your-github-org` / `repository: your-repo-name/...`
+# below with the actual GHCR path your fork publishes to
+# (ghcr.io/<owner>/<repo>/<service> — see build-images.yml).
+#
+# IMPORTANT: Never commit app.yaml with real credentials.
+# =============================================================================
+name: anansi
+region: ams
+
+# =============================================================================
+# Custom Domains
+# IMPORTANT: This section MUST be preserved during any spec updates.
+# DNS: your-app.example.com CNAME -> your-app-id.ondigitalocean.app
+# =============================================================================
+domains:
+  - domain: your-app.example.com
+    type: PRIMARY
+
+# =============================================================================
+# App-Level Environment Variables (shared across all services)
+# =============================================================================
+envs:
+  # API Security
+  - key: API_KEY
+    value: "${API_KEY}"
+    scope: RUN_TIME
+    type: SECRET
+
+  # Logging (can be changed via anansi-app Settings UI)
+  - key: LOG_LEVEL
+    value: "INFO"
+    scope: RUN_TIME
+
+  # Canonical public URL of the Anansi app
+  - key: APP_URL
+    value: "https://your-app.example.com"
+    scope: RUN_TIME
+
+  # Chat Database (Supabase) - legacy name still used by some components
+  - key: SUPABASE_URL
+    value: "${SUPABASE_URL}"
+    scope: RUN_TIME
+  - key: SUPABASE_KEY
+    value: "${SUPABASE_KEY}"
+    scope: RUN_TIME
+    type: SECRET
+
+  # Chat Database (preferred names)
+  - key: CHAT_DB_URL
+    value: "${CHAT_DB_URL}"
+    scope: RUN_TIME
+  - key: CHAT_DB_SERVICE_KEY
+    value: "${CHAT_DB_SERVICE_KEY}"
+    scope: RUN_TIME
+    type: SECRET
+
+  # Auth Database
+  - key: AUTH_DB_DIRECT_CONNECTION
+    value: "true"
+    scope: RUN_TIME
+  - key: AUTH_DB_HOST
+    value: "${AUTH_DB_HOST}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: AUTH_DB_PORT
+    value: "6543"
+    scope: RUN_TIME
+  - key: AUTH_DB_NAME
+    value: "postgres"
+    scope: RUN_TIME
+  - key: AUTH_DB_USER
+    value: "${AUTH_DB_USER}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: AUTH_DB_PASSWORD
+    value: "${AUTH_DB_PASSWORD}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: AUTH_DB_SSL_MODE
+    value: "require"
+    scope: RUN_TIME
+
+  # Session ID Security
+  - key: SESSION_ID_SECRET
+    value: "${SESSION_ID_SECRET}"
+    scope: RUN_TIME
+    type: SECRET
+
+  # Google Services
+  - key: GOOGLE_API_KEY
+    value: "${GOOGLE_API_KEY}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: GOOGLE_SERVICE_ACCOUNT_JSON
+    value: "${GOOGLE_SERVICE_ACCOUNT_JSON}"
+    scope: RUN_TIME
+    type: SECRET
+
+  # Google Docs - System Instructions (doc IDs, not secrets)
+  - key: CUSTOMER_SUPPORT_DOC_ID
+    value: "your-customer-support-doc-id"  # pragma: allowlist secret
+    scope: RUN_TIME
+  - key: STAFF_SUPPORT_DOC_ID
+    value: "your-staff-support-doc-id"  # pragma: allowlist secret
+    scope: RUN_TIME
+
+  # Telegram
+  - key: TELEGRAM_BOT_TOKEN
+    value: "${TELEGRAM_BOT_TOKEN}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: TELEGRAM_BOT_USERNAME
+    value: "${TELEGRAM_BOT_USERNAME}"
+    scope: RUN_TIME
+  - key: ESCALATION_TELEGRAM_CHAT_ID
+    value: "your-escalation-telegram-chat-id"
+    scope: RUN_TIME
+  - key: DEBUG_TELEGRAM_CHAT_ID
+    value: "your-debug-telegram-chat-id"
+    scope: RUN_TIME
+
+  # LLM Settings
+  - key: ALLOW_PARALLEL_CALLS
+    value: "true"
+    scope: RUN_TIME
+  - key: MAX_TOOL_ROUNDS
+    value: "3"
+    scope: RUN_TIME
+  - key: GEMINI_TEMPERATURE
+    value: "0.2"
+    scope: RUN_TIME
+  - key: GEMINI_MODEL
+    value: "gemini-flash-latest"
+    scope: RUN_TIME
+  - key: GEMINI_FALLBACK_MODEL
+    value: "gemini-2.5-flash"
+    scope: RUN_TIME
+
+  # Feature Flags
+  - key: DEBUG
+    value: "false"
+    scope: RUN_TIME
+  - key: DEVELOPMENT_MODE
+    value: "false"
+    scope: RUN_TIME
+  - key: BOT_ENABLED
+    value: "true"
+    scope: RUN_TIME
+
+  # Action Feature Flags (tools that write/modify data)
+  - key: JIRA_ACTIONS_ENABLED
+    value: "true"
+    scope: RUN_TIME
+  - key: SUPABASE_ACTIONS_ENABLED
+    value: "false"
+    scope: RUN_TIME
+  - key: TIMESCALE_ACTIONS_ENABLED
+    value: "false"
+    scope: RUN_TIME
+  - key: CALIN_ACTIONS_ENABLED
+    value: "false"
+    scope: RUN_TIME
+  - key: GRAFANA_ACTIONS_ENABLED
+    value: "true"
+    scope: RUN_TIME
+
+  # RAG Settings
+  - key: rag__enabled
+    value: "true"
+    scope: RUN_TIME
+  - key: rag__top_k
+    value: "5"
+    scope: RUN_TIME
+
+  # Metrics
+  - key: METRICS_ENABLED
+    value: "true"
+    scope: RUN_TIME
+  - key: METRICS_SCHEDULE_HOUR
+    value: "9"
+    scope: RUN_TIME
+  - key: METRICS_TIMEZONE
+    value: "UTC"
+    scope: RUN_TIME
+
+  # Grafana
+  - key: GRAFANA_URL
+    value: "https://grafana.example.com"
+    scope: RUN_TIME
+  - key: GRAFANA_USERNAME
+    value: "your-grafana-user"
+    scope: RUN_TIME
+  - key: GRAFANA_PASSWORD
+    value: "${GRAFANA_PASSWORD}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: GRAFANA_FOLDER_NAME
+    value: ""
+    scope: RUN_TIME
+  - key: ORGANIZATION_NAME
+    value: "Your Organization"
+    scope: RUN_TIME
+  - key: GRAFANA_PANEL_DESCRIPTION_PROMPT
+    value: "You are a system that generates tool descriptions for Grafana dashboard panels. Given a panel with title, description, query, and dashboard variables, create a concise tool description that explains what data this panel shows and what variables it requires. Format: A tool description suitable for an LLM to understand when to use this panel."
+    scope: RUN_TIME
+  - key: GRAFANA_ENABLED_PANELS
+    value: ""
+    scope: RUN_TIME
+  - key: GRAFANA_ENABLED_DASHBOARDS
+    value: ""
+    scope: RUN_TIME
+  - key: GRAFANA_SYNC_HOUR
+    value: "2"
+    scope: RUN_TIME
+  - key: GRAFANA_FORCE_FULL_REINDEX
+    value: "true"
+    scope: RUN_TIME
+
+  # Admin UI
+  - key: ALLOWED_VIEWER_EMAILS
+    value: "admin@example.com"
+    scope: RUN_TIME
+  - key: STAFF_ORG_NAME
+    value: "Staff"
+    scope: RUN_TIME
+  - key: DEFAULT_BROADCAST_GROUPS
+    value: ""
+    scope: RUN_TIME
+
+  # JIRA
+  - key: JIRA_BASE_URL
+    value: "https://your-org.atlassian.net"
+    scope: RUN_TIME
+  - key: JIRA_USERNAME
+    value: "admin@example.com"
+    scope: RUN_TIME
+  - key: JIRA_API_TOKEN
+    value: "${JIRA_API_TOKEN}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: JIRA_OPS_CLOUD_ID
+    value: "your-jira-ops-cloud-id"
+    scope: RUN_TIME
+  - key: JIRA_OPS_SCHEDULE_ID
+    value: "your-jira-ops-schedule-id"
+    scope: RUN_TIME
+
+  # TimescaleDB
+  - key: TIMESCALE_HOST
+    value: "your-timescale-host.tsdb.cloud.timescale.com"
+    scope: RUN_TIME
+  - key: TIMESCALE_PORT
+    value: "37244"
+    scope: RUN_TIME
+  - key: TIMESCALE_DATABASE
+    value: "tsdb"
+    scope: RUN_TIME
+  - key: TIMESCALE_USER
+    value: "your-timescale-user"
+    scope: RUN_TIME
+  - key: TIMESCALE_PASSWORD
+    value: "${TIMESCALE_PASSWORD}"
+    scope: RUN_TIME
+    type: SECRET
+
+  # Calin Meter API V1
+  - key: CALIN_V1_BASE_URL
+    value: "http://your-calin-v1-host:6001"
+    scope: RUN_TIME
+  - key: CALIN_V1_USERNAME
+    value: "your-calin-v1-username"
+    scope: RUN_TIME
+  - key: CALIN_V1_PASSWORD
+    value: "${CALIN_V1_PASSWORD}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: CALIN_V1_COMPANY
+    value: "YOUR_COMPANY"
+    scope: RUN_TIME
+
+  # Calin Meter API V2
+  - key: CALIN_V2_BASE_URL
+    value: "http://your-calin-v2-host:9400"
+    scope: RUN_TIME
+  - key: CALIN_V2_USERNAME
+    value: "your-calin-v2-username"
+    scope: RUN_TIME
+  - key: CALIN_V2_PASSWORD
+    value: "${CALIN_V2_PASSWORD}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: CALIN_V2_COMPANY
+    value: "YOUR_COMPANY"
+    scope: RUN_TIME
+
+  # VRM (Victron Remote Management)
+  - key: VRM_TOKEN
+    value: "${VRM_TOKEN}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: VRM_MQTT_USER
+    value: "vrm.mqtt@example.com"
+    scope: RUN_TIME
+  - key: VRM_MQTT_PASSWORD
+    value: "${VRM_MQTT_PASSWORD}"
+    scope: RUN_TIME
+    type: SECRET
+
+  # ChirpStack (LoRaWAN)
+  - key: CHIRPSTACK_BASE_URL
+    value: "https://lorawan.example.com"
+    scope: RUN_TIME
+
+  # Metering Platform API
+  - key: METERING_API_URL
+    value: "https://your-metering-api.example.com/"
+    scope: RUN_TIME
+  - key: METERING_BEARER_TOKEN
+    value: "${METERING_BEARER_TOKEN}"
+    scope: RUN_TIME
+    type: SECRET
+
+# =============================================================================
+# Ingress Rules
+# =============================================================================
+ingress:
+  rules:
+    # preserve_path_prefix is required here: DigitalOcean strips the matched
+    # prefix before forwarding by default, so without it a request to
+    # /chat/notify would reach the chat-orchestrator container as bare
+    # /notify (no such route -> 404) and a request to bare /chat would
+    # collapse to / (the wrong handler). Omitting this on just the /chat
+    # rule broke every nested route under /chat in production while /chat
+    # itself kept "working" by accident (both handlers share the same auth
+    # check, so the misrouted response looked plausible).
+    - component:
+        name: chat-orchestrator
+        preserve_path_prefix: true
+      match:
+        path:
+          prefix: /chat
+    - component:
+        name: chat-orchestrator
+        preserve_path_prefix: true
+      match:
+        path:
+          prefix: /mini-app
+    - component:
+        name: chat-orchestrator
+        preserve_path_prefix: true
+      match:
+        path:
+          prefix: /api/mini-app
+    - component:
+        name: tools-service
+      match:
+        path:
+          prefix: /mcp
+    - component:
+        name: anansi-app
+      match:
+        path:
+          prefix: /
+
+# =============================================================================
+# Services
+# =============================================================================
+services:
+  # ---------------------------------------------------------------------------
+  # Service 1: Chat Orchestrator
+  # Main API endpoint for chat interactions
+  # IMPORTANT: image must bundle shared/ and rag_pipeline/ — built by
+  # .github/workflows/build-images.yml from chat_orchestrator/Dockerfile
+  # ---------------------------------------------------------------------------
+  - name: chat-orchestrator
+    image:
+      registry_type: GHCR
+      registry: your-github-org
+      repository: your-repo-name/chat-orchestrator
+      tag: latest
+    http_port: 8000
+    instance_count: 1
+    instance_size_slug: basic-xxs  # 512MB RAM, 1 vCPU
+    termination:
+      drain_seconds: 30        # Wait for LB to drain before SIGTERM
+      grace_period_seconds: 600  # Covers full 10-min LPP + cleanup (max allowed)
+    health_check:
+      http_path: /health
+      initial_delay_seconds: 10
+      period_seconds: 30
+
+    envs:
+      # Bridge URL (internal service communication)
+      - key: BRIDGE_URL
+        value: "${tools-service.PRIVATE_URL}"
+        scope: RUN_TIME
+      # Tools service URL (same as BRIDGE_URL, used by user_permissions.py)
+      - key: TOOLS_SERVICE_URL
+        value: "${tools-service.PRIVATE_URL}"
+        scope: RUN_TIME
+
+      # JIRA Configuration
+      - key: JIRA_PROJECT_KEY
+        value: ""
+        scope: RUN_TIME
+      - key: JIRA_ISSUE_TYPE
+        value: "Support"
+        scope: RUN_TIME
+      # /chat/notify ticketing: keep alerts internal unless Jira is intentionally selected.
+      - key: NOTIFY_TICKETS_BACKEND
+        value: "internal"
+        scope: RUN_TIME
+      # Set false only to bypass alert correlation; ticketing remains fail-open.
+      - key: ALERT_CORRELATION_ENABLED
+        value: "true"
+        scope: RUN_TIME
+
+      # After-hours escalation handling begins at this hour (0-23).
+      - key: AFTER_HOURS_START_HOUR
+        value: "19"
+        scope: RUN_TIME
+
+      # Response Verification (LLM-as-judge for customer mode)
+      - key: VERIFICATION_ENABLED
+        value: "true"
+        scope: RUN_TIME
+      - key: VERIFICATION_DOC_ID
+        value: "your-verification-doc-id"  # pragma: allowlist secret
+        scope: RUN_TIME
+      - key: VERIFICATION_MODEL
+        value: "gemini-2.5-flash-lite"
+        scope: RUN_TIME
+
+      # Urgent /chat/notify live inverter-output lookup budget
+      - key: URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS
+        value: "3"
+        scope: RUN_TIME
+
+      # Mini App Forms (Telegram WebApp popup)
+      - key: MINI_APP_BASE_URL
+        value: "https://your-app.example.com/mini-app/"
+        scope: RUN_TIME
+      # All other env vars inherited from app-level
+
+  # ---------------------------------------------------------------------------
+  # Service 2: Tools Service
+  # REST API bridge for MCP server tools
+  # IMPORTANT: image must bundle shared/ — built by
+  # .github/workflows/build-images.yml from mcp_servers/Dockerfile
+  # ---------------------------------------------------------------------------
+  - name: tools-service
+    image:
+      registry_type: GHCR
+      registry: your-github-org
+      repository: your-repo-name/tools-service
+      tag: latest
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: basic-xxs  # 512MB RAM, 1 vCPU
+    health_check:
+      http_path: /
+      initial_delay_seconds: 10
+      period_seconds: 30
+
+    envs:
+      # Service-specific Feature Flags
+      - key: EQUIPMENT_CONTROL_ACTIONS_ENABLED
+        value: "true"
+        scope: RUN_TIME
+      # Equipment control whitelist - comma-separated emails
+      # Users in this list can execute /inverters_restart and /comms_reboot commands
+      - key: EQUIPMENT_CONTROL_ALLOWED_USERS
+        value: "admin@example.com"
+        scope: RUN_TIME
+      # All other env vars inherited from app-level
+
+  # ---------------------------------------------------------------------------
+  # Service 3: Anansi App
+  # NiceGUI app for chat history, settings, grid design, and broadcasts
+  # IMPORTANT: image must bundle shared/ (telegram_markdown, etc.) — built by
+  # .github/workflows/build-images.yml from anansi_app/Dockerfile
+  # ---------------------------------------------------------------------------
+  - name: anansi-app
+    image:
+      registry_type: GHCR
+      registry: your-github-org
+      repository: your-repo-name/anansi-app
+      tag: latest
+    http_port: 8501
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    health_check:
+      # NiceGUI app serves /healthz (was Streamlit's /_stcore/health).
+      http_path: /healthz
+      initial_delay_seconds: 60
+      period_seconds: 30
+      timeout_seconds: 10
+
+    envs:
+      # Internal URL for scheduled command execution
+      - key: CHAT_ORCHESTRATOR_URL
+        value: "${chat-orchestrator.PRIVATE_URL}"
+        scope: RUN_TIME
+      # SUPABASE_URL, SUPABASE_KEY, CHAT_DB_URL, CHAT_DB_SERVICE_KEY inherited from app-level
+      - key: DIGITALOCEAN_APP_ID
+        value: "your-digitalocean-app-id"
+        scope: RUN_TIME
+      - key: DIGITALOCEAN_API_TOKEN
+        value: "${DIGITALOCEAN_API_TOKEN}"
+        scope: RUN_AND_BUILD_TIME
+        type: SECRET
+      # Google OAuth Configuration
+      - key: AUTH_CLIENT_ID
+        value: "${AUTH_CLIENT_ID}"
+        scope: RUN_TIME
+        type: SECRET
+      - key: AUTH_CLIENT_SECRET
+        value: "${AUTH_CLIENT_SECRET}"
+        scope: RUN_TIME
+        type: SECRET
+      - key: AUTH_REDIRECT_URI
+        value: "https://your-app.example.com/oauth2callback"
+        scope: RUN_TIME
+      - key: AUTH_SERVER_METADATA_URL
+        value: "https://accounts.google.com/.well-known/openid-configuration"
+        scope: RUN_TIME
+      - key: AUTH_COOKIE_SECRET
+        value: "${AUTH_COOKIE_SECRET}"
+        scope: RUN_TIME
+        type: SECRET
+      # Telegram (for broadcast sender)
+      - key: TELEGRAM_BOT_TOKEN
+        value: "${TELEGRAM_BOT_TOKEN}"
+        scope: RUN_TIME
+        type: SECRET
+      # Admin access list (service-specific override)
+      - key: ALLOWED_VIEWER_EMAILS
+        value: "admin@example.com"
+        scope: RUN_TIME
+      # All other env vars inherited from app-level
+
+# =============================================================================
+# Jobs (Scheduled/One-time tasks)
+# =============================================================================
+# Note: Broadcast scheduler runs as background process in anansi-app service
+# The rag-pipeline job is left on the github/dockerfile_path build path in
+# app.example.yaml (it runs once daily, not on every deploy, so the fast
+# rebuild path matters far less here) — copy that job block unchanged if
+# you enable it.

@@ -853,6 +853,47 @@ doctl apps create-deployment <app-id>
 git push origin main
 ```
 
+#### Faster deploys: prebuilt images (optional)
+
+By default, App Platform builds each service's Dockerfile from scratch on
+every deploy (no cross-deploy layer cache, and all three services rebuild
+even if only one changed) — this is what makes the default path take
+several minutes. `.github/workflows/build-images.yml` builds and pushes
+each service to GHCR with GitHub Actions' own build cache, only rebuilding
+services whose paths actually changed. `.do/app.image.example.yaml` shows
+the equivalent app spec using `image:` sources instead of `github:` +
+`dockerfile_path:`, so App Platform just pulls a ready-made image instead
+of building one.
+
+This is opt-in and additive — the default `github:`-based spec above is
+unaffected, and switching an existing app over is a deliberate, manual step:
+
+```bash
+# 1. Back up your current live spec first (existing safe pattern above)
+doctl apps spec get <app-id> > .do/spec-backup-$(date +%Y%m%d).yaml
+
+# 2. Base your new spec on the backup, swapping just the service `github:`/
+#    `dockerfile_path:` blocks for the `image:` blocks in
+#    .do/app.image.example.yaml (env vars, ingress, health checks, domains
+#    all stay the same — only the build source changes)
+doctl apps update <app-id> --spec /tmp/new-spec.yaml
+
+# 3. GHCR has no push-to-deploy webhook to App Platform (unlike DOCR), so a
+#    new image push doesn't auto-redeploy — trigger it explicitly:
+doctl apps create-deployment <app-id>
+```
+
+Rolling back if an image-based deploy fails: App Platform keeps your last
+10 successful deployments and can restore app spec + code in one step —
+click **Rollback** next to a prior deployment in the app's Activity tab
+(or the `POST /v2/apps/{app_id}/rollback` API). To fully revert to the
+default build-from-source path, re-apply your spec backup from step 1:
+`doctl apps update <app-id> --spec .do/spec-backup-<date>.yaml`.
+
+Images published to GHCR by this workflow are plain OCI images — they're
+also deployable to any other container platform (Kubernetes, ECS, Fly.io,
+Render, plain `docker run`), not just DigitalOcean.
+
 ### Docker
 
 ```bash
