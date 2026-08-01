@@ -46,9 +46,13 @@ jobs:
       # shared/ has no venv of its own; chat_orchestrator's dependency set covers
       # it, and chat_orchestrator imports it, so it is tested here rather than in
       # a job that would install the same packages a second time.
+      # -n auto: shared/tests/test_layout_engine.py's 90 tests (fixture-scoped,
+      # no shared/global state, no fixed file paths) dominate this suite's
+      # runtime with real geometry/graph computation -- worth splitting across
+      # the runner's cores. Rest of shared/ is fast either way.
       - name: Run tests (shared)
         working-directory: chat_orchestrator
-        run: uv run pytest ../shared -q
+        run: uv run pytest ../shared -q -n auto
 
   validate:
     name: Validate (mcp_servers, anansi_app)
