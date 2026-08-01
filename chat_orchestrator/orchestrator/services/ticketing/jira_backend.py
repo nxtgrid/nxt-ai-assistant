@@ -187,9 +187,13 @@ class JiraTicketBackend:
         )
         self._get_storage_client = get_storage_client
 
-        # Cached (TTL) health probe state for is_available().
+        # Cached (TTL) health probe state for is_available(). `None` means
+        # "never probed" -- time.monotonic()'s epoch is undefined (commonly
+        # time-since-boot on Linux), so 0.0 is not a safe "never" sentinel: a
+        # freshly booted process could see monotonic() return a value under
+        # the TTL on its very first call and wrongly treat that as cached.
         self._probe_cache_ok: bool = False
-        self._probe_cache_time: float = 0.0
+        self._probe_cache_time: Optional[float] = None
         self._issue_type_selector: Optional[JiraIssueTypeSelector] = None
 
     # ------------------------------------------------------------------
@@ -207,7 +211,7 @@ class JiraTicketBackend:
 
         ttl = float(fr.get("JIRA_HEALTHCHECK_TTL_SECONDS"))
         now = time.monotonic()
-        if now - self._probe_cache_time < ttl:
+        if self._probe_cache_time is not None and now - self._probe_cache_time < ttl:
             return self._probe_cache_ok
 
         ok = await self._probe_myself()

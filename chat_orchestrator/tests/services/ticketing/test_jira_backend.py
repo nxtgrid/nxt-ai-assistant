@@ -368,6 +368,22 @@ class TestIsAvailable:
         assert await backend.is_available() is True
 
     @pytest.mark.asyncio
+    async def test_true_on_first_probe_even_when_process_clock_is_young(
+        self, fake_session, monkeypatch
+    ):
+        """A never-before-probed backend must always probe, regardless of how
+        close time.monotonic() happens to be to zero. Its epoch is undefined
+        by the stdlib -- on Linux it's commonly time-since-boot -- so a
+        freshly booted CI VM can return a value smaller than the TTL on the
+        very first call, and the cache must not mistake that for "cached"."""
+        monkeypatch.setenv("JIRA_HEALTHCHECK_TTL_SECONDS", "60")
+        monkeypatch.setattr(jira_backend_module.time, "monotonic", lambda: 10.0)
+        fake_session.queue("GET", "/rest/api/3/myself", _FakeResponse(200, {"accountId": "me"}))
+        backend = _make_backend()
+
+        assert await backend.is_available() is True
+
+    @pytest.mark.asyncio
     async def test_false_when_probe_fails(self, fake_session, monkeypatch):
         monkeypatch.setenv("JIRA_HEALTHCHECK_TTL_SECONDS", "60")
         fake_session.queue("GET", "/rest/api/3/myself", _FakeResponse(401, text_data="unauthorized"))
