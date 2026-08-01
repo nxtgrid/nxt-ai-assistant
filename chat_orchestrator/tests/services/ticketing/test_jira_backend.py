@@ -747,6 +747,50 @@ class TestCreateTicket:
             await _make_backend().create_ticket(TicketCreateRequest(summary="Help"))
 
 
+class TestFetchJiraOrganizations:
+    @pytest.mark.asyncio
+    async def test_fetches_on_first_call_even_when_process_clock_is_young(
+        self, fake_session, monkeypatch
+    ):
+        # time.monotonic()'s epoch is undefined -- on a freshly booted process
+        # it can be smaller than the TTL (1800s). The never-populated cache
+        # must not be mistaken for a fresh one just because the clock is young.
+        monkeypatch.setattr(jira_backend_module, "_jira_orgs_cache", [])
+        monkeypatch.setattr(jira_backend_module, "_jira_orgs_cache_time", None)
+        monkeypatch.setattr(jira_backend_module.time, "monotonic", lambda: 5.0)
+        fake_session.queue(
+            "GET",
+            "/rest/servicedeskapi/organization",
+            _FakeResponse(200, {"values": [{"id": "10", "name": "Acme"}], "isLastPage": True}),
+        )
+        backend = _make_backend()
+
+        orgs = await backend._fetch_jira_organizations()
+
+        assert orgs == [{"id": "10", "name": "Acme"}]
+        assert fake_session.calls  # actually hit the fake session, not the empty default
+
+    @pytest.mark.asyncio
+    async def test_result_is_cached_within_ttl(self, fake_session, monkeypatch):
+        monkeypatch.setattr(jira_backend_module, "_jira_orgs_cache", [])
+        monkeypatch.setattr(jira_backend_module, "_jira_orgs_cache_time", None)
+        monkeypatch.setattr(jira_backend_module.time, "monotonic", lambda: 5.0)
+        fake_session.queue(
+            "GET",
+            "/rest/servicedeskapi/organization",
+            _FakeResponse(200, {"values": [{"id": "10", "name": "Acme"}], "isLastPage": True}),
+        )
+        backend = _make_backend()
+
+        first = await backend._fetch_jira_organizations()
+        second = await backend._fetch_jira_organizations()
+
+        assert first == second == [{"id": "10", "name": "Acme"}]
+        # Only one GET actually hit the fake session -- the second call was
+        # served from the TTL cache (the queue would raise if consulted again).
+        assert len(fake_session.calls) == 1
+
+
 class TestAddComment:
     @pytest.mark.asyncio
     async def test_posts_comment_body(self, fake_session):

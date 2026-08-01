@@ -57,7 +57,7 @@ def _get_jira_session() -> aiohttp.ClientSession:
 
 # TTL cache for Jira organization list (changes rarely -- max one fetch per 30 min).
 _jira_orgs_cache: List[Dict[str, Any]] = []
-_jira_orgs_cache_time: float = 0.0
+_jira_orgs_cache_time: Optional[float] = None
 _JIRA_ORGS_TTL: float = 1800.0  # 30 minutes
 _URGENT_ALERT_SUMMARY = re.compile(r"^\s*!\s*urgent\s*:", re.IGNORECASE)
 
@@ -717,7 +717,10 @@ class JiraTicketBackend:
         Results are cached for 30 minutes to avoid hammering the Jira API on every escalation.
         """
         global _jira_orgs_cache, _jira_orgs_cache_time
-        if time.monotonic() - _jira_orgs_cache_time < _JIRA_ORGS_TTL:
+        if (
+            _jira_orgs_cache_time is not None
+            and time.monotonic() - _jira_orgs_cache_time < _JIRA_ORGS_TTL
+        ):
             return _jira_orgs_cache
 
         orgs: List[Dict[str, Any]] = []
