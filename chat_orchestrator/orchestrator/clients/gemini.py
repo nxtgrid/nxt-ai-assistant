@@ -93,12 +93,17 @@ class GeminiClient:
         system_instructions: Optional[str],
         tools_payload: Optional[list[Dict[str, Any]]],
     ) -> Dict[str, Any]:
+        is_gemini_3 = self._model_config._is_gemini_3_or_later(self._model_config.model)
+
         generation_config: Dict[str, Any] = {
-            "candidateCount": self._model_config.candidate_count,
-            "topK": self._model_config.top_k,
-            "topP": self._model_config.top_p,
             "maxOutputTokens": self._model_config.max_output_tokens,
         }
+        # Gemini 3+ rejects candidateCount/topK/topP with 400 INVALID_ARGUMENT
+        # instead of just ignoring them, so these can only be sent to 2.x models.
+        if not is_gemini_3:
+            generation_config["candidateCount"] = self._model_config.candidate_count
+            generation_config["topK"] = self._model_config.top_k
+            generation_config["topP"] = self._model_config.top_p
 
         effective_temp = self._model_config.get_effective_temperature()
         if effective_temp is not None:
@@ -108,7 +113,7 @@ class GeminiClient:
         model_lower = self._model_config.model.lower()
         is_pro_model = model_lower.endswith("-pro") or "-pro-" in model_lower
         if not is_pro_model and thinking_budget >= 0:
-            if self._model_config._is_gemini_3_or_later(self._model_config.model):
+            if is_gemini_3:
                 generation_config["thinkingConfig"] = {"thinkingLevel": "medium"}
             else:
                 generation_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}

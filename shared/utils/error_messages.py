@@ -18,6 +18,7 @@ Usage:
     message = get_user_message(ErrorCategory.TRANSIENT, "rate_limit")
 """
 
+import re
 from enum import Enum
 from typing import Optional, Tuple
 
@@ -126,8 +127,15 @@ def categorize_error(error: Exception) -> Tuple[ErrorCategory, str]:
     if "empty response" in error_str or "no response" in error_str:
         return (ErrorCategory.REPHRASE, get_user_message(ErrorCategory.REPHRASE, "empty_response"))
 
-    # Parse/format errors - user should rephrase
-    if "parse" in error_str or "format" in error_str or "invalid" in error_str:
+    # Parse/format errors - user should rephrase.
+    # NOTE: deliberately narrow. A bare "invalid"/"format" substring match used
+    # to live here and also caught upstream API status errors -- e.g. Gemini's
+    # "400 INVALID_ARGUMENT" for a generationConfig field the model doesn't
+    # support -- mislabeling a backend/config bug as "please rephrase your
+    # message" and showing that generic response for every single request
+    # regardless of content. Only match phrasing that specifically describes
+    # malformed/unparseable input, not generic argument or status validation.
+    if re.search(r"(could not parse|failed to parse|unable to parse|invalid json|malformed)", error_str):
         return (ErrorCategory.REPHRASE, get_user_message(ErrorCategory.REPHRASE, "parse_error"))
 
     # NOTE: We intentionally do NOT map raw "401"/"403"/"unauthorized" substrings
