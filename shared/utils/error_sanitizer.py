@@ -325,7 +325,11 @@ def categorize_and_sanitize_error(
     if re.search(r"(empty response|no response)", error_lower):
         return (ErrorCategory.REPHRASE, get_user_message(ErrorCategory.REPHRASE, "empty_response"))
 
-    if re.search(r"(invalid|malformed|incorrect.*format)", error_lower):
+    # NOTE: deliberately narrow -- see the matching comment in
+    # shared/utils/error_messages.categorize_error for why a bare "invalid"
+    # match is unsafe (it also catches upstream API status errors like
+    # Gemini's "400 INVALID_ARGUMENT").
+    if re.search(r"(could not parse|failed to parse|unable to parse|invalid json|malformed|incorrect.*format)", error_lower):
         return (ErrorCategory.REPHRASE, get_user_message(ErrorCategory.REPHRASE, "parse_error"))
 
     # NOTE: Upstream 401/403 substrings (Gemini billing/dunning, Jira API, etc.)
