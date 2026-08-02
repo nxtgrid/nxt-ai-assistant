@@ -1763,6 +1763,25 @@ async def get_ticket_statistics(days: int = 30) -> Dict[str, Any]:
 # Global client instance
 client = JiraClient()
 
+# search_issues_with_comments returns full comment threads for every matching issue
+# (up to max_results issues, default 50) with no upstream size limit. A broad query
+# against tickets with long comment histories can produce a payload large enough to
+# exceed the Gemini context window (1,048,576 tokens), which surfaces to the user as
+# a generic "something went wrong" error. Cap what gets embedded per issue instead.
+_MAX_COMMENTS_PER_ISSUE = 10
+_MAX_COMMENT_BODY_CHARS = 1000
+
+
+def _cap_comments_for_context(comments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Keep the most recent comments per issue and truncate long comment bodies."""
+    capped = []
+    for comment in comments[-_MAX_COMMENTS_PER_ISSUE:]:
+        body = comment.get("body", "")
+        if len(body) > _MAX_COMMENT_BODY_CHARS:
+            comment = {**comment, "body": body[:_MAX_COMMENT_BODY_CHARS] + "... [truncated]"}
+        capped.append(comment)
+    return capped
+
 
 @registry.tool("search_issues_with_comments", _READ_ONLY_SCHEMAS_BY_NAME["search_issues_with_comments"])
 async def _tool_search_issues_with_comments(arguments: Dict[str, Any]) -> List[types.TextContent]:
@@ -1969,7 +1988,7 @@ async def _tool_search_issues_with_comments(arguments: Dict[str, Any]) -> List[t
                 "created": issue.created,
                 "updated": issue.updated,
                 "comment_count": len(issue.comments),
-                "comments": issue.comments,
+                "comments": _cap_comments_for_context(issue.comments),
             }
         )
 

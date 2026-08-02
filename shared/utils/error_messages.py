@@ -55,6 +55,10 @@ ERROR_MESSAGES = {
         "internal_error": "Something went wrong on our end. Please try again or contact support.",
         "tool_unavailable": "One of my capabilities isn't working right now. Please try again.",
         "database_error": "I'm having trouble accessing data right now. Please try again.",
+        "context_length_exceeded": (
+            "That request pulled in too much data for me to process (e.g. a broad search "
+            "with a lot of results). Try narrowing your question, or start a fresh conversation."
+        ),
         "safety_blocked": "I can't respond to that request. If you believe this is an error, please contact support.",
         "content_blocked": "I'm not able to help with that particular request.",
         "recitation_blocked": "I can't provide that information due to content restrictions.",
@@ -149,6 +153,14 @@ def categorize_error(error: Exception) -> Tuple[ErrorCategory, str]:
     # Database errors - system issue
     if "database" in error_str or "db " in error_str or "sql" in error_str:
         return (ErrorCategory.SYSTEM, get_user_message(ErrorCategory.SYSTEM, "database_error"))
+
+    # LLM context window exceeded - usually a tool result (e.g. a broad Jira/RAG
+    # search) blew up the payload. Give guidance instead of the generic message.
+    if "token count exceeds" in error_str or "exceeds the maximum number of tokens" in error_str:
+        return (
+            ErrorCategory.SYSTEM,
+            get_user_message(ErrorCategory.SYSTEM, "context_length_exceeded"),
+        )
 
     # Default to system error (don't tell user to "try again" for unknown errors)
     return (ErrorCategory.SYSTEM, get_user_message(ErrorCategory.SYSTEM, "internal_error"))

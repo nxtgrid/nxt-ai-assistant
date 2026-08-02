@@ -42,3 +42,20 @@ def test_malformed_json_is_still_rephrase():
     category, _ = categorize_error(error)
 
     assert category == ErrorCategory.REPHRASE
+
+
+def test_context_length_exceeded_gets_actionable_message_not_generic():
+    """Regression test: a Gemini 400 for exceeding the token limit (e.g. from a
+    tool result that's too large) used to fall through to the generic "something
+    went wrong" message, giving no hint that a narrower query would help.
+    """
+    error = RuntimeError(
+        "400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': "
+        "'The input token count exceeds the maximum number of tokens allowed "
+        "1048576.', 'status': 'INVALID_ARGUMENT'}}"
+    )
+
+    category, message = categorize_error(error)
+
+    assert category == ErrorCategory.SYSTEM
+    assert "too much data" in message
