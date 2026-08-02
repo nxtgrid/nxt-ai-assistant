@@ -69,6 +69,16 @@ async def save_user_message(state: ConversationState) -> Dict[str, Any]:
 
         user_msg = ConversationMessage(role="user", content=user_input)
 
+        # Tag scheduled-execution triggers so they're excluded from interactive
+        # history (see init_services' exclude_types=["scheduled", "scheduled_user"]).
+        # Without this, a scheduled run that crashes before save_history's own
+        # tagging runs leaves this early save as the only record of that turn,
+        # untagged and defaulting to "interactive" — so its trigger text (and
+        # whatever tool calls it primed the model toward) leaks into the next
+        # unrelated live message's context.
+        if (state.get("metadata") or {}).get("scheduled_execution"):
+            user_msg.metadata["message_type"] = "scheduled"
+
         # Set sender info for thread disentanglement
         sender_telegram_id = state.get("sender_telegram_id")
         telegram_message_id = state.get("telegram_message_id")
