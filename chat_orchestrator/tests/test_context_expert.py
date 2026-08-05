@@ -2,6 +2,11 @@
 
 import pytest
 
+from orchestrator.experts.handlers.context_expert.detect_module_duplicates import (
+    classify_collision,
+    hash_body,
+    unique_slug,
+)
 from orchestrator.experts.handlers.context_expert.propose_module import (
     normalize_slug,
     parse_proposal,
@@ -37,3 +42,31 @@ def test_parse_proposal_rejects_missing_summary():
 def test_parse_proposal_rejects_non_json():
     with pytest.raises(ValueError, match="not valid JSON"):
         parse_proposal("I think this should be called Azimuth.")
+
+
+def test_hash_body_ignores_whitespace_and_case():
+    assert hash_body("Hello   World") == hash_body("hello world")
+
+
+def test_classify_collision_identical_body():
+    existing = [{"slug": "azimuth", "title": "Azimuth", "body": "Angle from north."}]
+    assert classify_collision("azimuth", "Azimuth", "angle from   NORTH.", existing) == "identical"
+
+
+def test_classify_collision_same_slug_different_body():
+    existing = [{"slug": "azimuth", "title": "Azimuth", "body": "Angle from north."}]
+    assert classify_collision("azimuth", "Azimuth", "Completely new text.", existing) == "slug_taken"
+
+
+def test_classify_collision_same_title_different_slug():
+    existing = [{"slug": "azimuth-calc", "title": "Azimuth", "body": "Angle."}]
+    assert classify_collision("azimuth-v2", "Azimuth", "Other text.", existing) == "title_taken"
+
+
+def test_classify_collision_none():
+    assert classify_collision("brand-new", "Brand New", "Text.", []) == "none"
+
+
+def test_unique_slug_appends_suffix():
+    assert unique_slug("azimuth", {"azimuth", "azimuth-2"}) == "azimuth-3"
+    assert unique_slug("fresh", {"azimuth"}) == "fresh"

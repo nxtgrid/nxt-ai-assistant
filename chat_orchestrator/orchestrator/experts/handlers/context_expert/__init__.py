@@ -13,8 +13,12 @@ fetch_document and improve_content are reused unchanged from ingestion_expert --
 step handlers register globally by name, so the workflow just names them.
 """
 
+from orchestrator.experts.handlers.context_expert.detect_module_duplicates import (
+    detect_module_duplicates,
+)
 from orchestrator.experts.handlers.context_expert.propose_module import propose_module
 
 __all__ = [
     "propose_module",
+    "detect_module_duplicates",
 ]
