@@ -7,6 +7,9 @@ from orchestrator.experts.handlers.context_expert.detect_module_duplicates impor
     hash_body,
     unique_slug,
 )
+from orchestrator.experts.handlers.context_expert.prepare_module_approval import (
+    build_approval_text,
+)
 from orchestrator.experts.handlers.context_expert.propose_module import (
     normalize_slug,
     parse_proposal,
@@ -14,6 +17,10 @@ from orchestrator.experts.handlers.context_expert.propose_module import (
 from orchestrator.experts.handlers.context_expert.select_prompts import (
     format_prompt_choices,
     parse_prompt_selection,
+)
+from orchestrator.experts.handlers.context_expert.store_module import (
+    build_module_payload,
+    resolve_mode,
 )
 
 
@@ -100,3 +107,49 @@ def test_parse_prompt_selection_none_means_empty():
 
 def test_parse_prompt_selection_ignores_out_of_range():
     assert parse_prompt_selection("9", ["staff.system"]) == []
+
+
+def test_build_approval_text_shows_identity_and_targets():
+    text = build_approval_text(
+        slug="azimuth-calculation",
+        title="Azimuth Calculation",
+        summary="How PV azimuth is measured.",
+        body="A" * 500,
+        mode="on_demand",
+        prompt_ids=["staff.system"],
+    )
+    assert "azimuth-calculation" in text
+    assert "How PV azimuth is measured." in text
+    assert "on_demand" in text
+    assert "staff.system" in text
+    assert "500 chars" in text
+
+
+def test_build_approval_text_warns_when_unattached():
+    text = build_approval_text(
+        slug="x", title="X", summary="s", body="b", mode="on_demand", prompt_ids=[]
+    )
+    assert "not attached to any prompt" in text
+
+
+def test_resolve_mode_defaults_to_on_demand():
+    assert resolve_mode("A" * 100) == "on_demand"
+    assert resolve_mode("A" * 5000) == "on_demand"
+
+
+def test_build_module_payload_shape():
+    payload = build_module_payload(
+        slug="azimuth", title="Azimuth", summary="s", body="b",
+        mode="on_demand", actor="ops@example.com",
+    )
+    assert payload == {
+        "slug": "azimuth",
+        "title": "Azimuth",
+        "summary": "s",
+        "body": "b",
+        "tags": [],
+        "scope": "sector",
+        "mode": "on_demand",
+        "source": "manual",
+        "updated_by": "ops@example.com",
+    }
