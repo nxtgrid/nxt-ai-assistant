@@ -125,9 +125,17 @@ mcp_servers/tests/test_meter_actions.py
 # extraction logic (no org IDs/secrets/site names), tracked with git add -f
 # Exception: migrate_docs_to_db.py is generic Doc-to-DB-override migration
 # logic (no org IDs/secrets/site names), tracked with git add -f
+# Exception: migrate_rag_docs_to_modules.py is generic RAG-document-to-
+# knowledge-module migration logic (no org IDs/secrets/site names), tracked
+# with git add -f
 scripts/*.py
 scripts/*.sh
 scripts/*.png
+
+# Dry-run output of migrate_rag_docs_to_modules.py -- contains the full
+# assembled body/summary of internal technical documents, must never be
+# committed
+migration_preview.json
 
 # Playwright MCP screenshots
 .playwright-mcp/

@@ -2,12 +2,11 @@
 
 from shared.prompts.knowledge import (
     KnowledgeModule,
-    apply_overrides,
     budget_pinned,
     diff_prompt_pins,
     render_catalog,
     render_pinned,
-    select_modules,
+    select_for_prompt,
 )
 from shared.prompts.types import RequestScope
 
@@ -25,36 +24,36 @@ def _module(slug, tags=("grid_ops",), scope="sector", mode="pinned", body="B"):
     )
 
 
-def test_selects_modules_sharing_a_tag():
-    modules = [_module("comms", tags=["comms"]), _module("billing", tags=["billing"])]
-    picked = select_modules(modules, ["comms"], RequestScope())
+def test_selects_only_pinned_modules():
+    modules = [_module("comms"), _module("billing")]
+    picked = select_for_prompt(modules, {"comms": True})
     assert [m.slug for m in picked] == ["comms"]
 
 
-def test_sector_scope_always_applies():
-    picked = select_modules([_module("a")], ["grid_ops"], RequestScope(grid="XYZ"))
-    assert len(picked) == 1
+def test_unpinned_override_excludes():
+    modules = [_module("comms")]
+    assert select_for_prompt(modules, {"comms": False}) == []
 
 
-def test_site_scope_applies_only_to_that_site():
+def test_no_pins_selects_nothing():
+    assert select_for_prompt([_module("a")], {}) == []
+
+
+def test_scope_still_gates_a_pinned_module():
     modules = [_module("abc", scope="site:ABC")]
-    assert select_modules(modules, ["grid_ops"], RequestScope(grid="ABC"))
-    assert not select_modules(modules, ["grid_ops"], RequestScope(grid="XYZ"))
+    assert select_for_prompt(modules, {"abc": True}, RequestScope(grid="ABC"))
+    assert select_for_prompt(modules, {"abc": True}, RequestScope(grid="XYZ")) == []
 
 
-def test_no_tags_selects_nothing():
-    assert select_modules([_module("a")], [], RequestScope()) == []
+def test_sector_scope_applies_everywhere():
+    modules = [_module("a", scope="sector")]
+    assert len(select_for_prompt(modules, {"a": True}, RequestScope(grid="XYZ"))) == 1
 
 
-def test_override_can_force_a_module_on():
-    modules = [_module("extra", tags=["unrelated"])]
-    picked = apply_overrides([], modules, {"extra": True})
-    assert [m.slug for m in picked] == ["extra"]
-
-
-def test_override_can_force_a_module_off():
-    selected = [_module("comms", tags=["comms"])]
-    assert apply_overrides(selected, selected, {"comms": False}) == []
+def test_selection_is_slug_sorted():
+    modules = [_module("zulu"), _module("alpha")]
+    picked = select_for_prompt(modules, {"zulu": True, "alpha": True})
+    assert [m.slug for m in picked] == ["alpha", "zulu"]
 
 
 def test_budget_keeps_site_scoped_modules_first():

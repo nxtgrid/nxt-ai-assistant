@@ -89,7 +89,8 @@ async def render() -> None:
         with list_container:
             if not documents:
                 ui.label(
-                    "No documents ingested yet. Use /ingest in Telegram to add documents."
+                    "No documents ingested yet. Use /learn_rag in Telegram to add source "
+                    "documents. For facts the bot should always know, use /learn (Context)."
                 ).classes("text-italic")
                 return
             for doc in documents:

@@ -14,7 +14,7 @@ from nicegui_app.pages.knowledge_modules import (
     prompt_option_label,
     validate_module,
 )
-from nicegui_app.pages.prompts import build_knowledge_tab
+from nicegui_app.pages.prompts import KnowledgeTabRow, build_knowledge_tab, filter_module_rows
 
 from shared.prompts.knowledge import KnowledgeModule
 
@@ -39,38 +39,43 @@ def test_build_module_rows_reports_size():
     ]
 
 
-def test_knowledge_tab_marks_tag_derived_versus_overridden():
-    tab = build_knowledge_tab(
-        prompt_tags=["grid_ops"],
-        modules=[_module("comms"), _module("extra", tags=["other"])],
-        overrides={"extra": True},
-    )
-    by_slug = {row.slug: row for row in tab}
-    assert by_slug["comms"].checked is True and by_slug["comms"].origin == "tag"
-    assert by_slug["extra"].checked is True and by_slug["extra"].origin == "override"
+def test_knowledge_tab_lists_all_modules_with_pinned_state():
+    rows = build_knowledge_tab([_module("beta"), _module("alpha", mode="on_demand")], {"alpha": True})
+    assert rows == [
+        KnowledgeTabRow(
+            slug="alpha", title="Alpha", mode="on_demand", chars=40, checked=True, summary="s"
+        ),
+        KnowledgeTabRow(
+            slug="beta", title="Beta", mode="pinned", chars=40, checked=False, summary="s"
+        ),
+    ]
 
 
-def test_knowledge_tab_shows_a_forced_off_module_as_unchecked():
-    tab = build_knowledge_tab(
-        prompt_tags=["grid_ops"], modules=[_module("comms")], overrides={"comms": False}
-    )
-    assert tab[0].checked is False and tab[0].origin == "override"
+def test_knowledge_tab_with_no_pins_checks_nothing():
+    rows = build_knowledge_tab([_module("alpha")], {})
+    assert [r.checked for r in rows] == [False]
 
 
-def test_knowledge_tab_totals_only_pinned_checked_modules():
-    tab = build_knowledge_tab(
-        prompt_tags=["grid_ops"],
-        modules=[_module("a"), _module("b", mode="on_demand")],
-        overrides={},
-    )
-    assert sum(row.chars for row in tab if row.checked and row.mode == "pinned") == 40
+def test_filter_modules_matches_slug_title_and_summary():
+    rows = _knowledge_tab_rows_fixture()
+    assert [r.slug for r in filter_module_rows(rows, "azimuth")] == ["azimuth-calculation"]
+    assert [r.slug for r in filter_module_rows(rows, "LED")] == ["victron-led"]
+    assert len(filter_module_rows(rows, "")) == 2
 
 
-def test_knowledge_tab_excludes_unrelated_unoverridden_modules():
-    tab = build_knowledge_tab(
-        prompt_tags=["grid_ops"], modules=[_module("unrelated", tags=["billing"])], overrides={}
-    )
-    assert tab == []
+def _knowledge_tab_rows_fixture():
+    return [
+        KnowledgeTabRow(
+            slug="azimuth-calculation", title="Azimuth Calculation",
+            mode="on_demand", chars=318, checked=False,
+            summary="How PV azimuth is measured.",
+        ),
+        KnowledgeTabRow(
+            slug="victron-led", title="Victron Quattro Codes",
+            mode="on_demand", chars=2438, checked=True,
+            summary="Decoding inverter LED error states.",
+        ),
+    ]
 
 
 def test_validate_module_requires_a_summary_for_on_demand():

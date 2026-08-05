@@ -43,7 +43,10 @@ def _module(slug, mode="pinned"):
 
 
 def test_pinned_module_lands_in_the_context_channel(bundled):
-    library = PromptLibrary(bundled=bundled, knowledge=FakeKnowledge([_module("comms")]))
+    library = PromptLibrary(
+        bundled=bundled,
+        knowledge=FakeKnowledge([_module("comms")], {"a.b": {"comms": True}}),
+    )
     out = library.render("a.b", scope=RequestScope())
     assert "# Technical Knowledge" in (out.context_text or "")
     assert "comms body" in out.context_text
@@ -52,7 +55,8 @@ def test_pinned_module_lands_in_the_context_channel(bundled):
 
 def test_on_demand_module_contributes_only_a_catalog_line(bundled):
     library = PromptLibrary(
-        bundled=bundled, knowledge=FakeKnowledge([_module("sites", mode="on_demand")])
+        bundled=bundled,
+        knowledge=FakeKnowledge([_module("sites", mode="on_demand")], {"a.b": {"sites": True}}),
     )
     out = library.render("a.b", scope=RequestScope())
     assert "sites body" not in (out.context_text or "")
@@ -101,8 +105,35 @@ def test_knowledge_appends_after_existing_context_text(tmp_path):
         "# System Instructions\n\nSys.\n\n# Examples\n\nEx.\n"
     )
     bundled = BundledStore(directory=tmp_path)
-    library = PromptLibrary(bundled=bundled, knowledge=FakeKnowledge([_module("comms")]))
+    library = PromptLibrary(
+        bundled=bundled,
+        knowledge=FakeKnowledge([_module("comms")], {"c.d": {"comms": True}}),
+    )
     out = library.render("c.d", scope=RequestScope())
     assert "# Examples" in out.context_text
     assert "# Technical Knowledge" in out.context_text
     assert out.context_text.index("# Examples") < out.context_text.index("# Technical Knowledge")
+
+
+def test_compose_uses_pins_not_tags(monkeypatch):
+    """A pinned module renders even though the prompt declares no tags."""
+    from shared.prompts.core import PromptLibrary
+    from shared.prompts.knowledge import KnowledgeModule
+
+    module = KnowledgeModule(
+        id="m1", slug="comms", title="Comms", summary="About comms.",
+        body="Radio checks hourly.", tags=[], scope="sector", mode="pinned",
+    )
+
+    class _Store:
+        def all_modules(self):
+            return [module]
+
+        def overrides_for(self, prompt_id):
+            return {"comms": True}
+
+    library = PromptLibrary(knowledge=_Store())
+    spec = library.spec("staff.system")
+    text, used = library._compose_knowledge(spec, RequestScope())
+    assert "Radio checks hourly." in text
+    assert used == ["comms"]

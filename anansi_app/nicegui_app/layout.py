@@ -27,7 +27,7 @@ OPERATIONS_NAV = [
 BOT_ADMIN_NAV = [
     ("/documents", "📚 RAG Knowledgebase"),
     ("/prompts", "📝 Prompts"),
-    ("/knowledge-modules", "🧠 Knowledge Modules"),
+    ("/knowledge-modules", "🧠 Context"),
     ("/settings", "⚙️ Settings"),
 ]
 

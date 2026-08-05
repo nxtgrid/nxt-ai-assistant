@@ -193,3 +193,140 @@ def test_cap_context_truncates_long_text():
 
 def test_cap_context_of_none_is_none():
     assert ip._cap_context(None) is None
+
+
+# ── RequestScope threading ──────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_customer_instructions_pass_organization_id_as_scope(monkeypatch):
+    from shared.prompts.types import PromptSource, RequestScope
+
+    captured = {}
+
+    def capture_render(prompt_id, vars=None, scope=None):
+        captured["prompt_id"] = prompt_id
+        captured["scope"] = scope
+
+        class _Rendered:
+            prompt_id = "customer.system"
+            system_text = "system"
+            context_text = None
+            source = PromptSource.BUNDLED
+            version = None
+            checksum = "abc12345"
+
+            def provenance(self):
+                return "customer.system@bundled:default:abc12345"
+
+        return _Rendered()
+
+    monkeypatch.setattr(ip.PROMPTS, "render", capture_render)
+
+    provider = ip.InstructionsProvider()
+    await provider.get_customer_instructions(organization_id="42")
+
+    assert captured["prompt_id"] == "customer.system"
+    assert captured["scope"] == RequestScope(organization_id="42")
+
+
+@pytest.mark.asyncio
+async def test_staff_instructions_pass_organization_id_as_scope(monkeypatch):
+    from shared.prompts.types import PromptSource, RequestScope
+
+    captured = {}
+
+    def capture_render(prompt_id, vars=None, scope=None):
+        captured["scope"] = scope
+
+        class _Rendered:
+            prompt_id = "staff.system"
+            system_text = "system"
+            context_text = None
+            source = PromptSource.BUNDLED
+            version = None
+            checksum = "abc12345"
+
+            def provenance(self):
+                return "staff.system@bundled:default:abc12345"
+
+        return _Rendered()
+
+    monkeypatch.setattr(ip.PROMPTS, "render", capture_render)
+
+    provider = ip.InstructionsProvider()
+    await provider._get_staff_instructions_from_doc(organization_id="7")
+
+    assert captured["scope"] == RequestScope(organization_id="7")
+
+
+@pytest.mark.asyncio
+async def test_get_instructions_derives_scope_from_user_context(monkeypatch):
+    from orchestrator.models.schemas import UserContext
+    from shared.prompts.types import PromptSource, RequestScope
+
+    captured = {}
+
+    def capture_render(prompt_id, vars=None, scope=None):
+        captured["scope"] = scope
+
+        class _Rendered:
+            system_text = "system"
+            context_text = None
+            source = PromptSource.BUNDLED
+            version = None
+            checksum = "abc12345"
+
+            def provenance(self):
+                return f"{prompt_id}@bundled:default:abc12345"
+
+        _Rendered.prompt_id = prompt_id
+
+        return _Rendered()
+
+    monkeypatch.setattr(ip.PROMPTS, "render", capture_render)
+
+    provider = ip.InstructionsProvider()
+    user_context = UserContext(
+        user_id="u1", user_email="staff@example.com", is_staff=True,
+        organization_ids=["3", "9"],
+    )
+    await provider.get_instructions(user_context)
+
+    assert captured["scope"] == RequestScope(organization_id="3")
+
+
+@pytest.mark.asyncio
+async def test_get_instructions_with_no_organizations_scopes_to_none(monkeypatch):
+    from orchestrator.models.schemas import UserContext
+    from shared.prompts.types import PromptSource, RequestScope
+
+    captured = {}
+
+    def capture_render(prompt_id, vars=None, scope=None):
+        captured["scope"] = scope
+
+        class _Rendered:
+            system_text = "system"
+            context_text = None
+            source = PromptSource.BUNDLED
+            version = None
+            checksum = "abc12345"
+
+            def provenance(self):
+                return f"{prompt_id}@bundled:default:abc12345"
+
+        _Rendered.prompt_id = prompt_id
+
+        return _Rendered()
+
+    monkeypatch.setattr(ip.PROMPTS, "render", capture_render)
+
+    provider = ip.InstructionsProvider()
+    user_context = UserContext(
+        user_id="u1", user_email="customer@example.com", is_staff=False,
+        organization_ids=[],
+    )
+    await provider.get_instructions(user_context)
+
+    assert captured["scope"] == RequestScope(organization_id=None)

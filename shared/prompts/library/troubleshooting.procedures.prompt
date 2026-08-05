@@ -6,7 +6,6 @@ component: orchestrator_services
 overridable: true
 output: text
 sections: []
-knowledge_tags: [troubleshooting]
 access:
   view: [ops, eng]
   edit: [ops]
