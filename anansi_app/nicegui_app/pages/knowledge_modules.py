@@ -180,13 +180,30 @@ async def _open_edit_dialog(
         mode_select = ui.select(
             sorted(VALID_MODES), value=existing.mode if existing else "pinned", label="Mode"
         ).classes("w-full")
-        ui.label("Body").classes("text-caption")
+        with ui.row().classes("items-center justify-between w-full"):
+            ui.label("Body").classes("text-caption")
+            view_toggle = ui.toggle(["Edit", "Preview"], value="Edit").props("dense")
         body_input = ui.codemirror(
             value=existing.body if existing else "",
             language="Markdown",
             theme="vscodeLight",
             line_wrapping=True,
         ).classes("w-full")
+        body_preview = (
+            ui.markdown("")
+            .classes("w-full")
+            .style("min-height: 16rem; border: 1px solid #e0e0e0; padding: 0.5rem;")
+        )
+        body_preview.set_visibility(False)
+
+        def _switch_view(e) -> None:
+            if e.value == "Preview":
+                body_preview.set_content(body_input.value)
+            body_input.set_visibility(e.value == "Edit")
+            body_preview.set_visibility(e.value == "Preview")
+
+        view_toggle.on_value_change(_switch_view)
+
         prompt_options = {
             pid: prompt_option_label(pid, PROMPTS.spec(pid).description)
             for pid in sorted(PROMPTS.ids())

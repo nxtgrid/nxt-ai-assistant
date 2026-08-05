@@ -218,6 +218,7 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
 
         with ui.tab_panels(tabs, value=edit_tab).classes("w-full"):
             with ui.tab_panel(edit_tab):
+                view_toggle = ui.toggle(["Edit", "Preview"], value="Edit").props("dense")
                 body_input = (
                     ui.codemirror(
                         value=current_body,
@@ -228,6 +229,21 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                     .classes("w-full")
                     .style("height: 26rem")
                 )
+                body_preview = (
+                    ui.markdown("")
+                    .classes("w-full")
+                    .style("min-height: 26rem; border: 1px solid #e0e0e0; padding: 0.5rem;")
+                )
+                body_preview.set_visibility(False)
+
+                def _switch_view(e) -> None:
+                    if e.value == "Preview":
+                        body_preview.set_content(body_input.value)
+                    body_input.set_visibility(e.value == "Edit")
+                    body_preview.set_visibility(e.value == "Preview")
+
+                view_toggle.on_value_change(_switch_view)
+
                 if spec.variables:
                     ui.label(f"Declared variables: {', '.join(spec.variables)}").classes(
                         "text-caption"
