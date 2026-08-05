@@ -52,39 +52,38 @@ class KnowledgeTabRow:
     mode: str
     chars: int
     checked: bool
-    origin: str  # "tag" | "override"
+    summary: str = ""
 
 
-def build_knowledge_tab(
-    prompt_tags: List[str], modules: List[Any], overrides: dict
-) -> List[KnowledgeTabRow]:
-    """The per-prompt checkbox grid: tag-derived, individually overridable.
+def build_knowledge_tab(modules: List[Any], pins: dict) -> List[KnowledgeTabRow]:
+    """Every module as a pickable row, flagged with this prompt's current pins.
 
-    A module appears if it shares a tag with the prompt, or if an override
-    exists for it (a forced-on module the tags didn't select, or a
-    forced-off module they did).
+    Unlike the tag-era version this hides nothing: the picker is how an
+    operator discovers modules, so an unpinned module must still be findable.
     """
-    wanted = set(prompt_tags)
-    rows = []
-    for module in sorted(modules, key=lambda m: m.slug):
-        by_tag = bool(wanted & set(module.tags))
-        if module.slug in overrides:
-            checked, origin = overrides[module.slug], "override"
-        else:
-            checked, origin = by_tag, "tag"
-        if not (by_tag or module.slug in overrides):
-            continue
-        rows.append(
-            KnowledgeTabRow(
-                slug=module.slug,
-                title=module.title,
-                mode=module.mode,
-                chars=len(module.body),
-                checked=checked,
-                origin=origin,
-            )
+    return [
+        KnowledgeTabRow(
+            slug=module.slug,
+            title=module.title,
+            mode=module.mode,
+            chars=len(module.body),
+            checked=bool(pins.get(module.slug)),
+            summary=module.summary,
         )
-    return rows
+        for module in sorted(modules, key=lambda m: m.slug)
+    ]
+
+
+def filter_module_rows(rows: List[KnowledgeTabRow], query: str) -> List[KnowledgeTabRow]:
+    """Case-insensitive substring match over slug, title and summary."""
+    needle = query.strip().lower()
+    if not needle:
+        return list(rows)
+    return [
+        r
+        for r in rows
+        if needle in r.slug.lower() or needle in r.title.lower() or needle in r.summary.lower()
+    ]
 
 
 def build_rows(library: Any, email: str) -> List[PromptRow]:
