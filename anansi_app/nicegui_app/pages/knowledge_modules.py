@@ -180,9 +180,13 @@ async def _open_edit_dialog(
         mode_select = ui.select(
             sorted(VALID_MODES), value=existing.mode if existing else "pinned", label="Mode"
         ).classes("w-full")
-        body_input = ui.textarea("Body", value=existing.body if existing else "").classes(
-            "w-full"
-        ).props("rows=10")
+        ui.label("Body").classes("text-caption")
+        body_input = ui.codemirror(
+            value=existing.body if existing else "",
+            language="Markdown",
+            theme="vscodeLight",
+            line_wrapping=True,
+        ).classes("w-full")
         prompt_options = {
             pid: prompt_option_label(pid, PROMPTS.spec(pid).description)
             for pid in sorted(PROMPTS.ids())
