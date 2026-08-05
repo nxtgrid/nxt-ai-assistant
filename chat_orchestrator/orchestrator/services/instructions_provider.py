@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from orchestrator.models.schemas import EntityContext, UserContext
 from shared.auth import get_auth_service
 from shared.prompts import PROMPTS
+from shared.prompts.types import RequestScope
 from shared.utils.langfuse_utils import prompt_metadata
 from shared.utils.logging import get_logger
 
@@ -299,16 +300,23 @@ class InstructionsProvider:
             LOGGER.exception(f"Error checking customer mode for {user_email}: {e}")
             return True  # Safe default: treat as customer on error
 
-    async def get_customer_instructions(self) -> tuple[str, Optional[str]]:
+    async def get_customer_instructions(
+        self, organization_id: Optional[str] = None
+    ) -> tuple[str, Optional[str]]:
         """
         Get customer-facing system instructions and optional context.
+
+        Args:
+            organization_id: Caller's organization, for org-scoped knowledge modules.
+                None renders with no org scope (matches sector-scoped modules only).
 
         Returns:
             Tuple of (system_instructions, context_message)
             - system_instructions: Goes to the provider system-instruction channel
             - context_message: Goes as first user message (or None)
         """
-        rendered = PROMPTS.render("customer.system")
+        scope = RequestScope(organization_id=organization_id)
+        rendered = PROMPTS.render("customer.system", scope=scope)
         self._last_provenance = prompt_metadata(rendered)
         context_message = _postprocess_context(rendered.context_text, extract_staff_groups=False)
         context_message = _cap_context(context_message)
@@ -340,28 +348,38 @@ class InstructionsProvider:
             - system_instructions: Goes to the provider system-instruction channel
             - context_message: Goes as first user message (or None)
         """
+        organization_id = (
+            user_context.organization_ids[0] if user_context.organization_ids else None
+        )
         # Use is_staff flag from user_context (already resolved during auth)
         if user_context.is_staff:
             LOGGER.info(
                 f"Using INTERNAL/STAFF mode for {user_context.user_email or user_context.user_id}"
             )
-            return await self._get_staff_instructions_from_doc()
+            return await self._get_staff_instructions_from_doc(organization_id=organization_id)
         else:
             LOGGER.info(
                 f"Using CUSTOMER mode for {user_context.user_email or user_context.user_id}"
             )
-            return await self.get_customer_instructions()
+            return await self.get_customer_instructions(organization_id=organization_id)
 
-    async def _get_staff_instructions_from_doc(self) -> tuple[str, Optional[str]]:
+    async def _get_staff_instructions_from_doc(
+        self, organization_id: Optional[str] = None
+    ) -> tuple[str, Optional[str]]:
         """
         Get staff instructions and optional context.
+
+        Args:
+            organization_id: Caller's organization, for org-scoped knowledge modules.
+                None renders with no org scope (matches sector-scoped modules only).
 
         Returns:
             Tuple of (system_instructions, context_message)
             - system_instructions: Goes to the provider system-instruction channel
             - context_message: Goes as first user message (or None)
         """
-        rendered = PROMPTS.render("staff.system")
+        scope = RequestScope(organization_id=organization_id)
+        rendered = PROMPTS.render("staff.system", scope=scope)
         self._last_provenance = prompt_metadata(rendered)
         context_message = _postprocess_context(rendered.context_text, extract_staff_groups=True)
         context_message = _cap_context(context_message)
