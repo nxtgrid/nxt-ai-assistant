@@ -18,6 +18,7 @@ from nicegui import ui
 from shared.prompts import PROMPTS
 from shared.prompts.access import can_edit_prompt, can_publish_prompt, can_view_prompt
 from shared.prompts.components import COMPONENT_LABELS, COMPONENT_ORDER, UNCATEGORIZED
+from shared.prompts.knowledge import PINNED_BUDGET_CHARS
 from shared.prompts.overrides import OverrideStore
 from shared.prompts.types import PromptSource
 
@@ -212,6 +213,7 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
 
         with ui.tabs().classes("w-full") as tabs:
             edit_tab = ui.tab("Edit")
+            knowledge_tab = ui.tab("Context")
             diff_tab = ui.tab("Diff vs default")
             history_tab = ui.tab("History")
 
@@ -282,6 +284,83 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                     ui.button("Save & Publish", on_click=publish_latest).props(
                         "color=primary"
                     ).set_visibility(row.can_publish)
+
+            with ui.tab_panel(knowledge_tab):
+                from shared.prompts.knowledge import KnowledgeStore
+
+                k_store = KnowledgeStore.from_env()
+                if not k_store._client:  # noqa: SLF001 -- readiness check, as elsewhere on this page
+                    ui.label(
+                        "⚠️ Context storage not configured (CHAT_DB_URL / CHAT_DB_SERVICE_KEY)."
+                    ).classes("text-warning")
+                else:
+                    ui.label(
+                        "Context modules this prompt uses. Pinned modules are inlined in full; "
+                        "on-demand modules contribute only a summary line, and the model fetches "
+                        "the body with get_knowledge_module when it decides it's relevant."
+                    ).classes("text-caption")
+
+                    all_modules = k_store.all_modules()
+                    pins = k_store.overrides_for(row.prompt_id)
+                    selected: set[str] = {m.slug for m in all_modules if pins.get(m.slug)}
+
+                    search = ui.input(placeholder="Search modules…").classes("w-full").props(
+                        "clearable dense"
+                    )
+                    picked_label = ui.label().classes("text-caption text-bold")
+                    options = ui.column().classes("w-full gap-0").style(
+                        "max-height: 340px; overflow-y: auto"
+                    )
+
+                    def redraw() -> None:
+                        options.clear()
+                        rows = filter_module_rows(
+                            build_knowledge_tab(all_modules, {s: True for s in selected}),
+                            search.value or "",
+                        )
+                        pinned_chars = sum(
+                            r.chars for r in rows if r.checked and r.mode == "pinned"
+                        )
+                        picked_label.text = (
+                            f"{len(selected)} selected · {pinned_chars} pinned chars "
+                            f"of {PINNED_BUDGET_CHARS} budget"
+                        )
+                        picked_label.classes(
+                            replace="text-caption text-bold "
+                            + ("text-negative" if pinned_chars > PINNED_BUDGET_CHARS else "")
+                        )
+                        with options:
+                            if not rows:
+                                ui.label("No modules match.").classes("text-italic text-caption")
+                            for r in rows:
+                                def toggle(e, slug=r.slug) -> None:
+                                    if e.value:
+                                        selected.add(slug)
+                                    else:
+                                        selected.discard(slug)
+                                    redraw()
+
+                                with ui.row().classes("items-center no-wrap w-full"):
+                                    ui.checkbox(value=r.checked, on_change=toggle).props("dense")
+                                    with ui.column().classes("gap-0"):
+                                        ui.label(f"{r.title}  ·  {r.mode}  ·  {r.chars} chars")
+                                        if r.summary:
+                                            ui.label(r.summary).classes("text-caption")
+
+                    async def save_pins() -> None:
+                        try:
+                            k_store.set_prompt_modules(
+                                row.prompt_id, sorted(selected), actor=user_email
+                            )
+                            k_store.invalidate()
+                            ui.notify("Context updated", type="positive")
+                        except Exception as e:  # noqa: BLE001 -- surfaced to the operator
+                            ui.notify(f"Save failed: {e}", type="negative")
+
+                    search.on_value_change(redraw)
+                    redraw()
+                    with ui.row().classes("justify-end w-full q-mt-sm"):
+                        ui.button("Save context", on_click=save_pins).props("color=primary")
 
             with ui.tab_panel(diff_tab):
                 lines = diff_lines(spec.body, current_body)
