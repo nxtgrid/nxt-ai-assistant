@@ -124,3 +124,59 @@ def test_unconfigured_store_prompts_pinning_returns_empty():
 
 def test_unconfigured_store_set_prompt_pins_is_a_noop():
     KnowledgeStore(client=None).set_prompt_pins("mod-1", ["a.b"], actor="ada@x.com")
+
+
+# ── set_prompt_modules: the prompt-editor counterpart to set_prompt_pins ───
+# set_prompt_pins reconciles one module across many prompts; set_prompt_modules
+# reconciles one prompt across many modules. Both write the same
+# prompt_knowledge_overrides row, from opposite ends of the relationship.
+
+
+def _modules():
+    from shared.prompts.knowledge import KnowledgeModule
+
+    return [
+        KnowledgeModule(id="id-a", slug="alpha", title="Alpha", summary="a", body="A"),
+        KnowledgeModule(id="id-b", slug="beta", title="Beta", summary="b", body="B"),
+    ]
+
+
+def test_set_prompt_modules_reconciles_both_directions(store):
+    store._cache = _modules()
+    store._expires = float("inf")
+
+    # beta starts pinned to staff.system (via the module-side API); alpha isn't.
+    store.set_prompt_pins("id-b", ["staff.system"], actor="ops@example.com")
+    assert store.overrides_for("staff.system") == {"beta": True}
+
+    # Reconciling staff.system to just ["alpha"] should add alpha and drop beta.
+    store.set_prompt_modules("staff.system", ["alpha"], actor="ops@example.com")
+
+    assert store.overrides_for("staff.system") == {"alpha": True}
+    assert store.prompts_pinning("id-a") == ["staff.system"]
+    assert store.prompts_pinning("id-b") == []
+
+
+def test_set_prompt_modules_is_idempotent(store):
+    store._cache = _modules()
+    store._expires = float("inf")
+
+    store.set_prompt_modules("staff.system", ["alpha"], actor="ops@example.com")
+    store.set_prompt_modules("staff.system", ["alpha"], actor="ops@example.com")
+
+    assert store.overrides_for("staff.system") == {"alpha": True}
+
+
+def test_set_prompt_modules_ignores_unknown_slugs(store):
+    store._cache = _modules()
+    store._expires = float("inf")
+
+    store.set_prompt_modules(
+        "staff.system", ["alpha", "does-not-exist"], actor="ops@example.com"
+    )
+
+    assert store.overrides_for("staff.system") == {"alpha": True}
+
+
+def test_unconfigured_store_set_prompt_modules_is_a_noop():
+    KnowledgeStore(client=None).set_prompt_modules("staff.system", ["alpha"], actor="ada@x.com")

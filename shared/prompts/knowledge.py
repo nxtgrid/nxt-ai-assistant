@@ -222,3 +222,33 @@ class KnowledgeStore:
             self._client.table("prompt_knowledge_overrides").delete().eq(
                 "prompt_id", prompt_id
             ).eq("module_id", module_id).execute()
+
+    def set_prompt_modules(self, prompt_id: str, slugs: List[str], actor: str) -> None:
+        """Reconcile this prompt's pinned modules to exactly ``slugs``.
+
+        The prompt-editor counterpart to ``set_prompt_pins``: both write the
+        same ``prompt_knowledge_overrides`` row, from opposite ends of the
+        relationship.
+        """
+        if not self._client:
+            return
+        by_slug = {m.slug: m.id for m in self.all_modules()}
+        current = set(self.overrides_for(prompt_id))
+        to_add, to_remove = diff_prompt_pins(current, set(slugs))
+        for slug in sorted(to_add):
+            if slug not in by_slug:
+                continue
+            self._client.table("prompt_knowledge_overrides").upsert(
+                {
+                    "prompt_id": prompt_id,
+                    "module_id": by_slug[slug],
+                    "pinned": True,
+                    "updated_by": actor,
+                }
+            ).execute()
+        for slug in sorted(to_remove):
+            if slug not in by_slug:
+                continue
+            self._client.table("prompt_knowledge_overrides").delete().eq(
+                "prompt_id", prompt_id
+            ).eq("module_id", by_slug[slug]).execute()
