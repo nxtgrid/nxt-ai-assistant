@@ -218,7 +218,16 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
 
         with ui.tab_panels(tabs, value=edit_tab).classes("w-full"):
             with ui.tab_panel(edit_tab):
-                body_input = ui.textarea(value=current_body).classes("w-full").props("rows=16")
+                body_input = (
+                    ui.codemirror(
+                        value=current_body,
+                        language="Markdown",
+                        theme="vscodeLight",
+                        line_wrapping=True,
+                    )
+                    .classes("w-full")
+                    .style("height: 26rem")
+                )
                 if spec.variables:
                     ui.label(f"Declared variables: {', '.join(spec.variables)}").classes(
                         "text-caption"
