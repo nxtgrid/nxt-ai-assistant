@@ -17,8 +17,10 @@ from orchestrator.experts.handlers.context_expert.detect_module_duplicates impor
     detect_module_duplicates,
 )
 from orchestrator.experts.handlers.context_expert.propose_module import propose_module
+from orchestrator.experts.handlers.context_expert.select_prompts import select_prompts
 
 __all__ = [
     "propose_module",
     "detect_module_duplicates",
+    "select_prompts",
 ]

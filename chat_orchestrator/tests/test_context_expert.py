@@ -11,6 +11,10 @@ from orchestrator.experts.handlers.context_expert.propose_module import (
     normalize_slug,
     parse_proposal,
 )
+from orchestrator.experts.handlers.context_expert.select_prompts import (
+    format_prompt_choices,
+    parse_prompt_selection,
+)
 
 
 def test_normalize_slug_is_kebab_case():
@@ -70,3 +74,29 @@ def test_classify_collision_none():
 def test_unique_slug_appends_suffix():
     assert unique_slug("azimuth", {"azimuth", "azimuth-2"}) == "azimuth-3"
     assert unique_slug("fresh", {"azimuth"}) == "fresh"
+
+
+def test_format_prompt_choices_numbers_them():
+    text = format_prompt_choices(
+        [("staff.system", "Staff assistant"), ("customer.system", "Customer bot")]
+    )
+    assert "1. staff.system — Staff assistant" in text
+    assert "2. customer.system — Customer bot" in text
+
+
+def test_parse_prompt_selection_accepts_numbers():
+    ids = ["staff.system", "customer.system", "troubleshooting.procedures"]
+    assert parse_prompt_selection("1, 3", ids) == ["staff.system", "troubleshooting.procedures"]
+
+
+def test_parse_prompt_selection_accepts_ids():
+    ids = ["staff.system", "customer.system"]
+    assert parse_prompt_selection("customer.system", ids) == ["customer.system"]
+
+
+def test_parse_prompt_selection_none_means_empty():
+    assert parse_prompt_selection("none", ["staff.system"]) == []
+
+
+def test_parse_prompt_selection_ignores_out_of_range():
+    assert parse_prompt_selection("9", ["staff.system"]) == []
