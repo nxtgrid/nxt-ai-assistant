@@ -43,7 +43,10 @@ def _module(slug, mode="pinned"):
 
 
 def test_pinned_module_lands_in_the_context_channel(bundled):
-    library = PromptLibrary(bundled=bundled, knowledge=FakeKnowledge([_module("comms")]))
+    library = PromptLibrary(
+        bundled=bundled,
+        knowledge=FakeKnowledge([_module("comms")], {"a.b": {"comms": True}}),
+    )
     out = library.render("a.b", scope=RequestScope())
     assert "# Technical Knowledge" in (out.context_text or "")
     assert "comms body" in out.context_text
@@ -52,7 +55,8 @@ def test_pinned_module_lands_in_the_context_channel(bundled):
 
 def test_on_demand_module_contributes_only_a_catalog_line(bundled):
     library = PromptLibrary(
-        bundled=bundled, knowledge=FakeKnowledge([_module("sites", mode="on_demand")])
+        bundled=bundled,
+        knowledge=FakeKnowledge([_module("sites", mode="on_demand")], {"a.b": {"sites": True}}),
     )
     out = library.render("a.b", scope=RequestScope())
     assert "sites body" not in (out.context_text or "")
@@ -101,7 +105,10 @@ def test_knowledge_appends_after_existing_context_text(tmp_path):
         "# System Instructions\n\nSys.\n\n# Examples\n\nEx.\n"
     )
     bundled = BundledStore(directory=tmp_path)
-    library = PromptLibrary(bundled=bundled, knowledge=FakeKnowledge([_module("comms")]))
+    library = PromptLibrary(
+        bundled=bundled,
+        knowledge=FakeKnowledge([_module("comms")], {"c.d": {"comms": True}}),
+    )
     out = library.render("c.d", scope=RequestScope())
     assert "# Examples" in out.context_text
     assert "# Technical Knowledge" in out.context_text
