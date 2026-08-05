@@ -1630,7 +1630,7 @@ class WorkflowExecutor:
         Different packet types get customized summaries highlighting relevant data.
 
         Args:
-            packet_type: Type of work packet (e.g., 'document_ingestion')
+            packet_type: Type of work packet (e.g., 'rag_ingestion')
             accumulated_results: Results from all completed steps
             execution_summary: Execution tracking summary
             context: Step context with packet state
@@ -1649,7 +1649,7 @@ class WorkflowExecutor:
                 lines.append(f"_Completed in {total_time_ms / 1000:.1f}s_\n")
 
         # Extract metrics based on packet type
-        if packet_type in ("document_ingestion", "rag_ingestion"):
+        if packet_type in ("rag_ingestion", "context_ingestion"):
             lines.extend(self._format_ingestion_summary(accumulated_results, context))
         elif packet_type in ("kpi_report", "grid_analysis"):
             lines.extend(self._format_report_summary(accumulated_results, context))
@@ -1966,7 +1966,8 @@ class WorkflowExecutor:
 
     # Packet types that have their own interactive flows and shouldn't show parameter confirmation
     INTERACTIVE_PACKET_TYPES = {
-        "document_ingestion",  # Ingestion expert has step-level user input flows
+        "rag_ingestion",  # RAG ingestion expert has step-level user input flows
+        "context_ingestion",  # Context expert has step-level user input flows
         "grids_technical_review",  # GTR analysis mode has conversational user input flows
         "code_investigation",  # Code investigator - LLM manages clarification flow
         "light_preliminary_package",  # LPP runs end-to-end with progress messages
@@ -1981,7 +1982,7 @@ class WorkflowExecutor:
         2. Packet type is in the interactive exclusion list (has its own user input flows)
 
         Args:
-            packet_type: The current packet type (e.g., "document_ingestion")
+            packet_type: The current packet type (e.g., "rag_ingestion")
 
         Returns:
             True if confirmation flow is enabled for this packet
