@@ -1,10 +1,12 @@
-"""Knowledge modules — curated, tagged context composed into prompts.
+"""Knowledge modules — curated context composed into prompts.
 
-Two tiers. Pinned modules are inlined in full, ordered so the most specific
-survives when the budget binds. On-demand modules contribute one catalog line
-each; the model fetches a body through the knowledge MCP tool when it needs
-one, which keeps the long tail out of a window an agent loop re-sends every
-step.
+A module is selected for a prompt by explicit per-prompt pin, not by tag:
+an operator picks which modules a prompt uses in the admin UI, and that
+choice is stored in ``prompt_knowledge_overrides``. Two tiers. Pinned modules
+are inlined in full, ordered so the most specific survives when the budget
+binds. On-demand modules contribute one catalog line each; the model fetches
+a body through the knowledge MCP tool when it needs one, which keeps the long
+tail out of a window an agent loop re-sends every step.
 """
 
 from __future__ import annotations
@@ -36,33 +38,28 @@ class KnowledgeModule:
         return self.scope.startswith("site:")
 
 
-def select_modules(
-    modules: List[KnowledgeModule], tags: List[str], scope: RequestScope
+def select_for_prompt(
+    modules: List[KnowledgeModule],
+    pins: Dict[str, bool],
+    scope: Optional[RequestScope] = None,
 ) -> List[KnowledgeModule]:
-    """Modules sharing a tag with the prompt whose scope matches the request."""
-    wanted = set(tags)
-    if not wanted:
-        return []
-    return [m for m in modules if wanted & set(m.tags) and scope.matches(m.scope)]
+    """Modules this prompt pins, that the request's scope admits.
+
+    Selection is explicit: an operator picks modules per prompt in the admin
+    UI and that choice is stored in ``prompt_knowledge_overrides``. Scope is a
+    separate, per-request gate -- a ``site:ABC`` module stays out of a
+    conversation about another site even when the prompt pins it.
+    """
+    scope = scope or RequestScope()
+    return sorted(
+        (m for m in modules if pins.get(m.slug) and scope.matches(m.scope)),
+        key=lambda m: m.slug,
+    )
 
 
 def diff_prompt_pins(current: "set[str]", selected: "set[str]") -> "tuple[set[str], set[str]]":
     """(to_add, to_remove) to reconcile a module's pinned prompts to ``selected``."""
     return selected - current, current - selected
-
-
-def apply_overrides(
-    selected: List[KnowledgeModule],
-    all_modules: List[KnowledgeModule],
-    overrides: Dict[str, bool],
-) -> List[KnowledgeModule]:
-    """Apply per-prompt forced-on / forced-off decisions to a tag selection."""
-    by_slug = {m.slug: m for m in all_modules}
-    result = {m.slug: m for m in selected if overrides.get(m.slug, True)}
-    for slug, pinned in overrides.items():
-        if pinned and slug in by_slug:
-            result[slug] = by_slug[slug]
-    return [by_slug[s] for s in sorted(result)]
 
 
 def budget_pinned(
