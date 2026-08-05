@@ -106,3 +106,27 @@ def test_knowledge_appends_after_existing_context_text(tmp_path):
     assert "# Examples" in out.context_text
     assert "# Technical Knowledge" in out.context_text
     assert out.context_text.index("# Examples") < out.context_text.index("# Technical Knowledge")
+
+
+def test_compose_uses_pins_not_tags(monkeypatch):
+    """A pinned module renders even though the prompt declares no tags."""
+    from shared.prompts.core import PromptLibrary
+    from shared.prompts.knowledge import KnowledgeModule
+
+    module = KnowledgeModule(
+        id="m1", slug="comms", title="Comms", summary="About comms.",
+        body="Radio checks hourly.", tags=[], scope="sector", mode="pinned",
+    )
+
+    class _Store:
+        def all_modules(self):
+            return [module]
+
+        def overrides_for(self, prompt_id):
+            return {"comms": True}
+
+    library = PromptLibrary(knowledge=_Store())
+    spec = library.spec("staff.system")
+    text, used = library._compose_knowledge(spec, RequestScope())
+    assert "Radio checks hourly." in text
+    assert used == ["comms"]

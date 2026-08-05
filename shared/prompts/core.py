@@ -13,11 +13,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.prompts.bundled import BundledStore
 from shared.prompts.knowledge import (
-    apply_overrides,
     budget_pinned,
     render_catalog,
     render_pinned,
-    select_modules,
+    select_for_prompt,
 )
 from shared.prompts.render import render_body, split_sections
 from shared.prompts.spec import PromptSpec, body_checksum
@@ -119,20 +118,18 @@ class PromptLibrary:
         self, spec: PromptSpec, scope: RequestScope
     ) -> Tuple[Optional[str], List[str]]:
         """Resolve, budget and render this prompt's knowledge. Never raises."""
-        if self._knowledge is None or not spec.knowledge_tags:
+        if self._knowledge is None:
             return None, []
         try:
             modules = self._knowledge.all_modules()
-            overrides = self._knowledge.overrides_for(spec.id)
+            pins = self._knowledge.overrides_for(spec.id)
         except Exception:
             LOGGER.warning(
                 f"Knowledge lookup failed for '{spec.id}'; rendering without it", exc_info=True
             )
             return None, []
 
-        chosen = apply_overrides(
-            select_modules(modules, spec.knowledge_tags, scope), modules, overrides
-        )
+        chosen = select_for_prompt(modules, pins, scope)
         pinned, _dropped = budget_pinned([m for m in chosen if m.mode == "pinned"])
         on_demand = [m for m in chosen if m.mode == "on_demand"]
 
