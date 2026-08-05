@@ -16,6 +16,7 @@ Available handlers are auto-discovered by importing handler modules.
 from orchestrator.experts.handlers import (
     community_detector,
     community_sizing,
+    context_expert,
     doc_editor,
     grid_analyst,
     grids_technical_reviewer,
@@ -27,6 +28,7 @@ from orchestrator.experts.handlers import (
 __all__ = [
     "community_detector",
     "community_sizing",
+    "context_expert",
     "doc_editor",
     "grid_analyst",
     "grids_technical_reviewer",
