@@ -31,62 +31,87 @@ EXCLUDED_TITLES = {"CET-rules.pdf"}
 # Explicit slug/title per source document. Auto-generated titles embed body text
 # and an uploader suffix ("Technical: X <body excerpt>... by <Name>"), so a regex
 # would be guesswork -- all 14 were reviewed by hand instead.
+#
+# The optional "summary" key is a hand-written override, read straight from each
+# document's full body (see docs/superpowers/plans/2026-08-05-context-knowledge-
+# consolidation.md Task 2). GOOGLE_API_KEY was not available when this migration
+# was reviewed, so draft_summary()'s LLM path never ran and its plain first-
+# sentence fallback produced weak or truncated results (e.g. "Fuses vs." cut off
+# mid-title) -- these overrides replace that fallback with a summary that
+# actually names the specific equipment/standard/calculation, which is the only
+# thing an on_demand module shows the model before it decides whether to fetch
+# the body. main() prefers this key when present; draft_summary() is only
+# consulted for a document that has none.
 CURATED: Dict[str, Dict[str, str]] = {
     "NXT Grid Power Plant Smoke Detector Battery": {
         "slug": "smoke-detector-battery",
         "title": "Smoke Detector Battery Specification",
+        "summary": "Specifies the standard 9V battery used to power smoke detectors in NXT Grid power plants.",
     },
     "Technical: Pre-installation Voltage Matching for BYD/Pylontech Battery Modules Before... by Vaibhav Vaidya": {
         "slug": "battery-module-voltage-matching",
         "title": "Pre-installation Voltage Matching for BYD/Pylontech Battery Modules",
+        "summary": "Requires matching new BYD/Pylontech battery module voltage to the existing bank within 0.1V before interconnecting them.",
     },
     "Technical: Fuses vs. Breakers on the DC Side For... by Vaibhav Vaidya": {
         "slug": "dc-side-fuses-vs-breakers",
         "title": "Fuses vs. Breakers on the DC Side",
+        "summary": "Explains why Class T/NH-blade fuses, not breakers, must protect DC battery banks feeding inverters like the Quattro 15kVA or Deye 30kW, based on AIC rating.",
     },
     "Technical: High Current Wiring Requirements Requirement Brazing is mandatory... by Vaibhav Vaidya": {
         "slug": "high-current-wiring-requirements",
         "title": "High Current Wiring Requirements",
+        "summary": "Mandates brazing for wire connections above 500A, covering 48V bus-bar inverters over 25kW and distribution equipment over 115kW peak per phase.",
     },
     "Technical: Calin Meter Token Validity Top-Up or other tokens... by Vaibhav Vaidya": {
         "slug": "calin-meter-token-validity",
         "title": "Calin Meter Token Validity",
+        "summary": "Explains that Calin prepaid meter tokens never expire, and a lost token only becomes invalid after 50 subsequent tokens are entered.",
     },
     "Technical: Solcast Irradiance Data Evaluation Overview We utilize Solcast... by Vaibhav Vaidya": {
         "slug": "solcast-irradiance-evaluation",
         "title": "Solcast Irradiance Data Evaluation",
+        "summary": "Reports that Solcast irradiance data overestimates ground-measured irradiance by 8-15% and gives the discount factor to apply in capacity design.",
     },
     "Technical: Victron Quattro 15kVA Inverter Operating Power Limits Summary... by Vaibhav Vaidya": {
         "slug": "victron-quattro-15kva-power-limits",
         "title": "Victron Quattro 15kVA Inverter Operating Power Limits",
+        "summary": "States the Victron Quattro 15kVA inverter's real-world maximum operating power is 10kW, not the 12kW nameplate rating, due to 40C ambient derating.",
     },
     "Technical: Azimuth Calculation Azimuth is defined as the angle... by Vaibhav Vaidya": {
         "slug": "azimuth-calculation",
         "title": "Azimuth Calculation",
+        "summary": "Defines the PV azimuth angle convention (-180 to +180 from true north, anticlockwise positive) with worked east/west/southwest examples.",
     },
     "Guidelines for Sizing PV to MPPT cables": {
         "slug": "pv-to-mppt-cable-sizing",
         "title": "Guidelines for Sizing PV to MPPT Cables",
+        "summary": "Gives the IEC table-52.3 current-rating and derating-factor method for sizing PV/MPPT and AC feeder cables, with two worked examples.",
     },
     "IEC Recommendations for trench depth and demarcation": {
         "slug": "iec-trench-depth-demarcation",
         "title": "IEC Recommendations for Trench Depth and Demarcation",
+        "summary": "States IEC minimum burial depths (750mm LV, 1000mm MV) and required route-marking for underground cables.",
     },
     "Decoding Victron Inverter Quattro LED error codes": {
         "slug": "victron-quattro-led-codes",
         "title": "Decoding Victron Quattro Inverter LED Error Codes",
+        "summary": "Decodes Victron Quattro Inverter/Charger/Alarm LED patterns, including fatal alarms, pre-alarm warnings, and VE.Bus multi-phase error sequences.",
     },
     "Decoding Pylontech Battery LED error codes": {
         "slug": "pylontech-led-codes",
         "title": "Decoding Pylontech Battery LED Error Codes",
+        "summary": "Decodes Pylontech UP5000 and LV Hub battery LED patterns (Run/Alarm/SOC lights), including DIP-switch and cable-pinout setup pitfalls.",
     },
     "Decoding BYD Battery BMS and BMU LED error codes": {
         "slug": "byd-bms-bmu-led-codes",
         "title": "Decoding BYD Battery BMS and BMU LED Error Codes",
+        "summary": "Decodes BYD LV Flex BMU White/Blue LED flash-count error codes (module and system-level EC codes) and the 5-second reset procedure.",
     },
     "BYD LV Flex Module large scale failure event debug flow": {
         "slug": "byd-lv-flex-failure-debug-flow",
         "title": "BYD LV Flex Module Large-Scale Failure Debug Flow",
+        "summary": "Walks through diagnosing a mass BYD LV Flex module failure (e.g. 21/22 modules dead at once) across pre-charge, voltage-surge, undervoltage and comms-lock scenarios.",
     },
 }
 
@@ -209,12 +234,18 @@ async def main() -> None:
             or []
         )
         body = assemble_body(chunks)
-        summary = await draft_summary(CURATED[doc["title"]]["title"], body)
+        curated = CURATED[doc["title"]]
+        if curated.get("summary"):
+            summary = curated["summary"]
+            summary_source = "curated"
+        else:
+            summary = await draft_summary(curated["title"], body)
+            summary_source = "generated"
         row = build_module_row(doc, body=body, summary=summary)
         rows.append(row)
         print(f"\n--- {row['slug']} ({len(body)} chars, {len(chunks)} chunks) ---")
         print(f"  title:   {row['title']}")
-        print(f"  summary: {row['summary']}")
+        print(f"  summary: {row['summary']} [{summary_source}]")
 
     total = sum(len(r["body"]) for r in rows)
     print(f"\nTotal body chars: {total} (pinned budget is 20000; all rows are on_demand)")
