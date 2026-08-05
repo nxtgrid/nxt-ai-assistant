@@ -132,6 +132,11 @@ scripts/*.py
 scripts/*.sh
 scripts/*.png
 
+# Dry-run output of migrate_rag_docs_to_modules.py -- contains the full
+# assembled body/summary of internal technical documents, must never be
+# committed
+migration_preview.json
+
 # Playwright MCP screenshots
 .playwright-mcp/
 

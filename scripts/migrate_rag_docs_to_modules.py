@@ -175,6 +175,10 @@ async def main() -> None:
         help="delete the migrated documents from the RAG tables (run only after verifying --write)",
     )
     args = parser.parse_args()
+    if args.write and args.delete_source:
+        raise SystemExit(
+            "--write and --delete-source are mutually exclusive; run them as separate invocations."
+        )
 
     client = _client()
     docs = (
