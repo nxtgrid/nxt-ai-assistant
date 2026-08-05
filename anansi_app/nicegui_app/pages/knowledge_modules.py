@@ -1,9 +1,9 @@
-"""Knowledge Modules admin page: CRUD for tagged, scoped knowledge modules.
+"""Context admin page: CRUD for curated context modules.
 
-A module is curated, named, addressable content a prompt can deliberately
-pin (in full) or leave on-demand (name + summary only, fetched via the
-get_knowledge_module MCP tool when the model decides it's relevant). See
-docs/superpowers/specs/2026-07-30-prompt-library-design.md.
+A context module is named, addressable content a prompt can deliberately pin
+(inlined in full) or leave on-demand (name + summary only, fetched via the
+get_knowledge_module MCP tool when the model decides it's relevant). Selection
+is explicit per prompt -- see the Context tab on the Prompts page.
 """
 
 from __future__ import annotations
@@ -94,18 +94,19 @@ def validate_module(
 async def render(user_email: str) -> None:
     from shared.prompts.knowledge import KnowledgeStore
 
-    ui.label("🧠 Knowledge Modules").classes("text-h5")
+    ui.label("🧠 Context").classes("text-h5")
     ui.label(
-        "Curated, scoped context pinned directly to the prompts that need it. Pinned "
-        "modules are inlined in full; on-demand modules contribute only their summary to "
-        "a prompt's context, and the model fetches the body via a tool when it decides "
-        "it's relevant."
+        "Curated facts the bot is told directly — the context it works from. Pinned "
+        "modules are inlined into a prompt in full; on-demand modules contribute only "
+        "their summary, and the model fetches the body with a tool when it decides "
+        "it's relevant. Attach modules to prompts here or from the Context tab of any "
+        "prompt."
     ).classes("text-caption")
 
     store = KnowledgeStore.from_env()
     if not store._client:  # noqa: SLF001 -- readiness check, same as the Prompts page
         ui.label(
-            "⚠️ Knowledge storage not configured (CHAT_DB_URL / CHAT_DB_SERVICE_KEY). "
+            "⚠️ Context storage not configured (CHAT_DB_URL / CHAT_DB_SERVICE_KEY). "
             "Modules can't be listed or saved."
         ).classes("text-warning")
         return
@@ -119,11 +120,13 @@ async def render(user_email: str) -> None:
         with list_container:
             with ui.row().classes("justify-end w-full"):
                 ui.button(
-                    "+ New module",
+                    "+ New context module",
                     on_click=lambda: _open_edit_dialog(None, store, refresh, user_email),
                 ).props("color=primary")
             if not rows:
-                ui.label("No knowledge modules yet.").classes("text-italic")
+                ui.label("No context modules yet. Use /learn in Telegram to add one.").classes(
+                    "text-italic"
+                )
                 return
             for label, group in group_module_rows(rows):
                 section = ui.expansion(f"{label}  ·  {len(group)}", value=True).classes(
