@@ -43,7 +43,6 @@ class PromptSpec:
     model: Optional[str] = None
     variables: List[str] = field(default_factory=list)
     sections: List[str] = field(default_factory=list)
-    knowledge_tags: List[str] = field(default_factory=list)
     access: AccessSpec = field(default_factory=AccessSpec)
 
 
@@ -96,6 +95,5 @@ def parse_prompt_file(text: str, *, path: str) -> PromptSpec:
         model=raw.get("model"),
         variables=list(raw.get("variables") or []),
         sections=list(raw.get("sections") or []),
-        knowledge_tags=list(raw.get("knowledge_tags") or []),
         access=access,
     )

@@ -14,7 +14,6 @@ overridable: true
 output: text
 variables: [user_name]
 sections: [system_instructions, examples]
-knowledge_tags: [grid_ops]
 access:
   view: [ops, eng]
   edit: [ops]
@@ -34,7 +33,6 @@ def test_parses_frontmatter_fields():
     assert spec.overridable is True
     assert spec.variables == ["user_name"]
     assert spec.sections == ["system_instructions", "examples"]
-    assert spec.knowledge_tags == ["grid_ops"]
 
 
 def test_component_defaults_to_uncategorized():
@@ -98,3 +96,23 @@ def test_json_output_with_schema_is_accepted():
     spec = parse_prompt_file(text, path="a.b.prompt")
     assert spec.output == "json"
     assert spec.schema == {"type": "object"}
+
+
+def test_spec_has_no_knowledge_tags_field():
+    """Knowledge selection moved to prompt_knowledge_overrides; tags are gone."""
+    from shared.prompts.spec import PromptSpec
+
+    assert not hasattr(PromptSpec("id", "d", "b", "c"), "knowledge_tags")
+
+
+def test_legacy_knowledge_tags_frontmatter_is_ignored(tmp_path):
+    """An old .prompt file with knowledge_tags still parses -- the key is dropped."""
+    from shared.prompts.spec import parse_prompt_file
+
+    text = (
+        "---\nid: legacy.example\ndescription: Legacy prompt\n"
+        "knowledge_tags: [grid_ops]\n---\nBody here.\n"
+    )
+    spec = parse_prompt_file(text, path="legacy.prompt")
+    assert spec.id == "legacy.example"
+    assert not hasattr(spec, "knowledge_tags")

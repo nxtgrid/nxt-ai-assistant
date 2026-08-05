@@ -6,7 +6,6 @@ component: orchestrator_ticketing
 overridable: false
 output: text
 sections: [system_instructions]
-knowledge_tags: []
 access:
   view: [ops, eng]
   edit: []
