@@ -276,7 +276,7 @@ ________________
 
 # Expert: ingestion_expert
 System Instructions
-You are the Document Ingestion Expert. Help users upload, validate, and process documents for the knowledge base.
+You are the RAG Ingestion Expert. Help users add source documents to the searchable knowledge base. For curated facts the bot should always know, direct users to /learn instead.
 Your workflow:
 1. Understand what documents the user wants to add
 2. Guide them to provide document content (Google Doc ID, pasted text, or Telegram file)
@@ -312,8 +312,8 @@ When NOT to use buttons:
 Tools
 * gdrive_get_document
 Packet Types
-* document_ingestion
-Packet: document_ingestion
+* rag_ingestion
+Packet: rag_ingestion
 Workflow
 1. [llm] understand_request - Parse user's intent and document source
 2. [function:fetch_document] - Retrieve document content from source
@@ -349,6 +349,59 @@ ingestion_summary: string - What was ingested
 document_uuid: string - Reference ID for the stored document
 chunk_count: integer - How many chunks were created
 entity_count: integer - How many entities extracted
+Settings
+resumable: true
+model: gemini-2.5-flash
+________________
+
+
+# Expert: context_expert
+System Instructions
+You are the Context Expert. You help staff teach the bot durable facts — procedures, specifications, thresholds, error-code tables — that it should reliably know.
+Your workflow:
+1. Understand what the user wants the bot to know
+2. Guide them to provide it (pasted text, or a Google Doc link)
+3. Help them tighten the wording so it reads as a clear, standalone reference
+4. Propose a name and a one-line summary for it
+5. Check whether something similar is already stored
+6. Ask which prompts should use it
+7. Show them exactly what will be saved and get approval
+8. Save it
+Explain that this is different from /learn_rag: context modules are curated facts the bot is told directly, while /learn_rag adds searchable source documents.
+Be conversational. Ask for confirmation before saving.
+Tools
+* gdrive_get_document
+Packet Types
+* context_ingestion
+Packet: context_ingestion
+Workflow
+1. [llm] understand_request - Parse what the user wants the bot to learn
+2. [function:fetch_document] - Retrieve content from paste, Google Doc, or file
+3. [function:improve_content] - Quality check and iterative wording improvement
+4. [function:propose_module] - Draft slug, title and summary via LLM
+5. [function:detect_module_duplicates] - Check for an existing module with the same slug, title or body
+6. [function:select_prompts] - Ask which prompts should use this module
+7. [function:prepare_module_approval] - Show the proposed module and ask for approval
+8. [function:store_module] - On approval, write the module and its prompt pins
+9. [llm] report_completion - Confirm what was saved and where it applies
+Inputs
+source_type: string - Where content comes from (gdrive, text, telegram)
+document_id: string - Google Doc ID or file reference
+raw_text: string - Direct text content if pasted
+State
+document_content: string - Raw content from source
+improved_content: string - After the improvement loop
+module_slug: string - Proposed kebab-case identifier
+module_title: string - Proposed human-readable title
+module_summary: string - One-line catalog summary
+module_body: string - Final body text
+module_mode: string - pinned or on_demand (new modules default to on_demand)
+module_collision: string - none, identical, slug_taken, title_taken
+module_prompt_ids: list - Prompt ids that will pin this module
+stored_module_slug: string - Slug after storage
+Outputs
+module_slug: string - Identifier of the stored module
+prompt_ids: list - Prompts it was attached to
 Settings
 resumable: true
 model: gemini-2.5-flash
