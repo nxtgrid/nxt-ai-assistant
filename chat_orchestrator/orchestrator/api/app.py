@@ -32,7 +32,6 @@ from orchestrator.services.urgent_alert_context import (
     UrgentAlertContext,
     build_urgent_alert_context,
 )
-from shared.utils.gdrive_doc_fetcher import GoogleDriveDocFetcher
 from shared.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -230,32 +229,29 @@ async def warmup_services():
         tools = await permissions_service.get_available_tools(warmup_context)
         logger.info(f"Warmup: Loaded {len(tools)} MCP tools")
 
-        # 2. Pre-fetch all Google Docs (system instructions for both modes)
-        from orchestrator.services.artifacts_provider import ArtifactsProvider
-
-        provider = ArtifactsProvider()
-
-        # NOTE: EXPERT_INSTRUCTIONS_DOC_ID is intentionally NOT warmed here. The
-        # artifacts provider parses a flat "system instructions" section, but the
-        # expert doc uses per-expert "# Expert:" headers, so this parser always
-        # returns 0 sections — logging a misleading "failed after 3 attempts"
-        # error and wasting ~6s every startup. The expert doc is loaded and
-        # cached correctly by expert_instructions_provider instead.
-        docs_to_cache = [
-            ("STAFF_SUPPORT_DOC_ID", "staff instructions"),
-            ("CUSTOMER_SUPPORT_DOC_ID", "customer instructions"),
-            ("VERIFICATION_DOC_ID", "verification criteria"),
-        ]
+        # 2. Pre-fetch every doc-backed prompt through the shared library, so
+        # the first real request doesn't pay the Google Doc fetch cost.
+        # Previously this went through ArtifactsProvider._fetch_google_doc_sections
+        # directly, keyed by env var; that parser assumes a flat "system
+        # instructions" section and always returned 0 sections for the
+        # experts doc (per-expert "# Expert:" headers), so it was excluded
+        # with a ~6s wasted-attempt cost every startup. PROMPTS.text() doesn't
+        # parse sections at all -- it's just cached raw text -- so there's no
+        # reason to exclude experts.definitions anymore.
+        from shared.prompts import PROMPTS
 
         loop = asyncio.get_running_loop()
-        for env_var, description in docs_to_cache:
-            doc_id = os.getenv(env_var)
-            if doc_id:
-                try:
-                    await loop.run_in_executor(None, provider._fetch_google_doc_sections, doc_id)
-                    logger.info(f"Warmup: Cached {description} doc")
-                except Exception as e:
-                    logger.warning(f"Warmup: Failed to cache {description}: {e}")
+        for prompt_id in (
+            "staff.system",
+            "customer.system",
+            "verification.criteria",
+            "experts.definitions",
+        ):
+            try:
+                await loop.run_in_executor(None, PROMPTS.text, prompt_id)
+                logger.info(f"Warmup: Cached {prompt_id}")
+            except Exception as e:
+                logger.warning(f"Warmup: Failed to cache {prompt_id}: {e}")
 
         elapsed = asyncio.get_running_loop().time() - start_time
         logger.info(f"Service warmup complete in {elapsed:.1f}s")
@@ -2318,57 +2314,18 @@ class BroadcastVerifyResponse(BaseModel):
     error: Optional[str] = None
 
 
-# Cache for verification criteria (fetched from Google Doc)
-_verification_criteria_cache: Optional[str] = None
-
-
 def _get_verification_criteria() -> str:
     """
-    Get verification criteria from the same Google Doc used for response verification.
+    Get verification criteria from the same prompt used for response verification.
 
-    Uses VERIFICATION_DOC_ID - the same document used for verifying customer responses.
-    This ensures consistent quality standards across all verification use cases.
-
-    Returns cached criteria if available.
+    Sourced from the shared prompt library (verification.criteria): DB
+    override, then an attached Google Doc, then the bundled default. This is
+    the same resolution every other verification consumer uses, from one
+    cache (shared.prompts.gdoc.GDocStore) -- no local cache of our own.
     """
-    global _verification_criteria_cache
+    from shared.prompts import PROMPTS
 
-    if _verification_criteria_cache is not None:
-        return _verification_criteria_cache
-
-    # Use the SAME verification doc as response verification
-    doc_id = os.getenv("VERIFICATION_DOC_ID", "")
-
-    if doc_id:
-        try:
-            fetcher = GoogleDriveDocFetcher()
-            doc_content = fetcher.fetch_document(doc_id)
-            if doc_content:
-                _verification_criteria_cache = doc_content
-                logger.info(f"Loaded verification criteria from doc {doc_id}")
-                return _verification_criteria_cache
-        except Exception as e:
-            logger.warning(f"Failed to fetch verification doc {doc_id}: {e}")
-
-    # Default criteria if no doc configured or fetch failed
-    _verification_criteria_cache = """
-You are a message quality checker for a utility/energy company.
-
-Evaluate messages for quality before they are sent to customers.
-
-PASS the message if it:
-- Is professional and appropriate for business communication
-- Does not contain sensitive information (passwords, API keys, internal URLs)
-- Is clear and understandable
-- Has correct grammar and spelling
-
-FAIL the message if it:
-- Contains inappropriate content, profanity, or unprofessional language
-- Includes internal information not meant for customers
-- Is confusing, ambiguous, or poorly written
-- Could cause unnecessary alarm or panic
-"""
-    return _verification_criteria_cache
+    return PROMPTS.text("verification.criteria")
 
 
 @app.post("/api/v1/verify/broadcast", response_model=BroadcastVerifyResponse)
@@ -2377,7 +2334,7 @@ async def verify_broadcast(request: Request, body: BroadcastVerifyRequest):
     Verify a broadcast message before sending.
 
     Uses the same ResponseVerificationService as response verification,
-    with the same Google Doc (VERIFICATION_DOC_ID), same model, and same LLM path.
+    with the same verification.criteria prompt, same model, and same LLM path.
 
     Args:
         body: The verification request with message and optional target groups

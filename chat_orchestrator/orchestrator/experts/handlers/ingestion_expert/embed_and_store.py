@@ -817,16 +817,15 @@ async def embed_and_store(context: StepContext) -> StepResult:
             )
 
         if response in ["done", "ready", "updated", "added"]:
-            from orchestrator.services.artifacts_provider import clear_gdoc_cache
             from orchestrator.services.procedure_provider import (
                 ProcedureProvider,
                 match_content_to_procedures,
             )
 
-            # Clear cache and reload procedures
-            doc_id = os.getenv("CUSTOMER_SUPPORT_DOC_ID", "")
-            clear_gdoc_cache(doc_id)
-
+            # provider.clear_cache() below invalidates the prompt library's
+            # doc cache (shared.prompts.gdoc.GDocStore), the one cache
+            # customer.system is actually read through -- no separate
+            # env-var-keyed cache to clear here anymore.
             provider = ProcedureProvider()
             provider.clear_cache()
             procedures = provider.get_procedures(force_reload=True)
@@ -1344,20 +1343,16 @@ async def embed_and_store(context: StepContext) -> StepResult:
 
         # For support_example, do per-chunk procedure matching
         elif doc_type == "support_example":
-            from orchestrator.services.artifacts_provider import clear_gdoc_cache
             from orchestrator.services.procedure_provider import (
                 ProcedureProvider,
                 match_content_to_procedures,
             )
 
-            # Re-cache customer support doc to catch latest procedures
-            # This is important when ingesting support examples that may reference
-            # procedures added since the last cache refresh
-            doc_id = os.getenv("CUSTOMER_SUPPORT_DOC_ID", "")
-            if doc_id:
-                LOGGER.info("Refreshing Customer Support Doc cache for procedure matching")
-                clear_gdoc_cache(doc_id)
-
+            # Re-cache customer support doc to catch procedures added since
+            # the last cache refresh -- important when ingesting support
+            # examples that may reference them. provider.clear_cache() +
+            # force_reload=True below invalidate the prompt library's doc
+            # cache directly; no separate env-var-keyed cache to clear here.
             provider = ProcedureProvider()
             provider.clear_cache()  # Clear procedure cache
             procedures = provider.get_procedures(force_reload=True)

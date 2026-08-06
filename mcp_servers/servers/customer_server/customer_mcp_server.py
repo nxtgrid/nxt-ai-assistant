@@ -71,19 +71,14 @@ async def get_last_gtr_summary(grid_name: str) -> Dict[str, Any]:
     ]
     spreadsheet_id_pattern = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
 
-    # Step 1: Fetch expert instructions doc to get grid-to-sheet mappings
-    expert_doc_id = os.getenv("EXPERT_INSTRUCTIONS_DOC_ID")
-    if not expert_doc_id:
-        return {"error": "GTR expert not configured"}
+    # Step 1: Get grid-to-sheet mappings from the experts.definitions prompt
+    # (DB override, then Google Doc, then bundled -- via the shared prompt
+    # library, same source as every other consumer of this prompt). resolve()
+    # never raises; an empty or mapping-less body falls through to the
+    # "no mappings" branch below rather than needing its own error case here.
+    from shared.prompts import PROMPTS
 
-    try:
-        from shared.utils.gdrive_doc_fetcher import fetch_google_doc_markdown
-    except ImportError:
-        return {"error": "Google Drive integration not available"}
-
-    doc_text = fetch_google_doc_markdown(expert_doc_id)
-    if not doc_text:
-        return {"error": "Could not fetch expert instructions"}
+    doc_text, _source, _version = PROMPTS.resolve("experts.definitions")
 
     # Extract grid-to-sheet mappings
     mappings: Dict[str, Dict[str, str]] = {}

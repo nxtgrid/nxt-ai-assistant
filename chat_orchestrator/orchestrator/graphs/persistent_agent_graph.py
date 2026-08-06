@@ -1217,19 +1217,13 @@ async def _verify_outgoing_message(message_text: str, context: str, thread_id: s
     """
     try:
         from orchestrator.services.verification_service import ResponseVerificationService
-
-        verification_doc_id = os.getenv("VERIFICATION_DOC_ID", "")
-        if not verification_doc_id:
-            LOGGER.warning(
-                f"Agent {thread_id}: VERIFICATION_DOC_ID not set, blocking message (fail closed)"
-            )
-            return False
+        from shared.prompts import PROMPTS
 
         service = ResponseVerificationService()
-        # Fetch verification instructions
-        from shared.utils.gdrive_doc_fetcher import fetch_google_doc_markdown
-
-        verification_instructions = fetch_google_doc_markdown(verification_doc_id)
+        # verification.criteria always resolves -- DB override, then Google
+        # Doc, then the bundled default -- so there is no "not configured"
+        # state to gate on here anymore.
+        verification_instructions = PROMPTS.text("verification.criteria")
         if not verification_instructions:
             LOGGER.warning(
                 f"Agent {thread_id}: verification doc empty, blocking message (fail closed)"
