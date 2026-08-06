@@ -21,6 +21,7 @@ from shared.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 LABEL_TTL_SECONDS = 60
+DOC_BINDING_TTL_SECONDS = 60
 PRODUCTION = "production"
 
 
@@ -32,6 +33,8 @@ class OverrideStore:
         self._label_cache: Optional[Dict[str, int]] = None
         self._label_expires: float = 0.0
         self._body_cache: Dict[Tuple[str, int], str] = {}
+        self._doc_binding_cache: Optional[Dict[str, Tuple[str, bool]]] = None
+        self._doc_binding_expires: float = 0.0
 
     # ── construction ─────────────────────────────────────────────────────────
     @classmethod
@@ -65,6 +68,8 @@ class OverrideStore:
         self._label_cache = None
         self._label_expires = 0.0
         self._body_cache.clear()
+        self._doc_binding_cache = None
+        self._doc_binding_expires = 0.0
 
     def _labels(self) -> Dict[str, int]:
         if self._label_cache is not None and time.time() < self._label_expires:
@@ -130,24 +135,59 @@ class OverrideStore:
         )
         return result.data or []
 
+    def _doc_bindings(self) -> Dict[str, Tuple[str, bool]]:
+        """Every prompt_id -> (doc_id, is_override) binding, one query for all of
+        them, cached for DOC_BINDING_TTL_SECONDS. Backs doc_id_for,
+        doc_override_for and all_doc_bindings so a per-prompt lookup and the
+        Prompts list page both hit the same cached batch instead of one query
+        per prompt.
+        """
+        if self._doc_binding_cache is not None and time.time() < self._doc_binding_expires:
+            return self._doc_binding_cache
+        if not self._client:
+            return {}
+        try:
+            result = (
+                self._client.table("prompt_doc_bindings")
+                .select("prompt_id, doc_id, is_override")
+                .execute()
+            )
+            self._doc_binding_cache = {
+                row["prompt_id"]: (str(row["doc_id"]), bool(row.get("is_override", False)))
+                for row in (result.data or [])
+            }
+        except Exception:
+            LOGGER.warning("Doc binding fetch failed; using legacy env vars only", exc_info=True)
+            self._doc_binding_cache = {}
+        self._doc_binding_expires = time.time() + DOC_BINDING_TTL_SECONDS
+        return self._doc_binding_cache
+
     def doc_id_for(self, prompt_id: str) -> Optional[str]:
         """Attached doc id for this prompt, falling back to the legacy env var."""
-        if self._client:
-            try:
-                result = (
-                    self._client.table("prompt_doc_bindings")
-                    .select("doc_id")
-                    .eq("prompt_id", prompt_id)
-                    .execute()
-                )
-                if result.data:
-                    return str(result.data[0]["doc_id"])
-            except Exception:
-                LOGGER.warning(
-                    f"Doc binding lookup failed for '{prompt_id}'; using the legacy env var",
-                    exc_info=True,
-                )
+        binding = self._doc_bindings().get(prompt_id)
+        if binding is not None:
+            return binding[0]
         return legacy_doc_id_for(prompt_id)
+
+    def doc_override_for(self, prompt_id: str) -> bool:
+        """Whether this prompt's doc binding should outrank a live DB version.
+
+        False (including when unconfigured or no binding row exists) means
+        today's resolution order: DB, then doc, then bundled -- byte-identical
+        to before this method existed. There is no env-var equivalent of
+        "override": a prompt with only a legacy env var and no binding row
+        always resolves as non-override.
+        """
+        binding = self._doc_bindings().get(prompt_id)
+        return binding[1] if binding is not None else False
+
+    def all_doc_bindings(self) -> Dict[str, Tuple[str, bool]]:
+        """Every prompt_id -> (doc_id, is_override) binding.
+
+        For the Prompts list page: one call covers every row, rather than
+        each row triggering its own doc_id_for/doc_override_for query.
+        """
+        return dict(self._doc_bindings())
 
     # ── writes ───────────────────────────────────────────────────────────────
     def propose(self, prompt_id: str, body: str, note: str, actor: str, via: str = "ui") -> int:
@@ -199,3 +239,35 @@ class OverrideStore:
         ).execute()
         self.invalidate()
         LOGGER.info(f"Reverted {prompt_id} to the bundled default by {actor}")
+
+    def set_doc_binding(self, prompt_id: str, doc_id: str, is_override: bool, actor: str) -> None:
+        """Attach (or update) this prompt's Google Doc binding.
+
+        Upserts on prompt_id, the table's primary key -- a second call for
+        the same prompt updates doc_id/is_override in place rather than
+        erroring on a duplicate key.
+        """
+        if not self._client:
+            raise RuntimeError("prompt override store is not configured")
+        self._client.table("prompt_doc_bindings").upsert(
+            {"prompt_id": prompt_id, "doc_id": doc_id, "is_override": is_override}
+        ).execute()
+        self.invalidate()
+        LOGGER.info(
+            f"Set doc binding for {prompt_id} -> {doc_id} (override={is_override}) by {actor}"
+        )
+
+    def clear_doc_binding(self, prompt_id: str, actor: str) -> None:
+        """Detach this prompt's doc binding entirely, falling back to the
+        legacy env var (if any) on the next resolution.
+
+        Distinct from setting an empty doc_id: this deletes the row so
+        doc_id_for/doc_override_for fall through to legacy_doc_id_for/False,
+        rather than leaving a row with a blank doc_id that shadows the env
+        var with nothing to fetch.
+        """
+        if not self._client:
+            raise RuntimeError("prompt override store is not configured")
+        self._client.table("prompt_doc_bindings").delete().eq("prompt_id", prompt_id).execute()
+        self.invalidate()
+        LOGGER.info(f"Cleared doc binding for {prompt_id} by {actor}")

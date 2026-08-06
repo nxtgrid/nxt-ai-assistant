@@ -873,7 +873,11 @@ CREATE TABLE IF NOT EXISTS prompt_labels (
 CREATE TABLE IF NOT EXISTS prompt_doc_bindings (
     prompt_id      text PRIMARY KEY,
     doc_id         text NOT NULL,
-    last_synced_at timestamptz
+    last_synced_at timestamptz,
+    -- When true, this doc outranks a live DB version instead of losing to
+    -- it (see 0009_prompt_doc_override.sql). Default false preserves the
+    -- pre-existing DB > doc > bundled order for every binding.
+    is_override    boolean NOT NULL DEFAULT false
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_modules (

@@ -27,15 +27,18 @@ LOGGER = get_logger(__name__)
 
 DbBodyFor = Callable[[str], Optional[Tuple[str, int]]]
 GDocBodyFor = Callable[[str], Optional[str]]
+DocOverrideFor = Callable[[str], bool]
 
 
 class PromptLibrary:
     """Resolves, renders and reports provenance for every prompt in Anansi.
 
     Resolution order per id: DB override, then attached Google Doc, then the
-    bundled file. Frontmatter always comes from the bundled file, so an override
-    can supply body text but can never change a prompt's overridability, output
-    schema or access lists.
+    bundled file -- unless the prompt's doc binding has its override flag set,
+    in which case the doc goes first instead (see _resolve_body). Frontmatter
+    always comes from the bundled file, so an override can supply body text
+    but can never change a prompt's overridability, output schema or access
+    lists.
     """
 
     def __init__(
@@ -46,6 +49,7 @@ class PromptLibrary:
         invalidate_gdoc: Optional[Callable[[], None]] = None,
         overrides: Optional[Any] = None,
         knowledge: Optional[Any] = None,
+        doc_override_for: Optional[DocOverrideFor] = None,
     ) -> None:
         self._bundled = bundled or BundledStore()
         # `overrides` (an OverrideStore, or any object with the same duck-typed
@@ -56,6 +60,16 @@ class PromptLibrary:
         self._gdoc_body_for = gdoc_body_for
         self._invalidate_gdoc = invalidate_gdoc
         self._knowledge = knowledge
+        # getattr, not direct attribute access: existing tests pass minimal
+        # duck-typed `overrides` fakes (e.g. shared/tests/test_prompt_write_api.py's
+        # RecordingStore) that predate this method and have no reason to grow
+        # it just to keep constructing. None here means "no toggle wired up",
+        # which _resolve_body treats as always the pre-toggle DB-first order.
+        self._doc_override_for = (
+            getattr(overrides, "doc_override_for", doc_override_for)
+            if overrides is not None
+            else doc_override_for
+        )
 
     # ── introspection ────────────────────────────────────────────────────────
     def ids(self) -> List[str]:
@@ -77,32 +91,51 @@ class PromptLibrary:
             self._invalidate_gdoc()
 
     # ── resolution ───────────────────────────────────────────────────────────
+    def _try_db(self, prompt_id: str) -> Optional[Tuple[str, PromptSource, Optional[int]]]:
+        if self._db_body_for is None:
+            return None
+        try:
+            found = self._db_body_for(prompt_id)
+            if found:
+                return found[0], PromptSource.DB, found[1]
+        except Exception:
+            LOGGER.warning(
+                f"Prompt override lookup failed for '{prompt_id}'; continuing to the next source",
+                exc_info=True,
+            )
+        return None
+
+    def _try_gdoc(self, prompt_id: str) -> Optional[Tuple[str, PromptSource, Optional[int]]]:
+        if self._gdoc_body_for is None:
+            return None
+        try:
+            body = self._gdoc_body_for(prompt_id)
+            if body:
+                return body, PromptSource.GDOC, None
+        except Exception:
+            LOGGER.warning(
+                f"Prompt Google Doc lookup failed for '{prompt_id}'; "
+                f"continuing to the next source",
+                exc_info=True,
+            )
+        return None
+
     def _resolve_body(self, spec: PromptSpec) -> Tuple[str, PromptSource, Optional[int]]:
         if not spec.overridable:
             return spec.body, PromptSource.BUNDLED, None
 
-        if self._db_body_for is not None:
-            try:
-                found = self._db_body_for(spec.id)
-                if found:
-                    return found[0], PromptSource.DB, found[1]
-            except Exception:
-                LOGGER.warning(
-                    f"Prompt override lookup failed for '{spec.id}'; "
-                    f"falling through to doc/bundled",
-                    exc_info=True,
-                )
+        # Default order: DB, then doc, then bundled. A prompt whose doc
+        # binding has is_override=True flips DB and doc -- the doc wins even
+        # when a DB version exists, instead of a saved-but-inactive draft
+        # silently losing to it. No override_for wired up (None) always means
+        # the default order: byte-identical to before this toggle existed.
+        is_override = bool(self._doc_override_for(spec.id)) if self._doc_override_for else False
+        order = (self._try_gdoc, self._try_db) if is_override else (self._try_db, self._try_gdoc)
 
-        if self._gdoc_body_for is not None:
-            try:
-                body = self._gdoc_body_for(spec.id)
-                if body:
-                    return body, PromptSource.GDOC, None
-            except Exception:
-                LOGGER.warning(
-                    f"Prompt Google Doc lookup failed for '{spec.id}'; using bundled",
-                    exc_info=True,
-                )
+        for attempt in order:
+            result = attempt(spec.id)
+            if result is not None:
+                return result
 
         return spec.body, PromptSource.BUNDLED, None
 
