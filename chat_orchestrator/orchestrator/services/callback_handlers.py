@@ -315,7 +315,9 @@ async def _handle_callback_query(args: Dict[str, Any]) -> Dict[str, Any]:
 
         from orchestrator.services.webhook_processor import process_webhook_with_graph
 
-        response_text, tool_results, reply_markup = await process_webhook_with_graph(
+        # _tokens: Phase 1 added this 4th element; this callback path sends a
+        # Telegram response and has no use for it yet.
+        response_text, tool_results, reply_markup, _tokens = await process_webhook_with_graph(
             user_input=user_input,
             user_context=user_context,
             session_id=session_id,
@@ -506,7 +508,9 @@ async def _handle_procedure_callback(
         # The choice number becomes the user's input
         from orchestrator.services.webhook_processor import process_webhook_with_graph
 
-        response_text, tool_results, reply_markup = await process_webhook_with_graph(
+        # _tokens: Phase 1 added this 4th element; this callback path sends a
+        # Telegram response and has no use for it yet.
+        response_text, tool_results, reply_markup, _tokens = await process_webhook_with_graph(
             user_input=selected_text,  # Send the full selected option text
             user_context=user_context,
             session_id=session_id,
@@ -648,7 +652,9 @@ async def _handle_step_input_callback(
         # KEY DIFFERENCE from procedure callback: send "1" not the full option text
         from orchestrator.services.webhook_processor import process_webhook_with_graph
 
-        response_text, tool_results, reply_markup = await process_webhook_with_graph(
+        # _tokens: Phase 1 added this 4th element; this callback path sends a
+        # Telegram response and has no use for it yet.
+        response_text, tool_results, reply_markup, _tokens = await process_webhook_with_graph(
             user_input=choice,
             user_context=user_context,
             session_id=session_id,

@@ -129,6 +129,14 @@ Almost all of the machinery already exists:
    `_handle_webhook_async` returns `{success, message, session_id}` at
    `handler.py:2672`, dropping `tool_results` and `reply_markup`. Phase 1 fixes
    this.
+6. **~~The API response envelope discards everything but text.~~ Fixed by
+   Phase 1.** Was: `_handle_webhook_async` returned `{success, message,
+   session_id}`, dropping `tool_results` and `reply_markup`. Now: the direct
+   API response (both the async path and a legacy sync entrypoint) also
+   includes `attachments`/`choices`/`tool_calls`/`tokens`, built via
+   `orchestrator/models/envelope.py`. See Phase 1's "implementation note" for
+   why this is a *derived view* over the original tuple rather than a
+   replacement for it — that distinction matters for anyone building on this.
 
 ---
 
@@ -277,6 +285,46 @@ The builder needs to render what a step produced. This also defines what a
      `reply_markup`. **Behavior must be byte-identical to today** — this is a
      refactor, not a redesign. Existing Telegram tests must pass unchanged.
    - The API path serializes the envelope to JSON.
+2. **Build it once, adapt per transport.**
+
+   **Implementation note (added during Phase 1, supersedes this item's
+   original wording):** `process_webhook_with_graph` does **not** return a
+   `ResponseEnvelope` directly — it still returns its original
+   `(text, tool_results, reply_markup)` tuple, widened to a 4-tuple with
+   `tokens` added. `build_response_envelope()` in `envelope.py` builds the
+   envelope as a *derived view* over that same tuple, called only where the
+   transport-neutral shape is actually needed.
+
+   Reason for the deviation: `handler.py`'s Telegram-sending code
+   (`_process_telegram_async`, `_process_and_respond_async`) turned out to
+   depend on the FULL `ToolCallResult` objects for more than image
+   extraction — `.output`/`.error`/`.success` feed escalation-message
+   formatting, `.name` drives a tool-triggered button special-case
+   (`schedule_create_user_agent` → "View Agent State" button), and LLM-authored
+   `[BUTTONS]` blocks get parsed out of the response text itself
+   (`parse_procedure_buttons`) *after* the graph call, mutating `reply_markup`
+   in place. None of that survives a lossy `ToolCallResult` → `Attachment`
+   projection. Replacing the tuple with an envelope-only return would force
+   rewriting all of that in the same change — a materially bigger, riskier
+   refactor than "byte-identical, this is a refactor not a redesign" calls
+   for, and bigger than what was understood when this plan was written.
+
+   So: 7 call sites across `handler.py` and `callback_handlers.py` were
+   widened to unpack 4 values instead of 3 (the 5 Telegram-bound ones ignore
+   the new `tokens` element; the 2 direct-API ones — one async, one a legacy
+   sync entrypoint — use it to build the envelope). **The production Telegram
+   send path does not go through the envelope or through
+   `choices_to_reply_markup`.** That function exists so the envelope's shape
+   is provably round-trippable (tested), not because anything wired sends
+   through it yet. A future phase that wants Telegram sending to actually run
+   through the envelope needs to fold in that business logic deliberately —
+   don't assume it's already unified because the envelope type exists.
+
+   - The API path (both the async and legacy-sync direct-response branches in
+     `handler.py`) builds the envelope and serializes it into the JSON
+     response.
+   - The Telegram path is otherwise untouched. Existing Telegram tests pass
+     unmodified — verified, not just intended.
 
 3. **Backwards compatibility.** The API response keeps its existing top-level
    `{success, message, session_id}` keys (other callers depend on them —
