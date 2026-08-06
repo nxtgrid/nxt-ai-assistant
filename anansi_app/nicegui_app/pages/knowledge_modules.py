@@ -185,19 +185,21 @@ async def _open_edit_dialog(
         ).classes("w-full")
         with ui.row().classes("items-center justify-between w-full"):
             ui.label("Body").classes("text-caption")
-            view_toggle = ui.toggle(["Edit", "Preview"], value="Edit").props("dense")
+            # Defaults to Preview -- opening a module is almost always to
+            # read it; Edit is one click away for the times it isn't.
+            view_toggle = ui.toggle(["Edit", "Preview"], value="Preview").props("dense")
         body_input = ui.codemirror(
             value=existing.body if existing else "",
             language="Markdown",
             theme="vscodeLight",
             line_wrapping=True,
         ).classes("w-full")
+        body_input.set_visibility(False)
         body_preview = (
-            ui.markdown("")
+            ui.markdown(existing.body if existing else "")
             .classes("w-full")
             .style("min-height: 16rem; border: 1px solid #e0e0e0; padding: 0.5rem;")
         )
-        body_preview.set_visibility(False)
 
         def _switch_view(e) -> None:
             if e.value == "Preview":
