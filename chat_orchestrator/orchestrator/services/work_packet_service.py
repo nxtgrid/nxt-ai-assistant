@@ -964,6 +964,28 @@ class WorkPacketService:
         LOGGER.info(f"Completed work packet: {packet['packet_id']}")
         return result.data[0]
 
+    async def record_token_usage(self, packet_id: str, token_usage: Dict[str, Any]) -> None:
+        """Best-effort: record this run's accumulated LLM token/cost totals.
+
+        Called once per workflow run (see WorkflowExecutor._persist_token_usage)
+        with the FULL run total, not a delta -- overwrites any previous value.
+        Swallows all errors; a bookkeeping failure must never surface as a
+        workflow failure. Callers that need the failure signal should let the
+        original exception from a real DB call propagate instead -- this method
+        is specifically for the "record cost, but never let recording cost
+        break anything" use case.
+        """
+        try:
+            packet = await self.get_packet(packet_id)
+            if not packet:
+                LOGGER.warning(f"record_token_usage: packet not found: {packet_id}")
+                return
+            self.client.table("agent_work_packets").update({"token_usage": token_usage}).eq(
+                "id", packet["id"]
+            ).execute()
+        except Exception:
+            LOGGER.exception(f"record_token_usage failed for packet {packet_id}")
+
     async def fail_packet(
         self,
         packet_id: str,

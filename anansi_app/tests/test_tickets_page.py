@@ -1,9 +1,9 @@
 """Tests for the Tickets page module + routing (Task 8).
 
-Follows this app's convention of faking ``nicegui`` at the sys.modules level
-before importing a ``nicegui_app.pages.*`` module (there is no NiceGUI runtime
-in tests). Covers the page's pure helpers, a static "no mutation controls"
-guarantee, and AST-level checks of main.py's routing/RBAC/landing precedence.
+Covers the page's pure helpers, a static "no mutation controls" guarantee,
+and AST-level checks of main.py's routing/RBAC/landing precedence. (``nicegui``
+is faked at the sys.modules level in conftest.py so ``nicegui_app.pages.*``
+modules can be imported without a NiceGUI runtime.)
 """
 
 from __future__ import annotations
@@ -11,14 +11,7 @@ from __future__ import annotations
 import ast
 import os
 import re
-import sys
 from datetime import datetime, timedelta
-from types import SimpleNamespace
-
-sys.modules.setdefault(
-    "nicegui",
-    SimpleNamespace(run=SimpleNamespace(), ui=SimpleNamespace()),
-)
 
 from nicegui_app.pages import tickets as tickets_page
 

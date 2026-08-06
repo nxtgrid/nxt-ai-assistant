@@ -49,7 +49,9 @@ _REAL_PACKAGE_GENERATOR_STEPS = {
 }
 
 
-def _turn(text: str = "LLM response text") -> GeminiTurnResult:
+def _turn(
+    text: str = "LLM response text", input_tokens: int = 0, output_tokens: int = 0
+) -> GeminiTurnResult:
     """Build the real turn object ``generate_messages`` returns.
 
     Uses the production dataclass rather than a dict or MagicMock so these
@@ -61,8 +63,8 @@ def _turn(text: str = "LLM response text") -> GeminiTurnResult:
         text=text,
         tool_calls=[],
         finish_reason="STOP",
-        input_tokens=0,
-        output_tokens=0,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
         raw_response={},
     )
 
@@ -164,6 +166,7 @@ class TestWorkflowExecution:
         """Create mock chat LLM client (GeminiClient or OpenRouterClient)."""
         mock = MagicMock()
         mock.generate_messages = AsyncMock(return_value=_turn())
+        mock.model_name = "gemini-2.5-flash"
         return mock
 
     @pytest.fixture
@@ -176,6 +179,7 @@ class TestWorkflowExecution:
         mock.set_awaiting_input = AsyncMock(
             return_value={"packet_id": "test_123", "status": "awaiting_input"}
         )
+        mock.record_token_usage = AsyncMock(return_value=None)
         return mock
 
     @pytest.fixture
@@ -254,6 +258,124 @@ class TestWorkflowExecution:
         assert mock_packet_service.complete_step.call_count == 2
 
     @pytest.mark.asyncio
+    async def test_llm_workflow_records_accumulated_token_usage(
+        self, mock_gemini, mock_packet_service, base_context, base_packet
+    ):
+        """Tokens from every [llm] step in the run are summed onto one
+        record_token_usage call, keyed by packet_id, once the run ends."""
+        mock_gemini.generate_messages = AsyncMock(
+            return_value=_turn(input_tokens=100, output_tokens=50)
+        )
+        executor = WorkflowExecutor(mock_gemini, mock_packet_service, None)
+
+        config = MockExpertConfig(
+            workflows={
+                "grid_analysis": [
+                    "1. [llm] understand - Parse the request",
+                    "2. [llm] respond - Generate response",
+                ]
+            }
+        )
+
+        await executor.execute_workflow(
+            expert_config=config, packet=base_packet, context=base_context
+        )
+
+        mock_packet_service.record_token_usage.assert_called_once()
+        packet_id_arg, token_usage = mock_packet_service.record_token_usage.call_args.args
+        assert packet_id_arg == "test_123"
+        assert token_usage["input_tokens"] == 200  # 2 steps x 100
+        assert token_usage["output_tokens"] == 100  # 2 steps x 50
+        assert token_usage["rounds"] == 2
+        assert token_usage["model"] == "gemini-2.5-flash"
+        # gemini-2.5-flash is a priced model -- cost_usd must be present.
+        assert "cost_usd" in token_usage
+
+    @pytest.mark.asyncio
+    async def test_unpriced_model_omits_cost_usd_but_keeps_tokens(
+        self, mock_gemini, mock_packet_service, base_context, base_packet
+    ):
+        """An unrecognized model still reports tokens -- never guesses a cost."""
+        mock_gemini.generate_messages = AsyncMock(
+            return_value=_turn(input_tokens=10, output_tokens=5)
+        )
+        mock_gemini.model_name = "some-future-model-not-in-pricing-table"
+        executor = WorkflowExecutor(mock_gemini, mock_packet_service, None)
+
+        config = MockExpertConfig(workflows={"grid_analysis": ["1. [llm] respond - Reply"]})
+
+        await executor.execute_workflow(
+            expert_config=config, packet=base_packet, context=base_context
+        )
+
+        _packet_id, token_usage = mock_packet_service.record_token_usage.call_args.args
+        assert token_usage["input_tokens"] == 10
+        assert token_usage["output_tokens"] == 5
+        assert "cost_usd" not in token_usage
+
+    @pytest.mark.asyncio
+    async def test_record_token_usage_failure_does_not_break_workflow(
+        self, mock_gemini, mock_packet_service, base_context, base_packet
+    ):
+        """Bookkeeping is best-effort: a DB error persisting cost must not
+        surface as (or mask) the workflow's own result."""
+        mock_packet_service.record_token_usage = AsyncMock(
+            side_effect=RuntimeError("db is down")
+        )
+        executor = WorkflowExecutor(mock_gemini, mock_packet_service, None)
+
+        config = MockExpertConfig(workflows={"grid_analysis": ["1. [llm] respond - Reply"]})
+
+        # Must not raise, despite record_token_usage blowing up internally.
+        response, state = await executor.execute_workflow(
+            expert_config=config, packet=base_packet, context=base_context
+        )
+
+        assert response is not None
+
+    @pytest.mark.asyncio
+    async def test_cancelled_mid_run_still_records_tokens_spent_so_far(
+        self, mock_gemini, mock_packet_service, base_context, base_packet
+    ):
+        """SIGTERM-style cancellation between steps must not lose the cost of
+        the LLM call(s) that already completed before the cancel arrived.
+
+        Forces the cancellation via complete_step (called right after step 1's
+        _execute_llm_step already accumulated its tokens onto execution_summary)
+        so this exercises the real finally-runs-before-re-raise path, not a
+        mocked-away one.
+        """
+        mock_gemini.generate_messages = AsyncMock(
+            return_value=_turn(input_tokens=42, output_tokens=7)
+        )
+        mock_packet_service.complete_step = AsyncMock(side_effect=asyncio.CancelledError())
+        mock_packet_service.interrupt_packet = AsyncMock(return_value=None)
+        executor = WorkflowExecutor(mock_gemini, mock_packet_service, None)
+
+        config = MockExpertConfig(
+            workflows={
+                "grid_analysis": [
+                    "1. [llm] understand - Parse the request",
+                    "2. [llm] respond - Generate response",
+                ]
+            }
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            await executor.execute_workflow(
+                expert_config=config, packet=base_packet, context=base_context
+            )
+
+        mock_packet_service.interrupt_packet.assert_awaited_once()
+        mock_packet_service.record_token_usage.assert_called_once()
+        _packet_id, token_usage = mock_packet_service.record_token_usage.call_args.args
+        # Only step 1 ran before the cancellation -- its tokens must still be
+        # recorded, not discarded because the run never reached a normal end.
+        assert token_usage["input_tokens"] == 42
+        assert token_usage["output_tokens"] == 7
+        assert token_usage["rounds"] == 1
+
+    @pytest.mark.asyncio
     async def test_execute_function_step(
         self, mock_gemini, mock_packet_service, base_context, base_packet
     ):
@@ -290,6 +412,36 @@ class TestWorkflowExecution:
         finally:
             # Clean up: unregister the test handler
             global_registry.unregister("test_fetch_step")
+
+    @pytest.mark.asyncio
+    async def test_function_only_workflow_does_not_record_token_usage(
+        self, mock_gemini, mock_packet_service, base_context, base_packet
+    ):
+        """A workflow with no [llm] steps spends no LLM tokens -- record_token_usage
+        must not fire an all-zero write. Function steps call MCP tools directly,
+        never self.gemini, so there is nothing to accumulate."""
+        global_registry = get_step_registry()
+
+        async def test_fetch_handler(ctx: StepContext) -> StepResult:
+            return StepResult.success(data={"ok": True}, message="done")
+
+        global_registry.register("test_fetch_step_no_tokens", test_fetch_handler)
+
+        try:
+            executor = WorkflowExecutor(mock_gemini, mock_packet_service, None)
+
+            config = MockExpertConfig(
+                workflows={"grid_analysis": ["1. [function:test_fetch_step_no_tokens] - Fetch"]}
+            )
+
+            await executor.execute_workflow(
+                expert_config=config, packet=base_packet, context=base_context
+            )
+
+            mock_gemini.generate_messages.assert_not_called()
+            mock_packet_service.record_token_usage.assert_not_called()
+        finally:
+            global_registry.unregister("test_fetch_step_no_tokens")
 
     @pytest.mark.asyncio
     async def test_execute_function_step_failure(

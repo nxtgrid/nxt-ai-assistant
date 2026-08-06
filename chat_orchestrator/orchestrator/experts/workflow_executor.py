@@ -141,6 +141,14 @@ class ExecutionSummary:
     failure_reason: Optional[str] = None
     all_steps: Optional[List["ParsedStep"]] = field(default=None, repr=False)
 
+    # Token/cost accounting (see WorkflowExecutor._persist_token_usage). Only
+    # [llm] steps contribute -- function steps call MCP tools directly, not
+    # the LLM client, so a function-only workflow legitimately stays at 0/0.
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    llm_rounds: int = 0
+    model_name: Optional[str] = None
+
     def add_record(self, record: StepExecutionRecord) -> None:
         """Add a step execution record."""
         self.step_records.append(record)
@@ -217,6 +225,12 @@ class ExecutionSummary:
             "skipped_steps": self.skipped_steps,
             "final_status": self.final_status,
             "failure_reason": self.failure_reason,
+            # Running total, visible mid-run via the same packet_state.execution_summary
+            # persistence this dict already feeds -- not just the final value.
+            "total_input_tokens": self.total_input_tokens,
+            "total_output_tokens": self.total_output_tokens,
+            "llm_rounds": self.llm_rounds,
+            "model_name": self.model_name,
             "steps": [r.to_dict() for r in records],
         }
 
@@ -315,6 +329,10 @@ class WorkflowExecutor:
         self._current_step_name: Optional[str] = None
         self._current_packet_id: Optional[str] = None
         self._current_session_id: Optional[str] = None
+        # Set once _execute_workflow_inner constructs its ExecutionSummary; read
+        # back in execute_workflow's `finally` to persist token/cost totals
+        # regardless of how the run ended. See _persist_token_usage.
+        self._current_execution_summary: Optional[ExecutionSummary] = None
 
     def parse_workflow(self, workflow_lines: List[str]) -> List[ParsedStep]:
         """Parse workflow lines into structured steps.
@@ -429,6 +447,7 @@ class WorkflowExecutor:
         # Track packet/session for CancelledError handler (SIGTERM graceful shutdown)
         self._current_packet_id = packet.get("packet_id")
         self._current_session_id = context.session_id
+        self._current_execution_summary = None
         try:
             result: Tuple[str, Dict[str, Any]] = await self._execute_workflow_inner(
                 expert_config, packet, context, on_progress
@@ -440,6 +459,13 @@ class WorkflowExecutor:
             # awaiting — ensuring the state is written even if cancel() fires again.
             await self._mark_interrupted()
             raise  # Always re-raise CancelledError
+        finally:
+            # Runs on every exit -- success, a handled failure/pause returned
+            # (not raised) by _execute_workflow_inner, an unexpected exception,
+            # and CancelledError (after _mark_interrupted, before re-raise
+            # propagates). Whatever tokens were spent get recorded regardless
+            # of how the run ended.
+            await self._persist_token_usage()
 
     async def _mark_interrupted(self) -> None:
         """Best-effort: write auto_resumable=True state. Swallow all errors — process is dying."""
@@ -454,6 +480,51 @@ class WorkflowExecutor:
             )
         except Exception:
             pass  # Best-effort during shutdown
+
+    async def _persist_token_usage(self) -> None:
+        """Best-effort: record this run's accumulated LLM token/cost totals.
+
+        Reads from `self._current_execution_summary`, set by
+        `_execute_workflow_inner` once it constructs its `ExecutionSummary`.
+        Runs from `execute_workflow`'s `finally`, so it fires exactly once per
+        call to `execute_workflow` regardless of outcome. Never raises -- a
+        bookkeeping failure must not mask the workflow's actual result.
+        """
+        summary = self._current_execution_summary
+        packet_id = self._current_packet_id
+        if summary is None or not packet_id:
+            return
+        if summary.total_input_tokens == 0 and summary.total_output_tokens == 0:
+            # No LLM steps ran (function-only workflow, or failed before any
+            # LLM call) -- nothing to report. Leaves agent_work_packets.token_usage
+            # at its default rather than writing an all-zero row.
+            return
+        try:
+            from shared.llm.pricing import estimate_cost_usd
+
+            token_usage: Dict[str, Any] = {
+                "input_tokens": summary.total_input_tokens,
+                "output_tokens": summary.total_output_tokens,
+                "rounds": summary.llm_rounds,
+            }
+            if summary.model_name:
+                token_usage["model"] = summary.model_name
+                cost = estimate_cost_usd(
+                    summary.model_name,
+                    summary.total_input_tokens,
+                    summary.total_output_tokens,
+                )
+                # Omit entirely when unpriced -- never write cost_usd=0 for an
+                # unknown model, that reads as "free" rather than "unknown".
+                if cost is not None:
+                    token_usage["cost_usd"] = str(cost)
+
+            await asyncio.wait_for(
+                self.packet_service.record_token_usage(packet_id, token_usage),
+                timeout=5.0,
+            )
+        except Exception:
+            LOGGER.exception(f"Failed to persist token usage for packet {packet_id}")
 
     @langfuse_observe(name="expert-workflow-inner")
     async def _execute_workflow_inner(
@@ -500,6 +571,9 @@ class WorkflowExecutor:
             total_steps=len(steps),
             all_steps=steps,
         )
+        # Exposed to execute_workflow's `finally` for token/cost persistence
+        # regardless of how this run ends. See _persist_token_usage.
+        self._current_execution_summary = execution_summary
 
         # Find current step index (resume from where we left off)
         completed = set(packet.get("steps_completed", []) or [])
@@ -2369,6 +2443,15 @@ class WorkflowExecutor:
                 system_instructions=expert_config.system_instructions,
                 tools_payload=None,
             )
+
+            # Record token usage regardless of what happens next -- a blocked
+            # response still consumed input+output tokens. See
+            # WorkflowExecutor._persist_token_usage for where this lands.
+            if execution_summary is not None:
+                execution_summary.total_input_tokens += response.input_tokens
+                execution_summary.total_output_tokens += response.output_tokens
+                execution_summary.llm_rounds += 1
+                execution_summary.model_name = self.gemini.model_name
 
             # Check finishReason for blocked content
             finish_reason = response.finish_reason

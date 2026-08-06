@@ -338,5 +338,73 @@ class TestUpdateState:
         service, fake_client = _make_condition_checking_service(packet)
 
         result = await service.update_state("packet-1", {"k": "v"})
-
         assert result["state_version"] == 6
+
+
+class TestRecordTokenUsage:
+    """Tests for WorkPacketService.record_token_usage (run-level cost accounting).
+
+    See chat_orchestrator/orchestrator/experts/workflow_executor.py's
+    _persist_token_usage for the (single) caller.
+    """
+
+    @pytest.mark.asyncio
+    async def test_writes_token_usage_column(self):
+        service, fake_client = _make_service(_base_packet())
+        token_usage = {"input_tokens": 100, "output_tokens": 50, "rounds": 2}
+
+        await service.record_token_usage("packet-1", token_usage)
+
+        assert fake_client.updates == [{"token_usage": token_usage}]
+        assert fake_client.packet["token_usage"] == token_usage
+
+    @pytest.mark.asyncio
+    async def test_resolves_by_business_packet_id(self):
+        # get_packet accepts either the human-readable packet_id or the raw
+        # uuid; record_token_usage must go through it rather than assuming
+        # the caller already has the uuid.
+        service, fake_client = _make_service(_base_packet(id="uuid-xyz", packet_id="packet-1"))
+
+        await service.record_token_usage("packet-1", {"input_tokens": 1, "output_tokens": 1})
+
+        assert fake_client.packet["id"] == "uuid-xyz"
+        assert fake_client.packet["token_usage"] == {"input_tokens": 1, "output_tokens": 1}
+
+    @pytest.mark.asyncio
+    async def test_missing_packet_does_not_raise(self):
+        service, fake_client = _make_service(None)
+
+        # Must not raise -- this runs from a `finally` block and a bookkeeping
+        # failure must never surface as (or mask) a workflow failure.
+        await service.record_token_usage("missing-packet", {"input_tokens": 1})
+
+        assert fake_client.updates == []
+
+    @pytest.mark.asyncio
+    async def test_db_error_does_not_raise(self, monkeypatch):
+        service, fake_client = _make_service(_base_packet())
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("db is down")
+
+        monkeypatch.setattr(fake_client, "table", _boom)
+
+        # Must swallow the error, not propagate it.
+        await service.record_token_usage("packet-1", {"input_tokens": 1})
+
+    @pytest.mark.asyncio
+    async def test_overwrites_previous_value_rather_than_merging(self):
+        service, fake_client = _make_service(
+            _base_packet(token_usage={"input_tokens": 1, "output_tokens": 1, "rounds": 1})
+        )
+
+        await service.record_token_usage(
+            "packet-1", {"input_tokens": 500, "output_tokens": 300, "rounds": 4}
+        )
+
+        # A full-run total replaces the prior value; it is not summed with it.
+        assert fake_client.packet["token_usage"] == {
+            "input_tokens": 500,
+            "output_tokens": 300,
+            "rounds": 4,
+        }

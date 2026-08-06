@@ -125,6 +125,10 @@ Almost all of the machinery already exists:
    and then only into fixed keys. There is no general output binding. Phase 2
    adds one.
 
+6. **The API response envelope discards everything but text.**
+   `_handle_webhook_async` returns `{success, message, session_id}` at
+   `handler.py:2672`, dropping `tool_results` and `reply_markup`. Phase 1 fixes
+   this.
 6. **~~The API response envelope discards everything but text.~~ Fixed by
    Phase 1.** Was: `_handle_webhook_async` returned `{success, message,
    session_id}`, dropping `tool_results` and `reply_markup`. Now: the direct
@@ -275,6 +279,12 @@ The builder needs to render what a step produced. This also defines what a
        session_id: str
    ```
 
+2. **Build it once, adapt per transport.** `_process_webhook_with_graph` should
+   return a `ResponseEnvelope`. Then:
+   - The Telegram path converts envelope → `sendPhoto` + `sendMessage` +
+     `reply_markup`. **Behavior must be byte-identical to today** — this is a
+     refactor, not a redesign. Existing Telegram tests must pass unchanged.
+   - The API path serializes the envelope to JSON.
 2. **Build it once, adapt per transport.**
 
    **Implementation note (added during Phase 1, supersedes this item's
