@@ -13,3 +13,15 @@ def test_knowledge_modules_dialog_body_defaults_to_preview():
     src = KNOWLEDGE_MODULES_PATH.read_text()
 
     assert 'ui.toggle(["Edit", "Preview"], value="Preview")' in src
+
+
+def test_knowledge_modules_dialog_has_viewport_scroll_container():
+    """A rendered Preview can be arbitrarily tall (long modules commonly have
+    tables and multiple headings). Without an explicit scroll container the
+    body overflows past the dialog and overlaps the fields below it --
+    same failure mode the Broadcast and Prompts dialogs had, fixed there
+    with this exact style pair (see test_broadcast_dialog.py,
+    test_prompts_dialog.py)."""
+    src = KNOWLEDGE_MODULES_PATH.read_text()
+
+    assert "max-height: calc(100dvh - 32px); overflow-y: auto" in src

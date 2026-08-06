@@ -166,7 +166,9 @@ async def _open_edit_dialog(
         existing = next((m for m in store.all_modules() if m.slug == slug), None)
     existing_pins = store.prompts_pinning(existing.id) if existing else []
 
-    with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width: 700px"):
+    with ui.dialog() as dialog, ui.card().classes("w-full").style(
+        "max-width: 700px; max-height: calc(100dvh - 32px); overflow-y: auto"
+    ):
         ui.label("Edit module" if existing else "New module").classes("text-h6")
         slug_input = ui.input("Slug", value=existing.slug if existing else "").classes("w-full")
         slug_input.set_enabled(existing is None)  # slug is the identity; don't let it drift
