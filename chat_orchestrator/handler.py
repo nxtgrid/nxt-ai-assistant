@@ -13,6 +13,7 @@ import asyncio
 import copy
 import json
 import os
+from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -28,6 +29,7 @@ except ImportError:
     pass
 
 from orchestrator.config.settings import AppSettings, GeminiModelConfig
+from orchestrator.models.envelope import build_response_envelope
 from orchestrator.models.schemas import (
     ConversationMessage,
     MessageSourceLiteral,
@@ -2409,7 +2411,7 @@ def _handle_webhook(args: Dict[str, Any]) -> Dict[str, Any]:
             "original_chat_id": original_chat_id,  # For DB lookup
             "topic_id": webhook_req.topic_id,  # For schedule tools
         }
-        response_text, tool_results, reply_markup = asyncio.run(
+        response_text, tool_results, reply_markup, tokens = asyncio.run(
             _process_webhook_with_graph(
                 user_input=webhook_req.message,
                 user_context=user_context,
@@ -2420,11 +2422,25 @@ def _handle_webhook(args: Dict[str, Any]) -> Dict[str, Any]:
             )
         )
 
+        # Mirrors the async direct-API path in _handle_webhook_async -- see
+        # orchestrator.models.envelope's module docstring.
+        envelope = build_response_envelope(
+            text=response_text,
+            tool_results=tool_results,
+            reply_markup=reply_markup,
+            tokens=tokens,
+            session_id=session_id,
+        )
+
         return {
             "success": True,
             "message": response_text,
             "session_id": session_id,
             "statusCode": 200,
+            "attachments": [asdict(a) for a in envelope.attachments],
+            "choices": [asdict(c) for c in envelope.choices],
+            "tool_calls": envelope.tool_calls,
+            "tokens": envelope.tokens,
         }
 
     except Exception as e:
@@ -2656,7 +2672,7 @@ async def _handle_webhook_async(args: Dict[str, Any]) -> Dict[str, Any]:
         # =================================================================
         # DIRECT API CALLS: Process synchronously, return response in body
         # =================================================================
-        response_text, tool_results, reply_markup = await _process_webhook_with_graph(
+        response_text, tool_results, reply_markup, tokens = await _process_webhook_with_graph(
             user_input=webhook_req.message,
             user_context=user_context,
             entity_context=webhook_req.entity_context,
@@ -2670,11 +2686,29 @@ async def _handle_webhook_async(args: Dict[str, Any]) -> Dict[str, Any]:
             f"response_len={len(response_text) if response_text else 0}"
         )
 
+        # Transport-neutral envelope fields alongside the existing top-level
+        # keys (never remove those -- anansi_app, the scheduler, and n8n all
+        # depend on success/message/session_id as-is). See
+        # orchestrator.models.envelope's module docstring for why this is
+        # built here rather than by process_webhook_with_graph returning the
+        # envelope directly.
+        envelope = build_response_envelope(
+            text=response_text,
+            tool_results=tool_results,
+            reply_markup=reply_markup,
+            tokens=tokens,
+            session_id=session_id,
+        )
+
         return {
             "success": True,
             "message": response_text,
             "session_id": session_id,
             "statusCode": 200,
+            "attachments": [asdict(a) for a in envelope.attachments],
+            "choices": [asdict(c) for c in envelope.choices],
+            "tool_calls": envelope.tool_calls,
+            "tokens": envelope.tokens,
         }
 
     except Exception as e:
@@ -2768,7 +2802,9 @@ async def _process_and_respond_async(
     """Process webhook request and send response to outgoing webhook URL."""
     try:
         # Process with LangGraph full conversation graph
-        response_text, tool_results, reply_markup = await _process_webhook_with_graph(
+        # (_tokens: Phase 1 added this 4th element to the tuple; this path
+        # sends a Telegram-format response and has no use for it yet.)
+        response_text, tool_results, reply_markup, _tokens = await _process_webhook_with_graph(
             user_input=webhook_req.message,
             user_context=user_context,
             entity_context=webhook_req.entity_context,
@@ -2982,7 +3018,9 @@ async def _process_telegram_async(
         # even if processing raises — no risk of stuck indicators.
         async with _TypingIndicator(original_chat_id, webhook_req.topic_id):
             # Process with LangGraph full conversation graph
-            response_text, tool_results, reply_markup = await _process_webhook_with_graph(
+            # (_tokens: Phase 1 added this 4th element to the tuple; this path
+            # sends a Telegram Bot API response and has no use for it yet.)
+            response_text, tool_results, reply_markup, _tokens = await _process_webhook_with_graph(
                 user_input=webhook_req.message,
                 user_context=user_context,
                 entity_context=webhook_req.entity_context,

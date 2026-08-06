@@ -192,7 +192,7 @@ async def test_unexpected_graph_recursion_returns_continuation_contract(monkeypa
     persist_fallback = AsyncMock()
     monkeypatch.setattr(webhook_processor, "_persist_execution_limit_fallback", persist_fallback)
 
-    response, tool_results, markup = await webhook_processor.process_webhook_with_graph(
+    response, tool_results, markup, tokens = await webhook_processor.process_webhook_with_graph(
         "status",
         user_context,
         session_id="scheduled-session",
@@ -203,6 +203,9 @@ async def test_unexpected_graph_recursion_returns_continuation_contract(monkeypa
     assert "continue" in response.lower()
     assert tool_results == []
     assert markup is None
+    # No final_state was reached (GraphRecursionError fired inside
+    # invoke_full_graph) -- {} signals "unknown", not "zero tokens spent".
+    assert tokens == {}
     persist_fallback.assert_awaited_once_with(
         response=response,
         session_id="scheduled-session",
