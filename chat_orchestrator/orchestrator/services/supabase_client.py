@@ -13,7 +13,6 @@ from orchestrator.models.database import (
     ConversationSummary,
     DocumentChunkModel,
     RAGSearchResult,
-    TokenUsageModel,
     ToolCallModel,
     UserModel,
 )
@@ -838,28 +837,6 @@ class EnhancedSupabaseClient:
 
         except Exception as e:
             LOGGER.error(f"Error saving tool call: {e}")
-            raise
-
-    # Token Usage Tracking
-    async def save_token_usage(self, session_uuid: UUID, usage: TokenUsageModel) -> TokenUsageModel:
-        """Save token usage metrics."""
-        try:
-            client = self._get_client()
-
-            usage_data = {
-                "session_id": str(session_uuid),
-                "message_id": str(usage.message_id) if usage.message_id else None,
-                "model_name": usage.model_name,
-                "prompt_tokens": usage.prompt_tokens,
-                "completion_tokens": usage.completion_tokens,
-                "cost_usd": usage.cost_usd,
-            }
-
-            response = client.table("token_usage").insert(usage_data).execute()
-            return TokenUsageModel(**response.data[0])
-
-        except Exception as e:
-            LOGGER.error(f"Error saving token usage: {e}")
             raise
 
     # RAG Operations

@@ -77,20 +77,6 @@ class ToolCallModel(BaseModel):
     created_at: Optional[datetime] = None
 
 
-class TokenUsageModel(BaseModel):
-    """Token usage model for database operations."""
-
-    id: Optional[UUID] = None
-    session_id: UUID
-    message_id: Optional[UUID] = None
-    model_name: str
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: Optional[int] = None  # Computed column
-    cost_usd: Optional[float] = None
-    created_at: Optional[datetime] = None
-
-
 class UserFeedbackModel(BaseModel):
     """User feedback model for database operations."""
 
@@ -150,7 +136,6 @@ __all__ = [
     "ChatSessionModel",
     "ChatMessageModel",
     "ToolCallModel",
-    "TokenUsageModel",
     "UserFeedbackModel",
     "DocumentChunkModel",
     "ConversationSummary",

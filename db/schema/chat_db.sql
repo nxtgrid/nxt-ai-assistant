@@ -437,7 +437,8 @@ CREATE TABLE IF NOT EXISTS agent_work_packets (
     completed_at            timestamptz,
     created_at              timestamptz NOT NULL DEFAULT now(),
     updated_at              timestamptz NOT NULL DEFAULT now(),
-    state_version           integer NOT NULL DEFAULT 0
+    state_version           integer NOT NULL DEFAULT 0,
+    token_usage             jsonb NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS agent_work_packets_status_org_idx ON agent_work_packets (packet_status, organization_id);

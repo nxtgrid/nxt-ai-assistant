@@ -49,6 +49,11 @@ class GeminiClient:
         self._client_to_close = client if client is not None and hasattr(client, "aclose") else None
         self._closed = False
 
+    @property
+    def model_name(self) -> str:
+        """The effective model id for this client's calls (for cost attribution)."""
+        return self._model_config.model
+
     @langfuse_observe(as_type="generation", name="gemini-generation")
     async def generate_content(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """Generate content from a legacy Gemini REST-style payload."""

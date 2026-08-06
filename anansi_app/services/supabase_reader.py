@@ -10,6 +10,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from supabase import Client, create_client  # type: ignore[attr-defined]
@@ -917,6 +918,82 @@ class SupabaseReader:
                 "output_tokens": 0,
                 "median_response_time": None,
             }
+
+    @cache_data(ttl=300, show_spinner=False)  # Cache for 5 minutes
+    def get_run_usage_by_skill(_self, days_back: int = 7) -> Dict[str, Dict[str, Any]]:
+        """Aggregate agent_work_packets.token_usage over the last N days, per packet_type.
+
+        Written by WorkflowExecutor._persist_token_usage
+        (chat_orchestrator/orchestrator/experts/workflow_executor.py) once per
+        run. Until skills exist as a first-class table (see
+        docs/superpowers/plans/2026-08-06-user-designed-skills.md Phase 3),
+        packet_type is the closest stand-in for "which skill" -- swap the
+        grouping key to skill_id once that lands.
+
+        Returns {packet_type: {runs, failures, input_tokens, output_tokens,
+        cost_usd}}. cost_usd is a string (Decimal) and is None -- not 0 -- for
+        any packet_type where even one run in the window used a model absent
+        from shared/llm/pricing.py's PRICES table, rather than silently
+        reporting a partial sum as if it were the true total. Cost is always
+        an estimate -- see that module's docstring.
+        """
+        if not _self.client:
+            return {}
+
+        try:
+            since = datetime.utcnow() - timedelta(days=days_back)
+            response = (
+                _self.client.table("agent_work_packets")
+                .select("packet_type, packet_status, token_usage")
+                .gte("created_at", since.isoformat())
+                .execute()
+            )
+        except Exception as e:
+            logger.error("Error fetching run usage: %s", e)
+            return {}
+
+        # Decimal accumulator kept separate from the str-ified return value --
+        # jsonb round-trips cost_usd as a string (see 0010_run_token_usage.sql),
+        # and summing strings would be wrong.
+        totals: Dict[str, Dict[str, Any]] = {}
+        for row in response.data or []:
+            packet_type = row.get("packet_type") or "unknown"
+            bucket = totals.setdefault(
+                packet_type,
+                {
+                    "runs": 0,
+                    "failures": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cost_usd": Decimal("0"),
+                    "has_unpriced_run": False,
+                },
+            )
+            bucket["runs"] += 1
+            if row.get("packet_status") == "failed":
+                bucket["failures"] += 1
+
+            token_usage = row.get("token_usage") or {}
+            if not token_usage:
+                continue  # Function-only workflow or pre-Phase-0 row -- no LLM cost.
+            bucket["input_tokens"] += token_usage.get("input_tokens", 0) or 0
+            bucket["output_tokens"] += token_usage.get("output_tokens", 0) or 0
+            cost_str = token_usage.get("cost_usd")
+            if cost_str is not None:
+                bucket["cost_usd"] += Decimal(str(cost_str))
+            else:
+                bucket["has_unpriced_run"] = True
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for packet_type, bucket in totals.items():
+            result[packet_type] = {
+                "runs": bucket["runs"],
+                "failures": bucket["failures"],
+                "input_tokens": bucket["input_tokens"],
+                "output_tokens": bucket["output_tokens"],
+                "cost_usd": None if bucket["has_unpriced_run"] else str(bucket["cost_usd"]),
+            }
+        return result
 
     def _calculate_median_response_time(
         self, start_date: datetime, end_date: datetime

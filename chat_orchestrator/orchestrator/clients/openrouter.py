@@ -50,6 +50,15 @@ class OpenRouterClient:
             default_model=self._default_model,
         )
 
+    @property
+    def model_name(self) -> str:
+        """The effective (OpenRouter-normalized) model id for cost attribution.
+
+        Deliberately not in `shared.llm.pricing.PRICES` -- see that module's
+        docstring for why OpenRouter-routed models aren't priced in v1.
+        """
+        return self._default_model
+
     @langfuse_observe(as_type="generation", name="openrouter-generation")
     async def generate_messages(
         self,

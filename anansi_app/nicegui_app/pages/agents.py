@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -38,6 +39,18 @@ def _fmt_local(iso: str | None) -> str:
         return dt.astimezone(_DEFAULT_TZ).strftime("%Y-%m-%d %H:%M %Z")
     except (ValueError, TypeError):
         return str(iso)[:16]
+
+
+def _cost_display(cost_usd: str | None) -> str:
+    """Format a get_run_usage_by_skill cost_usd value for the run-cost table.
+
+    None means "at least one run in this bucket used an unpriced model" (see
+    SupabaseReader.get_run_usage_by_skill) -- must render as unknown, never
+    as a guessed or partial dollar amount.
+    """
+    if cost_usd is None:
+        return "—"
+    return f"${Decimal(cost_usd):.4f}"
 
 
 def _wake_ago(iso: str | None) -> str:
@@ -76,6 +89,7 @@ async def render() -> None:
         )
         return
 
+    await _render_run_cost_section()
     await _render_scheduled_jobs_section()
 
     # Global kill-switch indicator (var lives on anansi-bot; fetch from DO).
@@ -118,6 +132,54 @@ async def render() -> None:
             ).props("color=primary")
 
     await refresh()
+
+
+async def _render_run_cost_section() -> None:
+    """LLM token/cost usage for expert workflow runs, last 7 days.
+
+    Grouped by packet_type (not by expert/agent instance) -- see
+    SupabaseReader.get_run_usage_by_skill's docstring for why: this predates
+    skills existing as a first-class concept
+    (docs/superpowers/plans/2026-08-06-user-designed-skills.md Phase 3), and
+    packet_type is the closest stand-in available today. Costs are estimates
+    from shared/llm/pricing.py's static price table, not billed amounts.
+    """
+    with ui.expansion("💰 LLM Run Cost (Last 7 Days)", value=True).classes("w-full"):
+        reader = get_reader()
+        if not await run.io_bound(reader.is_configured):
+            ui.label("Database not configured — cannot load run cost.").classes("text-warning")
+            return
+
+        usage = await run.io_bound(reader.get_run_usage_by_skill)
+        if not usage:
+            ui.label("No workflow runs with LLM steps in the last 7 days.").classes(
+                "text-caption"
+            )
+            return
+
+        ui.label(
+            "By packet type for now — will switch to per-skill once skills exist."
+        ).classes("text-caption text-italic")
+
+        ui.table(
+            columns=[
+                {"name": "type", "label": "Type", "field": "type", "align": "left"},
+                {"name": "runs", "label": "Runs", "field": "runs", "align": "right"},
+                {"name": "failures", "label": "Failures", "field": "failures", "align": "right"},
+                {"name": "tokens", "label": "Tokens (in / out)", "field": "tokens", "align": "right"},
+                {"name": "cost", "label": "Est. cost (7d)", "field": "cost", "align": "right"},
+            ],
+            rows=[
+                {
+                    "type": packet_type.replace("_", " ").title(),
+                    "runs": bucket["runs"],
+                    "failures": bucket["failures"],
+                    "tokens": f"{bucket['input_tokens']:,} / {bucket['output_tokens']:,}",
+                    "cost": _cost_display(bucket["cost_usd"]),
+                }
+                for packet_type, bucket in sorted(usage.items())
+            ],
+        ).classes("w-full")
 
 
 async def _render_scheduled_jobs_section() -> None:
