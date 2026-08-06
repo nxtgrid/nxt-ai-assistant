@@ -1,15 +1,9 @@
 from __future__ import annotations
 
-import sys
 from types import SimpleNamespace
 
-from services.settings_service import SettingsService
-
-sys.modules.setdefault(
-    "nicegui",
-    SimpleNamespace(run=SimpleNamespace(), ui=SimpleNamespace()),
-)
 from nicegui_app.pages import settings as settings_page
+from services.settings_service import SettingsService
 
 
 class FakeResponse:

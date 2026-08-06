@@ -1,11 +1,3 @@
-import sys
-from types import SimpleNamespace
-
-# settings_readiness imports `ui` from nicegui at module scope for render_panel;
-# build_rows itself needs none of it. Stub it the same way test_model_settings.py
-# does, so this test can exercise build_rows without the nicegui dependency.
-sys.modules.setdefault("nicegui", SimpleNamespace(ui=SimpleNamespace(), run=SimpleNamespace()))
-
 from nicegui_app.pages.settings_readiness import build_rows
 
 

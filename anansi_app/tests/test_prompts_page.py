@@ -1,10 +1,5 @@
 """Prompts page view-model."""
 
-import sys
-from types import SimpleNamespace
-
-sys.modules.setdefault("nicegui", SimpleNamespace(run=SimpleNamespace(), ui=SimpleNamespace()))
-
 from nicegui_app.pages.prompts import PromptRow, build_rows, diff_lines, group_rows
 
 

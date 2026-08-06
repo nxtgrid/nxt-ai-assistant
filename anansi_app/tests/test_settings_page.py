@@ -1,8 +1,3 @@
-import sys
-from types import SimpleNamespace
-
-sys.modules.setdefault("nicegui", SimpleNamespace(run=SimpleNamespace(), ui=SimpleNamespace()))
-
 from nicegui_app.pages import settings as page
 
 from shared.config import flag_registry as fr
