@@ -1,7 +1,9 @@
 """Webhook -> conversation-graph processing.
 
-Runs one user turn through the full LangGraph conversation graph and returns the
-final response text, tool-call results, and any inline-button reply markup.
+Runs one user turn through the full LangGraph conversation graph and returns
+the final response text, tool-call results, any inline-button reply markup,
+and this turn's token usage. See orchestrator.models.envelope for the
+transport-neutral view built from this same tuple.
 
 Extracted from ``handler.py`` so orchestrator modules (e.g. callback handlers)
 can invoke it directly instead of importing back into the top-level serverless
@@ -77,7 +79,7 @@ async def process_webhook_with_graph(
     media: List[MediaAttachment] | None = None,
     session_id: str | None = None,
     metadata: Dict[str, Any] | None = None,
-) -> tuple[str, List[ToolCallResult], Dict[str, Any] | None]:
+) -> tuple[str, List[ToolCallResult], Dict[str, Any] | None, Dict[str, int]]:
     """Process webhook request using the full LangGraph conversation graph.
 
     This is the Phase 3 implementation that replaces _process_webhook_async
@@ -92,7 +94,13 @@ async def process_webhook_with_graph(
         metadata: Additional metadata
 
     Returns:
-        Tuple of (final response text, list of tool call results, optional reply_markup for inline buttons)
+        Tuple of (final response text, list of tool call results, optional
+        reply_markup for inline buttons, token usage as {"input_tokens": N,
+        "output_tokens": N} -- empty dict when unavailable, e.g. an error
+        path where no reliable total was computed. Never guess a total in
+        that case; an empty dict is the honest signal, not {"input_tokens": 0,
+        ...}, which would misreport a run that may have spent real tokens
+        before failing).
     """
     # Set Langfuse trace metadata (skipped for warmup requests)
     user_email = getattr(user_context, "email", "")
@@ -140,13 +148,22 @@ async def process_webhook_with_graph(
         # Extract reply_markup for inline buttons (decision prompts)
         reply_markup: Dict[str, Any] | None = final_state.get("reply_markup")
 
+        # Extract token usage for this turn (Phase 1 addition — see envelope.py).
+        # Absent/zero-default via .get() is fine here (unlike the error paths
+        # below): the graph completed normally, so 0 is a real observed count,
+        # not a guess standing in for "unknown".
+        tokens: Dict[str, int] = {
+            "input_tokens": final_state.get("total_input_tokens", 0) or 0,
+            "output_tokens": final_state.get("total_output_tokens", 0) or 0,
+        }
+
         LOGGER.info(
             f"Graph execution complete: response_len={len(final_response)}, "
             f"rounds={final_state.get('current_round', 0)}, "
             f"tool_results={len(tool_results)}, has_reply_markup={reply_markup is not None}"
         )
 
-        return final_response, tool_results, reply_markup
+        return final_response, tool_results, reply_markup, tokens
 
     except GraphRecursionError as exc:
         LOGGER.exception(f"Graph recursion guard fired before graceful recovery: {exc}")
@@ -157,9 +174,11 @@ async def process_webhook_with_graph(
             user_context=user_context,
             metadata=metadata,
         )
-        return response, [], None
+        # No final_state reached this exception -- {} signals "unknown", not
+        # a claim that zero tokens were spent before the recursion guard fired.
+        return response, [], None, {}
     except Exception as e:
         LOGGER.exception(f"Error in LangGraph full graph processing: {e}")
         # Fall back to error message
         _, error_message = categorize_error(e)
-        return error_message, [], None
+        return error_message, [], None, {}
