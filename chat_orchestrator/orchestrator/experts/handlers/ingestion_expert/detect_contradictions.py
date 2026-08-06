@@ -31,6 +31,18 @@ from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
+# The only truncation point for system-instructions context injected into the
+# contradiction-check LLM call. Matches PINNED_BUDGET_CHARS
+# (shared/prompts/knowledge.py) -- knowledge modules get the same-order
+# budget, so this input isn't the odd one out. Previously 1000 chars, applied
+# twice (here and again where the text was consumed) -- a single named
+# constant, applied once, replaces both. Unbounded is not an option: this
+# text goes straight into an LLM prompt, and staff.system can resolve to a
+# live Google Doc with no size guarantee of its own (see the 2026-08-02
+# context-overflow incident in CLAUDE.md for what an uncapped prompt input
+# does under Gemini's context limit).
+SYSTEM_INSTRUCTIONS_CONTEXT_CHARS = 20000
+
 
 def _build_existing_knowledge_text(
     similar_chunks: list, system_instructions_text: Optional[str]
@@ -48,7 +60,8 @@ def _build_existing_knowledge_text(
 
     if system_instructions_text:
         parts.append(
-            f"[System Instructions — read-only | chunk_id=system | similarity=N/A]\n{system_instructions_text[:1000]}"
+            "[System Instructions — read-only | chunk_id=system | similarity=N/A]\n"
+            f"{system_instructions_text}"
         )
 
     return "\n\n---\n\n".join(parts)
@@ -130,15 +143,21 @@ async def _run_gemini_contradiction_check(prompt: str) -> Optional[dict]:
 
 
 async def _fetch_system_instructions_snippet() -> Optional[str]:
-    """Fetch the first 1000 chars of the staff support doc as system instructions context."""
-    from shared.utils.gdrive_doc_fetcher import fetch_google_doc_markdown
+    """First SYSTEM_INSTRUCTIONS_CONTEXT_CHARS of staff.system as contradiction-check context.
 
-    doc_id = os.getenv("STAFF_SUPPORT_DOC_ID")
-    if not doc_id:
-        return None
+    Sourced via the shared prompt library (resolve, not text/render): this is
+    parser input for the contradiction check, not a rendered prompt, so it
+    must not pick up appended knowledge-module blocks the way PROMPTS.text()
+    would. resolve() is DB override, then Google Doc, then bundled, and never
+    raises -- the try/except here is defense against a genuinely unexpected
+    failure (e.g. a network error surfacing through the doc-fetch path
+    despite the library's own fallback), not a documented failure mode.
+    """
+    from shared.prompts import PROMPTS
+
     try:
-        content = await asyncio.to_thread(fetch_google_doc_markdown, doc_id)
-        return content[:1000] if content else None
+        content, _source, _version = await asyncio.to_thread(PROMPTS.resolve, "staff.system")
+        return content[:SYSTEM_INSTRUCTIONS_CONTEXT_CHARS] if content else None
     except Exception as e:
         LOGGER.warning(f"Could not fetch system instructions for contradiction check: {e}")
         return None

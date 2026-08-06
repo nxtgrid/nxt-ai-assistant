@@ -42,6 +42,24 @@ def test_unconfigured_store_falls_back_to_legacy_env_var_for_doc_id(store, monke
     assert store.doc_id_for("customer.system") == "DOC123"
 
 
+def test_unconfigured_store_reports_no_doc_override(store):
+    assert store.doc_override_for("customer.system") is False
+
+
+def test_unconfigured_store_returns_no_doc_bindings(store):
+    assert store.all_doc_bindings() == {}
+
+
+def test_set_doc_binding_on_unconfigured_store_raises(store):
+    with pytest.raises(RuntimeError, match="not configured"):
+        store.set_doc_binding("a.b", "DOC1", is_override=False, actor="ada@x.com")
+
+
+def test_clear_doc_binding_on_unconfigured_store_raises(store):
+    with pytest.raises(RuntimeError, match="not configured"):
+        store.clear_doc_binding("a.b", actor="ada@x.com")
+
+
 def test_next_version_starts_at_one():
     assert OverrideStore._next_version([]) == 1
 
@@ -199,3 +217,55 @@ def test_versions_lists_history_for_a_prompt(configured_store):
     configured_store.propose("a.b", "v2", note="second", actor="ada@x.com")
     versions = configured_store.versions("a.b")
     assert len(versions) == 2
+
+
+# ── doc bindings ─────────────────────────────────────────────────────────────
+
+
+def test_set_doc_binding_then_doc_id_for_returns_it(configured_store):
+    configured_store.set_doc_binding("a.b", "DOC1", is_override=False, actor="ada@x.com")
+    assert configured_store.doc_id_for("a.b") == "DOC1"
+
+
+def test_set_doc_binding_then_doc_override_for_returns_it(configured_store):
+    configured_store.set_doc_binding("a.b", "DOC1", is_override=True, actor="ada@x.com")
+    assert configured_store.doc_override_for("a.b") is True
+
+
+def test_doc_binding_with_override_false_is_distinct_from_no_binding(configured_store):
+    """A row with is_override=False and no row at all both resolve to False,
+    but only one has a doc_id_for -- override defaulting to False must not be
+    confused with the doc not being attached at all."""
+    configured_store.set_doc_binding("a.b", "DOC1", is_override=False, actor="ada@x.com")
+    assert configured_store.doc_override_for("a.b") is False
+    assert configured_store.doc_id_for("a.b") == "DOC1"
+
+
+def test_set_doc_binding_twice_updates_in_place(configured_store):
+    configured_store.set_doc_binding("a.b", "DOC1", is_override=False, actor="ada@x.com")
+    configured_store.set_doc_binding("a.b", "DOC2", is_override=True, actor="eve@x.com")
+    assert configured_store.doc_id_for("a.b") == "DOC2"
+    assert configured_store.doc_override_for("a.b") is True
+    assert len(configured_store.all_doc_bindings()) == 1
+
+
+def test_clear_doc_binding_falls_back_to_legacy_env_var(configured_store, monkeypatch):
+    monkeypatch.setenv("CUSTOMER_SUPPORT_DOC_ID", "LEGACY_DOC")
+    configured_store.set_doc_binding(
+        "customer.system", "DOC1", is_override=True, actor="ada@x.com"
+    )
+    assert configured_store.doc_id_for("customer.system") == "DOC1"
+
+    configured_store.clear_doc_binding("customer.system", actor="eve@x.com")
+
+    assert configured_store.doc_id_for("customer.system") == "LEGACY_DOC"
+    assert configured_store.doc_override_for("customer.system") is False
+
+
+def test_all_doc_bindings_returns_every_binding(configured_store):
+    configured_store.set_doc_binding("a.b", "DOC1", is_override=False, actor="ada@x.com")
+    configured_store.set_doc_binding("c.d", "DOC2", is_override=True, actor="ada@x.com")
+    assert configured_store.all_doc_bindings() == {
+        "a.b": ("DOC1", False),
+        "c.d": ("DOC2", True),
+    }

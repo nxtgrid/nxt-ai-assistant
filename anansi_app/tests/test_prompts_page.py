@@ -125,6 +125,76 @@ def test_build_rows_does_not_render_a_prompt_that_declares_variables(monkeypatch
     assert [r.prompt_id for r in rows] == ["needs.vars"]
 
 
+def test_build_rows_uses_the_batched_doc_binding_when_present(monkeypatch):
+    from shared.prompts.spec import AccessSpec, PromptSpec
+    from shared.prompts.types import PromptSource
+
+    monkeypatch.setenv("PROMPT_ADMINS", "root@x.com")
+    spec = PromptSpec(
+        id="a.b", description="d", body="x", checksum="c", access=AccessSpec(view=["ops"])
+    )
+    resolved = ("x", PromptSource.BUNDLED, None)
+    rows = build_rows(
+        FakeLibrary({"a.b": spec}, {"a.b": resolved}),
+        "root@x.com",
+        doc_bindings={"a.b": ("DOC1", True)},
+    )
+    assert rows[0].doc_id == "DOC1"
+    assert rows[0].doc_override is True
+
+
+def test_build_rows_falls_back_to_legacy_env_var_with_no_binding(monkeypatch):
+    """customer.system is one of the 5 ids shared/prompts/gdoc.py's
+    LEGACY_DOC_ENV_VARS maps to CUSTOMER_SUPPORT_DOC_ID -- with no batch
+    binding for it, the row must still surface that legacy doc id, since
+    that's what doc_id_for() would actually resolve to. doc_override is
+    always False for a legacy-only doc: there's no override row to read a
+    flag from."""
+    from shared.prompts.spec import AccessSpec, PromptSpec
+    from shared.prompts.types import PromptSource
+
+    monkeypatch.setenv("PROMPT_ADMINS", "root@x.com")
+    monkeypatch.setenv("CUSTOMER_SUPPORT_DOC_ID", "LEGACY_DOC")
+    spec = PromptSpec(
+        id="customer.system",
+        description="d",
+        body="x",
+        checksum="c",
+        access=AccessSpec(view=["ops"]),
+    )
+    resolved = ("x", PromptSource.BUNDLED, None)
+    rows = build_rows(
+        FakeLibrary({"customer.system": spec}, {"customer.system": resolved}), "root@x.com"
+    )
+    assert rows[0].doc_id == "LEGACY_DOC"
+    assert rows[0].doc_override is False
+
+
+def test_build_rows_batched_binding_wins_over_legacy_env_var(monkeypatch):
+    """Matches OverrideStore.doc_id_for's real precedence: a binding row, if
+    one exists, always wins over the legacy env var -- never merged, never
+    "whichever is set"."""
+    from shared.prompts.spec import AccessSpec, PromptSpec
+    from shared.prompts.types import PromptSource
+
+    monkeypatch.setenv("PROMPT_ADMINS", "root@x.com")
+    monkeypatch.setenv("CUSTOMER_SUPPORT_DOC_ID", "LEGACY_DOC")
+    spec = PromptSpec(
+        id="customer.system",
+        description="d",
+        body="x",
+        checksum="c",
+        access=AccessSpec(view=["ops"]),
+    )
+    resolved = ("x", PromptSource.BUNDLED, None)
+    rows = build_rows(
+        FakeLibrary({"customer.system": spec}, {"customer.system": resolved}),
+        "root@x.com",
+        doc_bindings={"customer.system": ("BOUND_DOC", False)},
+    )
+    assert rows[0].doc_id == "BOUND_DOC"
+
+
 def _row(prompt_id: str, component: str = "orchestrator_services") -> PromptRow:
     return PromptRow(
         prompt_id=prompt_id,

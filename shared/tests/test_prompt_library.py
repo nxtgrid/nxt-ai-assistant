@@ -158,3 +158,92 @@ def test_resolve_never_inlines_partials(bundled, tmp_path):
     lib = PromptLibrary(bundled=bundled)
     body, _source, _version = lib.resolve("c.d")
     assert body == "{{> partials.tone}}\n"
+
+
+# ── doc-override precedence toggle ──────────────────────────────────────────
+#
+# is_override governs DB-vs-doc order only. False (including the default of
+# no doc_override_for at all, covered by test_db_beats_gdoc above) means
+# today's order: DB, then doc, then bundled. True flips DB and doc; bundled
+# stays last either way.
+
+
+def test_doc_override_flips_doc_ahead_of_db(bundled):
+    lib = PromptLibrary(
+        bundled=bundled,
+        gdoc_body_for=lambda pid: "# System Instructions\n\nDoc text.",
+        db_body_for=lambda pid: ("# System Instructions\n\nDb text.", 4),
+        doc_override_for=lambda pid: True,
+    )
+    out = lib.render("a.b")
+    assert out.system_text == "Doc text."
+    assert out.source is PromptSource.GDOC
+
+
+def test_doc_override_false_keeps_db_first(bundled):
+    """Explicit False must behave identically to no toggle wired up at all --
+    this is the byte-identical-to-before guarantee, exercised explicitly
+    rather than only via the implicit-None case in test_db_beats_gdoc."""
+    lib = PromptLibrary(
+        bundled=bundled,
+        gdoc_body_for=lambda pid: "# System Instructions\n\nDoc text.",
+        db_body_for=lambda pid: ("# System Instructions\n\nDb text.", 4),
+        doc_override_for=lambda pid: False,
+    )
+    out = lib.render("a.b")
+    assert out.system_text == "Db text."
+    assert out.source is PromptSource.DB
+
+
+def test_doc_override_with_doc_failure_falls_through_to_db(bundled):
+    """Under override order (doc, then DB, then bundled), a doc-fetch
+    failure must fall through to DB next -- not straight to bundled, which
+    is what the old fixed-order code's "using bundled" log message
+    (inaccurate once a toggle could reorder these) would have implied."""
+
+    def boom(pid):
+        raise RuntimeError("doc fetch failed")
+
+    lib = PromptLibrary(
+        bundled=bundled,
+        gdoc_body_for=boom,
+        db_body_for=lambda pid: ("# System Instructions\n\nDb text.", 4),
+        doc_override_for=lambda pid: True,
+    )
+    out = lib.render("a.b")
+    assert out.system_text == "Db text."
+    assert out.source is PromptSource.DB
+
+
+def test_doc_override_with_both_sources_failing_falls_through_to_bundled(bundled):
+    def boom(pid):
+        raise RuntimeError("down")
+
+    lib = PromptLibrary(
+        bundled=bundled,
+        gdoc_body_for=boom,
+        db_body_for=boom,
+        doc_override_for=lambda pid: True,
+    )
+    out = lib.render("a.b")
+    assert out.system_text == "Bundled text."
+    assert out.source is PromptSource.BUNDLED
+
+
+def test_doc_override_for_receiving_the_prompt_id(bundled):
+    """The toggle is per-prompt, not global -- confirm the id passed to
+    render() is what reaches doc_override_for."""
+    seen = []
+
+    def override_for(pid):
+        seen.append(pid)
+        return True
+
+    lib = PromptLibrary(
+        bundled=bundled,
+        gdoc_body_for=lambda pid: "# System Instructions\n\nDoc text.",
+        db_body_for=lambda pid: ("# System Instructions\n\nDb text.", 4),
+        doc_override_for=override_for,
+    )
+    lib.render("a.b")
+    assert seen == ["a.b"]
