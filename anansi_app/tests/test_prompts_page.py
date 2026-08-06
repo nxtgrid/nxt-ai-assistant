@@ -1,6 +1,12 @@
 """Prompts page view-model."""
 
-from nicegui_app.pages.prompts import PromptRow, build_rows, diff_lines, group_rows
+from nicegui_app.pages.prompts import (
+    PromptRow,
+    body_action_visibility,
+    build_rows,
+    diff_lines,
+    group_rows,
+)
 
 
 class FakeLibrary:
@@ -138,6 +144,51 @@ def test_build_rows_uses_the_batched_doc_binding_when_present(monkeypatch):
     assert rows[0].doc_override is True
 
 
+def test_build_rows_marks_active_doc_override_as_overridden(monkeypatch):
+    """When the override toggle is on *and* the doc is what's actually live
+    (library.resolve() returned GDOC), the row should read the same as a DB
+    override -- 'Overridden' -- not 'Google Doc'. The toggle being on means
+    the doc was deliberately told to win; from an operator's point of view
+    that's the same "this prompt is overridden" state as a saved draft,
+    regardless of which storage backs it."""
+    from shared.prompts.spec import AccessSpec, PromptSpec
+    from shared.prompts.types import PromptSource
+
+    monkeypatch.setenv("PROMPT_ADMINS", "root@x.com")
+    spec = PromptSpec(
+        id="a.b", description="d", body="x", checksum="c", access=AccessSpec(view=["ops"])
+    )
+    resolved = ("x", PromptSource.GDOC, None)
+    rows = build_rows(
+        FakeLibrary({"a.b": spec}, {"a.b": resolved}),
+        "root@x.com",
+        doc_bindings={"a.b": ("DOC1", True)},
+    )
+    assert rows[0].source == "Overridden"
+    assert rows[0].doc_is_live is True
+
+
+def test_build_rows_keeps_passive_doc_source_labeled_google_doc(monkeypatch):
+    """A doc that's merely the fallback source -- override off, or no binding
+    row at all -- keeps its own distinct 'Google Doc' label. Only a doc that
+    is *actively* overriding (see test above) should read as 'Overridden'."""
+    from shared.prompts.spec import AccessSpec, PromptSpec
+    from shared.prompts.types import PromptSource
+
+    monkeypatch.setenv("PROMPT_ADMINS", "root@x.com")
+    spec = PromptSpec(
+        id="a.b", description="d", body="x", checksum="c", access=AccessSpec(view=["ops"])
+    )
+    resolved = ("x", PromptSource.GDOC, None)
+    rows = build_rows(
+        FakeLibrary({"a.b": spec}, {"a.b": resolved}),
+        "root@x.com",
+        doc_bindings={"a.b": ("DOC1", False)},
+    )
+    assert rows[0].source == "Google Doc"
+    assert rows[0].doc_is_live is True
+
+
 def test_build_rows_falls_back_to_legacy_env_var_with_no_binding(monkeypatch):
     """customer.system is one of the 5 ids shared/prompts/gdoc.py's
     LEGACY_DOC_ENV_VARS maps to CUSTOMER_SUPPORT_DOC_ID -- with no batch
@@ -223,3 +274,35 @@ def test_group_rows_puts_unrecognised_components_in_a_trailing_uncategorized_buc
     typo_row = _row("z.z", component="orchestraotr_services")
     groups = group_rows([_row("a.a"), typo_row])
     assert groups[-1] == ("Uncategorized", [typo_row])
+
+
+def test_body_action_visibility_hides_everything_when_the_body_is_unchanged():
+    """A freshly-opened dialog, nothing typed yet: offering to save or
+    revert nothing is just clutter, so none of the three show."""
+    assert body_action_visibility(dirty=False, can_edit=True, can_publish=True) == (
+        False,
+        False,
+        False,
+    )
+
+
+def test_body_action_visibility_shows_save_and_revert_once_the_body_differs():
+    assert body_action_visibility(dirty=True, can_edit=True, can_publish=True) == (
+        True,
+        True,
+        True,
+    )
+
+
+def test_body_action_visibility_still_respects_edit_and_publish_permissions():
+    """Dirty alone isn't enough for Save draft / Save & Publish -- a viewer
+    without edit/publish rights must not see buttons they can't use, same
+    permission checks that gated them before this function existed. Revert
+    has no separate permission concept here (unchanged from before this
+    function existed -- see prompts.py's _open_detail_dialog), so it's
+    driven by dirty alone."""
+    assert body_action_visibility(dirty=True, can_edit=False, can_publish=False) == (
+        True,
+        False,
+        False,
+    )

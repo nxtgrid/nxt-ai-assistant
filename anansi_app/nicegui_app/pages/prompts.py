@@ -52,6 +52,14 @@ class PromptRow:
     # override concept; see OverrideStore.doc_override_for).
     doc_id: "str | None" = None
     doc_override: bool = False
+    # Whether the bound doc is the prompt's resolved body right now (i.e.
+    # library.resolve() actually returned PromptSource.GDOC) -- independent
+    # of `source` below, which folds an *active* override (doc_override=True
+    # while the doc is live) into "Overridden" so the badge doesn't need a
+    # third state. build_rows sets this from the raw resolution, before that
+    # relabeling; _render_row uses it to spot a dormant binding (a doc_id set
+    # but something else currently live).
+    doc_is_live: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,19 +128,28 @@ def build_rows(
         binding = doc_bindings.get(prompt_id)
         doc_id = binding[0] if binding is not None else legacy_doc_id_for(prompt_id)
         doc_override = binding[1] if binding is not None else False
+        doc_is_live = source == PromptSource.GDOC
+        label = SOURCE_LABELS[source]
+        if doc_is_live and doc_override:
+            # The toggle deliberately told the doc to win, not just "a doc
+            # happened to be the only source available" -- surface it the
+            # same as a DB override so the list doesn't need a third state
+            # for "not the shipped default, and I control what's live."
+            label = SOURCE_LABELS[PromptSource.DB]
         rows.append(
             PromptRow(
                 prompt_id=prompt_id,
                 description=spec.description,
                 owner=spec.owner,
                 component=spec.component,
-                source=SOURCE_LABELS[source],
+                source=label,
                 version=version,
                 overridable=spec.overridable,
                 can_edit=can_edit_prompt(spec, email),
                 can_publish=can_publish_prompt(spec, email),
                 doc_id=doc_id,
                 doc_override=doc_override,
+                doc_is_live=doc_is_live,
             )
         )
     return rows
@@ -167,6 +184,20 @@ def diff_lines(default_body: str, current_body: str) -> List[Tuple[str, str]]:
         if marker in ("  ", "- ", "+ "):
             result.append((marker, text))
     return result
+
+
+def body_action_visibility(dirty: bool, can_edit: bool, can_publish: bool) -> Tuple[bool, bool, bool]:
+    """Visibility for (Revert to default, Save draft, Save & Publish).
+
+    All three stay hidden until the body actually differs from what's
+    currently live -- otherwise they offer to save or revert nothing, which
+    is just clutter on a dialog that was only just opened. Save draft / Save
+    & Publish are additionally gated by this user's edit/publish permission,
+    the same checks that guarded them before this function existed. Revert
+    has no separate permission concept here (also unchanged): dirty alone
+    decides it.
+    """
+    return dirty, dirty and can_edit, dirty and can_publish
 
 
 async def render(user_email: str) -> None:
@@ -220,10 +251,12 @@ def _render_row(row: PromptRow, store: OverrideStore, refresh, user_email: str) 
                 ui.label(row.prompt_id).classes("text-bold")
                 ui.label(row.description).classes("text-caption")
                 # A dormant binding: a doc is attached but isn't the active
-                # source (row.source already covers the live case with its
-                # own "Google Doc" badge below). Without this, a bound-but-
-                # inactive doc and an unbound prompt look identical.
-                if row.doc_id and row.source != SOURCE_LABELS[PromptSource.GDOC]:
+                # source. Without this, a bound-but-inactive doc and an
+                # unbound prompt look identical. Checks doc_is_live rather
+                # than the source label, since an active override now shares
+                # the "Overridden" label with a DB-sourced row -- the label
+                # alone can no longer tell "doc is live" from "doc is not."
+                if row.doc_id and not row.doc_is_live:
                     ui.label(f"📎 doc attached ({row.doc_id}), not live").classes(
                         "text-caption text-grey"
                     )
@@ -242,7 +275,9 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
     spec = PROMPTS.spec(row.prompt_id)
     current_body, _source, _version = PROMPTS.resolve(row.prompt_id)
 
-    with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width: 900px"):
+    with ui.dialog() as dialog, ui.card().classes("w-full").style(
+        "max-width: 900px; max-height: calc(100dvh - 32px); overflow-y: auto"
+    ):
         ui.label(row.prompt_id).classes("text-h6")
         ui.label(f"Owner: {spec.owner} · Source: {row.source}").classes("text-caption")
 
@@ -252,9 +287,13 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
             diff_tab = ui.tab("Diff vs default")
             history_tab = ui.tab("History")
 
-        with ui.tab_panels(tabs, value=edit_tab).classes("w-full"):
+        with ui.tab_panels(tabs, value=edit_tab).classes("w-full").style(
+            "min-height: 0; overflow-y: auto"
+        ):
             with ui.tab_panel(edit_tab):
-                view_toggle = ui.toggle(["Edit", "Preview"], value="Edit").props("dense")
+                # Defaults to Preview -- opening a prompt is almost always to
+                # read it; Edit is one click away for the times it isn't.
+                view_toggle = ui.toggle(["Edit", "Preview"], value="Preview").props("dense")
                 body_input = (
                     ui.codemirror(
                         value=current_body,
@@ -265,12 +304,12 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                     .classes("w-full")
                     .style("height: 26rem")
                 )
+                body_input.set_visibility(False)
                 body_preview = (
-                    ui.markdown("")
+                    ui.markdown(current_body)
                     .classes("w-full")
                     .style("min-height: 26rem; border: 1px solid #e0e0e0; padding: 0.5rem;")
                 )
-                body_preview.set_visibility(False)
 
                 def _switch_view(e) -> None:
                     if e.value == "Preview":
@@ -392,13 +431,26 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
 
                 with ui.row().classes("justify-end w-full gap-2 q-mt-sm"):
                     ui.button("Reload cache", on_click=reload_cache).props("flat")
-                    ui.button("Revert to default", on_click=revert).props("flat color=warning")
-                    ui.button("Save draft", on_click=save_draft).props("flat").set_visibility(
-                        row.can_edit
+                    revert_button = ui.button("Revert to default", on_click=revert).props(
+                        "flat color=warning"
                     )
-                    ui.button("Save & Publish", on_click=publish_latest).props(
-                        "color=primary"
-                    ).set_visibility(row.can_publish)
+                    save_draft_button = ui.button("Save draft", on_click=save_draft).props("flat")
+                    save_publish_button = ui.button(
+                        "Save & Publish", on_click=publish_latest
+                    ).props("color=primary")
+
+                def _refresh_body_actions() -> None:
+                    revert_visible, save_draft_visible, save_publish_visible = (
+                        body_action_visibility(
+                            body_input.value != current_body, row.can_edit, row.can_publish
+                        )
+                    )
+                    revert_button.set_visibility(revert_visible)
+                    save_draft_button.set_visibility(save_draft_visible)
+                    save_publish_button.set_visibility(save_publish_visible)
+
+                body_input.on_value_change(lambda: _refresh_body_actions())
+                _refresh_body_actions()
 
             with ui.tab_panel(knowledge_tab):
                 from shared.prompts.knowledge import KnowledgeStore
