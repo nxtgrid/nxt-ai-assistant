@@ -11,13 +11,14 @@ from __future__ import annotations
 import difflib
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from nicegui import ui
 
 from shared.prompts import PROMPTS
 from shared.prompts.access import can_edit_prompt, can_publish_prompt, can_view_prompt
 from shared.prompts.components import COMPONENT_LABELS, COMPONENT_ORDER, UNCATEGORIZED
+from shared.prompts.gdoc import LEGACY_DOC_ENV_VARS, legacy_doc_id_for
 from shared.prompts.knowledge import PINNED_BUDGET_CHARS
 from shared.prompts.overrides import OverrideStore
 from shared.prompts.types import PromptSource
@@ -44,6 +45,13 @@ class PromptRow:
     can_edit: bool
     can_publish: bool
     component: str = UNCATEGORIZED
+    # doc_id falls back to the legacy env var when no UI binding exists, so
+    # the row reflects what doc_id_for() would actually resolve to -- not
+    # just what's in prompt_doc_bindings. doc_override is False whenever
+    # there's no explicit binding row (a legacy-env-var-only doc has no
+    # override concept; see OverrideStore.doc_override_for).
+    doc_id: "str | None" = None
+    doc_override: bool = False
 
 
 @dataclass(frozen=True)
@@ -87,14 +95,31 @@ def filter_module_rows(rows: List[KnowledgeTabRow], query: str) -> List[Knowledg
     ]
 
 
-def build_rows(library: Any, email: str) -> List[PromptRow]:
-    """The list view, filtered to what this user may see."""
+def build_rows(
+    library: Any,
+    email: str,
+    doc_bindings: "Optional[Dict[str, Tuple[str, bool]]]" = None,
+) -> List[PromptRow]:
+    """The list view, filtered to what this user may see.
+
+    ``doc_bindings`` is the batch ``prompt_id -> (doc_id, is_override)`` map
+    from ``OverrideStore.all_doc_bindings()`` -- one query for every row,
+    fetched once by the caller, rather than each row querying for its own
+    binding. Omit it (or pass ``None``) when doc-id display doesn't matter,
+    e.g. in tests that predate doc bindings entirely -- every row's
+    ``doc_id``/``doc_override`` then falls back to the legacy-env-var-only,
+    non-override defaults.
+    """
+    doc_bindings = doc_bindings or {}
     rows: List[PromptRow] = []
     for prompt_id in sorted(library.ids()):
         spec = library.spec(prompt_id)
         if not can_view_prompt(spec, email):
             continue
         _body, source, version = library.resolve(prompt_id)
+        binding = doc_bindings.get(prompt_id)
+        doc_id = binding[0] if binding is not None else legacy_doc_id_for(prompt_id)
+        doc_override = binding[1] if binding is not None else False
         rows.append(
             PromptRow(
                 prompt_id=prompt_id,
@@ -106,6 +131,8 @@ def build_rows(library: Any, email: str) -> List[PromptRow]:
                 overridable=spec.overridable,
                 can_edit=can_edit_prompt(spec, email),
                 can_publish=can_publish_prompt(spec, email),
+                doc_id=doc_id,
+                doc_override=doc_override,
             )
         )
     return rows
@@ -161,7 +188,7 @@ async def render(user_email: str) -> None:
 
     def refresh() -> None:
         list_container.clear()
-        rows = build_rows(PROMPTS, user_email)
+        rows = build_rows(PROMPTS, user_email, store.all_doc_bindings())
         query = (search_input.value or "").strip().lower()
         if query:
             rows = [
@@ -192,6 +219,14 @@ def _render_row(row: PromptRow, store: OverrideStore, refresh, user_email: str) 
             with ui.column().classes("gap-0").style("flex: 3"):
                 ui.label(row.prompt_id).classes("text-bold")
                 ui.label(row.description).classes("text-caption")
+                # A dormant binding: a doc is attached but isn't the active
+                # source (row.source already covers the live case with its
+                # own "Google Doc" badge below). Without this, a bound-but-
+                # inactive doc and an unbound prompt look identical.
+                if row.doc_id and row.source != SOURCE_LABELS[PromptSource.GDOC]:
+                    ui.label(f"📎 doc attached ({row.doc_id}), not live").classes(
+                        "text-caption text-grey"
+                    )
             ui.badge(row.source, color="primary" if row.source == "Overridden" else "grey")
             if row.version is not None:
                 ui.label(f"v{row.version}").classes("text-caption")
@@ -249,6 +284,61 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                     ui.label(f"Declared variables: {', '.join(spec.variables)}").classes(
                         "text-caption"
                     )
+
+                ui.separator().classes("q-my-sm")
+                ui.label("Google Doc").classes("text-caption text-bold")
+                with ui.row().classes("items-start gap-4 w-full no-wrap"):
+                    doc_id_input = (
+                        ui.input("Google Doc ID", value=row.doc_id or "")
+                        .classes("flex-grow")
+                        .props("dense")
+                    )
+                    doc_id_input.set_enabled(row.can_edit)
+                    override_switch = ui.switch(
+                        "Doc overrides saved versions", value=row.doc_override
+                    ).props("dense")
+                    override_switch.set_enabled(row.can_publish)
+
+                existing_binding = store.all_doc_bindings().get(row.prompt_id)
+                if existing_binding is not None:
+                    origin = "from binding, set on this page"
+                elif row.doc_id:
+                    env_var = LEGACY_DOC_ENV_VARS.get(row.prompt_id)
+                    origin = f"from {env_var} (no binding row yet)" if env_var else "from env"
+                else:
+                    origin = None
+                if origin:
+                    ui.label(origin).classes("text-caption text-grey")
+
+                override_banner = ui.label(
+                    "⚠️ Doc override is on: edits saved above will be stored but will NOT go "
+                    "live while this stays on. The doc always wins over a saved version."
+                ).classes("text-caption text-warning")
+                override_banner.bind_visibility_from(override_switch, "value")
+
+                async def save_doc_binding() -> None:
+                    try:
+                        doc_id = doc_id_input.value.strip()
+                        if doc_id:
+                            store.set_doc_binding(
+                                row.prompt_id,
+                                doc_id,
+                                is_override=override_switch.value,
+                                actor=user_email,
+                            )
+                            ui.notify("Doc binding saved", type="positive")
+                        else:
+                            store.clear_doc_binding(row.prompt_id, actor=user_email)
+                            ui.notify("Doc binding cleared", type="positive")
+                        dialog.close()
+                        refresh()
+                    except (PermissionError, RuntimeError) as e:
+                        ui.notify(str(e), type="negative")
+
+                with ui.row().classes("justify-end w-full"):
+                    ui.button("Save doc settings", on_click=save_doc_binding).props(
+                        "flat"
+                    ).set_visibility(row.can_edit)
 
                 async def save_draft() -> None:
                     try:
