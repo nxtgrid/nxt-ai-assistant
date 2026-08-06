@@ -832,7 +832,7 @@
       },
       {
         "name": "customer_get_grid_status",
-        "description": "[READ-ONLY] Get comprehensive status for a single grid including power status (HPS/FS), capacity (kWp/kWh), DCU connectivity, and current weather. You MUST provide the grid_name parameter.",
+        "description": "[READ-ONLY] Get comprehensive status for a single grid including power status (HPS/FS), capacity (kWp/kWh), DCU connectivity, current weather, and real-time per-phase inverter output power (service_status.inverter_l1_power_kw / l2 / l3, in kW). If a customer asks about per-phase consumption or load and no historical breakdown exists, offer this live power reading as the closest available answer instead of escalating — but say plainly it's an instantaneous snapshot, not accumulated energy/consumption. You MUST provide the grid_name parameter.",
         "inputSchema": {
           "type": "object",
           "properties": {
