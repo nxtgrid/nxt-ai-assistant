@@ -4,7 +4,7 @@
 
 **Goal:** Make Anansi the single author of Telegram ticket updates — for Jira and internal tickets alike — posting an intelligent, scroll-aware update card on every meaningful status transition and on operationally significant comments.
 
-**Architecture:** One notifier (`TicketUpdateNotifier`) sits behind `TicketService.transition_to_done()` and the Jira webhook handlers. It renders a *full current-state card* (never an incremental append), so the same text is valid whether it edits the original ticket message in place or posts as a fresh reply. Anchor message and target chat come from the existing `message_deliveries` table; the edit-vs-repost decision comes from a new per-chat Telegram message-id watermark. Jira comments are mirrored into `ticket_comments` (the `source` enum already reserves `'jira'`), so closing summaries read from one table regardless of backend.
+**Architecture:** One notifier (`TicketUpdateNotifier`) sits behind `TicketService.transition_to_done()` and the Jira webhook handlers. It renders a *full current-state card* (never an incremental append), so the same text is valid whether it edits the original ticket message in place or posts as a fresh reply. Anchor message and target chat come from the existing `message_deliveries` table; the edit-vs-repost decision is derived read-only from `chat_messages` and `message_deliveries` — no new table. Jira comments are mirrored into `ticket_comments` (the `source` enum already reserves `'jira'`), so closing summaries read from one table regardless of backend.
 
 **Tech Stack:** Python 3.11, FastAPI, Supabase/PostgREST, Pydantic, loguru-style logging (`shared.utils.logging.get_logger`), `shared.llm` gateway (Gemini), pytest.
 
@@ -23,7 +23,8 @@ Read these before starting — the plan builds on them rather than replacing the
 | `send_telegram_message_with_fallback()` | `shared/utils/telegram_send.py:201` | Returns the new `message_id`; falls back when Markdown fails to parse |
 | `/notify` amend path | `chat_orchestrator/orchestrator/api/app.py:1018-1061` | The existing edit-then-fall-back-to-send pattern this notifier mirrors |
 | Hardcoded Jira closure post | `chat_orchestrator/orchestrator/services/escalation_service.py:3222` | The "direct Jira update" being replaced |
-| Escalation-group blind spot | `chat_orchestrator/handler.py:2056-2067` | Non-reply messages there are deliberately dropped — hence the watermark table |
+| Escalation-group blind spot | `chat_orchestrator/handler.py:2056-2067` | Non-reply messages there are deliberately dropped — Task 1 closes this by passive-saving the group like every other staff group |
+| `_save_passive_group_message()` | `chat_orchestrator/handler.py:880` | Already writes `telegram_message_id`; Task 1 reuses it rather than adding new persistence |
 
 **Two known bugs this plan fixes as a side effect:**
 1. `handle_jira_issue_updated` matches the literal strings `"Done"`/`"Closed"` (`escalation_service.py:3188`), so a workflow status named "Resolved" never fires. The correct, workflow-agnostic check via `statusCategory` already exists at `escalation_service.py:1234`.
@@ -41,15 +42,14 @@ Run tests from the `chat_orchestrator/` directory (that is where `pyproject.toml
 cd chat_orchestrator && python -m pytest tests/services/ticketing -v
 ```
 
-**CRITICAL — from CLAUDE.md:** every new file under any `tests/` directory needs `git add -f`. A plain `git add` is a silent no-op, the commit succeeds, and CI never runs the test. Task 11 verifies this; do not skip it.
+**CRITICAL — from CLAUDE.md:** every new file under any `tests/` directory needs `git add -f`. A plain `git add` is a silent no-op, the commit succeeds, and CI never runs the test. Task 10 verifies this; do not skip it.
 
 ---
 
 ## File Structure
 
 **Create:**
-- `db/migrations/0010_telegram_chat_watermarks.sql` — watermark table + `observe_telegram_message` RPC
-- `chat_orchestrator/orchestrator/services/ticketing/chat_watermark.py` — `ChatWatermarkRepository`
+- `chat_orchestrator/orchestrator/services/ticketing/chat_watermark.py` — `ChatWatermarkRepository` (read-only, derived from `chat_messages` + `message_deliveries`)
 - `chat_orchestrator/orchestrator/services/ticketing/update_render.py` — pure rendering + LLM summarisation
 - `chat_orchestrator/orchestrator/services/ticketing/update_notifier.py` — `TicketEvent`, `TicketUpdateNotifier`
 - `chat_orchestrator/tests/services/ticketing/test_chat_watermark.py`
@@ -57,85 +57,64 @@ cd chat_orchestrator && python -m pytest tests/services/ticketing -v
 - `chat_orchestrator/tests/services/ticketing/test_update_notifier.py`
 
 **Modify:**
+- `chat_orchestrator/handler.py` — passive-save the escalation group (position signal + bot context), same as every other staff group already gets
+- `anansi_app/nicegui_app/pages/chat.py` — filter the escalation group out of the admin chat list
 - `chat_orchestrator/orchestrator/services/ticketing/repository.py` — add `list_comments_by_ref()`, make `transition_to_done_by_ref()` idempotent and boolean-returning
-- `chat_orchestrator/orchestrator/services/ticketing/delivery_repository.py` — add `latest_for_ticket()`, observe watermark on record
+- `chat_orchestrator/orchestrator/services/ticketing/delivery_repository.py` — add `latest_for_ticket()`
 - `chat_orchestrator/orchestrator/services/ticketing/service.py` — fire the notifier from `transition_to_done()`
 - `chat_orchestrator/orchestrator/services/escalation_service.py` — `statusCategory` transition detection, delegate the closure post to the notifier, mirror Jira comments
-- `chat_orchestrator/handler.py` — observe the watermark in the escalation-group branch
 - `README.md` — Jira webhook setup section
 
 ---
 
-### Task 1: Watermark table and RPC
+### Task 1: Derive chat position from what Anansi already stores
 
 **Files:**
-- Create: `db/migrations/0010_telegram_chat_watermarks.sql`
-
-Telegram message ids increment per chat, so `head - anchor` approximates "messages since". The escalation group's non-reply messages are never persisted (`handler.py:2056`), so no existing table can supply that head — hence this table.
-
-- [ ] **Step 1: Write the migration**
-
-```sql
--- 0010_telegram_chat_watermarks.sql
---
--- Per-chat high-water mark of the newest Telegram message id Anansi has
--- observed. Used by TicketUpdateNotifier to decide whether a ticket's
--- original message is still on screen (edit it in place) or has scrolled
--- away (post a fresh reply instead).
---
--- Why a dedicated table rather than max(chat_messages.telegram_message_id):
--- non-reply messages in the escalation group are deliberately dropped
--- without being saved (chat_orchestrator/handler.py), so chat_messages has
--- a blind spot in exactly the chat that matters most here.
-
-CREATE TABLE IF NOT EXISTS telegram_chat_watermarks (
-    chat_id         text PRIMARY KEY,
-    last_message_id bigint NOT NULL,
-    updated_at      timestamptz NOT NULL DEFAULT now()
-);
-
--- PostgREST cannot express "upsert to GREATEST(old, new)" directly, so the
--- monotonic merge lives in SQL (same rationale as next_internal_ticket_ref).
-CREATE OR REPLACE FUNCTION observe_telegram_message(p_chat_id text, p_message_id bigint)
-RETURNS void
-LANGUAGE sql
-AS $$
-    INSERT INTO telegram_chat_watermarks (chat_id, last_message_id, updated_at)
-    VALUES (p_chat_id, p_message_id, now())
-    ON CONFLICT (chat_id) DO UPDATE
-        SET last_message_id = GREATEST(
-                telegram_chat_watermarks.last_message_id,
-                EXCLUDED.last_message_id
-            ),
-            updated_at = now();
-$$;
-```
-
-- [ ] **Step 2: Commit**
-
-```bash
-git add db/migrations/0010_telegram_chat_watermarks.sql
-git commit -m "feat(db): add telegram chat watermark table and observe RPC"
-```
-
-Note for the operator (not a code step): this migration is applied by hand in the Supabase SQL editor, same as `0001`–`0009`. The notifier degrades to "always edit in place" until it is applied, so shipping code before the migration is safe.
-
----
-
-### Task 2: ChatWatermarkRepository
-
-**Files:**
+- Modify: `chat_orchestrator/handler.py:2050-2067`
 - Create: `chat_orchestrator/orchestrator/services/ticketing/chat_watermark.py`
 - Test: `chat_orchestrator/tests/services/ticketing/test_chat_watermark.py`
 
-- [ ] **Step 1: Write the failing test**
+Telegram message ids increment by one per message within a chat, so the gap between the newest id on record and a ticket's anchor id approximates how many messages have scrolled past it. **No new table is needed** — the two tables that can answer this already exist:
+
+- `chat_messages.telegram_message_id` — every group message Anansi observes
+- `message_deliveries.external_message_id` — Anansi's own ticket posts
+
+The one blind spot is the escalation group: its messages are dropped without being saved (`handler.py:2056`), while every other staff group is passively saved (`handler.py:2100`). Closing that inconsistency with one call is the whole write-side change.
+
+**Accepted accuracy limit:** `_save_passive_group_message` returns early on messages with no text and no caption, so a bare photo does not advance the head. Field photos usually carry a caption, but not always, so the count can run slightly low — which biases toward editing in place. Widening that guard would change behavior for every other group that already uses this function, so it is deliberately left alone.
+
+- [ ] **Step 1: Persist escalation-group messages**
+
+In `handler.py`, inside `if current_chat_id == escalation_chat_id:` and **above** the `if "reply_to_message" in telegram_msg:` branch, so both replies and non-replies are covered:
 
 ```python
-"""ChatWatermarkRepository: monotonic per-chat Telegram message-id tracking.
+                # Persist escalation-group messages the same way every other
+                # staff group already is (see the staff_group branch below).
+                # Two reasons: the bot gets conversation context here, and the
+                # ticket update notifier can tell from telegram_message_id
+                # whether a ticket's message has scrolled out of view. Without
+                # this, the one chat where ticket updates matter most is the
+                # only group with no position signal at all.
+                try:
+                    await _save_passive_group_message(telegram_msg, chat)
+                except Exception as e:
+                    LOGGER.warning(f"Failed to save escalation group message: {e}")
+```
 
-The notifier uses messages_since() to decide edit-in-place vs fresh reply,
-so a missing/absent watermark must degrade to 0 ("nothing has scrolled")
-rather than raising into a ticket-close path.
+The existing routing below is unchanged — replies still forward to the customer, non-replies are still not answered. This only adds persistence.
+
+- [ ] **Step 2: Write the failing test**
+
+```python
+"""ChatWatermarkRepository: how far a chat has scrolled past a ticket message.
+
+Derived from data Anansi already stores rather than a dedicated table:
+chat_messages for observed group traffic, message_deliveries for the bot's
+own ticket posts, whichever is higher.
+
+The notifier calls messages_since() inside ticket-close paths, so an absent
+or unreadable signal must degrade to 0 ("nothing has scrolled", i.e. edit in
+place) rather than raise.
 """
 
 from __future__ import annotations
@@ -152,108 +131,155 @@ class _FakeResponse:
         self.data = data
 
 
-class _FakeSelect:
-    def __init__(self, rows: List[Dict[str, Any]]) -> None:
+class _FakeQuery:
+    def __init__(self, rows: List[Dict[str, Any]], raises: bool = False) -> None:
         self._rows = rows
+        self._raises = raises
 
-    def select(self, *_a, **_k) -> "_FakeSelect":
+    def select(self, *_a, **_k) -> "_FakeQuery":
         return self
 
-    def eq(self, *_a, **_k) -> "_FakeSelect":
+    def eq(self, *_a, **_k) -> "_FakeQuery":
         return self
 
-    def limit(self, *_a, **_k) -> "_FakeSelect":
+    def gte(self, *_a, **_k) -> "_FakeQuery":
+        return self
+
+    def order(self, *_a, **_k) -> "_FakeQuery":
+        return self
+
+    def limit(self, *_a, **_k) -> "_FakeQuery":
         return self
 
     def execute(self) -> _FakeResponse:
+        if self._raises:
+            raise RuntimeError("postgrest down")
         return _FakeResponse(self._rows)
 
 
 class _FakeClient:
-    def __init__(self, rows: Optional[List[Dict[str, Any]]] = None, rpc_raises: bool = False) -> None:
-        self._rows = rows or []
-        self.rpc_calls: List[tuple] = []
-        self._rpc_raises = rpc_raises
+    """Serves a different row set per table, so each source can be tested alone."""
 
-    def table(self, _name: str) -> _FakeSelect:
-        return _FakeSelect(self._rows)
+    def __init__(
+        self,
+        chat_messages: Optional[List[Dict[str, Any]]] = None,
+        deliveries: Optional[List[Dict[str, Any]]] = None,
+        raising_tables: Optional[set] = None,
+    ) -> None:
+        self._by_table = {
+            "chat_messages": chat_messages or [],
+            "message_deliveries": deliveries or [],
+        }
+        self._raising = raising_tables or set()
 
-    def rpc(self, name: str, params: Dict[str, Any]) -> Any:
-        if self._rpc_raises:
-            raise RuntimeError("postgrest down")
-        self.rpc_calls.append((name, params))
-        return _FakeResponse(None)
-
-
-@pytest.mark.asyncio
-async def test_observe_calls_the_monotonic_rpc():
-    client = _FakeClient()
-    await ChatWatermarkRepository(client=client).observe("-100123", 4242)
-    assert client.rpc_calls == [
-        ("observe_telegram_message", {"p_chat_id": "-100123", "p_message_id": 4242})
-    ]
+    def table(self, name: str) -> _FakeQuery:
+        return _FakeQuery(self._by_table.get(name, []), raises=name in self._raising)
 
 
 @pytest.mark.asyncio
-async def test_observe_swallows_backend_failure():
-    client = _FakeClient(rpc_raises=True)
-    # Must not raise: observing is best-effort telemetry, never load-bearing.
-    await ChatWatermarkRepository(client=client).observe("-100123", 1)
+async def test_head_reads_observed_group_traffic():
+    client = _FakeClient(chat_messages=[{"telegram_message_id": 120}])
+    assert await ChatWatermarkRepository(client=client).head("-100123") == 120
 
 
 @pytest.mark.asyncio
-async def test_messages_since_returns_gap_from_head():
-    client = _FakeClient(rows=[{"last_message_id": 120}])
-    repo = ChatWatermarkRepository(client=client)
-    assert await repo.messages_since("-100123", 100) == 20
+async def test_head_reads_the_bots_own_ticket_posts():
+    client = _FakeClient(deliveries=[{"external_message_id": 140}])
+    assert await ChatWatermarkRepository(client=client).head("-100123") == 140
 
 
 @pytest.mark.asyncio
-async def test_messages_since_is_zero_when_no_watermark_recorded():
-    client = _FakeClient(rows=[])
-    repo = ChatWatermarkRepository(client=client)
-    assert await repo.messages_since("-100123", 100) == 0
+async def test_head_takes_the_higher_of_both_sources():
+    client = _FakeClient(
+        chat_messages=[{"telegram_message_id": 120}],
+        deliveries=[{"external_message_id": 140}],
+    )
+    assert await ChatWatermarkRepository(client=client).head("-100123") == 140
 
 
 @pytest.mark.asyncio
-async def test_messages_since_is_zero_when_head_is_behind_anchor():
-    client = _FakeClient(rows=[{"last_message_id": 50}])
-    repo = ChatWatermarkRepository(client=client)
-    assert await repo.messages_since("-100123", 100) == 0
+async def test_head_survives_one_source_failing():
+    """A broken source must not blind the other one."""
+    client = _FakeClient(
+        deliveries=[{"external_message_id": 140}],
+        raising_tables={"chat_messages"},
+    )
+    assert await ChatWatermarkRepository(client=client).head("-100123") == 140
+
+
+@pytest.mark.asyncio
+async def test_head_is_none_when_nothing_is_on_record():
+    assert await ChatWatermarkRepository(client=_FakeClient()).head("-100123") is None
+
+
+@pytest.mark.asyncio
+async def test_messages_since_returns_the_gap():
+    client = _FakeClient(chat_messages=[{"telegram_message_id": 120}])
+    assert await ChatWatermarkRepository(client=client).messages_since("-100123", 100) == 20
+
+
+@pytest.mark.asyncio
+async def test_messages_since_is_zero_when_nothing_is_on_record():
+    """Unknown position must read as "still on screen" -- the same behavior
+    as before any of this existed."""
+    assert await ChatWatermarkRepository(client=_FakeClient()).messages_since("-100123", 100) == 0
+
+
+@pytest.mark.asyncio
+async def test_messages_since_is_zero_when_head_is_behind_the_anchor():
+    client = _FakeClient(chat_messages=[{"telegram_message_id": 50}])
+    assert await ChatWatermarkRepository(client=client).messages_since("-100123", 100) == 0
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 3: Run test to verify it fails**
 
 Run: `cd chat_orchestrator && python -m pytest tests/services/ticketing/test_chat_watermark.py -v`
 Expected: FAIL — `ModuleNotFoundError: No module named 'orchestrator.services.ticketing.chat_watermark'`
 
-- [ ] **Step 3: Write the implementation**
+- [ ] **Step 4: Write the implementation**
 
 ```python
-"""Per-chat Telegram message-id watermark.
+"""How far a chat has scrolled past a ticket's message.
 
 Telegram message ids increment by one per message within a chat, so the gap
-between the newest id Anansi has seen and a given anchor id approximates how
-many messages have been posted since that anchor. TicketUpdateNotifier uses
-that to decide whether a ticket's message is still on screen.
+between the newest id on record and a given anchor id approximates how many
+messages have been posted since. TicketUpdateNotifier uses that to choose
+between editing a ticket's message in place and posting a fresh reply.
 
-The approximation is deliberate: service messages (joins, pins, topic
-renames) also consume ids, so the gap can over-count slightly. Over-counting
-means "post a fresh reply" — the safe direction, since a reply is always
-visible while an edit to a scrolled-away message is not.
+Read-only, and derived from tables Anansi already writes:
+
+* ``chat_messages.telegram_message_id`` -- group traffic the bot observes,
+  including the escalation group (see the passive-save call in ``handler.py``)
+* ``message_deliveries.external_message_id`` -- the bot's own ticket posts
+
+Both reads are bounded by a recency window. ``chat_messages`` has no index on
+``group_id``, but ``chat_messages_created_at_idx`` makes a short window
+selective, and an anchor older than the window is stale by definition -- for
+which "post a fresh message" is the right answer regardless.
+
+The approximation runs slightly low: ``_save_passive_group_message`` skips
+messages with no text or caption, so bare photos do not advance the head.
+Under-counting biases toward editing in place, which is the pre-existing
+behavior, so it degrades rather than misbehaves.
 """
 
 from __future__ import annotations
 
-from typing import Any, Callable, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, List, Optional
 
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
+#: How far back to look for chat position. Long enough to cover any ticket
+#: still being actively discussed, short enough to keep the group_id scan
+#: bounded by the created_at index.
+LOOKBACK_DAYS = 7
+
 
 class ChatWatermarkRepository:
-    """The only reader/writer for ``telegram_chat_watermarks``.
+    """Reads the newest known Telegram message id for a chat.
 
     Every method is best-effort: this is positioning telemetry sitting in the
     path of ticket closes, so a database hiccup must degrade the notifier's
@@ -281,43 +307,60 @@ class ChatWatermarkRepository:
                 return None
         return None
 
-    async def observe(self, chat_id: str, message_id: int) -> None:
-        """Record that ``message_id`` exists in ``chat_id``. Monotonic; never raises."""
-        client = self._raw_client()
-        if client is None or not chat_id or not message_id:
-            return
-        try:
-            client.rpc(
-                "observe_telegram_message",
-                {"p_chat_id": str(chat_id), "p_message_id": int(message_id)},
-            ).execute()
-        except Exception:
-            LOGGER.debug("chat watermark: observe failed for {}", chat_id, exc_info=True)
+    @staticmethod
+    def _since() -> str:
+        return (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).isoformat()
 
     async def head(self, chat_id: str) -> Optional[int]:
-        """Newest observed message id in ``chat_id``, or None if never observed."""
+        """Newest message id on record for ``chat_id``, or None if unknown."""
         client = self._raw_client()
         if client is None or not chat_id:
             return None
+
+        since = self._since()
+        candidates: List[int] = []
+
         try:
             response = (
-                client.table("telegram_chat_watermarks")
-                .select("last_message_id")
-                .eq("chat_id", str(chat_id))
+                client.table("chat_messages")
+                .select("telegram_message_id")
+                .eq("group_id", str(chat_id))
+                .gte("created_at", since)
+                .order("telegram_message_id", desc=True)
                 .limit(1)
                 .execute()
             )
+            rows = getattr(response, "data", None) or []
+            if rows and rows[0].get("telegram_message_id"):
+                candidates.append(int(rows[0]["telegram_message_id"]))
         except Exception:
-            LOGGER.debug("chat watermark: head lookup failed for {}", chat_id, exc_info=True)
-            return None
-        rows = getattr(response, "data", None) or []
-        return int(rows[0]["last_message_id"]) if rows else None
+            LOGGER.debug("chat watermark: chat_messages read failed for {}", chat_id, exc_info=True)
+
+        try:
+            response = (
+                client.table("message_deliveries")
+                .select("external_message_id")
+                .eq("external_chat_id", str(chat_id))
+                .gte("sent_at", since)
+                .order("external_message_id", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(response, "data", None) or []
+            if rows and rows[0].get("external_message_id"):
+                candidates.append(int(rows[0]["external_message_id"]))
+        except Exception:
+            LOGGER.debug(
+                "chat watermark: message_deliveries read failed for {}", chat_id, exc_info=True
+            )
+
+        return max(candidates) if candidates else None
 
     async def messages_since(self, chat_id: str, anchor_message_id: int) -> int:
         """Approximate message count posted in ``chat_id`` after ``anchor_message_id``.
 
         Returns 0 when unknown, which the notifier reads as "still on screen"
-        — the same behavior as before the watermark table existed.
+        -- matching how ticket messages behaved before this existed.
         """
         head = await self.head(chat_id)
         if head is None or head <= anchor_message_id:
@@ -325,20 +368,69 @@ class ChatWatermarkRepository:
         return head - anchor_message_id
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [ ] **Step 5: Run test to verify it passes**
 
 Run: `cd chat_orchestrator && python -m pytest tests/services/ticketing/test_chat_watermark.py -v`
-Expected: PASS — 5 passed
+Expected: PASS — 8 passed
 
-- [ ] **Step 5: Commit (note the `-f` on the test file)**
+- [ ] **Step 6: Commit (note the `-f` on the test file)**
 
 ```bash
-git add chat_orchestrator/orchestrator/services/ticketing/chat_watermark.py
+git add chat_orchestrator/orchestrator/services/ticketing/chat_watermark.py \
+        chat_orchestrator/handler.py
 git add -f chat_orchestrator/tests/services/ticketing/test_chat_watermark.py
-git commit -m "feat(ticketing): add per-chat telegram message watermark repository"
+git commit -m "feat(ticketing): derive telegram chat position for update placement"
 ```
 
 ---
+
+### Task 2: Hide the escalation group from the admin chat list
+
+**Files:**
+- Modify: `anansi_app/nicegui_app/pages/chat.py:99-105`
+
+Task 1 makes escalation-group messages appear as a conversation in the admin Chat page — one passive session per forum topic. That page is for reviewing customer conversations; internal escalation chatter does not belong in it.
+
+Filtering after the search merge (rather than inside `get_chat_contexts`) is deliberate: it is the one point every path flows through, so a content search cannot surface the group either, and the derived counts in `stats` stay consistent with the list.
+
+- [ ] **Step 1: Add the filter**
+
+In `chat.py`, immediately after the `if search:` block ends and **before** `groups = [c for c in contexts if c["is_group"]]`:
+
+```python
+        # The escalation group is persisted for bot context and for ticket
+        # update placement (see handler.py's passive-save call), but it is
+        # internal staff traffic -- this page is for customer conversations.
+        escalation_chat_id = os.getenv("ESCALATION_TELEGRAM_CHAT_ID", "")
+        if escalation_chat_id:
+            contexts = [
+                c
+                for c in contexts
+                if str(c.get("chat_id") or "") != escalation_chat_id
+                and str(c.get("group_id") or "") != escalation_chat_id
+            ]
+```
+
+Both keys are checked because `get_chat_contexts` returns group rows keyed on `(chat_id, group_id)` and the escalation chat can appear under either depending on how the session was created.
+
+Add `import os` to the top of `chat.py` if it is not already imported.
+
+- [ ] **Step 2: Verify the page still renders**
+
+Run: `cd anansi_app && python -c "import ast,sys; ast.parse(open('nicegui_app/pages/chat.py').read()); print('ok')"`
+Expected: `ok`
+
+Then load the admin Chat page and confirm the escalation group is absent from the Groups list and that the group count dropped by one. If the app is not running locally, this is a post-deploy check — note it and move on.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add anansi_app/nicegui_app/pages/chat.py
+git commit -m "feat(admin): hide the escalation group from the chat conversation list"
+```
+
+Note: `_render_stats`' message and token totals come from `get_period_stats`, which aggregates all messages — those numbers will now include escalation-group traffic. That is a truthful "messages handled" figure and is left alone; say so if anyone asks why the count stepped up after deploy.
+
 
 ### Task 3: Repository additions
 
@@ -1769,73 +1861,7 @@ git commit -m "feat(jira): detect closures by status category and route updates 
 
 ---
 
-### Task 8: Feed the watermark
-
-**Files:**
-- Modify: `chat_orchestrator/handler.py:2050-2067`
-- Modify: `chat_orchestrator/orchestrator/services/ticketing/delivery_repository.py` (`record`)
-
-Two observation points give full coverage: every message Anansi sees in the escalation group, and every message Anansi sends about a ticket.
-
-- [ ] **Step 1: Observe inbound escalation-group messages**
-
-In `handler.py`, inside `if current_chat_id == escalation_chat_id:` and **before** the `if "reply_to_message" in telegram_msg:` branch, insert:
-
-```python
-                # Track the newest message id seen in this chat so the ticket
-                # update notifier can tell whether a ticket's message has
-                # scrolled out of view. Non-reply messages here are otherwise
-                # dropped without being persisted anywhere, which would leave
-                # the escalation group -- the chat that matters most for this
-                # -- with no position signal at all.
-                try:
-                    from orchestrator.services.supabase_client import get_supabase_client
-                    from orchestrator.services.ticketing.chat_watermark import (
-                        ChatWatermarkRepository,
-                    )
-
-                    _wm_msg_id = telegram_msg.get("message_id")
-                    if _wm_msg_id:
-                        await ChatWatermarkRepository(
-                            get_client=lambda: get_supabase_client()._get_client()
-                        ).observe(current_chat_id, int(_wm_msg_id))
-                except Exception:
-                    LOGGER.debug("Failed to observe escalation chat watermark", exc_info=True)
-```
-
-- [ ] **Step 2: Observe outbound ticket messages**
-
-In `delivery_repository.py`, at the end of `record()`, just before `return rows[0]`:
-
-```python
-        # Anansi's own sends advance the chat too -- recording them here keeps
-        # the watermark correct in chats where no inbound observation happens.
-        try:
-            from .chat_watermark import ChatWatermarkRepository
-
-            await ChatWatermarkRepository(
-                client=self._client_instance, get_client=self._get_client
-            ).observe(external_chat_id, external_message_id)
-        except Exception:
-            pass
-```
-
-- [ ] **Step 3: Verify nothing regressed**
-
-Run: `cd chat_orchestrator && python -m pytest tests/services/ticketing -v`
-Expected: PASS. The delivery-repository fakes must tolerate the extra `rpc` call — if a fake lacks `.rpc()`, the `except Exception: pass` swallows it, so no test change should be needed. Confirm rather than assume.
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add chat_orchestrator/handler.py \
-        chat_orchestrator/orchestrator/services/ticketing/delivery_repository.py
-git commit -m "feat(ticketing): observe telegram chat position for update placement"
-```
-
----
-
-### Task 9: Close the MCP `change_status` gap
+### Task 8: Close the MCP `change_status` gap
 
 **Files:**
 - Modify: `chat_orchestrator/orchestrator/api/app.py` (new endpoint)
@@ -1940,7 +1966,7 @@ git commit -m "fix(ticketing): route MCP internal-ticket closes through TicketSe
 
 ---
 
-### Task 10: Document the Jira webhook setup
+### Task 9: Document the Jira webhook setup
 
 **Files:**
 - Modify: `README.md` (insert before the `POST /chat/notify` section, ~line 629)
@@ -2026,7 +2052,7 @@ git commit -m "docs: document the Jira webhook setup and the ticket update flow"
 
 ---
 
-### Task 11: Full verification
+### Task 10: Full verification
 
 **Files:** none
 
@@ -2072,8 +2098,8 @@ git commit -am "chore: pre-commit fixes" || echo "nothing to commit"
 
 ## Operator checklist (post-merge, not code)
 
-1. Apply `db/migrations/0010_telegram_chat_watermarks.sql` in the Supabase SQL editor. Until then the notifier always edits in place — safe, just less smart.
+1. No migration to apply — chat position is derived from existing tables. Nothing to do here.
 2. **Turn off the existing direct Jira → Telegram integration** (native app, Automation rule, or n8n flow). This is what stops the double-posting; the code change alone does not.
 3. Confirm `JIRA_WEBHOOK_SECRET` matches between the app spec and the Jira webhook config, and that the webhook subscribes to both *Issue updated* and *Comment created*.
 4. Optionally set `JIRA_BASE_URL` for clickable ticket links.
-5. If Task 9 was implemented, add `CHAT_ORCHESTRATOR_URL` to the `tools-service` component and redeploy.
+5. If Task 8 was implemented, add `CHAT_ORCHESTRATOR_URL` to the `tools-service` component and redeploy.
