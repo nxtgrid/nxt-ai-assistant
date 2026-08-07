@@ -1002,6 +1002,44 @@ async def summarize_skill(
     return SkillSummarizeResponse(summary=summary)
 
 
+class SkillDispatchScheduleRequest(BaseModel):
+    schedule_id: str
+
+
+class SkillDispatchScheduleResponse(BaseModel):
+    dispatched: int
+    skipped: int
+    failed: int
+    reason: Optional[str] = None
+
+
+@app.post("/skills/dispatch-schedule", response_model=SkillDispatchScheduleResponse)
+async def dispatch_skill_schedule_endpoint(
+    request: Request, body: SkillDispatchScheduleRequest
+) -> SkillDispatchScheduleResponse:
+    """Fan a due skill schedule out across every eligible entity (Phase 5 of
+    docs/superpowers/plans/2026-08-06-user-designed-skills.md, item 1).
+
+    Called by anansi_app/scripts/broadcast_scheduler.py when it finds a due
+    user_schedules row with skill_id set, instead of that scheduler's own
+    single-chat command dispatch -- see skill_schedule_dispatch.py's module
+    docstring for why the entity fan-out and authorization work can only
+    happen here (direct Auth DB access), not in the scheduler's own process.
+
+    Synchronous: the scheduler waits for this to finish rather than
+    polling, since a skill run's own per-entity delivery already happens
+    inside this call (skill_runner.py's _ResponseBuffer sends success
+    messages as steps complete; failures are routed before this returns
+    too) -- there is nothing left to deliver asynchronously afterward.
+    """
+    get_auth_method(request)
+
+    from orchestrator.experts.skill_schedule_dispatch import dispatch_skill_schedule
+
+    result = await dispatch_skill_schedule(body.schedule_id)
+    return SkillDispatchScheduleResponse(**result)
+
+
 # ============================================================================
 # External Notification Passthrough (n8n / VRM / Grafana → Telegram)
 # ============================================================================
@@ -2382,6 +2420,19 @@ async def handle_notify(
     )
     if error_response is not None:
         return error_response
+
+    # Skill alert trigger (Phase 5 of
+    # docs/superpowers/plans/2026-08-06-user-designed-skills.md, item 6):
+    # deliberately AFTER the correlation decision above, never before --
+    # firing earlier would re-run triggered skills on duplicate re-fires of
+    # the same alert, exactly the noise ALERT_CORRELATION_ENABLED exists to
+    # avoid. Backgrounded like the notification delivery itself below, so a
+    # skill run's latency never delays this endpoint's response.
+    from orchestrator.experts.skill_schedule_dispatch import dispatch_skill_alert_trigger
+
+    background_tasks.add_task(
+        dispatch_skill_alert_trigger, target.grid_name, target.chat_id, target.topic_id
+    )
 
     # Return fast; the send + logging happen in the background (mirrors the
     # Telegram-webhook pattern — responses go out via the Bot API, not this body).

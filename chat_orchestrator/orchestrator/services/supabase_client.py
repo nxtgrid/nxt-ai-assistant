@@ -203,6 +203,141 @@ class EnhancedSupabaseClient:
             LOGGER.error(f"Error getting session: {e}")
             return None
 
+    async def get_skill(self, skill_id: str) -> Optional[Dict[str, Any]]:
+        """Full skills row (steps, inputs, staff_only, status, created_by) --
+        Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md.
+
+        Deliberately a raw dict, not a dataclass: unlike
+        shared.prompts.skills.Skill (catalog rendering only -- id/slug/
+        title/summary/staff_only), skill_runner.py needs the full row to
+        build a runnable workflow. Returns None for both "not found" and
+        "DB unreachable" -- callers can't distinguish the two, which is fine
+        here since either way there is nothing to run.
+        """
+        try:
+            client = self._get_client()
+            response = client.table("skills").select("*").eq("id", skill_id).execute()
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            LOGGER.error(f"Error getting skill {skill_id}: {e}")
+            return None
+
+    async def set_skill_status(self, skill_id: str, status: str, reason: str) -> None:
+        """Flip skills.status -- Phase 5's creator-liveness check uses this
+        to set 'unusable' and abort every future run of a skill whose
+        creator's account has been soft-deleted. Logs, never raises: the
+        caller's own abort-all-runs behavior doesn't depend on this write
+        actually landing.
+        """
+        try:
+            client = self._get_client()
+            client.table("skills").update({"status": status}).eq("id", skill_id).execute()
+            LOGGER.warning(f"Skill {skill_id} status -> {status}: {reason}")
+        except Exception as e:
+            LOGGER.error(f"Error setting skill {skill_id} status to {status}: {e}")
+
+    async def get_user_schedule(self, schedule_id: str) -> Optional[Dict[str, Any]]:
+        """Full user_schedules row, including the Phase 5 skill_id/
+        anchor_entity_type/skill_inputs columns -- see
+        skill_schedule_dispatch.py, the only intended caller.
+        """
+        try:
+            client = self._get_client()
+            response = (
+                client.table("user_schedules").select("*").eq("id", schedule_id).execute()
+            )
+            if response.data:
+                return response.data[0]
+            return None
+        except Exception as e:
+            LOGGER.error(f"Error getting user_schedule {schedule_id}: {e}")
+            return None
+
+    async def log_skill_schedule_run(
+        self,
+        schedule_id: str,
+        status: str,
+        *,
+        anchor_entity_id: Optional[str] = None,
+        anchor_entity_name: Optional[str] = None,
+        result_message: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """One user_schedule_logs row per fan-out target (Phase 5, item 3:
+        a skipped chat must appear in the web run history with its reason).
+        status is 'success' | 'failed' | 'skipped' -- not DB-enforced (this
+        column predates Phase 5 and was never constrained), see
+        db/migrations/0013_skill_scheduling.sql. Logs, never raises: a
+        logging failure must not turn into a second failure mode on top of
+        whatever this row is trying to record.
+        """
+        try:
+            client = self._get_client()
+            client.table("user_schedule_logs").insert(
+                {
+                    "schedule_id": schedule_id,
+                    "status": status,
+                    "anchor_entity_id": anchor_entity_id,
+                    "anchor_entity_name": anchor_entity_name,
+                    "result_message": result_message,
+                    "error_message": error_message,
+                }
+            ).execute()
+        except Exception as e:
+            LOGGER.error(f"Error logging skill schedule run for {schedule_id}: {e}")
+
+    async def get_notify_trigger_schedules(self, anchor_entity_type: str) -> List[Dict[str, Any]]:
+        """Active skill schedules whose trigger is an alert notify, not a
+        cron tick -- Phase 5's item 6. schedule_type='notify_trigger' is a
+        new value alongside the pre-existing 'once'/'recurring'/'biweekly';
+        cron_expression/next_run_at are simply unused (stay NULL) on these
+        rows, since handle_notify wakes them directly rather than a poll
+        loop finding them due.
+        """
+        try:
+            client = self._get_client()
+            response = (
+                client.table("user_schedules")
+                .select("*")
+                .eq("schedule_type", "notify_trigger")
+                .eq("anchor_entity_type", anchor_entity_type)
+                .eq("is_active", True)
+                .not_.is_("skill_id", "null")
+                .execute()
+            )
+            return response.data or []
+        except Exception as e:
+            LOGGER.error(f"Error getting notify-trigger schedules for {anchor_entity_type}: {e}")
+            return []
+
+    async def get_last_skill_schedule_run_at(
+        self, schedule_id: str, anchor_entity_id: str
+    ) -> Optional[str]:
+        """Most recent executed_at for this (schedule, entity) pair, or None
+        if it has never run. Backs Phase 5's alert-trigger rate limit (one
+        run per ALERT_TRIGGER_MIN_INTERVAL_SECONDS per (skill, grid) --
+        "the way the old user-agent path did").
+        """
+        try:
+            client = self._get_client()
+            response = (
+                client.table("user_schedule_logs")
+                .select("executed_at")
+                .eq("schedule_id", schedule_id)
+                .eq("anchor_entity_id", anchor_entity_id)
+                .order("executed_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if response.data:
+                return response.data[0]["executed_at"]
+            return None
+        except Exception as e:
+            LOGGER.error(f"Error getting last run time for schedule {schedule_id}: {e}")
+            return None
+
     async def get_session_by_id(self, session_uuid: str) -> Optional[ChatSessionModel]:
         """Get session by its chat_sessions.id uuid (the canonical FK
         escalations.chat_session_id points at) rather than the text

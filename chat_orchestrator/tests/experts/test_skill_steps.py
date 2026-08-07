@@ -117,6 +117,14 @@ def _patch_available_tools(monkeypatch, tools: list[dict]):
 def _patch_max_tool_rounds(monkeypatch, rounds: int):
     fake_settings = MagicMock()
     fake_settings.max_tool_rounds = rounds
+    # Every caller of this helper is testing a skill step (tools_payload is
+    # not None), so skill_max_tool_rounds -- not max_tool_rounds -- is the
+    # ceiling _call_llm_step_with_tools actually reads (Phase 5 of
+    # docs/superpowers/plans/2026-08-06-user-designed-skills.md, item 7).
+    # Set both so this helper's `rounds` argument means what every call site
+    # already expects it to mean, regardless of which field the code
+    # currently picks.
+    fake_settings.skill_max_tool_rounds = rounds
     monkeypatch.setattr(wf_module, "get_settings", lambda: fake_settings)
 
 
@@ -289,6 +297,35 @@ class TestSkillStepToolAccess:
 
         # 1 initial call + 2 rounds (max_tool_rounds=2) = 3 total calls.
         assert mock_gemini.generate_messages.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_skill_steps_are_bounded_by_skill_max_tool_rounds_not_the_global(
+        self, mock_gemini, mock_packet_service, step_context, base_skill_packet, monkeypatch
+    ):
+        """Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md,
+        item 7: skill steps get their own, separate, higher round ceiling --
+        proven here by setting the two settings to different values and
+        confirming the skill-specific one is what actually bounds the loop."""
+        _patch_available_tools(monkeypatch, [{"name": "get_thing"}])
+        fake_settings = MagicMock()
+        fake_settings.max_tool_rounds = 1  # must NOT be the ceiling that applies
+        fake_settings.skill_max_tool_rounds = 4
+        monkeypatch.setattr(wf_module, "get_settings", lambda: fake_settings)
+
+        always_wants_tool = _turn(
+            text="", tool_calls=[FunctionCall(name="get_thing", arguments={})]
+        )
+        mock_gemini.generate_messages = AsyncMock(return_value=always_wants_tool)
+        step = ParsedStep(
+            index=0, step_type="llm", name="loop", description="Keep going.", is_skill_step=True
+        )
+        executor = WorkflowExecutor(mock_gemini, mock_packet_service, None)
+
+        await executor._execute_llm_step(step, _MockExpertConfig(), base_skill_packet, step_context, {})
+
+        # 1 initial call + 4 rounds (skill_max_tool_rounds=4, NOT
+        # max_tool_rounds=1) = 5 total calls.
+        assert mock_gemini.generate_messages.call_count == 5
 
     @pytest.mark.asyncio
     async def test_failed_tool_call_is_fed_back_as_error_not_raised(

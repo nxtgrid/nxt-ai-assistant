@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from orchestrator.clients.factory import create_chat_llm_client
 from orchestrator.config.settings import get_settings
+from orchestrator.experts import skill_runner
 from orchestrator.experts.step_context import StepContext
 from orchestrator.experts.workflow_executor import WorkflowExecutor
 from orchestrator.graphs.nodes.expert_router import parse_expert_command
@@ -464,6 +465,16 @@ async def expert_handler(state: ConversationState) -> Dict[str, Any]:
                 "routing",
             ),
         }
+
+    # Skill run (Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md).
+    # expert_router.py sets this synthetic marker for a scheduled/triggered
+    # skill run, before any Google-Doc-expert logic below (packet
+    # creation/resumption/tool-executor construction, all built for
+    # persistent Google-Doc experts) would otherwise run. Delegates
+    # entirely to skill_runner.py -- see its module docstring for why it
+    # doesn't reuse this function's own _create_new_packet et al.
+    if skill_runner.is_skill_expert_id(expert_id):
+        return await skill_runner.run_skill_packet(state, expert_id, packet_service)
 
     # Get expert configuration
     expert_config = await expert_provider.get_expert_config(expert_id)

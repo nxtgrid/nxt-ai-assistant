@@ -88,6 +88,36 @@ async def resolve_auth(state: ConversationState) -> Dict[str, Any]:
         )
         LOGGER.info(f"Staff group auth: org={staff_org_id}, user={user_context.user_id}")
 
+    elif is_scheduled_execution and metadata.get("skill_id"):
+        # Skill run (Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md).
+        #
+        # Deliberately NOT the generic is_scheduled_execution branch below,
+        # which trusts a permissions snapshot captured at schedule-creation
+        # time. Skills always re-resolve from the *live* chat instead --
+        # see the plan's Phase 5, item 2: "the chat is authoritative... do
+        # not merge in the creator's permissions. This is what makes a
+        # staff-authored skill behave correctly in a customer group" (same
+        # chat-based resolution a live Telegram message in that chat would
+        # get, just triggered by the scheduler instead of a real update).
+        #
+        # Unlike the live-chat branch above, an unresolvable org here must
+        # NOT raise PermissionError -- there is no live user watching this
+        # request to see an error response. skill_runner.py checks
+        # organization_ids itself and treats empty as "skip this chat,
+        # silently in the group, recorded in the run history" (Phase 5,
+        # item 3), not a hard failure.
+        user_permissions = await auth_service.resolve_permissions_from_chat(
+            chat_id=user_context.chat_id,
+            topic_id=user_context.topic_id,
+            user_id=user_context.user_id,
+            telegram_id=user_context.user_id,
+        )
+        if not user_permissions.organization_ids:
+            LOGGER.warning(
+                f"Skill run: no organization for chat_id={user_context.chat_id}, "
+                f"topic_id={user_context.topic_id} -- skill_runner.py will skip this chat"
+            )
+
     elif is_scheduled_execution:
         # Use stored context from schedule creation
         scheduled_org_id = metadata.get("scheduled_organization_id")

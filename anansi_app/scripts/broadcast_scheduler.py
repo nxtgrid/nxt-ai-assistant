@@ -186,6 +186,134 @@ def process_pending_broadcasts(processor_id: str, verbose: bool = True) -> int:
     return processed
 
 
+def process_due_skill_schedules(verbose: bool = True) -> int:
+    """Hand off every due skill-based user_schedules row to chat_orchestrator.
+
+    Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md,
+    item 1: "the scheduler starts the run and hands off... it does not
+    execute steps." A skill row fans out across every eligible entity of
+    its anchor_entity_type (Phase 5, item 5) rather than naming one
+    chat_id -- that doesn't fit the scheduled_messages queue's one-row-one-
+    chat model the command path above uses, so this queries user_schedules
+    directly instead of going through claim_user_command_messages.
+
+    Entity fan-out and per-run authorization both need direct Auth DB
+    access (AUTH_DB_HOST/USER/PASSWORD), which this process's own .env.example
+    has never had -- see skill_schedule_dispatch.py's module docstring for
+    why that work happens in chat_orchestrator via POST
+    /skills/dispatch-schedule, not here. This function's only job is
+    recognizing "due" and advancing next_run_at; it never touches Auth DB,
+    entity eligibility, or Telegram delivery itself.
+
+    Returns the number of schedules handed off.
+    """
+    from supabase import create_client
+
+    supabase_url = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL", "")
+    supabase_key = os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY", "")
+    if not supabase_url or not supabase_key:
+        if verbose:
+            print("ERROR: Chat database not configured for skill schedules")
+        return 0
+
+    supabase = create_client(supabase_url, supabase_key)
+    now = datetime.now(timezone.utc)
+
+    try:
+        due = (
+            supabase.table("user_schedules")
+            .select("*")
+            .not_.is_("skill_id", "null")
+            .eq("is_active", True)
+            .lte("next_run_at", now.isoformat())
+            .execute()
+        )
+        schedules = due.data or []
+    except Exception as e:
+        if verbose:
+            print(f"ERROR querying due skill schedules: {e}")
+        return 0
+
+    if not schedules:
+        return 0
+
+    if verbose:
+        print(f"[{now.isoformat()}] Found {len(schedules)} due skill schedule(s)", flush=True)
+
+    dispatched = 0
+    for schedule in schedules:
+        schedule_id = schedule["id"]
+        try:
+            headers = {"X-Api-Key": API_KEY} if API_KEY else {}
+            with httpx.Client(timeout=300.0) as client:
+                response = client.post(
+                    f"{CHAT_ORCHESTRATOR_URL}/skills/dispatch-schedule",
+                    json={"schedule_id": schedule_id},
+                    headers=headers,
+                )
+                response.raise_for_status()
+                result = response.json()
+            if verbose:
+                print(
+                    f"  Skill schedule {schedule_id[:8]}: dispatched={result.get('dispatched')}, "
+                    f"skipped={result.get('skipped')}, failed={result.get('failed')}, "
+                    f"reason={result.get('reason')}",
+                    flush=True,
+                )
+            dispatched += 1
+        except Exception as e:
+            if verbose:
+                print(f"  ERROR dispatching skill schedule {schedule_id[:8]}: {e}", flush=True)
+            # Still advance next_run_at below -- a single tick's dispatch
+            # failure must not wedge a recurring schedule forever, same
+            # rationale as _update_recurring_schedule's own comment.
+
+        _advance_skill_schedule(supabase, schedule, verbose)
+
+    return dispatched
+
+
+def _advance_skill_schedule(supabase, schedule: Dict[str, Any], verbose: bool = True) -> None:
+    """Compute and persist a skill schedule's next_run_at, or deactivate it
+    if it was one-time -- the skill-row counterpart to
+    _update_recurring_schedule (which only ever handles command rows)."""
+    schedule_id = schedule["id"]
+    schedule_type = schedule.get("schedule_type", "recurring")
+
+    if schedule_type not in ("recurring", "biweekly"):
+        supabase.table("user_schedules").update(
+            {
+                "status": "completed",
+                "is_active": False,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }
+        ).eq("id", schedule_id).execute()
+        if verbose:
+            print(f"    One-time skill schedule {schedule_id[:8]} completed")
+        return
+
+    cron_expr = schedule.get("cron_expression")
+    if not cron_expr:
+        return
+
+    if advance_recurrence is not None:
+        next_run = advance_recurrence(schedule_type, cron_expr)
+    else:
+        import pytz  # type: ignore[import-untyped]
+
+        next_run = datetime.now(pytz.UTC) + timedelta(hours=24)
+
+    supabase.table("user_schedules").update(
+        {
+            "next_run_at": next_run.isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    ).eq("id", schedule_id).execute()
+
+    if verbose:
+        print(f"    Skill schedule {schedule_id[:8]}: next run at {next_run.isoformat()}")
+
+
 def process_pending_user_commands(processor_id: str, verbose: bool = True) -> int:
     """
     Process all pending user-scheduled commands that are due.
@@ -702,7 +830,7 @@ def run_daemon(poll_interval: int = 60, verbose: bool = True):
     if verbose:
         print(f"Starting scheduler daemon (processor_id: {processor_id})")
         print(f"Poll interval: {poll_interval}s")
-        print("Processing: broadcasts and user commands")
+        print("Processing: broadcasts, user commands, and skill schedules")
         print("Press Ctrl+C to stop\n")
 
     try:
@@ -713,6 +841,10 @@ def run_daemon(poll_interval: int = 60, verbose: bool = True):
 
                 # Process user commands
                 process_pending_user_commands(processor_id, verbose)
+
+                # Process due skill schedules (Phase 5 of
+                # docs/superpowers/plans/2026-08-06-user-designed-skills.md)
+                process_due_skill_schedules(verbose)
 
             except Exception as e:
                 if verbose:

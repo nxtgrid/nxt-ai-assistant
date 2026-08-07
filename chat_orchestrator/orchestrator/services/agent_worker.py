@@ -348,44 +348,23 @@ class AgentWorker:
 
     # ── Internal: reconciliation helpers ─────────────────────────────────
 
-    # Registry: anchor_entity_type → eligibility query function
-    # To add a new entity type, add an entry here and a corresponding
-    # method on AuthService.
-
+    # Lifted into orchestrator.experts.entity_fanout by Phase 5 of
+    # docs/superpowers/plans/2026-08-06-user-designed-skills.md, item 5, so
+    # skill scheduling can reuse the same eligibility/metadata logic instead
+    # of a second copy -- and so it's already out of this module before
+    # Phase 6 deletes it. Thin wrappers rather than updating this class's
+    # own many internal call sites (_reconcile_expert,
+    # _auto_create_instance, etc.).
     async def _get_eligible_entities(self, entity_type: str) -> List[Dict[str, Any]]:
-        """Get eligible entities for a given anchor_entity_type."""
-        from shared.auth.auth_service import get_auth_service
+        from orchestrator.experts.entity_fanout import get_eligible_entities
 
-        auth_service = get_auth_service()
-
-        if entity_type == "grid":
-            return await auth_service.get_eligible_grids_for_agents()
-
-        LOGGER.warning(f"No eligibility query registered for entity_type={entity_type}")
-        return []
+        return await get_eligible_entities(entity_type)
 
     @staticmethod
     def _build_anchor_metadata(entity_type: str, entity: Dict[str, Any]) -> Dict[str, Any]:
-        """Build anchor_metadata dict from entity data.
+        from orchestrator.experts.entity_fanout import build_anchor_metadata
 
-        Each entity type maps its DB fields to a standard metadata shape
-        used for event routing and context.
-        """
-        if entity_type == "grid":
-            return {
-                "grid_name": entity["name"],
-                "telegram_chat_id": str(entity["internal_telegram_group_chat_id"]),
-                "telegram_topic_id": entity.get("internal_telegram_group_thread_id"),
-                "vrm_site_id": entity.get("generation_external_site_id"),
-                "organization_id": entity["organization_id"],
-                "organization_name": entity.get("organization_name", ""),
-            }
-
-        # Fallback: store name + organization_id
-        return {
-            "name": entity.get("name", ""),
-            "organization_id": entity.get("organization_id"),
-        }
+        return build_anchor_metadata(entity_type, entity)
 
     async def _auto_create_instance(
         self,

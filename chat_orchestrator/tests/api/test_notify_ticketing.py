@@ -393,7 +393,11 @@ async def test_handle_notify_passthrough_response_byte_identical(monkeypatch):
     import json
 
     assert json.loads(response.body) == {"ok": True}
-    assert len(background_tasks.tasks) == 1
+    # 2, not 1, since Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md
+    # added a second background task (dispatch_skill_alert_trigger) queued
+    # alongside the pre-existing _deliver_notification -- the response body
+    # this test is actually about stays byte-identical either way.
+    assert len(background_tasks.tasks) == 2
 
 
 async def test_handle_notify_create_ticket_returns_ref_in_response(monkeypatch):

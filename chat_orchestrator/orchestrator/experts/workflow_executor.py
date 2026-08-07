@@ -284,6 +284,17 @@ class ParsedStep:
     # skill_step_bindings.READ_ONLY_TOOL_PREFIXES for why that default is
     # what makes "a rewound step already took effect" survivable.
     allow_write: bool = False
+    # is_response_step: Phase 5 of the skills plan. Only consulted for
+    # scheduled/triggered skill runs (metadata.scheduled_execution=true) --
+    # meaningless in the interactive builder, where every step is always
+    # shown live regardless of this flag (see the plan's "Run-mode output"
+    # section). When true, this step's full response delivers immediately
+    # during a run instead of being folded into the next response step's
+    # buffered summary. skill_runner.py's build_parsed_steps always forces
+    # this true on a skill's last step even if not explicitly flagged, per
+    # that same section's "final step is always an implicit response step"
+    # rule.
+    is_response_step: bool = False
 
 
 @dataclass
@@ -472,6 +483,10 @@ class WorkflowExecutor:
         packet: Dict[str, Any],
         context: StepContext,
         on_progress: Optional[Callable[[str], Any]] = None,
+        pre_parsed_steps: Optional[List[ParsedStep]] = None,
+        on_step_complete: Optional[
+            Callable[[ParsedStep, StepExecutionRecord, Optional[str]], Any]
+        ] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """Execute all remaining steps in workflow.
 
@@ -480,6 +495,29 @@ class WorkflowExecutor:
             packet: Current packet data
             context: Step execution context
             on_progress: Optional callback for progress updates
+            pre_parsed_steps: Phase 5 of the skills plan. When given, used
+                instead of expert_config.get_workflow(packet_type) +
+                parse_workflow() -- that pipeline only ever produces
+                ParsedStep objects with is_skill_step/allow_write/
+                is_response_step at their defaults (it parses plain doc
+                text, which has no notion of them), so a saved skill's
+                per-step flags would be silently lost going through it.
+                See orchestrator/experts/skill_runner.py, the only intended
+                caller. expert_config is still required when this is set --
+                only its get_workflow() call is skipped, everything else
+                (system_instructions, tools, capabilities) is used as
+                normal -- skill_runner.py builds a minimal synthetic one.
+            on_step_complete: Phase 5 of the skills plan. Called once per
+                step that reaches a terminal SUCCESS/FAILED status (never
+                for a PENDING/awaiting-confirmation pause), with that step's
+                ParsedStep, final StepExecutionRecord, and the step's full
+                response text if it produced one (LLM steps only --
+                StepExecutionRecord.result_summary is a short descriptive
+                label, e.g. "Generated 340 chars", not the text itself;
+                function steps have no response text at all, hence
+                Optional). This is the run-mode delivery hook -- see
+                skill_runner.py's _ResponseBuffer -- and is a no-op for
+                every existing caller (Google-Doc experts never pass it).
 
         Returns:
             Tuple of (final_response_text, state_updates)
@@ -490,7 +528,7 @@ class WorkflowExecutor:
         self._current_execution_summary = None
         try:
             result: Tuple[str, Dict[str, Any]] = await self._execute_workflow_inner(
-                expert_config, packet, context, on_progress
+                expert_config, packet, context, on_progress, pre_parsed_steps, on_step_complete
             )
             return result
         except asyncio.CancelledError:
@@ -573,6 +611,10 @@ class WorkflowExecutor:
         packet: Dict[str, Any],
         context: StepContext,
         on_progress: Optional[Callable[[str], Any]] = None,
+        pre_parsed_steps: Optional[List[ParsedStep]] = None,
+        on_step_complete: Optional[
+            Callable[[ParsedStep, StepExecutionRecord, Optional[str]], Any]
+        ] = None,
     ) -> Tuple[str, Dict[str, Any]]:
         """Inner workflow execution — called by execute_workflow which handles CancelledError."""
         update_trace(
@@ -582,8 +624,11 @@ class WorkflowExecutor:
             },
         )
         packet_type = packet["packet_type"]
-        workflow_lines = expert_config.get_workflow(packet_type)
-        steps = self.parse_workflow(workflow_lines)
+        if pre_parsed_steps is not None:
+            steps = pre_parsed_steps
+        else:
+            workflow_lines = expert_config.get_workflow(packet_type)
+            steps = self.parse_workflow(workflow_lines)
 
         # Extract chat_id for button type selection (web_app only in private chats)
         _wf_chat_id = (
@@ -704,11 +749,30 @@ class WorkflowExecutor:
             if signal.final_response is not None:
                 final_response = signal.final_response
             if signal.action == "return":
+                # A pause (awaiting confirmation/input), not a completion --
+                # on_step_complete deliberately does not fire here. A
+                # scheduled/triggered run has nobody present to resume it;
+                # skill_runner.py treats "returned without reaching a
+                # response step" as the run simply having nothing to
+                # deliver via this path (see execute_workflow's
+                # on_step_complete docstring and the plan's Phase 5, item 8).
                 return signal.return_value
+            if signal.action == "retry":
+                continue  # Re-run while loop with same _step_idx -- not a completion, no hook
+            if on_step_complete is not None:
+                try:
+                    record = next(
+                        (r for r in execution_summary.step_records if r.step_name == step.name),
+                        None,
+                    )
+                    if record is not None:
+                        await on_step_complete(step, record, signal.final_response)
+                except Exception:
+                    LOGGER.warning(
+                        f"on_step_complete callback failed for step {step.name}", exc_info=True
+                    )
             if signal.action == "break":
                 break
-            if signal.action == "retry":
-                continue  # Re-run while loop with same _step_idx
 
             # Advance to next step
             _step_idx += 1
@@ -2633,9 +2697,13 @@ class WorkflowExecutor:
         Non-skill steps (tools_payload=None) make exactly one call, same as
         before Phase 2 -- the while loop below never executes, since
         `response.tool_calls` is empty with no tools offered. Skill steps
-        with tools may loop up to settings.max_tool_rounds (shared with the
-        main chat graph's round cap; see the skills plan's Phase 5 for the
-        planned separate, higher setting for skill runs specifically).
+        with tools may loop up to settings.skill_max_tool_rounds (Phase 5 of
+        the skills plan, item 7: a separate, higher ceiling than the main
+        chat graph's settings.max_tool_rounds -- a "find tickets, evaluate
+        each" step legitimately needs more than 3 rounds, and raising the
+        global default would also raise it for every Google-Doc expert
+        step). tools_payload is not None is exactly the is_skill_step
+        signal here -- see this method's caller, _execute_llm_step.
 
         Returns the final round's GeminiTurnResult. If the round cap is hit
         while the model still wants to call tools, that response (whatever
@@ -2652,7 +2720,10 @@ class WorkflowExecutor:
         )
         self._record_llm_step_tokens(response, execution_summary)
 
-        max_rounds = get_settings().max_tool_rounds
+        settings = get_settings()
+        max_rounds = (
+            settings.skill_max_tool_rounds if tools_payload is not None else settings.max_tool_rounds
+        )
         rounds = 0
         while response.tool_calls and tools_payload and rounds < max_rounds:
             rounds += 1
