@@ -33,6 +33,25 @@ from shared.utils.date_utils import compose_date_range_query
 from shared.utils.http_client import HTTPClientMixin
 from shared.utils.response_formatters import compose_json_response
 
+# Prefer an in-process TicketService call for closing internal tickets: every
+# current deployment bundles mcp_servers inside the chat-orchestrator image
+# and runs it in the same process (chat_orchestrator/Dockerfile puts both on
+# PYTHONPATH) -- there is no live standalone tools-service to call over HTTP
+# (see "stop building/publishing the tools-service GHCR image", #69). This
+# mirrors ToolExecutor's own DIRECT_REGISTRY_AVAILABLE fallback pattern for
+# the reverse direction (orchestrator -> mcp_servers) so a standalone
+# mcp_servers deployment -- where this import fails -- still works, over
+# HTTP via CHAT_ORCHESTRATOR_URL.
+try:
+    from orchestrator.services.supabase_client import get_supabase_client as _get_orchestrator_db
+    from orchestrator.services.ticketing.service import TicketService as _OrchestratorTicketService
+
+    _DIRECT_TICKET_SERVICE_AVAILABLE = True
+except ImportError:
+    _DIRECT_TICKET_SERVICE_AVAILABLE = False
+    _get_orchestrator_db = None
+    _OrchestratorTicketService = None
+
 # Configure logging to stderr for Claude Desktop visibility
 logging.basicConfig(
     level=logging.INFO,
@@ -186,12 +205,24 @@ class JiraClient(HTTPClientMixin):
             return False
 
     async def close_internal_ticket(self, ticket_ref: str) -> bool:
-        """Close an internal ticket via the orchestrator, not a direct DB write.
+        """Close an internal ticket through TicketService, not a direct DB write.
 
-        TicketRepository is the sole writer for `tickets`; closing through the
-        orchestrator is also what triggers the Telegram update card, which a
-        direct write here would silently skip.
+        TicketRepository is the sole writer for `tickets`; closing through
+        TicketService is also what triggers the Telegram update card, which a
+        direct write here would silently skip. Prefers an in-process call
+        (see the _DIRECT_TICKET_SERVICE_AVAILABLE import at module top);
+        falls back to HTTP only for a standalone mcp_servers deployment.
         """
+        if _DIRECT_TICKET_SERVICE_AVAILABLE:
+            try:
+                await _OrchestratorTicketService(
+                    get_supabase_client=_get_orchestrator_db
+                ).transition_to_done(ticket_ref)
+                return True
+            except Exception as exc:
+                logger.warning("Internal ticket close failed for %s: %s", ticket_ref, exc)
+                return False
+
         base = os.getenv("CHAT_ORCHESTRATOR_URL", "").rstrip("/")
         if not base:
             logger.warning(
