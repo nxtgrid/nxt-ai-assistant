@@ -482,7 +482,15 @@ services:
       - key: EQUIPMENT_CONTROL_ALLOWED_USERS
         value: "admin@example.com"
         scope: RUN_TIME
-      # All other env vars inherited from app-level
+      # Internal URL so the Jira MCP server can close internal tickets through
+      # TicketService (POST /internal/tickets/{ref}/close) instead of writing
+      # the tickets table directly -- that direct write bypassed the ticket
+      # update notifier, so a bot-initiated close never reached Telegram.
+      - key: CHAT_ORCHESTRATOR_URL
+        value: "${chat-orchestrator.PRIVATE_URL}"
+        scope: RUN_TIME
+      # All other env vars (including API_KEY, used to authenticate the call
+      # above) inherited from app-level
 
   # ---------------------------------------------------------------------------
   # Service 3: Anansi App

@@ -186,17 +186,34 @@ class JiraClient(HTTPClientMixin):
             return False
 
     async def close_internal_ticket(self, ticket_ref: str) -> bool:
-        def close() -> bool:
-            db = self._get_chat_supabase()
-            if db is None:
-                return False
-            db.table("tickets").update(
-                {"status": "done", "resolved_at": datetime.utcnow().isoformat() + "Z"}
-            ).eq("ticket_ref", ticket_ref).eq("backend", "internal").execute()
-            return True
+        """Close an internal ticket via the orchestrator, not a direct DB write.
 
+        TicketRepository is the sole writer for `tickets`; closing through the
+        orchestrator is also what triggers the Telegram update card, which a
+        direct write here would silently skip.
+        """
+        base = os.getenv("CHAT_ORCHESTRATOR_URL", "").rstrip("/")
+        if not base:
+            logger.warning(
+                "CHAT_ORCHESTRATOR_URL not set -- cannot close internal ticket %s", ticket_ref
+            )
+            return False
+        api_key = os.getenv("API_KEY", "")
         try:
-            return await asyncio.to_thread(close)
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{base}/internal/tickets/{ticket_ref}/close",
+                    headers={"X-Api-Key": api_key},
+                    timeout=aiohttp.ClientTimeout(total=15),
+                ) as response:
+                    if response.status != 200:
+                        logger.warning(
+                            "Internal ticket close for %s returned HTTP %s",
+                            ticket_ref,
+                            response.status,
+                        )
+                        return False
+                    return True
         except Exception as exc:
             logger.warning("Internal ticket close failed for %s: %s", ticket_ref, exc)
             return False

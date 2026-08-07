@@ -193,23 +193,76 @@ async def test_add_internal_comment_returns_false_for_unknown_ref(fake_tables):
     assert fake_tables["ticket_comments"] == []
 
 
-async def test_close_internal_ticket_updates_canonical_tickets_row(fake_tables):
-    fake_tables["tickets"].append(
-        {
-            "id": "uuid-1",
-            "ticket_ref": "TKT-000001",
-            "backend": "internal",
-            "status": "open",
-            "resolved_at": None,
-        }
-    )
+class _FakeHttpResponse:
+    """Async context manager standing in for aiohttp's response object."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    async def __aenter__(self) -> "_FakeHttpResponse":
+        return self
+
+    async def __aexit__(self, *_exc) -> bool:
+        return False
+
+
+class _FakeHttpSession:
+    """Async context manager standing in for aiohttp.ClientSession.
+
+    close_internal_ticket now closes tickets over HTTP (through the
+    orchestrator's TicketService, not a direct DB write -- see its
+    docstring), so these tests exercise the HTTP call rather than a
+    Supabase fake.
+    """
+
+    def __init__(self, status: int = 200) -> None:
+        self._status = status
+        self.posted_urls: list[str] = []
+        self.posted_headers: list[dict] = []
+
+    async def __aenter__(self) -> "_FakeHttpSession":
+        return self
+
+    async def __aexit__(self, *_exc) -> bool:
+        return False
+
+    def post(self, url, **kwargs):
+        self.posted_urls.append(url)
+        self.posted_headers.append(kwargs.get("headers"))
+        return _FakeHttpResponse(self._status)
+
+
+async def test_close_internal_ticket_posts_to_the_orchestrator(monkeypatch):
+    monkeypatch.setenv("CHAT_ORCHESTRATOR_URL", "http://orchestrator.internal")
+    monkeypatch.setenv("API_KEY", "secret-key")
+    fake_session = _FakeHttpSession(status=200)
+    monkeypatch.setattr(jira_module.aiohttp, "ClientSession", lambda: fake_session)
 
     ok = await jira_module.client.close_internal_ticket("TKT-000001")
 
     assert ok is True
-    row = fake_tables["tickets"][0]
-    assert row["status"] == "done"
-    assert row["resolved_at"] is not None
+    assert fake_session.posted_urls == [
+        "http://orchestrator.internal/internal/tickets/TKT-000001/close"
+    ]
+    assert fake_session.posted_headers == [{"X-Api-Key": "secret-key"}]
+
+
+async def test_close_internal_ticket_returns_false_on_http_error(monkeypatch):
+    monkeypatch.setenv("CHAT_ORCHESTRATOR_URL", "http://orchestrator.internal")
+    fake_session = _FakeHttpSession(status=500)
+    monkeypatch.setattr(jira_module.aiohttp, "ClientSession", lambda: fake_session)
+
+    ok = await jira_module.client.close_internal_ticket("TKT-000001")
+
+    assert ok is False
+
+
+async def test_close_internal_ticket_returns_false_without_orchestrator_url(monkeypatch):
+    monkeypatch.delenv("CHAT_ORCHESTRATOR_URL", raising=False)
+
+    ok = await jira_module.client.close_internal_ticket("TKT-000001")
+
+    assert ok is False
 
 
 async def test_get_issue_tool_returns_internal_ticket_without_touching_jira(
