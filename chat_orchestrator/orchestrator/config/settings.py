@@ -244,6 +244,13 @@ class AppSettings(BaseSettings):
     known_services: List[ToolServiceConfig] = Field(default_factory=list)
     allow_parallel_calls: bool = True
     max_tool_rounds: int = Field(default=3, ge=1, le=50)
+    # Separate, higher ceiling for user-designed skill steps (Phase 5 of
+    # docs/superpowers/plans/2026-08-06-user-designed-skills.md, item 7): a
+    # "find tickets, evaluate each" step legitimately needs more than 3
+    # tool-calling rounds. Raising the global default instead would also
+    # raise it for every existing Google-Doc expert step, which is not this
+    # phase's call to make.
+    skill_max_tool_rounds: int = Field(default=8, ge=1, le=50)
     rag: RagConfig = Field(default_factory=RagConfig)
     dspy: DspyConfig = Field(default_factory=DspyConfig)
     bridge_url: Optional[str] = Field(

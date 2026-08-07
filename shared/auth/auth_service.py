@@ -545,6 +545,35 @@ class AuthService:
             LOGGER.exception(f"Error resolving user email: {e}")
             return None
 
+    async def is_account_email_live(self, email: str) -> Optional[bool]:
+        """Whether `email` names a non-deleted row in public.accounts.
+
+        Backs Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md's
+        per-skill creator-liveness check: a skill whose creator's account
+        has been soft-deleted (or never existed) must flip to
+        skills.status='unusable' and stop running everywhere -- see
+        skill_schedule_dispatch.py.
+
+        Returns True (a live row exists), False (no row, or deleted_at is
+        set), or None when liveness could not be determined (the Auth DB
+        query itself failed). None is deliberately distinct from False:
+        callers must not treat "couldn't check" the same as "confirmed
+        dead" -- a transient DB error must never mass-disable a skill, the
+        same "0 rows returned, skip -- don't mass-terminate" safety
+        property _reconcile_expert already has for entity eligibility.
+        """
+        try:
+            pool = await self._get_db_pool()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT id FROM public.accounts WHERE email = $1 AND deleted_at IS NULL LIMIT 1",
+                    email,
+                )
+                return row is not None
+        except Exception as e:
+            LOGGER.exception(f"Error checking account liveness for {email}: {e}")
+            return None
+
     async def get_user_permissions(
         self, email: str, user_id: Optional[str] = None
     ) -> UserPermissions:
@@ -1179,6 +1208,32 @@ class AuthService:
                 return [dict(r) for r in rows]
         except Exception as e:
             LOGGER.exception(f"Error getting eligible grids for agents: {e}")
+            return []
+
+    async def get_eligible_organizations_for_agents(self) -> List[dict]:
+        """Get all organizations eligible for auto-provisioned agents /
+        skill runs anchored to anchor_entity_type="organization" (Phase 5 of
+        docs/superpowers/plans/2026-08-06-user-designed-skills.md, item 5).
+
+        Eligibility: not deleted, has a developer_group_telegram_chat_id
+        configured -- that chat is where a skill anchored to this
+        organization sends. Mirrors get_eligible_grids_for_agents' shape.
+        """
+        try:
+            pool = await self._get_db_pool()
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT id, name, developer_group_telegram_chat_id
+                    FROM organizations
+                    WHERE deleted_at IS NULL
+                      AND developer_group_telegram_chat_id IS NOT NULL
+                    ORDER BY name
+                    """
+                )
+                return [dict(r) for r in rows]
+        except Exception as e:
+            LOGGER.exception(f"Error getting eligible organizations for agents: {e}")
             return []
 
     async def get_grid_telegram_sources(

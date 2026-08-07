@@ -231,6 +231,41 @@ async def expert_router(state: ConversationState) -> Dict[str, Any]:
         if pending_result is not None:
             return pending_result
 
+    # =====================================================================
+    # Skill run (Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md).
+    #
+    # A scheduled/triggered skill run already knows exactly which skill to
+    # execute (skill_runner.py's dispatch set metadata.skill_id before
+    # building this webhook request) -- it needs none of the NL/command
+    # matching, resume-decision, or duplicate-detection logic below, all of
+    # which exist to figure out *which* expert an ambiguous human message
+    # was aimed at. Routing straight to "expert" here, bypassing everything
+    # else, is what lets a skill run reuse the existing packet-creation and
+    # tool-executor machinery (via expert_handler.py) without needing its
+    # own copy of either.
+    #
+    # Gated on metadata.scheduled_execution as well as skill_id so this can
+    # never be triggered by a live user typing a skill's UUID into chat --
+    # only the scheduler/alert-trigger dispatch path sets both.
+    # matched_expert_id is a synthetic "skill:<uuid>" marker (never a real
+    # Google-Doc expert_id) that expert_handler.py checks for before calling
+    # ExpertInstructionsProvider.get_expert_config(), which has no notion of
+    # skills at all.
+    # =====================================================================
+    metadata = state.get("metadata") or {}
+    skill_id = metadata.get("skill_id")
+    if skill_id and metadata.get("scheduled_execution"):
+        return {
+            **result,
+            "expert_routing_decision": "expert",
+            "active_work_packet": None,  # Always a fresh packet; skill runs never resume
+            "matched_expert_id": f"skill:{skill_id}",
+            "expert_command": user_input,
+            "expert_raw_request": user_input,
+            "expert_packet_type": "skill_run",
+            "expert_key_entity": None,
+        }
+
     try:
         # Initialize services
         packet_service = WorkPacketService()

@@ -1,8 +1,11 @@
-"""Tests for the skill builder's two support endpoints (Phase 4 of
-docs/superpowers/plans/2026-08-06-user-designed-skills.md): POST
-/skills/validate (wraps skill_validation.validate_skill_steps, no LLM) and
-POST /skills/summarize (wraps skill_summary.generate_skill_summary, one LLM
-call). Both had no HTTP caller before this phase -- see those modules'
+"""Tests for the skill builder's support endpoints:
+POST /skills/validate (Phase 4, wraps skill_validation.validate_skill_steps,
+no LLM), POST /skills/summarize (Phase 4, wraps
+skill_summary.generate_skill_summary, one LLM call), and POST
+/skills/dispatch-schedule (Phase 5, wraps
+skill_schedule_dispatch.dispatch_skill_schedule -- see
+docs/superpowers/plans/2026-08-06-user-designed-skills.md). All three had
+no HTTP caller before their respective phase -- see those modules'
 docstrings.
 
 Calls the endpoint functions directly with a minimal request stub, matching
@@ -18,9 +21,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from orchestrator.api.app import (
+    SkillDispatchScheduleRequest,
     SkillStepPayload,
     SkillSummarizeRequest,
     SkillValidateRequest,
+    dispatch_skill_schedule_endpoint,
     summarize_skill,
     validate_skill,
 )
@@ -139,3 +144,34 @@ class TestSummarizeSkillEndpoint:
 
         assert response.summary == ""
         mock_gateway_factory.assert_not_called()
+
+
+class TestDispatchSkillScheduleEndpoint:
+    @pytest.mark.asyncio
+    async def test_no_auth_header_is_rejected(self):
+        from fastapi import HTTPException
+
+        body = SkillDispatchScheduleRequest(schedule_id="sched-1")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await dispatch_skill_schedule_endpoint(_FakeRequest(), body)
+
+        assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_delegates_to_dispatch_skill_schedule_and_returns_its_result(self):
+        body = SkillDispatchScheduleRequest(schedule_id="sched-1")
+        mock_dispatch = AsyncMock(
+            return_value={"dispatched": 2, "skipped": 1, "failed": 0, "reason": None}
+        )
+
+        with patch(
+            "orchestrator.experts.skill_schedule_dispatch.dispatch_skill_schedule", mock_dispatch
+        ):
+            response = await dispatch_skill_schedule_endpoint(_authed_request(), body)
+
+        mock_dispatch.assert_awaited_once_with("sched-1")
+        assert response.dispatched == 2
+        assert response.skipped == 1
+        assert response.failed == 0
+        assert response.reason is None

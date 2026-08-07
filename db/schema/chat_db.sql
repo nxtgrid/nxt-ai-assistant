@@ -607,7 +607,15 @@ CREATE TABLE IF NOT EXISTS user_schedules (
     created_by_user_id      text NOT NULL,
     created_by_email        text,
     organization_id         integer,
-    command                 text NOT NULL,
+    -- Exactly one of command / skill_id is set per row (see the
+    -- user_schedules_command_xor_skill_chk / _skill_requires_anchor_chk
+    -- constraints below): the pre-existing single-chat command mechanism,
+    -- or a skill (Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md)
+    -- fanned out across every eligible anchor_entity_type entity (see
+    -- orchestrator/experts/entity_fanout.py). skill_inputs is scoped to
+    -- this one schedule, separate from skills.inputs (what a skill accepts
+    -- at all).
+    command                 text,
     schedule_type           text NOT NULL DEFAULT 'once',
     cron_expression         text,
     timezone                text DEFAULT 'UTC',
@@ -619,20 +627,39 @@ CREATE TABLE IF NOT EXISTS user_schedules (
     last_run_at             timestamptz,
     run_count               integer DEFAULT 0,
     friendly_name           text,
-    user_context            jsonb DEFAULT '{}'
+    user_context            jsonb DEFAULT '{}',
+    skill_id                uuid REFERENCES skills (id),
+    anchor_entity_type      text,
+    skill_inputs            jsonb NOT NULL DEFAULT '{}',
+    CONSTRAINT user_schedules_anchor_entity_type_chk
+        CHECK (anchor_entity_type IS NULL OR anchor_entity_type IN ('grid', 'organization')),
+    CONSTRAINT user_schedules_command_xor_skill_chk
+        CHECK ((command IS NOT NULL) <> (skill_id IS NOT NULL)),
+    CONSTRAINT user_schedules_skill_requires_anchor_chk
+        CHECK ((skill_id IS NULL) = (anchor_entity_type IS NULL))
 );
 
 CREATE TABLE IF NOT EXISTS user_schedule_logs (
     id                      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     schedule_id             uuid NOT NULL REFERENCES user_schedules (id) ON DELETE CASCADE,
     executed_at             timestamptz NOT NULL DEFAULT now(),
+    -- 'success' | 'failed' | 'skipped' (application-enforced, not a DB
+    -- constraint -- this column predates Phase 5 and was never one).
+    -- 'skipped' plus error_message-as-reason is how a fanned-out skill run
+    -- records "this chat was silently skipped" per the plan's Phase 5,
+    -- item 3 -- see run_skill_dispatch.py.
     status                  text NOT NULL,
     result_message          text,
     error_message           text,
     telegram_message_id     text,
     verification_passed     boolean,
     verification_feedback   text,
-    execution_time_ms       integer
+    execution_time_ms       integer,
+    -- Which fan-out target this row is for (a skill run produces one row
+    -- per eligible entity per tick, not one row per tick). NULL for the
+    -- pre-existing single-chat command path, which only ever has one target.
+    anchor_entity_id        text,
+    anchor_entity_name      text
 );
 
 -- ── User Preferences ──────────────────────────────────────────────────────────
