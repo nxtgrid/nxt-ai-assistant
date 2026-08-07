@@ -133,12 +133,62 @@ async def test_falls_back_to_a_fresh_reply_when_the_edit_is_rejected():
 
 @pytest.mark.asyncio
 async def test_stays_silent_when_the_ticket_was_never_announced():
+    """No anchor and no fallback destination -- most callers (e.g.
+    TicketService.transition_to_done's own generic callers) have neither, so
+    this must stay the default."""
     notifier, edits, sends, _ = _notifier(gap=0, anchor=None)
     posted = await notifier.notify(TicketEvent(ticket_ref="ANS-42", kind="transition",
                                                to_status="done"))
     assert posted is False
     assert edits == []
     assert sends == []
+
+
+@pytest.mark.asyncio
+async def test_constructs_a_fresh_message_when_no_anchor_but_a_fallback_is_given():
+    """A ticket the bot never announced (e.g. filed directly in Jira) can
+    still get its first update if the caller knows where it belongs -- the
+    Jira webhook handler, via the escalation mapping's chat/topic. The
+    result must read like an original notification: a fresh top-level post,
+    not a reply to anything, and it becomes the anchor for future updates."""
+    notifier, edits, sends, deliveries = _notifier(gap=0, anchor=None)
+
+    posted = await notifier.notify(TicketEvent(
+        ticket_ref="ANS-42", kind="transition", to_status="in_progress",
+        fallback_chat_id="-100999", fallback_topic_id="42",
+    ))
+
+    assert posted is True
+    assert edits == []
+    assert len(sends) == 1
+    assert sends[0]["chat_id"] == "-100999"
+    assert sends[0]["reply_to_message_id"] is None
+    assert deliveries.recorded[0]["external_chat_id"] == "-100999"
+    assert deliveries.recorded[0]["external_topic_id"] == "42"
+    assert deliveries.recorded[0]["external_message_id"] == 9999
+    # Not "update" -- this is the ticket's first-ever delivery.
+    assert deliveries.recorded[0]["purpose"] == "notification"
+
+
+@pytest.mark.asyncio
+async def test_fallback_message_send_failure_returns_false(monkeypatch):
+    async def _send_fails(*_a, **_k):
+        return None
+
+    notifier = TicketUpdateNotifier(
+        tickets=_FakeTickets(record=_Record()),
+        deliveries=_FakeDeliveries(anchor=None),
+        watermark=_FakeWatermark(gap=0),
+        bot_token="tok",
+        send_fn=_send_fails,
+    )
+
+    posted = await notifier.notify(TicketEvent(
+        ticket_ref="ANS-42", kind="transition", to_status="in_progress",
+        fallback_chat_id="-100999", fallback_topic_id=None,
+    ))
+
+    assert posted is False
 
 
 @pytest.mark.asyncio

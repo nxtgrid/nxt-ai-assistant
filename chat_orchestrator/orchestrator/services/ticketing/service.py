@@ -421,6 +421,52 @@ class TicketService:
             status = None
         return bool(status and status.is_done)
 
+    async def mark_in_progress_from_webhook(
+        self,
+        ref: str,
+        *,
+        fallback_chat_id: Optional[str] = None,
+        fallback_topic_id: Optional[str] = None,
+    ) -> bool:
+        """Sync canonical status + notify for a move to "in progress", as
+        reported by the Jira webhook.
+
+        Unlike ``transition_to_done``, there is no actively-initiated
+        counterpart to this method: Anansi has no code path that drives a
+        ticket to "in progress" itself, so the webhook (already reporting a
+        transition Jira applied) is the only caller and the only source of
+        truth -- there's nothing to re-drive via a live API call, just the
+        canonical write to sync.
+
+        ``fallback_chat_id``/``fallback_topic_id`` let the notifier construct
+        a first-ever update card when this ticket was never announced on
+        Telegram (see ``TicketEvent`` for why that's opt-in per caller).
+        Returns True only if this call is what flipped the canonical row.
+        """
+        try:
+            newly_set = await self._tickets.set_in_progress_by_ref(ref)
+        except Exception:
+            LOGGER.warning(
+                "mark_in_progress_from_webhook: failed to persist canonical status for {}",
+                ref,
+                exc_info=True,
+            )
+            return False
+
+        if newly_set:
+            from .update_notifier import TicketEvent
+
+            await self.notify_ticket_event(
+                TicketEvent(
+                    ticket_ref=ref,
+                    kind="transition",
+                    to_status="in_progress",
+                    fallback_chat_id=fallback_chat_id,
+                    fallback_topic_id=fallback_topic_id,
+                )
+            )
+        return newly_set
+
     async def update_ticket(
         self,
         ref: str,

@@ -22,7 +22,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Literal, Optional, cast
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -94,21 +94,27 @@ def _adf_to_text(adf: Any, _depth: int = 0, _max_depth: int = 50) -> str:
     return "".join(_adf_to_text(child, _depth + 1, _max_depth) for child in adf.get("content", []))
 
 
-def _is_closure_event(payload: Dict[str, Any]) -> bool:
-    """Whether a jira:issue_updated payload represents a move into Done.
+def _status_transition_kind(payload: Dict[str, Any]) -> Optional[Literal["done", "in_progress"]]:
+    """What kind of status transition a jira:issue_updated payload represents,
+    if any Anansi cares to announce.
 
     Uses Jira's ``statusCategory`` rather than status *names*: category keys
     are fixed ("new", "indeterminate", "done") while names are per-workflow,
-    so a project whose done status is called "Resolved" or "Completed" is
-    handled without configuration. This mirrors the check ``_fetch_jira_issue_fields``
+    so a project whose done status is called "Resolved" or "Completed" -- or
+    whose in-progress status is called "In Review" or "Blocked" -- is handled
+    without configuration. This mirrors the check ``_fetch_jira_issue_fields``
     already uses when reading issue status directly, and how
     ``JiraTicketBackend._transition_jira_to_done`` picks its transition.
+
+    A move back to the "new" category (e.g. a reopened ticket returning to
+    the backlog) deliberately returns None -- not asked for, and out of
+    scope for this function to guess an announcement for.
     """
     changed_status = any(
         item.get("field") == "status" for item in payload.get("changelog", {}).get("items", [])
     )
     if not changed_status:
-        return False
+        return None
     category = (
         payload.get("issue", {})
         .get("fields", {})
@@ -116,7 +122,11 @@ def _is_closure_event(payload: Dict[str, Any]) -> bool:
         .get("statusCategory", {})
         .get("key", "")
     )
-    return category == "done"
+    if category == "done":
+        return "done"
+    if category == "indeterminate":
+        return "in_progress"
+    return None
 
 
 class EscalationService:
@@ -3245,16 +3255,18 @@ class EscalationService:
             )
 
     async def handle_jira_issue_updated(self, payload: Dict[str, Any]) -> None:
-        """Handle a jira:issue_updated webhook — close on ticket closure.
+        """Handle a jira:issue_updated webhook — close or mark-in-progress.
 
-        Does not post to Telegram directly: ``self._tickets.transition_to_done()``
-        (``TicketService``) already renders and places the update card itself
-        once the canonical write actually flips the row, so a retried webhook
-        delivery cannot double-announce a closure. This handler's own job is
-        just the escalation-session bookkeeping the ticket update alone
-        doesn't cover.
+        Does not post to Telegram directly for either transition:
+        ``TicketService`` (``self._tickets``) already renders and places the
+        update card itself once its own canonical write actually flips the
+        row, so a retried webhook delivery cannot double-announce. This
+        handler's own job for a closure is the escalation-session bookkeeping
+        the ticket update alone doesn't cover; "in progress" has no
+        equivalent bookkeeping, so it's just the canonical sync + notify.
         """
-        if not _is_closure_event(payload):
+        kind = _status_transition_kind(payload)
+        if kind is None:
             return
 
         issue_key = payload.get("issue", {}).get("key", "")
@@ -3264,6 +3276,24 @@ class EscalationService:
             return
 
         mapping = ctx["mapping"]
+        ticket_ref = mapping.get("ticket_ref")
+
+        if kind == "in_progress":
+            if ticket_ref:
+                try:
+                    await self._tickets.mark_in_progress_from_webhook(
+                        ticket_ref,
+                        fallback_chat_id=self._escalation_chat_id,
+                        fallback_topic_id=ctx["escalation_topic_id"],
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "Jira webhook: failed to sync in-progress status for canonical ticket {}",
+                        ticket_ref,
+                        exc_info=True,
+                    )
+            return
+
         jira_orgs = ctx["jira_orgs"]
         escalation_org_name = ctx["escalation_org_name"]
 
@@ -3274,7 +3304,6 @@ class EscalationService:
         # already_confirmed_externally=True: Jira already applied this
         # closure (that's what the webhook is reporting), so there's no live
         # transition left to (redundantly) re-drive -- just sync our record.
-        ticket_ref = mapping.get("ticket_ref")
         if ticket_ref:
             try:
                 await self._tickets.transition_to_done(

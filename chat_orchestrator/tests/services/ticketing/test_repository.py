@@ -254,6 +254,61 @@ async def test_transition_to_done_by_ref_returns_false_when_already_done():
 
 
 @pytest.mark.asyncio
+async def test_set_in_progress_by_ref_updates_canonical_ticket_state():
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "OPS-1", "backend": "jira",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+        "status": "open",
+    }]
+
+    flipped = await TicketRepository(client=client).set_in_progress_by_ref("OPS-1")
+
+    assert flipped is True
+    table, mode, payload, filters = client.calls[-1]
+    assert table == "tickets"
+    assert mode == "update"
+    assert payload == {"status": "in_progress"}
+    assert ("id", "ticket-1") in filters
+    assert ("status", "neq:in_progress") in filters
+    assert ("status", "neq:done") in filters
+
+
+@pytest.mark.asyncio
+async def test_set_in_progress_by_ref_returns_false_when_already_in_progress():
+    """A retried or duplicate Jira webhook must not re-announce a transition
+    that already happened."""
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "OPS-1", "backend": "jira",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+        "status": "in_progress",
+    }]
+    client.update_conflict = True
+
+    flipped = await TicketRepository(client=client).set_in_progress_by_ref("OPS-1")
+
+    assert flipped is False
+
+
+@pytest.mark.asyncio
+async def test_set_in_progress_by_ref_does_not_regress_an_already_done_ticket():
+    """An out-of-order or reordered webhook delivery reporting "in progress"
+    after this record already knows the ticket is done must not un-close it."""
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "OPS-1", "backend": "jira",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+        "status": "done",
+    }]
+    client.update_conflict = True
+
+    flipped = await TicketRepository(client=client).set_in_progress_by_ref("OPS-1")
+
+    assert flipped is False
+
+
+@pytest.mark.asyncio
 async def test_list_comments_by_ref_returns_oldest_first():
     client = _Client()
     client.select_rows_by_table = {

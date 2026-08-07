@@ -58,6 +58,15 @@ class TicketEvent:
     comment_body: str = ""
     comment_author: str = ""
     ticket_url: Optional[str] = None
+    #: Where to post this ticket's *first* update card when it has never
+    #: been announced on Telegram (no message_deliveries row at all -- e.g.
+    #: a ticket filed directly in Jira, with no /notify or escalation post
+    #: to anchor on). Only populated by callers that actually know a
+    #: destination for this ticket, e.g. the Jira webhook handler via the
+    #: escalation mapping's chat/topic. Left unset, the notifier keeps its
+    #: original behavior: stay silent rather than guess where to post.
+    fallback_chat_id: Optional[str] = None
+    fallback_topic_id: Optional[str] = None
 
 
 class TicketUpdateNotifier:
@@ -125,6 +134,48 @@ class TicketUpdateNotifier:
             reply_to_message_id=reply_to,
         )
 
+    async def _send_fallback(self, ticket: Any, event: TicketEvent, text: str) -> bool:
+        """Post a ticket's first-ever update card, at a caller-supplied
+        fallback destination, since there is no anchor message to place it
+        against. A fresh top-level post (not a reply to anything), recorded
+        as the ticket's ``notification`` delivery so later updates find it
+        as their anchor."""
+        chat_id = event.fallback_chat_id or ""
+        if not chat_id:
+            return False
+        topic_id = event.fallback_topic_id
+
+        message_id = await self._send(chat_id, text, topic_id, None)
+        if message_id is None:
+            LOGGER.warning(
+                "ticket update: fallback send failed for {}", event.ticket_ref
+            )
+            return False
+
+        try:
+            await self._deliveries.record(
+                ticket_id=ticket.id,
+                escalation_id=None,
+                purpose="notification",
+                external_chat_id=chat_id,
+                external_topic_id=str(topic_id) if topic_id is not None else None,
+                external_message_id=int(message_id),
+            )
+        except Exception:
+            LOGGER.warning(
+                "ticket update: failed to record fallback delivery for {} -- the "
+                "next update will post another fresh message instead of anchoring",
+                event.ticket_ref,
+                exc_info=True,
+            )
+        LOGGER.info(
+            "ticket update: posted first-ever card for {} (chat={} msg={})",
+            event.ticket_ref,
+            chat_id,
+            message_id,
+        )
+        return True
+
     # -- policy ------------------------------------------------------------
 
     async def _is_worth_posting(self, event: TicketEvent) -> bool:
@@ -180,16 +231,10 @@ class TicketUpdateNotifier:
             return False
 
         anchor = await self._deliveries.latest_for_ticket(ticket.id)
-        if not anchor:
-            # Never announced on Telegram (e.g. a ticket filed by a sweep).
-            # There is no thread to update and no defensible place to start one.
+        if not anchor and not event.fallback_chat_id:
+            # Never announced on Telegram (e.g. a ticket filed by a sweep),
+            # and this caller has no destination to start one at either.
             LOGGER.debug("ticket update: no delivery anchor for {}", event.ticket_ref)
-            return False
-
-        chat_id = str(anchor.get("external_chat_id") or "")
-        topic_id = anchor.get("external_topic_id")
-        anchor_message_id = int(anchor.get("external_message_id") or 0)
-        if not chat_id or not anchor_message_id:
             return False
 
         activity = await self._activity_line(event)
@@ -201,6 +246,20 @@ class TicketUpdateNotifier:
             url=event.ticket_url,
         )
         text = convert_github_to_telegram_markdown(card)
+
+        if not anchor:
+            # No prior message, but the caller knows where this ticket
+            # belongs (e.g. the Jira webhook handler, via the escalation
+            # mapping's chat/topic). The card above is a full current-state
+            # render, so this reads exactly like an original notification
+            # would have -- and becomes the anchor for future updates.
+            return await self._send_fallback(ticket, event, text)
+
+        chat_id = str(anchor.get("external_chat_id") or "")
+        topic_id = anchor.get("external_topic_id")
+        anchor_message_id = int(anchor.get("external_message_id") or 0)
+        if not chat_id or not anchor_message_id:
+            return False
 
         gap = await self._watermark.messages_since(chat_id, anchor_message_id)
         if gap <= SCROLL_THRESHOLD:
