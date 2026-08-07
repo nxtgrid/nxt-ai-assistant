@@ -460,6 +460,44 @@ code):**
 
 **Prerequisite:** Phase 2.
 
+**Implementation note (added during Phase 3):**
+
+- **The catalog integration point is `instructions_provider.py`, not
+  `shared/prompts/core.py`.** The plan named `PromptLibrary`'s
+  `_compose_knowledge` (`core.py:167-170`) as the mechanism to reuse, which
+  is right -- but `PromptLibrary.render()` itself is called from 15+
+  unrelated places (ticketing, ingestion, verification, doc-editing), most
+  of which have nothing to do with an interactive chat turn. The actual
+  once-per-turn call site for the customer/staff system prompt -- the one
+  that runs alongside `prepare_tools.py`'s tool-list assembly, which is what
+  "presented alongside MCP tools" requires -- is
+  `InstructionsProvider.get_customer_instructions` /
+  `._get_staff_instructions_from_doc` in
+  `orchestrator/services/instructions_provider.py`. That's where
+  `_append_skill_catalog` hooks in, as a new helper appended after
+  `_cap_context`, not inside `core.py`.
+- **New `shared/prompts/skills.py`, not an extension of
+  `shared/prompts/knowledge.py`.** Mirrors `KnowledgeStore`'s shape
+  deliberately (same cache lifecycle, same "degrade to empty, never raise"
+  contract) but is a separate module: skills have no per-prompt pinning or
+  geographic/org scope selection the way knowledge modules do (every active
+  skill is potentially relevant to every conversation), so the selection
+  logic is a plain `staff_only` gate, not `select_for_prompt`'s pin+scope
+  matching. `SKILL_CATALOG` is a module-level singleton (mirrors `PROMPTS`)
+  so its 5-minute TTL cache is actually shared across calls, not rebuilt
+  fresh per turn.
+- **The catalog line shows a skill's `title`, not its `slug`** -- this
+  deviates from knowledge modules' catalog (which shows `slug`). A skill's
+  title is the author-chosen, editable name (the original request's
+  "editable title"); slug is a stable identifier with no user-facing
+  purpose yet. Sort order follows the same choice: by title, not slug.
+- **`generate_skill_summary()` (`orchestrator/experts/skill_summary.py`)
+  has no caller yet.** Phase 3 built the generation function per item 4, but
+  not a `create_skill`/`save_skill` service -- there's no "save a skill" flow
+  until Phase 4's builder exists to call it. Building that service now,
+  without a real caller to prove it integrates correctly, would be
+  speculative.
+
 ### Work
 
 1. **Migration** `db/migrations/0011_skills.sql`:
