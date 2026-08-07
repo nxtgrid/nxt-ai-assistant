@@ -2048,7 +2048,20 @@ async def async_main(args: Dict[str, Any]) -> Dict[str, Any]:
             current_chat_id = str(chat.get("id", ""))
 
             if current_chat_id == escalation_chat_id:
-                # This message is from the escalation group
+                # This message is from the escalation group.
+                #
+                # Persist it the same way every other staff group already is
+                # (see the staff_group branch below). Two reasons: the bot
+                # gets conversation context here, and the ticket update
+                # notifier can tell from telegram_message_id whether a
+                # ticket's message has scrolled out of view. Without this,
+                # the one chat where ticket updates matter most is the only
+                # group with no position signal at all.
+                try:
+                    await _save_passive_group_message(telegram_msg, chat)
+                except Exception as e:
+                    LOGGER.warning(f"Failed to save escalation group message: {e}")
+
                 if "reply_to_message" in telegram_msg:
                     # It's a reply to an escalated message - forward to original chat
                     LOGGER.info("Detected reply in escalation group, handling support response")
