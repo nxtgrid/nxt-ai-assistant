@@ -11,6 +11,7 @@ placeholder notice for now.
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -97,6 +98,18 @@ async def render(user: dict[str, Any]) -> None:
             for ctx in title_matches + content_matches:
                 combined[(ctx["chat_id"], ctx.get("group_id"))] = ctx
             contexts = sorted(combined.values(), key=lambda x: x["last_message"], reverse=True)
+
+        # The escalation group is persisted for bot context and for ticket
+        # update placement (see handler.py's passive-save call), but it is
+        # internal staff traffic -- this page is for customer conversations.
+        escalation_chat_id = os.getenv("ESCALATION_TELEGRAM_CHAT_ID", "")
+        if escalation_chat_id:
+            contexts = [
+                c
+                for c in contexts
+                if str(c.get("chat_id") or "") != escalation_chat_id
+                and str(c.get("group_id") or "") != escalation_chat_id
+            ]
 
         groups = [c for c in contexts if c["is_group"]]
         dms = [c for c in contexts if not c["is_group"]]
