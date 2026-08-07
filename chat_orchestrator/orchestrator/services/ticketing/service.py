@@ -350,32 +350,122 @@ class TicketService:
             return False
         return await self._notifier.notify(event)
 
-    async def transition_to_done(self, ref: str) -> None:
+    async def transition_to_done(
+        self, ref: str, *, already_confirmed_externally: bool = False
+    ) -> bool:
+        """Close a ticket. Returns True if it is now closed -- either this
+        call closed it, or it was already closed -- and False only when this
+        call genuinely could not close it.
+
+        ``already_confirmed_externally`` is for the Jira webhook handler,
+        which already knows Jira applied the closure (that's what the
+        webhook is reporting) and is only here to sync Anansi's own record.
+        Every other caller -- a chat-initiated close, the escalation close
+        button, ``/notify`` close -- is asking Anansi to actively close the
+        ticket, so a failed Jira transition there must be reported as
+        failure, not silently produce a canonical row (and a Telegram post)
+        that disagree with what Jira actually did.
+        """
         backend = await self._backend_for_ref(ref)
-        flipped = bool(await backend.transition_to_done(ref))
 
         if backend is self._jira:
-            # Unlike the internal backend (which persists via the repository it
-            # shares with this service), jira_backend.transition_to_done() only
-            # calls the Jira transitions API -- it has no repository reference,
-            # so the canonical row would otherwise stay "open" forever. That
-            # guarded write is also the authoritative flip signal here.
+            if not already_confirmed_externally:
+                if not await backend.transition_to_done(ref):
+                    # An actively-initiated close where Jira itself refused
+                    # or failed the transition. Don't touch the canonical
+                    # write at all here -- that's what would let a failure
+                    # silently masquerade as a closure. Fall through to the
+                    # status check below in case it's actually already done
+                    # (e.g. a race with a concurrent closer) rather than a
+                    # genuine failure.
+                    try:
+                        status = await self._tickets.get_status_by_ref(ref)
+                    except Exception:
+                        status = None
+                    return bool(status and status.is_done)
+            # Either already_confirmed_externally (Jira already applied the
+            # closure; re-driving its transitions API would be redundant and
+            # would predictably report "no transition available"), or the
+            # live transition above just succeeded. Unlike the internal
+            # backend (which persists via the repository it shares with this
+            # service), jira_backend.transition_to_done() has no repository
+            # reference of its own, so this guarded write is what keeps the
+            # canonical row from staying "open" forever -- and is the
+            # authoritative "did THIS call announce it" signal either way.
             try:
-                flipped = await self._tickets.transition_to_done_by_ref(ref)
+                newly_closed = await self._tickets.transition_to_done_by_ref(ref)
             except Exception:
-                flipped = False
+                newly_closed = False
                 LOGGER.warning(
                     "transition_to_done: failed to persist canonical status for jira ticket {}",
                     ref,
                     exc_info=True,
                 )
+        else:
+            newly_closed = bool(await backend.transition_to_done(ref))
 
-        if flipped:
+        if newly_closed:
             from .update_notifier import TicketEvent
 
             await self.notify_ticket_event(
                 TicketEvent(ticket_ref=ref, kind="transition", to_status="done")
             )
+            return True
+
+        # Nothing newly flipped -- could be "already done" (a race with a
+        # concurrent closer) or a genuine failure. Ask the canonical record
+        # directly rather than guess.
+        try:
+            status = await self._tickets.get_status_by_ref(ref)
+        except Exception:
+            status = None
+        return bool(status and status.is_done)
+
+    async def mark_in_progress_from_webhook(
+        self,
+        ref: str,
+        *,
+        fallback_chat_id: Optional[str] = None,
+        fallback_topic_id: Optional[str] = None,
+    ) -> bool:
+        """Sync canonical status + notify for a move to "in progress", as
+        reported by the Jira webhook.
+
+        Unlike ``transition_to_done``, there is no actively-initiated
+        counterpart to this method: Anansi has no code path that drives a
+        ticket to "in progress" itself, so the webhook (already reporting a
+        transition Jira applied) is the only caller and the only source of
+        truth -- there's nothing to re-drive via a live API call, just the
+        canonical write to sync.
+
+        ``fallback_chat_id``/``fallback_topic_id`` let the notifier construct
+        a first-ever update card when this ticket was never announced on
+        Telegram (see ``TicketEvent`` for why that's opt-in per caller).
+        Returns True only if this call is what flipped the canonical row.
+        """
+        try:
+            newly_set = await self._tickets.set_in_progress_by_ref(ref)
+        except Exception:
+            LOGGER.warning(
+                "mark_in_progress_from_webhook: failed to persist canonical status for {}",
+                ref,
+                exc_info=True,
+            )
+            return False
+
+        if newly_set:
+            from .update_notifier import TicketEvent
+
+            await self.notify_ticket_event(
+                TicketEvent(
+                    ticket_ref=ref,
+                    kind="transition",
+                    to_status="in_progress",
+                    fallback_chat_id=fallback_chat_id,
+                    fallback_topic_id=fallback_topic_id,
+                )
+            )
+        return newly_set
 
     async def update_ticket(
         self,

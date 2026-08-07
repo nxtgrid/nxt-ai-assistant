@@ -623,10 +623,20 @@ async def close_ticket_internal(ticket_ref: str, request: Request) -> JSONRespon
     from orchestrator.services.ticketing.service import TicketService
 
     try:
-        await TicketService(get_supabase_client=get_supabase_client).transition_to_done(ticket_ref)
+        closed = await TicketService(get_supabase_client=get_supabase_client).transition_to_done(
+            ticket_ref
+        )
     except Exception as exc:
         logger.exception("Internal close failed for {!r}", ticket_ref)
         return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+    if not closed:
+        # transition_to_done() returning False (not raising) means the close
+        # itself genuinely didn't happen -- e.g. Jira refused the transition.
+        # Distinct from the 500 above: the request was handled fine, the
+        # ticket just isn't closed.
+        return JSONResponse(
+            status_code=200, content={"ok": False, "ticket_ref": ticket_ref, "closed": False}
+        )
     return JSONResponse(status_code=200, content={"ok": True, "ticket_ref": ticket_ref})
 
 

@@ -93,6 +93,8 @@ class _FakeTicketRepository:
         self.find_ref_for_escalation_calls: list[str] = []
         self.transition_to_done_by_ref_calls: list[str] = []
         self.transition_returns: bool = True
+        self.set_in_progress_by_ref_calls: list[str] = []
+        self.in_progress_returns: bool = True
         self.comments_by_ref: dict[str, list[dict]] = {}
         self.open_refs_by_backend: dict[str, list[str]] = {}
         self.list_open_by_backend_calls: list[tuple] = []
@@ -130,12 +132,25 @@ class _FakeTicketRepository:
     async def get_status(self, ref: str):
         return None
 
+    async def get_status_by_ref(self, ref: str) -> Optional[TicketStatus]:
+        record = self.records_by_ref.get(ref)
+        if record is None:
+            return None
+        return TicketStatus(
+            summary=record.summary, is_done=record.status == "done",
+            raw_status=record.status, ticket_type=record.ticket_type,
+        )
+
     async def list_comments_by_ref(self, ref: str, *, limit: int = 5) -> List[dict]:
         return self.comments_by_ref.get(ref, [])
 
     async def transition_to_done_by_ref(self, ref: str) -> bool:
         self.transition_to_done_by_ref_calls.append(ref)
         return self.transition_returns
+
+    async def set_in_progress_by_ref(self, ref: str) -> bool:
+        self.set_in_progress_by_ref_calls.append(ref)
+        return self.in_progress_returns
 
     async def list_open_by_backend(self, backend: str, *, limit: int = 200) -> List[str]:
         self.list_open_by_backend_calls.append((backend, limit))
@@ -596,7 +611,8 @@ class TestTransitionToDone:
 
     @pytest.mark.asyncio
     async def test_stays_silent_on_a_redundant_jira_close(self, monkeypatch):
-        """A retried Jira webhook must not re-announce an already-closed ticket."""
+        """A retried Jira webhook must not re-announce an already-closed ticket
+        -- and must still report success, since the ticket genuinely is closed."""
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
         events: list = []
 
@@ -608,16 +624,81 @@ class TestTransitionToDone:
         jira = _FakeBackend("jira")
         repository = _FakeTicketRepository()
         repository.records_by_ref["OPS-99"] = TicketRecord(
-            id="ticket-1", ticket_ref="OPS-99", backend="jira",
+            id="ticket-1", ticket_ref="OPS-99", backend="jira", status="done",
             summary="x", created_via="notification", provisioning_state="active",
         )
         repository.transition_returns = False  # row was already done
         service = _make_service(None, jira=jira, ticket_repository=repository)
         service._update_notifier = _Notifier()
 
-        await service.transition_to_done("OPS-99")
+        closed = await service.transition_to_done("OPS-99")
 
+        assert closed is True
         assert events == []
+
+    @pytest.mark.asyncio
+    async def test_returns_false_when_an_actively_initiated_jira_close_genuinely_fails(
+        self, monkeypatch
+    ):
+        """A chat-initiated (or escalation-button, or /notify) close where Jira
+        itself refuses the transition must be reported as a failure, and must
+        NOT flip the canonical row to "done" out from under a ticket Jira
+        still considers open -- that would announce a closure that never
+        actually happened."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        jira = _FakeBackend("jira")
+        jira.transition_returns = False  # Jira itself refused/failed the transition
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira", status="open",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        closed = await service.transition_to_done("OPS-99")
+
+        assert closed is False
+        assert events == []
+        # The canonical write must never even be attempted -- that's the bug
+        # this test guards against.
+        assert repository.transition_to_done_by_ref_calls == []
+
+    @pytest.mark.asyncio
+    async def test_already_confirmed_externally_skips_the_live_jira_call(self, monkeypatch):
+        """The Jira webhook handler already knows Jira applied the closure --
+        it should sync the canonical row directly rather than waste a live API
+        call trying to re-drive a transition that already happened."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        jira = _FakeBackend("jira")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira", status="open",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        closed = await service.transition_to_done("OPS-99", already_confirmed_externally=True)
+
+        assert closed is True
+        assert len(events) == 1
+        assert jira.transition_to_done_calls == []
+        assert repository.transition_to_done_by_ref_calls == ["OPS-99"]
 
     @pytest.mark.asyncio
     async def test_stays_silent_on_a_redundant_internal_close(self, monkeypatch):
@@ -633,14 +714,97 @@ class TestTransitionToDone:
         internal.transition_returns = False  # row was already done
         repository = _FakeTicketRepository()
         repository.records_by_ref["TKT-1"] = TicketRecord(
-            id="ticket-1", ticket_ref="TKT-1", backend="internal",
+            id="ticket-1", ticket_ref="TKT-1", backend="internal", status="done",
             summary="x", created_via="notification", provisioning_state="active",
         )
         service = _make_service(None, internal=internal, ticket_repository=repository)
         service._update_notifier = _Notifier()
 
-        await service.transition_to_done("TKT-1")
+        closed = await service.transition_to_done("TKT-1")
 
+        assert closed is True
+        assert events == []
+
+
+class TestMarkInProgressFromWebhook:
+    """Unlike transition_to_done, there is no actively-initiated counterpart
+    here -- the Jira webhook is the only caller, so the canonical write's own
+    guarded result is the sole flip signal, with no live-transition branch to
+    reconcile against."""
+
+    @pytest.mark.asyncio
+    async def test_syncs_canonical_status_and_notifies(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-1"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-1", backend="jira", status="open",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        flipped = await service.mark_in_progress_from_webhook(
+            "OPS-1", fallback_chat_id="-100999", fallback_topic_id="42"
+        )
+
+        assert flipped is True
+        assert repository.set_in_progress_by_ref_calls == ["OPS-1"]
+        assert len(events) == 1
+        assert events[0].ticket_ref == "OPS-1"
+        assert events[0].kind == "transition"
+        assert events[0].to_status == "in_progress"
+        assert events[0].fallback_chat_id == "-100999"
+        assert events[0].fallback_topic_id == "42"
+
+    @pytest.mark.asyncio
+    async def test_stays_silent_on_a_redundant_transition(self, monkeypatch):
+        """A retried or duplicate webhook delivery must not re-announce a
+        transition that already happened."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        repository = _FakeTicketRepository()
+        repository.in_progress_returns = False  # already in progress
+        service = _make_service(None, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        flipped = await service.mark_in_progress_from_webhook("OPS-1")
+
+        assert flipped is False
+        assert events == []
+
+    @pytest.mark.asyncio
+    async def test_a_persistence_failure_is_non_fatal_and_does_not_notify(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        class _RaisingRepository(_FakeTicketRepository):
+            async def set_in_progress_by_ref(self, ref: str) -> bool:
+                raise RuntimeError("db down")
+
+        service = _make_service(None, ticket_repository=_RaisingRepository())
+        service._update_notifier = _Notifier()
+
+        flipped = await service.mark_in_progress_from_webhook("OPS-1")
+
+        assert flipped is False
         assert events == []
 
 

@@ -13,7 +13,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from orchestrator.services.escalation_service import EscalationService, _is_closure_event
+from orchestrator.services.escalation_service import EscalationService, _status_transition_kind
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -137,8 +137,10 @@ class _FakeTickets:
         id_by_ref: Optional[Dict[str, str]] = None,
         backend_by_ref: Optional[Dict[str, str]] = None,
         add_comment_error: Optional[Exception] = None,
+        mark_in_progress_error: Optional[Exception] = None,
     ) -> None:
         self.transition_to_done_calls: List[str] = []
+        self.transition_to_done_kwargs: List[Dict[str, Any]] = []
         self._transition_error = transition_error
         self._ref_by_ticket_id = ref_by_ticket_id or {}
         self._id_by_ref = id_by_ref or {}
@@ -146,11 +148,37 @@ class _FakeTickets:
         self.add_comment_calls: List[tuple] = []
         self._add_comment_error = add_comment_error
         self.notify_ticket_event_calls: List[Any] = []
+        self.mark_in_progress_calls: List[Dict[str, Any]] = []
+        self._mark_in_progress_error = mark_in_progress_error
 
-    async def transition_to_done(self, ref: str) -> None:
+    async def transition_to_done(
+        self, ref: str, *, already_confirmed_externally: bool = False
+    ) -> bool:
         self.transition_to_done_calls.append(ref)
+        self.transition_to_done_kwargs.append(
+            {"already_confirmed_externally": already_confirmed_externally}
+        )
         if self._transition_error is not None:
             raise self._transition_error
+        return True
+
+    async def mark_in_progress_from_webhook(
+        self,
+        ref: str,
+        *,
+        fallback_chat_id: Optional[str] = None,
+        fallback_topic_id: Optional[str] = None,
+    ) -> bool:
+        self.mark_in_progress_calls.append(
+            {
+                "ref": ref,
+                "fallback_chat_id": fallback_chat_id,
+                "fallback_topic_id": fallback_topic_id,
+            }
+        )
+        if self._mark_in_progress_error is not None:
+            raise self._mark_in_progress_error
+        return True
 
     async def get_id_by_ref(self, ref: str) -> Optional[str]:
         return self._id_by_ref.get(ref)
@@ -200,6 +228,17 @@ def _closed_payload(issue_key: str = "OPS-1") -> Dict[str, Any]:
     }
 
 
+def _in_progress_payload(issue_key: str = "OPS-1") -> Dict[str, Any]:
+    return {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {
+            "key": issue_key,
+            "fields": {"status": {"statusCategory": {"key": "indeterminate"}}},
+        },
+        "changelog": {"items": [{"field": "status", "toString": "In Progress"}]},
+    }
+
+
 def _make_service(supa: _FakeSupabase, tickets: _FakeTickets) -> EscalationService:
     svc = EscalationService(
         escalation_chat_id="-100123456",
@@ -230,19 +269,12 @@ def test_closure_detected_for_a_custom_done_category_status():
         "issue": {"key": "OPS-5", "fields": {"status": {"statusCategory": {"key": "done"}}}},
         "changelog": {"items": [{"field": "status", "toString": "Resolved"}]},
     }
-    assert _is_closure_event(payload) is True
+    assert _status_transition_kind(payload) == "done"
 
 
-def test_non_status_changes_are_not_closures():
-    payload = {
-        "webhookEvent": "jira:issue_updated",
-        "issue": {"key": "OPS-5", "fields": {"status": {"statusCategory": {"key": "new"}}}},
-        "changelog": {"items": [{"field": "assignee", "toString": "Ada"}]},
-    }
-    assert _is_closure_event(payload) is False
-
-
-def test_status_change_to_a_non_done_category_is_not_a_closure():
+def test_in_progress_detected_for_a_custom_indeterminate_category_status():
+    """A workflow whose in-progress status is named "Blocked" or "In Review"
+    must still be recognized -- the category, not the name, is what's fixed."""
     payload = {
         "webhookEvent": "jira:issue_updated",
         "issue": {
@@ -251,7 +283,27 @@ def test_status_change_to_a_non_done_category_is_not_a_closure():
         },
         "changelog": {"items": [{"field": "status", "toString": "In Progress"}]},
     }
-    assert _is_closure_event(payload) is False
+    assert _status_transition_kind(payload) == "in_progress"
+
+
+def test_non_status_changes_are_not_transitions():
+    payload = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {"key": "OPS-5", "fields": {"status": {"statusCategory": {"key": "new"}}}},
+        "changelog": {"items": [{"field": "assignee", "toString": "Ada"}]},
+    }
+    assert _status_transition_kind(payload) is None
+
+
+def test_reopen_to_the_backlog_is_not_announced():
+    """A move back to the "new" category (e.g. reopened) is deliberately out
+    of scope -- not asked for, so not guessed at."""
+    payload = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {"key": "OPS-5", "fields": {"status": {"statusCategory": {"key": "new"}}}},
+        "changelog": {"items": [{"field": "status", "toString": "Backlog"}]},
+    }
+    assert _status_transition_kind(payload) is None
 
 
 async def test_closure_webhook_marks_the_canonical_ticket_done():
@@ -266,6 +318,9 @@ async def test_closure_webhook_marks_the_canonical_ticket_done():
     await svc.handle_jira_issue_updated(_closed_payload("OPS-1"))
 
     assert tickets.transition_to_done_calls == ["OPS-1"]
+    # The webhook already knows Jira applied this closure -- it must not ask
+    # TicketService to redundantly re-drive Jira's own transitions API.
+    assert tickets.transition_to_done_kwargs == [{"already_confirmed_externally": True}]
     # The existing escalation-session closure must still happen alongside it.
     assert supa.close_escalation_calls == ["telegram_abc"]
 
@@ -318,6 +373,56 @@ async def test_non_closure_status_change_is_ignored():
 
     assert tickets.transition_to_done_calls == []
     assert supa.close_escalation_calls == []
+
+
+async def test_in_progress_webhook_syncs_status_with_the_escalation_group_as_fallback():
+    """The escalation group (and its topic, when the mapping resolves one)
+    is what "look like it would have if it had been there" resolves to for
+    the notifier's fallback destination -- the same place a fresh
+    notification for this ticket would have gone."""
+    raw = _FakeRaw()
+    raw.tables["escalation_mappings"].rows = [
+        {"id": "mapping-1", "session_id": "telegram_abc", "is_active": True}
+    ]
+    supa = _FakeSupabase(raw, mapping_by_jira_key={"OPS-1": _mapping("OPS-1")})
+    tickets = _FakeTickets()
+    svc = _make_service(supa, tickets)
+
+    await svc.handle_jira_issue_updated(_in_progress_payload("OPS-1"))
+
+    assert tickets.mark_in_progress_calls == [
+        {"ref": "OPS-1", "fallback_chat_id": "-100123456", "fallback_topic_id": None}
+    ]
+    # In-progress has no escalation-session bookkeeping equivalent to a
+    # closure's close_escalation_by_mapping -- must not touch that at all.
+    assert supa.close_escalation_calls == []
+    assert tickets.transition_to_done_calls == []
+
+
+async def test_in_progress_webhook_skips_sync_when_mapping_has_no_ticket_ref():
+    raw = _FakeRaw()
+    raw.tables["escalation_mappings"].rows = [
+        {"id": "mapping-1", "session_id": "telegram_abc", "is_active": True}
+    ]
+    supa = _FakeSupabase(raw, mapping_by_jira_key={"OPS-1": _mapping(None)})
+    tickets = _FakeTickets()
+    svc = _make_service(supa, tickets)
+
+    await svc.handle_jira_issue_updated(_in_progress_payload("OPS-1"))
+
+    assert tickets.mark_in_progress_calls == []
+
+
+async def test_in_progress_webhook_failure_is_non_fatal():
+    raw = _FakeRaw()
+    raw.tables["escalation_mappings"].rows = [
+        {"id": "mapping-1", "session_id": "telegram_abc", "is_active": True}
+    ]
+    supa = _FakeSupabase(raw, mapping_by_jira_key={"OPS-1": _mapping("OPS-1")})
+    tickets = _FakeTickets(mark_in_progress_error=RuntimeError("db blip"))
+    svc = _make_service(supa, tickets)
+
+    await svc.handle_jira_issue_updated(_in_progress_payload("OPS-1"))  # must not raise
 
 
 # ---------------------------------------------------------------------------

@@ -241,6 +241,35 @@ class TicketRepository:
             raise TicketRepositoryError(f"failed to close canonical ticket: {exc}") from exc
         return bool(getattr(response, "data", None))
 
+    async def set_in_progress_by_ref(self, ref: str) -> bool:
+        """Mark a ticket in progress. Returns True only if this call is what
+        flipped it.
+
+        Guards against two cases: a redundant flip when it's already
+        "in_progress" (Jira retries webhook deliveries same as any other
+        event), and -- unlike ``transition_to_done_by_ref``, which has only
+        one guard because "done" has nowhere further to go -- against
+        regressing an already-"done" ticket, in case a reordered or
+        out-of-order webhook delivery reports "in progress" after a closure
+        this record already knows about.
+        """
+        ticket = await self.get_by_ref(ref)
+        if ticket is None:
+            raise TicketRepositoryError(f"cannot update: unknown ticket ref {ref}")
+        try:
+            response = (
+                self._raw_client()
+                .table("tickets")
+                .update({"status": "in_progress"})
+                .eq("id", ticket.id)
+                .neq("status", "in_progress")
+                .neq("status", "done")
+                .execute()
+            )
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to update canonical ticket: {exc}") from exc
+        return bool(getattr(response, "data", None))
+
     async def update_by_ref(
         self, ref: str, *, summary: str | None = None, description: str | None = None
     ) -> None:

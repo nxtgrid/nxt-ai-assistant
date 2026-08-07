@@ -62,6 +62,11 @@ logger = logging.getLogger("jira-mcp-server")
 
 _STAFF_ORG_ID = int(os.getenv("STAFF_ORG_ID", "2"))
 
+# Transition names change_status treats as "close this ticket" -- routed
+# through TicketService (for both internal and Jira-backed tickets) so the
+# update notifier fires, rather than a raw Jira transitions-API call.
+_CLOSING_TRANSITION_NAMES = {"done", "close", "closed", "resolve", "resolved"}
+
 # Startup message to stderr
 print("🚀 Jira MCP Server starting...", file=sys.stderr)
 print(f"📍 Python path: {sys.path}", file=sys.stderr)
@@ -204,29 +209,38 @@ class JiraClient(HTTPClientMixin):
             logger.warning("Internal ticket comment failed for %s: %s", ticket_ref, exc)
             return False
 
-    async def close_internal_ticket(self, ticket_ref: str) -> bool:
-        """Close an internal ticket through TicketService, not a direct DB write.
+    async def close_ticket_via_orchestrator(self, ticket_ref: str) -> bool:
+        """Close a ticket (internal or Jira-backed) through TicketService.
 
-        TicketRepository is the sole writer for `tickets`; closing through
-        TicketService is also what triggers the Telegram update card, which a
-        direct write here would silently skip. Prefers an in-process call
-        (see the _DIRECT_TICKET_SERVICE_AVAILABLE import at module top);
-        falls back to HTTP only for a standalone mcp_servers deployment.
+        TicketRepository is the sole writer for `tickets`, and TicketService
+        is what triggers the Telegram update card -- a direct DB write or a
+        raw Jira transitions-API call here would silently skip both. Works
+        for either backend: TicketService resolves which one owns the ref
+        internally, so this method doesn't need to know or care.
+
+        Prefers an in-process call (see the _DIRECT_TICKET_SERVICE_AVAILABLE
+        import at module top); falls back to HTTP only for a standalone
+        mcp_servers deployment. Returns False both when the request itself
+        failed AND when it succeeded but the ticket genuinely didn't close
+        (e.g. Jira refused the transition) -- callers only get a single
+        success/failure signal, matching TicketService.transition_to_done()'s
+        own contract.
         """
         if _DIRECT_TICKET_SERVICE_AVAILABLE:
             try:
-                await _OrchestratorTicketService(
-                    get_supabase_client=_get_orchestrator_db
-                ).transition_to_done(ticket_ref)
-                return True
+                return bool(
+                    await _OrchestratorTicketService(
+                        get_supabase_client=_get_orchestrator_db
+                    ).transition_to_done(ticket_ref)
+                )
             except Exception as exc:
-                logger.warning("Internal ticket close failed for %s: %s", ticket_ref, exc)
+                logger.warning("Ticket close failed for %s: %s", ticket_ref, exc)
                 return False
 
         base = os.getenv("CHAT_ORCHESTRATOR_URL", "").rstrip("/")
         if not base:
             logger.warning(
-                "CHAT_ORCHESTRATOR_URL not set -- cannot close internal ticket %s", ticket_ref
+                "CHAT_ORCHESTRATOR_URL not set -- cannot close ticket %s", ticket_ref
             )
             return False
         api_key = os.getenv("API_KEY", "")
@@ -239,14 +253,20 @@ class JiraClient(HTTPClientMixin):
                 ) as response:
                     if response.status != 200:
                         logger.warning(
-                            "Internal ticket close for %s returned HTTP %s",
-                            ticket_ref,
-                            response.status,
+                            "Ticket close for %s returned HTTP %s", ticket_ref, response.status
                         )
                         return False
-                    return True
+                    # A 200 no longer guarantees success -- the endpoint
+                    # returns {"ok": false} (still HTTP 200) when the close
+                    # itself didn't happen, distinct from a transport/500
+                    # failure. Fail closed if the body is unparseable.
+                    try:
+                        body = await response.json()
+                    except Exception:
+                        return False
+                    return bool(body.get("ok"))
         except Exception as exc:
-            logger.warning("Internal ticket close failed for %s: %s", ticket_ref, exc)
+            logger.warning("Ticket close failed for %s: %s", ticket_ref, exc)
             return False
 
     async def _get_auth_pool(self):
@@ -2244,13 +2264,14 @@ async def _tool_change_status(arguments: Dict[str, Any]) -> List[types.TextConte
     transition = arguments["transition"]
     current_user_email = arguments.get("user_email")
     current_user_name = arguments.get("user_name")
+    is_closing_transition = transition.strip().lower() in _CLOSING_TRANSITION_NAMES
 
     if await client.get_internal_ticket(issue_key) is not None:
-        if transition.strip().lower() not in {"done", "close", "closed", "resolve", "resolved"}:
+        if not is_closing_transition:
             raise ValueError(
                 "Internal tickets support only closing. Use transition 'Done' for this ticket."
             )
-        if not await client.close_internal_ticket(issue_key):
+        if not await client.close_ticket_via_orchestrator(issue_key):
             raise ValueError(f"Unable to close internal ticket {issue_key}.")
         return list(compose_json_response({
             "success": True,
@@ -2260,6 +2281,25 @@ async def _tool_change_status(arguments: Dict[str, Any]) -> List[types.TextConte
             "message": f"Closed internal ticket {issue_key}",
         }, default=str))
 
+    if is_closing_transition:
+        # Route through TicketService rather than a raw Jira transitions-API
+        # call: it's what triggers the Telegram update card immediately,
+        # instead of waiting on Jira's webhook to call back (which it also
+        # still will -- TicketService's idempotent canonical write means
+        # that second, webhook-driven confirmation is a correct no-op, not a
+        # duplicate announcement).
+        if not await client.close_ticket_via_orchestrator(issue_key):
+            raise ValueError(f"Unable to close {issue_key}.")
+        return list(compose_json_response({
+            "success": True,
+            "issue_key": issue_key,
+            "backend": "jira",
+            "status": "done",
+            "message": f"Closed {issue_key}",
+        }, default=str))
+
+    # Any non-closing transition (e.g. "In Progress") has no notifier concept
+    # in this design -- go straight to Jira, unchanged from before.
     transition_result = await client.transition_issue(
         issue_key, transition, current_user_email, current_user_name
     )
