@@ -117,18 +117,19 @@ Almost all of the machinery already exists:
 
 3. **User liveness** = a row in `public.accounts` with `deleted_at IS NULL`.
 
-4. **LLM steps cannot call tools today.** `_execute_llm_step` calls
-   `generate_messages(..., tools_payload=None)` at `workflow_executor.py:2366`.
-   Phase 2 fixes this. It is the load-bearing change in the whole plan.
+4. **~~LLM steps cannot call tools today.~~ Fixed by Phase 2.** Was:
+   `_execute_llm_step` called `generate_messages(..., tools_payload=None)`.
+   Now: gated entirely behind a new `ParsedStep.is_skill_step` flag (default
+   `False` for every step parsed from a Google Doc, so this changed zero
+   production expert-workflow behavior) — see Phase 2's implementation note
+   for why that gate exists and wasn't in the original plan text.
 
-5. **LLM step output only reaches state if the step name contains `"parse"`**,
-   and then only into fixed keys. There is no general output binding. Phase 2
-   adds one.
+5. **~~LLM step output only reaches state if the step name contains
+   "parse".~~ Fixed by Phase 2** for skill steps specifically (the `"parse"`-
+   name convention is untouched for everything else). A skill step's
+   `-> {{var}}` write clause is extracted and persisted to `packet_state` --
+   see `skill_step_bindings.py`.
 
-6. **The API response envelope discards everything but text.**
-   `_handle_webhook_async` returns `{success, message, session_id}` at
-   `handler.py:2672`, dropping `tool_results` and `reply_markup`. Phase 1 fixes
-   this.
 6. **~~The API response envelope discards everything but text.~~ Fixed by
    Phase 1.** Was: `_handle_webhook_async` returned `{success, message,
    session_id}`, dropping `tool_results` and `reply_markup`. Now: the direct
@@ -279,12 +280,6 @@ The builder needs to render what a step produced. This also defines what a
        session_id: str
    ```
 
-2. **Build it once, adapt per transport.** `_process_webhook_with_graph` should
-   return a `ResponseEnvelope`. Then:
-   - The Telegram path converts envelope → `sendPhoto` + `sendMessage` +
-     `reply_markup`. **Behavior must be byte-identical to today** — this is a
-     refactor, not a redesign. Existing Telegram tests must pass unchanged.
-   - The API path serializes the envelope to JSON.
 2. **Build it once, adapt per transport.**
 
    **Implementation note (added during Phase 1, supersedes this item's
@@ -347,6 +342,47 @@ The builder needs to render what a step produced. This also defines what a
 **Prerequisite:** Phase 1 (the envelope defines what a step result is).
 
 This is the load-bearing phase. Everything after it is UI.
+
+**Implementation note (added during Phase 2, read before touching this
+code):**
+
+- **`ParsedStep` gained two new fields** the original plan text didn't
+  anticipate: `is_skill_step: bool = False` and `allow_write: bool = False`.
+  Nothing in this plan said how the executor should tell a skill step
+  apart from an ordinary Google-Doc-authored `[llm]` step -- and giving
+  *every* `[llm]` step tool access unconditionally would have been a real
+  production-behavior change (an existing expert's reasoning step gaining
+  the ability to call tools mid-step, changing its output), not the
+  additive, opt-in capability this phase is supposed to be. `is_skill_step`
+  defaults `False` everywhere a step is parsed from a Google Doc today, so
+  none of this phase's new code paths (tool resolution, `{{var}}` binding)
+  execute for any currently-live workflow. Phase 3 sets `is_skill_step=True`
+  (and `allow_write` per-step) when it constructs `ParsedStep` from a stored
+  skill's steps.
+- **Pause-on-missing-value does not go through `StepLoopSignal`.** The plan
+  named `action="return"` as the mechanism, but that vocabulary belongs to
+  `_execute_one_step`'s while-loop, a different scope than `_execute_llm_step`
+  (which has always returned a plain `str`, never a `StepLoopSignal`).
+  Reworking that contract would have touched `_execute_one_step`'s dispatch
+  logic broadly. Instead: a new `SkillStepVariableError` (a `RuntimeError`
+  subclass) is raised for both failure modes -- an unresolvable `{{read}}`
+  and a declared write that produced nothing -- and deliberately left
+  uncaught by `_execute_llm_step`'s own blanket `except Exception`, so it
+  propagates to `_execute_one_step`'s *existing* except-block, which already
+  calls `packet_service.fail_packet(...)` with a clear reason. Same
+  "terminal failure over a new resumable state" reasoning as Phase 1's
+  envelope deviation -- see that phase's note for the pattern.
+- **The tool-round bound reuses `settings.max_tool_rounds`** (the same
+  setting the main chat graph's tool loop already uses), not a new
+  skill-specific setting -- consistent with Phase 5 item 7 describing that
+  *existing* setting as what "a 'find tickets, evaluate each' step will
+  exhaust," implying this phase wires to it and Phase 5 raises/separates it
+  later, not that Phase 2 invents the separate setting itself.
+- New `orchestrator/experts/skill_step_bindings.py` holds the shared,
+  regex-driven pieces (write-clause parsing, `RESULT:` extraction, read-only
+  tool-name filtering) so `workflow_executor.py` (runtime) and
+  `skill_validation.py` (static, save-time) can't drift on what counts as a
+  write, a read, or a read-only tool.
 
 ### Work
 
