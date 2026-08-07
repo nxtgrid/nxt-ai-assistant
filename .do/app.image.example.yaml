@@ -167,12 +167,6 @@ envs:
   - key: JIRA_ACTIONS_ENABLED
     value: "true"
     scope: RUN_TIME
-  - key: SUPABASE_ACTIONS_ENABLED
-    value: "false"
-    scope: RUN_TIME
-  - key: TIMESCALE_ACTIONS_ENABLED
-    value: "false"
-    scope: RUN_TIME
   - key: CALIN_ACTIONS_ENABLED
     value: "false"
     scope: RUN_TIME
