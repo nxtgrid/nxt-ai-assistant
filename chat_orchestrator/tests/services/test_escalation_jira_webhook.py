@@ -139,6 +139,7 @@ class _FakeTickets:
         add_comment_error: Optional[Exception] = None,
     ) -> None:
         self.transition_to_done_calls: List[str] = []
+        self.transition_to_done_kwargs: List[Dict[str, Any]] = []
         self._transition_error = transition_error
         self._ref_by_ticket_id = ref_by_ticket_id or {}
         self._id_by_ref = id_by_ref or {}
@@ -147,10 +148,16 @@ class _FakeTickets:
         self._add_comment_error = add_comment_error
         self.notify_ticket_event_calls: List[Any] = []
 
-    async def transition_to_done(self, ref: str) -> None:
+    async def transition_to_done(
+        self, ref: str, *, already_confirmed_externally: bool = False
+    ) -> bool:
         self.transition_to_done_calls.append(ref)
+        self.transition_to_done_kwargs.append(
+            {"already_confirmed_externally": already_confirmed_externally}
+        )
         if self._transition_error is not None:
             raise self._transition_error
+        return True
 
     async def get_id_by_ref(self, ref: str) -> Optional[str]:
         return self._id_by_ref.get(ref)
@@ -266,6 +273,9 @@ async def test_closure_webhook_marks_the_canonical_ticket_done():
     await svc.handle_jira_issue_updated(_closed_payload("OPS-1"))
 
     assert tickets.transition_to_done_calls == ["OPS-1"]
+    # The webhook already knows Jira applied this closure -- it must not ask
+    # TicketService to redundantly re-drive Jira's own transitions API.
+    assert tickets.transition_to_done_kwargs == [{"already_confirmed_externally": True}]
     # The existing escalation-session closure must still happen alongside it.
     assert supa.close_escalation_calls == ["telegram_abc"]
 

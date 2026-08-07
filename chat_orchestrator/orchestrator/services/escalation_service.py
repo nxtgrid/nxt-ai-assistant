@@ -3271,10 +3271,15 @@ class EscalationService:
         # human closing the ticket directly in Jira flows into the internal
         # tickets admin view. jira_backend.transition_to_done() only calls the
         # Jira API, so without this the canonical row stays "open" forever.
+        # already_confirmed_externally=True: Jira already applied this
+        # closure (that's what the webhook is reporting), so there's no live
+        # transition left to (redundantly) re-drive -- just sync our record.
         ticket_ref = mapping.get("ticket_ref")
         if ticket_ref:
             try:
-                await self._tickets.transition_to_done(ticket_ref)
+                await self._tickets.transition_to_done(
+                    ticket_ref, already_confirmed_externally=True
+                )
             except Exception:
                 LOGGER.warning(
                     "Jira webhook closure: failed to close canonical ticket {}",
