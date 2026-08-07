@@ -361,6 +361,18 @@ ingress:
       match:
         path:
           prefix: /api/mini-app
+    # Without this rule, /webhook/jira falls through to the catch-all below
+    # and gets swallowed by anansi-app's login gate -- a request that never
+    # reaches chat-orchestrator at all, with no error anywhere: Jira sees a
+    # 200 (after the redirect resolves) and never retries or alerts. Found
+    # via a real ticket close producing no Telegram notification, and zero
+    # matching lines in chat-orchestrator's own logs for the entire window.
+    - component:
+        name: chat-orchestrator
+        preserve_path_prefix: true
+      match:
+        path:
+          prefix: /webhook
     - component:
         name: tools-service
       match:
