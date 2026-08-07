@@ -4,7 +4,7 @@ Replaces the persistent-agent concept with **user-designed skills**: ordered LLM
 steps, authored interactively in the web app, saved as an expert workflow, and
 run on a schedule (or an alert trigger) inside a specific Telegram group.
 
-**Status:** planned, not started
+**Status:** complete — all 7 phases (0-6) shipped
 **Author:** design worked out 2026-08-06
 
 ---
@@ -1068,6 +1068,134 @@ depends on it before proceeding.
 - `grep -rn "persistent_agent"` returns only migration files and CHANGELOG.
 - The full test suite passes.
 - `pre-commit run --all-files` is clean.
+
+### Implementation notes
+
+1. **Prerequisite gate re-checked, not waived.** "Phase 5 merged" and "Phase 5
+   in production carrying real load" are different claims; the operator
+   confirmed only the former. Ran the production census anyway — zero
+   `active`/`executing` rows existed (worst case: 9 `grid_monitor` rows
+   `paused`, which `agent_management_service.py`'s "Only allow pausing active
+   or resuming paused" comment and `agents.py`'s Pause/Resume buttons confirm
+   is a deliberate, resumable staff action, not an abandoned state — so this
+   wasn't a `created_by`-based auto-churn call, it was the operator's own
+   sign-off that nothing depended on resuming them). With nothing live, the
+   "load-bearing" risk the prerequisite exists to catch didn't apply, and the
+   operator explicitly cleared it.
+
+2. **The plan's file list undersold the footprint by roughly 2x.** Reading
+   actual call graphs (not grepping `persistent_agent` alone — see #3) turned
+   up a second full module the plan never named:
+   `orchestrator/services/expert_tool_runner.py`, "the ONLY bridge between
+   persistent agents and expert workflows" per its own docstring, plus its
+   test file `test_headless_expert.py`. Confirmed dead by tracing that its
+   `start_expert_workflow`/`check_workflow_result` MCP tools had exactly one
+   real caller (`agent_worker.py`'s `think_and_act`) — a same-named
+   `start_expert_workflow` *virtual* tool in `prepare_tools.py` is a
+   live-chat-only NL-routing feature that `full_conversation_graph.py`
+   intercepts unconditionally before any real MCP dispatch, so it never
+   reaches this one. Also newly found and deleted: `agent_event_filter.py`
+   (imported only by the `handler.py` block item 2 already named), the
+   entire `mcp_servers/servers/messaging_server/` (one tool, `send_to_group`,
+   documented in its own header as "Intended for persistent agents only"),
+   and 2 more schedule-MCP tools beyond the plan's named 3 —
+   `start_expert_workflow`/`check_workflow_result` were implemented in
+   `schedule_mcp_server.py` alongside `create_user_agent`/`list_user_agents`/
+   `cancel_user_agent`, not colocated with `expert_tool_runner.py`.
+
+3. **The repo's `grep` is shimmed to `ugrep --ignore-files`, which silently
+   skips everything under `tests/`** (gitignored per this repo's operator-data
+   policy) **and, separately, a 3-alternative pattern
+   (`persistent_agent\|PersistentAgent\|persistent agent`) produced false
+   negatives that a single-term search didn't** — every sweep in this phase
+   used `command grep` (bypassing the shim) with one term at a time, cross-
+   checked against a broader symbol sweep (`AgentWorker`, `agent_worker`,
+   `UserAgentService`, etc.) to catch files that reference the subsystem
+   without the literal string `persistent_agent` — `expert_tool_runner.py`,
+   `messaging_mcp_server.py`, and the flag/JSON manifest files below were all
+   found this way, not the first way.
+
+4. **Two more `handler.py` call sites existed beyond the one instance-
+   matching block the plan named** (whose line numbers had drifted, as
+   expected): the "attach View State button to agent creation responses"
+   block (checked `tr.name == "schedule_create_user_agent"`) and
+   `build_agent_state_url` in `mini_app/schemas.py`, which had exactly two
+   callers total — that block and `schedule_mcp_server.py`'s
+   `create_user_agent` tool. Deleted the function once both callers were gone.
+
+5. **"Remove the checkpointer" required no separate work.**
+   `_init_checkpointer` was a method on `AgentWorker` itself
+   (`agent_worker.py:792`), not a free function with its own callers —
+   deleting the file already removed it. The "avoid checkpointer
+   serialization errors" comments scattered across `prepare_tools.py`,
+   `expert_handler.py`, `resolve_auth.py`, etc. describe a defensive pattern
+   (service objects don't belong in LangGraph state) that's still good
+   advice even with zero checkpointers left anywhere in the codebase; left
+   them as-is rather than rewriting ~8 unrelated files' comments.
+
+6. **`nicegui_app/pages/agents.py` was not uniformly persistent-agent
+   content** the way the plan's "persistent-agent branches" phrasing implied
+   — `_render_run_cost_section` (LLM cost across *all* workflow/skill runs)
+   and `_render_scheduled_jobs_section` (system jobs + `user_schedules`,
+   which Phase 5 skills also flow through) have nothing to do with agent
+   instances and are the only admin visibility into either. Stripped the
+   file to just those two sections rather than deleting it; kept the same
+   route/file path (`/agents`) to avoid bookmark/wiring churn, but relabeled
+   the nav entry from "🤖 Agents" to "📊 System Ops" since a page with that
+   name and zero agents on it would be its own confusion. Its backing
+   service, `agent_management_service.py`, had no such split — 100% agent
+   CRUD — so it was deleted outright, along with its `get_agent_service()`
+   accessor.
+
+7. **Two fields were left in place as deliberately-unenforced vestiges**
+   rather than chased through every construction site: `StepContext.
+   call_depth` (only `expert_tool_runner.py` ever set it to a non-zero
+   "agent-invoked" value; `expert_meta_tools.py`'s own headless-style call
+   always passes 0) and `ExpertConfig.anchor_entity_type`/`wake_schedule`
+   (parsed from the experts-definitions doc's `## Anchor Entity`/
+   `## Wake Schedule` sections; their only 2 readers were the 2 files
+   deleted in this phase). Both are harmless — a permanently-zero int and
+   two permanently-unread optional strings — and touching the ~15 test
+   files that construct `StepContext` for a comment-only concern was
+   disproportionate. Fixed the one stale docstring claim (`call_depth`'s)
+   that was actively wrong once nothing sets it; left the parsing logic,
+   since the live experts-definitions Google Doc (external to this repo)
+   almost certainly still has `## Type: persistent` blocks for
+   `grid_monitor`/`site_visit_tracker`/`user_agent` — those now parse as
+   `stateless` (the existing unknown-type fallback) rather than erroring,
+   but cleaning the doc itself is the operator's action, not this PR's.
+
+8. **Went beyond the plan's 2-table drop.** `checkpoints`/
+   `checkpoint_writes`/`checkpoint_blobs` are never declared in
+   `db/schema/chat_db.sql` — `AsyncPostgresSaver.setup()` created them at
+   runtime, only when `PERSISTENT_AGENTS_ENABLED=true` — but
+   `agent_worker.py`'s checkpointer was their only reader or writer
+   anywhere in this codebase, and the 2026-07-11 retention audit found them
+   to be ~640 MB, the single largest chunk of Chat DB bloat at the time.
+   Added them to the same migration (`0014_drop_persistent_agents.sql`)
+   since leaving them was leaving the majority of the cleanup on the table;
+   also dropped `claim_agent_events` (an RPC operating on `agent_events`)
+   and removed `persistent_agent_instances` from `chat_db.sql`'s
+   auto-`updated_at`-trigger table list, which would otherwise fail a fresh
+   bootstrap by trying to attach a trigger to a table that no longer exists.
+
+9. **Manifest/flag files needed regeneration, not just hand-editing.**
+   `mcp_servers/tool_definitions.json` is what `server_registry.list_tools`
+   actually serves in production (preferred over the code manifest when
+   present) — edited it directly (JSON, not the export script, to avoid
+   pulling in unrelated servers' live-credential-dependent output in this
+   sandbox) to drop the `messaging` key and the 5 removed `schedule` tools,
+   verified against `mcp_servers/tests/test_tool_manifest_sync.py`'s
+   AST-based 3-layer sync checks. `shared/config/flags.env.example` is
+   generated from `flag_registry.py` (`test_generated_env_example_is_current`
+   caught the drift) — regenerated with `python -m shared.config.
+   flag_registry`, which also dropped `MESSAGING_ENABLED`/
+   `MESSAGING_ACTIONS_ENABLED` automatically once `messaging` came out of
+   `MCP_SERVER_NAMES`. `chat_orchestrator/.env.example` is a separate,
+   hand-maintained reference file with its own values/comment style; edited
+   by hand. `STARTUP_RECOVERY_ENABLED`'s "recover orphaned agent packets"
+   comment refers to `agent_work_packets` (kept — skills use it), not
+   persistent agents; left untouched despite the naming coincidence.
 
 ---
 
