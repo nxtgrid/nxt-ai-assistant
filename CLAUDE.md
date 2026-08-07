@@ -88,3 +88,52 @@ tagging the early-save with `message_type="scheduled"` when
 `metadata.scheduled_execution` is set (`save_user_message.py`), and adding a
 `context_length_exceeded` category to `error_messages.py` so this fails with an
 actionable message instead of the generic one next time.
+
+## A CI failure with no relevant diff is probably the CVE audit, not your PR
+
+Before assuming a red CI check means something in your change is wrong, run
+`gh pr checks <PR#>` and look at *which* job failed. `Dependency CVE audit
+(chat_orchestrator)` and `Dependency CVE audit` (the `mcp_servers` /
+`rag_pipeline` / `anansi_app` matrix) run `pip-audit` against whatever's
+currently pinned — they check the vulnerability database's state *at CI run
+time*, not at commit time. A PR that touched zero dependency files can go
+from green to red days later purely because a new CVE got disclosed against
+an already-pinned (often transitive) package. If `Tests`/`Lint`/`Validate`
+are all green and only an audit job is red, it's this — don't go hunting in
+your own diff first.
+
+**Fix, for the `uv`-based jobs (`chat_orchestrator`, and any future `uv`
+project — check `.github/workflows/ci.yml` for which projects use `uv sync`
+vs. plain `requirements.txt`):**
+
+```bash
+cd chat_orchestrator
+uv lock --upgrade-package <name>   # bumps ONLY that package; minimal lockfile diff
+```
+
+Then verify with the *exact* command CI runs (see `ci.yml`'s
+`audit-orchestrator` job — the `--ignore-vuln` list changes over time, copy
+it from there rather than the line below):
+
+```bash
+uv sync --extra dev && uv pip install pip-audit
+uv run pip-audit --progress-spinner off --ignore-vuln PYSEC-2026-1845
+```
+
+If no fixed version exists yet, or the bump is a breaking major version,
+follow the pattern already in `ci.yml` above the `pip-audit` invocation:
+add `--ignore-vuln <ID>` with a comment explaining *why* the finding doesn't
+apply here (see the existing `PYSEC-2026-1845` entry) — never ignore a
+CVE silently.
+
+For the `requirements.txt`-based matrix job (`mcp_servers` / `rag_pipeline`
+/ `anansi_app`), there's no `uv.lock` to target — edit the affected
+package's pin directly in that project's `requirements.txt`.
+
+**2026-08-07 incident (reference case):** PR #74 (feat/skill-step-tools, a
+`workflow_executor.py`/test-only change with zero dependency edits) failed
+only `Dependency CVE audit (chat_orchestrator)`; every other job was green.
+The log showed `h2 4.4.0 CVE-2026-71554, fix: 4.4.1` — `h2` is a transitive
+dependency of `httpx[http2]`, not anything this PR touched. Fixed with
+`uv lock --upgrade-package h2` (a 3-line lockfile diff), verified locally
+with the command above before pushing.
