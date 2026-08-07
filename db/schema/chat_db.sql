@@ -464,66 +464,6 @@ CREATE TABLE IF NOT EXISTS agent_work_packet_logs (
     created_at   timestamptz NOT NULL DEFAULT now()
 );
 
--- ── Persistent Agents ─────────────────────────────────────────────────────────
-
-CREATE TABLE IF NOT EXISTS persistent_agent_instances (
-    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    expert_id           text NOT NULL,
-    instance_name       text NOT NULL,
-    anchor_entity_type  text NOT NULL,
-    anchor_entity_id    text NOT NULL,
-    anchor_metadata     jsonb DEFAULT '{}',
-    thread_id           text NOT NULL UNIQUE,
-    status              text NOT NULL DEFAULT 'initializing',
-    metadata            jsonb DEFAULT '{}',
-    last_woke_at        timestamptz,
-    last_acted_at       timestamptz,
-    wake_count          integer DEFAULT 0,
-    error_message       text,
-    wake_schedule       text,
-    organization_id     integer NOT NULL,
-    created_at          timestamptz NOT NULL DEFAULT now(),
-    updated_at          timestamptz NOT NULL DEFAULT now(),
-    created_by          text,
-    created_by_user_id  text,
-    check_prompt        text,
-    response_prompt     text,
-    notify_chat_id      text,
-    notify_topic_id     text,
-    auto_complete       boolean DEFAULT false,
-    user_context        jsonb DEFAULT '{}',
-    weekly_summaries    jsonb DEFAULT '{}',
-    last_compacted_at   timestamptz,
-    subscribers         jsonb DEFAULT '[]',
-    UNIQUE (expert_id, anchor_entity_id),
-    CONSTRAINT valid_agent_status CHECK (status IN (
-        'initializing', 'active', 'executing', 'paused', 'error', 'terminated'
-    ))
-);
-
-CREATE INDEX IF NOT EXISTS persistent_agent_instances_active_idx
-    ON persistent_agent_instances (status)
-    WHERE status IN ('active', 'executing');
-CREATE INDEX IF NOT EXISTS persistent_agent_instances_org_idx ON persistent_agent_instances (organization_id);
-
-CREATE TABLE IF NOT EXISTS agent_events (
-    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    target_instance_id  uuid NOT NULL REFERENCES persistent_agent_instances (id) ON DELETE CASCADE,
-    event_type          text NOT NULL,
-    event_data          jsonb NOT NULL DEFAULT '{}',
-    source_message_id   text,
-    status              text NOT NULL DEFAULT 'pending',
-    processed_at        timestamptz,
-    result              jsonb,
-    error               text,
-    created_at          timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT valid_event_status CHECK (status IN ('pending', 'processing', 'done', 'failed'))
-);
-
-CREATE INDEX IF NOT EXISTS agent_events_pending_idx
-    ON agent_events (target_instance_id, created_at)
-    WHERE status = 'pending';
-
 -- ── Multi-turn Decisions ──────────────────────────────────────────────────────
 
 CREATE TABLE IF NOT EXISTS pending_decisions (
@@ -573,24 +513,6 @@ BEGIN
         SELECT id FROM scheduled_messages
         WHERE (status = 'pending' AND scheduled_for <= now())
            OR (status = 'processing' AND processed_at < now() - INTERVAL '5 minutes')
-        LIMIT batch_size
-        FOR UPDATE SKIP LOCKED
-    )
-    RETURNING *;
-END;
-$$;
-
--- RPC: atomically claim agent events for processing
-CREATE OR REPLACE FUNCTION claim_agent_events(p_instance_id UUID, batch_size INT DEFAULT 10)
-RETURNS SETOF agent_events LANGUAGE plpgsql AS $$
-BEGIN
-    RETURN QUERY
-    UPDATE agent_events
-    SET status = 'processing'
-    WHERE id IN (
-        SELECT id FROM agent_events
-        WHERE target_instance_id = p_instance_id AND status = 'pending'
-        ORDER BY created_at
         LIMIT batch_size
         FOR UPDATE SKIP LOCKED
     )
@@ -984,7 +906,7 @@ BEGIN
     FOR t IN VALUES
         ('chat_sessions'), ('agent_work_packets'), ('user_schedules'),
         ('user_preferences'), ('broadcast_templates'), ('documents'),
-        ('entities'), ('relationships'), ('persistent_agent_instances'),
+        ('entities'), ('relationships'),
         ('bot_artifacts'), ('internal_tickets'), ('ticket_correlations'),
         ('prompt_labels'), ('knowledge_modules'), ('prompt_knowledge_overrides'),
         ('skills')

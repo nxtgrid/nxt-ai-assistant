@@ -21,7 +21,7 @@ PAGE_BG = "#f0f2f6"
 OPERATIONS_NAV = [
     ("/tickets", "🎫 Tickets"),
     ("/conversations", "💬 Chats"),
-    ("/agents", "🤖 Agents"),
+    ("/agents", "📊 System Ops"),
     ("/skill-builder", "🧩 Skill Builder"),
 ]
 

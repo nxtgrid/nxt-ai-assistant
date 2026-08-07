@@ -2,18 +2,15 @@
 env-var "not configured" gate and no local module-level cache of their own.
 
 Removing the VERIFICATION_DOC_ID fail-closed gate was a deliberate,
-user-directed change: previously, an unset env var made
-_verify_outgoing_message block every agent message outright. Now
-verification.criteria always resolves (DB override, then Google Doc, then a
-real bundled default), so "not configured" is no longer a state that exists
-here -- the remaining fail-closed paths are an empty resolved body, an LLM
-error, or any other exception, all still intact.
+user-directed change: previously, an unset env var made verification block
+outgoing messages outright. Now verification.criteria always resolves (DB
+override, then Google Doc, then a real bundled default), so "not configured"
+is no longer a state that exists here -- the remaining fail-closed paths are
+an empty resolved body, an LLM error, or any other exception, all still
+intact.
 """
 
-import inspect
-
 from orchestrator.api.app import _get_verification_criteria
-from orchestrator.graphs import persistent_agent_graph
 from shared.prompts import PROMPTS
 
 
@@ -33,14 +30,3 @@ def test_get_verification_criteria_has_no_local_cache_global():
     import orchestrator.api.app as app_module
 
     assert not hasattr(app_module, "_verification_criteria_cache")
-
-
-def test_verify_outgoing_message_source_has_no_env_var_gate():
-    """Guards the specific security-posture change: no os.getenv(
-    "VERIFICATION_DOC_ID") gate remains in the fail-closed verification path.
-    Belt-and-suspenders on top of the repo-wide guardrail in
-    shared/tests/test_prompt_single_resolution.py -- this one names the
-    exact function the decision was about."""
-    source = inspect.getsource(persistent_agent_graph._verify_outgoing_message)
-    assert "VERIFICATION_DOC_ID" not in source
-    assert "fetch_google_doc_markdown" not in source

@@ -70,18 +70,13 @@ class ExpertConfig:
     raw_sections: Dict[str, str] = field(default_factory=dict)
     model: Optional[str] = None  # Optional model override (e.g., "gemini-3-flash")
     settings: Dict[str, Any] = field(default_factory=dict)  # Parsed from ### Settings
-    expert_type: str = "stateless"  # "stateless", "persistent", or "user_startable"
-    anchor_entity_type: Optional[str] = None  # e.g., "grid" for persistent experts
+    expert_type: str = "stateless"  # "stateless" or "user_startable"
+    anchor_entity_type: Optional[str] = None  # e.g., "grid" for anchored experts
     wake_schedule: Optional[str] = None  # Cron expression (UTC) for periodic wakes
     triggers: List[str] = field(
         default_factory=list
     )  # Natural language triggers for user_startable
     required_inputs: List[str] = field(default_factory=list)  # Required inputs for user_startable
-
-    @property
-    def is_persistent(self) -> bool:
-        """Whether this is a persistent (long-running) expert."""
-        return self.expert_type in ("persistent", "user_startable")
 
     @property
     def is_user_startable(self) -> bool:
@@ -368,7 +363,7 @@ class ExpertInstructionsProvider:
             expert_type = (
                 subsections.get("type", "").strip().lower().replace(" ", "_") or "stateless"
             )
-            if expert_type not in ("stateless", "persistent", "user_startable"):
+            if expert_type not in ("stateless", "user_startable"):
                 expert_type = "stateless"
 
             anchor_entity_type = subsections.get("anchor_entity", "").strip().lower() or None
