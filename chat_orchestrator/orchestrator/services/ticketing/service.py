@@ -10,8 +10,10 @@ in without also having to design its public surface.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Dict, List, Optional
 
+from orchestrator.config.settings import get_settings
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 
@@ -25,6 +27,7 @@ from .backend import (
     TicketStatus,
     TicketSummary,
 )
+from .delivery_repository import DeliveryRepository
 from .internal_backend import InternalTicketBackend
 from .jira_backend import JiraTicketBackend
 from .repository import TicketRepository
@@ -71,6 +74,8 @@ class TicketService:
             get_client=self._raw_client, ticket_repository=self._tickets
         )
         self._attachments = AttachmentRepository(get_client=self._raw_client)
+        self._deliveries = DeliveryRepository(get_client=self._raw_client)
+        self._update_notifier: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Supabase access (wrapper -> raw client, matching EscalationService's
@@ -307,22 +312,70 @@ class TicketService:
         ticket = await self._tickets.get_by_ref(ref)
         return ticket.id if ticket else None
 
+    @property
+    def _notifier(self) -> Any:
+        """Built on first use so constructing a TicketService stays cheap --
+        several call sites build one per request, and most never notify."""
+        if self._update_notifier is None:
+            from shared.llm import get_default_generation_gateway
+
+            from .chat_watermark import ChatWatermarkRepository
+            from .update_notifier import TicketUpdateNotifier
+
+            try:
+                gateway = get_default_generation_gateway()
+            except Exception:
+                LOGGER.warning("ticket update: no LLM gateway -- summaries degrade", exc_info=True)
+                gateway = None
+
+            self._update_notifier = TicketUpdateNotifier(
+                tickets=self._tickets,
+                deliveries=self._deliveries,
+                watermark=ChatWatermarkRepository(get_client=self._raw_client),
+                bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+                gateway=gateway,
+                model=get_settings().gemini.model,
+            )
+        return self._update_notifier
+
+    async def notify_ticket_event(self, event: Any) -> bool:
+        """Post a ticket update card. The public entry point for callers
+        outside this service (e.g. the Jira comment webhook).
+
+        Short-circuits before building the notifier when there is no bot
+        token, which keeps unrelated unit tests from constructing an LLM
+        gateway they never use.
+        """
+        if not os.getenv("TELEGRAM_BOT_TOKEN", ""):
+            return False
+        return await self._notifier.notify(event)
+
     async def transition_to_done(self, ref: str) -> None:
         backend = await self._backend_for_ref(ref)
-        await backend.transition_to_done(ref)
+        flipped = bool(await backend.transition_to_done(ref))
+
         if backend is self._jira:
             # Unlike the internal backend (which persists via the repository it
             # shares with this service), jira_backend.transition_to_done() only
             # calls the Jira transitions API -- it has no repository reference,
-            # so the canonical row would otherwise stay "open" forever.
+            # so the canonical row would otherwise stay "open" forever. That
+            # guarded write is also the authoritative flip signal here.
             try:
-                await self._tickets.transition_to_done_by_ref(ref)
+                flipped = await self._tickets.transition_to_done_by_ref(ref)
             except Exception:
+                flipped = False
                 LOGGER.warning(
                     "transition_to_done: failed to persist canonical status for jira ticket {}",
                     ref,
                     exc_info=True,
                 )
+
+        if flipped:
+            from .update_notifier import TicketEvent
+
+            await self.notify_ticket_event(
+                TicketEvent(ticket_ref=ref, kind="transition", to_status="done")
+            )
 
     async def update_ticket(
         self,

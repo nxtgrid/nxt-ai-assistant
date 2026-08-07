@@ -121,15 +121,18 @@ class InternalTicketBackend:
             LOGGER.warning("Failed to fetch internal ticket status for {}: {}", ref, e)
             return None
 
-    async def transition_to_done(self, ref: str) -> None:
+    async def transition_to_done(self, ref: str) -> bool:
         """Mark a ticket as done.
 
-        The canonical repository owns the state transition and resolved time.
+        The canonical repository owns the state transition and resolved time,
+        and its guarded UPDATE is what makes this idempotent -- so its return
+        value is the authoritative "this call closed it" signal.
         """
         try:
-            await self._tickets.transition_to_done_by_ref(ref)
+            return await self._tickets.transition_to_done_by_ref(ref)
         except Exception as e:
             LOGGER.warning("Failed to transition internal ticket {} to done: {}", ref, e)
+            return False
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         try:

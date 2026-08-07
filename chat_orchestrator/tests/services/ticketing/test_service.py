@@ -539,6 +539,110 @@ class TestTransitionToDone:
         # TicketService must not also call it, or resolved_at would be bumped twice.
         assert repository.transition_to_done_by_ref_calls == []
 
+    @pytest.mark.asyncio
+    async def test_announces_an_internal_closure(self, monkeypatch):
+        """Internal tickets take their flip signal from the backend, which is
+        the only thing that wrote the canonical row."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        internal = _FakeBackend("internal")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["TKT-1"] = TicketRecord(
+            id="ticket-1", ticket_ref="TKT-1", backend="internal",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, internal=internal, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        await service.transition_to_done("TKT-1")
+
+        assert len(events) == 1
+        assert events[0].ticket_ref == "TKT-1"
+        assert events[0].kind == "transition"
+        assert events[0].to_status == "done"
+        # The invariant from this class's existing tests still holds.
+        assert repository.transition_to_done_by_ref_calls == []
+
+    @pytest.mark.asyncio
+    async def test_announces_a_jira_closure(self, monkeypatch):
+        """Jira tickets take their flip signal from the canonical write, since
+        the Jira backend only talks to the Jira API."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        jira = _FakeBackend("jira")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        await service.transition_to_done("OPS-99")
+
+        assert [e.ticket_ref for e in events] == ["OPS-99"]
+
+    @pytest.mark.asyncio
+    async def test_stays_silent_on_a_redundant_jira_close(self, monkeypatch):
+        """A retried Jira webhook must not re-announce an already-closed ticket."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        jira = _FakeBackend("jira")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        repository.transition_returns = False  # row was already done
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        await service.transition_to_done("OPS-99")
+
+        assert events == []
+
+    @pytest.mark.asyncio
+    async def test_stays_silent_on_a_redundant_internal_close(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        internal = _FakeBackend("internal")
+        internal.transition_returns = False  # row was already done
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["TKT-1"] = TicketRecord(
+            id="ticket-1", ticket_ref="TKT-1", backend="internal",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, internal=internal, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        await service.transition_to_done("TKT-1")
+
+        assert events == []
+
 
 class TestSyncJiraTicketStatuses:
     """Sweep entry point: reconciles canonical status for Jira tickets that
