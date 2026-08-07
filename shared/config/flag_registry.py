@@ -1316,6 +1316,11 @@ _FLAGS: List[Flag] = [
     _connection("CHAT_DB_SERVICE_KEY", "Chat database service-role key."),
     _connection("AUTH_DB_HOST", "Auth database host."),
     _connection("API_KEY", "Shared key authenticating calls to the orchestrator."),
+    _connection(
+        "IDENTITY_ASSERTION_KEY",
+        "Distinct from API_KEY -- lets the skill builder assert a caller's "
+        "user_email when auth-DB lookup misses. Unset means nobody can.",
+    ),
     _connection("SESSION_ID_SECRET", "Secret used to derive session identifiers."),
     _connection("CHAT_ORCHESTRATOR_URL", "Orchestrator chat endpoint.", secret=False),
     _connection(

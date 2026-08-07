@@ -32,3 +32,11 @@ def get_settings_service():
     from services.settings_service import SettingsService
 
     return SettingsService()
+
+
+@lru_cache(maxsize=1)
+def get_skill_builder_service():
+    """Return a process-wide ``SkillBuilderService``."""
+    from services.skill_builder_service import SkillBuilderService
+
+    return SkillBuilderService()

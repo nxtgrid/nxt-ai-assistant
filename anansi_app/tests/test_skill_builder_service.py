@@ -1,0 +1,313 @@
+"""Unit tests for SkillBuilderService (Phase 4 of
+docs/superpowers/plans/2026-08-06-user-designed-skills.md).
+
+A minimal fluent fake stands in for the real Supabase client -- the same
+style as tests/test_supabase_reader_run_usage.py, generalized to the
+eq/is_/gte/order/update/select/execute verbs get_builder_messages and
+archive_from_message_index use.
+
+Covers the acceptance criteria from the plan's Phase 4 section: rewinding to
+a step leaves the right messages visible (asserted on what
+get_builder_messages returns, not on any UI), and archived messages never
+resurface.
+"""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional
+
+from services.skill_builder_service import SkillBuilderService
+
+SESSION_TEXT_ID = "api_dm_abc123"
+SESSION_UUID = "11111111-1111-1111-1111-111111111111"
+
+
+class _FakeQuery:
+    def __init__(self, table: "_FakeTable", op: str, payload: Optional[dict] = None) -> None:
+        self._table = table
+        self._op = op
+        self._payload = payload
+        self._filters: List[tuple] = []
+        self._order: Optional[tuple] = None
+
+    def select(self, *_args, **_kwargs) -> "_FakeQuery":
+        return self
+
+    def eq(self, col: str, val: Any) -> "_FakeQuery":
+        self._filters.append(("eq", col, val))
+        return self
+
+    def is_(self, col: str, val: Any) -> "_FakeQuery":
+        self._filters.append(("is", col, val))
+        return self
+
+    def gte(self, col: str, val: Any) -> "_FakeQuery":
+        self._filters.append(("gte", col, val))
+        return self
+
+    def limit(self, _n: int) -> "_FakeQuery":
+        return self
+
+    def order(self, col: str, desc: bool = False) -> "_FakeQuery":
+        self._order = (col, desc)
+        return self
+
+    def _matches(self, row: Dict[str, Any]) -> bool:
+        for kind, col, val in self._filters:
+            if kind == "eq" and row.get(col) != val:
+                return False
+            if kind == "is":
+                is_null = row.get(col) is None
+                if val == "null" and not is_null:
+                    return False
+            if kind == "gte" and not (row.get(col) is not None and row[col] >= val):
+                return False
+        return True
+
+    def execute(self) -> SimpleNamespace:
+        if self._op == "select":
+            rows = [r for r in self._table.rows if self._matches(r)]
+            if self._order is not None:
+                col, desc = self._order
+                rows.sort(key=lambda r: r.get(col), reverse=desc)
+            return SimpleNamespace(data=rows)
+
+        if self._op == "update":
+            matched = [r for r in self._table.rows if self._matches(r)]
+            for r in matched:
+                r.update(self._payload or {})
+            return SimpleNamespace(data=matched)
+
+        raise AssertionError(f"Unhandled op: {self._op}")
+
+
+class _FakeTable:
+    def __init__(self, rows: List[Dict[str, Any]]) -> None:
+        self.rows = rows
+
+    def select(self, *args, **kwargs) -> _FakeQuery:
+        return _FakeQuery(self, "select").select(*args, **kwargs)
+
+    def update(self, payload: dict) -> _FakeQuery:
+        return _FakeQuery(self, "update", payload)
+
+    def insert(self, payload: dict) -> "_FakeInsertQuery":
+        return _FakeInsertQuery(self, payload)
+
+
+class _FakeInsertQuery:
+    def __init__(self, table: "_FakeTable", payload: dict) -> None:
+        self._table = table
+        self._payload = payload
+
+    def execute(self) -> SimpleNamespace:
+        row = {"id": f"generated-{len(self._table.rows)}", **self._payload}
+        self._table.rows.append(row)
+        return SimpleNamespace(data=[row])
+
+
+class _FakeClient:
+    def __init__(
+        self,
+        chat_sessions: List[Dict[str, Any]],
+        chat_messages: List[Dict[str, Any]],
+        skills: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        self._tables = {
+            "chat_sessions": _FakeTable(chat_sessions),
+            "chat_messages": _FakeTable(chat_messages),
+            "skills": _FakeTable(skills or []),
+        }
+
+    def table(self, name: str) -> _FakeTable:
+        return self._tables[name]
+
+
+def _service(
+    chat_sessions: List[Dict[str, Any]],
+    chat_messages: List[Dict[str, Any]],
+    skills: Optional[List[Dict[str, Any]]] = None,
+) -> SkillBuilderService:
+    service = SkillBuilderService.__new__(SkillBuilderService)  # bypass real DB init
+    service.client = _FakeClient(chat_sessions, chat_messages, skills)
+    return service
+
+
+def _session_row() -> Dict[str, Any]:
+    return {"id": SESSION_UUID, "session_id": SESSION_TEXT_ID}
+
+
+def _message(index: int, content: str, archived_at: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "id": f"msg-{index}",
+        "session_id": SESSION_UUID,
+        "role": "user",
+        "content": content,
+        "message_index": index,
+        "archived_at": archived_at,
+        "metadata": {},
+    }
+
+
+class TestNoClient:
+    def test_get_session_uuid_returns_none(self):
+        service = SkillBuilderService.__new__(SkillBuilderService)
+        service.client = None
+
+        assert service.get_session_uuid(SESSION_TEXT_ID) is None
+
+    def test_get_builder_messages_returns_empty_list(self):
+        service = SkillBuilderService.__new__(SkillBuilderService)
+        service.client = None
+
+        assert service.get_builder_messages(SESSION_TEXT_ID) == []
+
+    def test_archive_from_message_index_returns_zero(self):
+        service = SkillBuilderService.__new__(SkillBuilderService)
+        service.client = None
+
+        assert service.archive_from_message_index(SESSION_TEXT_ID, 0) == 0
+
+
+class TestGetSessionUuid:
+    def test_resolves_text_session_id_to_uuid(self):
+        service = _service([_session_row()], [])
+
+        assert service.get_session_uuid(SESSION_TEXT_ID) == SESSION_UUID
+
+    def test_unknown_session_id_returns_none(self):
+        service = _service([_session_row()], [])
+
+        assert service.get_session_uuid("no-such-session") is None
+
+
+class TestGetBuilderMessages:
+    def test_returns_live_messages_in_order(self):
+        messages = [_message(0, "step 1"), _message(1, "step 2")]
+        service = _service([_session_row()], messages)
+
+        result = service.get_builder_messages(SESSION_TEXT_ID)
+
+        assert [m["content"] for m in result] == ["step 1", "step 2"]
+
+    def test_excludes_archived_messages(self):
+        messages = [
+            _message(0, "step 1"),
+            _message(1, "step 2 (rewound)", archived_at="2026-08-07T00:00:00+00:00"),
+        ]
+        service = _service([_session_row()], messages)
+
+        result = service.get_builder_messages(SESSION_TEXT_ID)
+
+        assert [m["content"] for m in result] == ["step 1"]
+
+    def test_unresolvable_session_returns_empty_list(self):
+        service = _service([], [_message(0, "orphaned")])
+
+        assert service.get_builder_messages(SESSION_TEXT_ID) == []
+
+
+class TestArchiveFromMessageIndex:
+    def test_rewinding_to_step_2_of_5_leaves_2_visible_steps(self):
+        # Mirrors the plan's Phase 4 acceptance criterion literally: a
+        # 5-step session, rewind targeting step 3 (index 2, 0-based) so
+        # steps 1-2 (indices 0-1) remain and 3-5 (indices 2-4) are archived
+        # -- "rewinding to step 2" leaves the *2 steps up to and including
+        # step 2* visible.
+        messages = [_message(i, f"step {i + 1}") for i in range(5)]
+        service = _service([_session_row()], messages)
+
+        archived_count = service.archive_from_message_index(SESSION_TEXT_ID, 2)
+
+        assert archived_count == 3
+        remaining = service.get_builder_messages(SESSION_TEXT_ID)
+        assert [m["content"] for m in remaining] == ["step 1", "step 2"]
+
+    def test_archives_the_target_message_itself(self):
+        # "Archives that message and everything after it" -- the clicked
+        # step's own message is included in the cut, not just what follows.
+        messages = [_message(0, "step 1"), _message(1, "step 2")]
+        service = _service([_session_row()], messages)
+
+        service.archive_from_message_index(SESSION_TEXT_ID, 1)
+
+        remaining = service.get_builder_messages(SESSION_TEXT_ID)
+        assert [m["content"] for m in remaining] == ["step 1"]
+
+    def test_already_archived_rows_are_not_recounted(self):
+        messages = [
+            _message(0, "step 1"),
+            _message(1, "step 2", archived_at="2026-08-01T00:00:00+00:00"),
+        ]
+        service = _service([_session_row()], messages)
+
+        archived_count = service.archive_from_message_index(SESSION_TEXT_ID, 0)
+
+        # Only index 0 was live; index 1 was already archived and is left alone.
+        assert archived_count == 1
+
+    def test_unresolvable_session_returns_zero_and_touches_nothing(self):
+        messages = [_message(0, "step 1")]
+        service = _service([], messages)
+
+        assert service.archive_from_message_index(SESSION_TEXT_ID, 0) == 0
+        assert messages[0]["archived_at"] is None
+
+
+class TestSaveSkill:
+    def _steps(self):
+        return [{"index": 0, "name": "find", "instruction": "List all open tickets."}]
+
+    def test_no_client_returns_failure(self):
+        service = SkillBuilderService.__new__(SkillBuilderService)
+        service.client = None
+
+        result = service.save_skill("Find Tickets", "Finds tickets.", self._steps(), True, "a@b.com")
+
+        assert result["success"] is False
+
+    def test_blank_title_is_rejected(self):
+        service = _service([], [])
+
+        result = service.save_skill("   ", "Finds tickets.", self._steps(), True, "a@b.com")
+
+        assert result["success"] is False
+        assert "title" in result["error"].lower()
+
+    def test_no_steps_is_rejected(self):
+        service = _service([], [])
+
+        result = service.save_skill("Find Tickets", "Finds tickets.", [], True, "a@b.com")
+
+        assert result["success"] is False
+        assert "step" in result["error"].lower()
+
+    def test_successful_save_returns_the_inserted_row(self):
+        service = _service([], [])
+
+        result = service.save_skill("Find Tickets", "Finds tickets.", self._steps(), True, "a@b.com")
+
+        assert result["success"] is True
+        assert result["skill"]["title"] == "Find Tickets"
+        assert result["skill"]["slug"] == "find-tickets"
+        assert result["skill"]["staff_only"] is True
+        assert result["skill"]["created_by"] == "a@b.com"
+        assert result["skill"]["status"] == "active"
+        assert result["skill"]["steps"] == self._steps()
+
+    def test_slug_collision_appends_a_counter(self):
+        service = _service([], [], skills=[{"slug": "find-tickets"}])
+
+        result = service.save_skill("Find Tickets", "Finds tickets.", self._steps(), True, "a@b.com")
+
+        assert result["skill"]["slug"] == "find-tickets-2"
+
+    def test_slug_is_derived_from_title_not_user_supplied(self):
+        service = _service([], [])
+
+        result = service.save_skill(
+            "Weekly KPI Digest!", "Sends a digest.", self._steps(), False, "a@b.com"
+        )
+
+        assert result["skill"]["slug"] == "weekly-kpi-digest"

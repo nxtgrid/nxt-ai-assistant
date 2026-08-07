@@ -60,7 +60,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     telegram_message_id             bigint,
     reply_to_telegram_message_id    bigint,
     sender_telegram_id              text,
-    thread_id                       text
+    thread_id                       text,
+    archived_at                     timestamptz
 );
 
 CREATE INDEX IF NOT EXISTS chat_messages_session_id_idx ON chat_messages (session_id);
@@ -69,6 +70,10 @@ CREATE INDEX IF NOT EXISTS chat_messages_session_index_idx ON chat_messages (ses
 CREATE INDEX IF NOT EXISTS chat_messages_telegram_msg_idx ON chat_messages (session_id, telegram_message_id)
     WHERE telegram_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS chat_messages_created_at_idx ON chat_messages (created_at);
+-- Skill builder's Rewind button sets archived_at; every history read filters
+-- on it (see 0012_message_archive.sql).
+CREATE INDEX IF NOT EXISTS chat_messages_archived_idx ON chat_messages (session_id)
+    WHERE archived_at IS NULL;
 
 -- ── Conversation Summaries ────────────────────────────────────────────────────
 

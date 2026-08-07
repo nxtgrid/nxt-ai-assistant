@@ -22,6 +22,7 @@ OPERATIONS_NAV = [
     ("/tickets", "🎫 Tickets"),
     ("/conversations", "💬 Chats"),
     ("/agents", "🤖 Agents"),
+    ("/skill-builder", "🧩 Skill Builder"),
 ]
 
 BOT_ADMIN_NAV = [

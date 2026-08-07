@@ -1799,7 +1799,9 @@ def main(args: Dict[str, Any]) -> Dict[str, Any]:
         "username": "Display name (optional)",
         "chat_id": "Chat/group ID (optional)",
         "topic_id": "Topic/thread ID (optional)",
-        "user_email": "Email (optional, fallback if auth lookup fails)",
+        "user_email": "Email (optional fallback if auth lookup fails -- only honored "
+                       "from callers holding IDENTITY_ASSERTION_KEY, see app.py's "
+                       "is_identity_trusted_caller)",
         "media": [...],
         "entity_context": {...},
         "metadata": {...}
@@ -2271,6 +2273,40 @@ async def async_main(args: Dict[str, Any]) -> Dict[str, Any]:
         }
 
 
+def _resolve_email_lookup_fallback(
+    webhook_user_email: Optional[str],
+    identity_trusted: bool,
+    *,
+    source: str,
+    user_id: str,
+) -> Optional[str]:
+    """Decide whether to trust a caller-supplied user_email once the auth-DB
+    lookup (auth_service.get_user_email) has already failed.
+
+    Only identity-trusted callers (holding IDENTITY_ASSERTION_KEY -- see
+    app.py's is_identity_trusted_caller) may assert an arbitrary email this
+    way. Without this gate, any caller holding the single shared API_KEY
+    could impersonate any account, since a failed DB lookup is exactly what
+    reaches this fallback. See Phase 4 of
+    docs/superpowers/plans/2026-08-06-user-designed-skills.md, "Identity
+    over the API channel."
+
+    Shared by _handle_webhook and _handle_webhook_async, which otherwise
+    duplicate this fallback verbatim.
+
+    Returns the email to use, or None if the caller isn't entitled to one --
+    callers must then return the existing 403 "not registered" response.
+    """
+    if webhook_user_email and identity_trusted:
+        return webhook_user_email
+    if webhook_user_email:
+        LOGGER.warning(
+            f"Rejected caller-supplied user_email from an untrusted caller "
+            f"(source={source}, user_id={user_id})"
+        )
+    return None
+
+
 def _handle_webhook(args: Dict[str, Any]) -> Dict[str, Any]:
     """Handle webhook requests from Telegram/Roam."""
     try:
@@ -2288,6 +2324,13 @@ def _handle_webhook(args: Dict[str, Any]) -> Dict[str, Any]:
             if current_chat_id == escalation_chat_id and "reply_to_message" in telegram_msg:
                 LOGGER.info("Detected reply in escalation group, handling support response")
                 return asyncio.run(_handle_escalation_reply(telegram_msg))
+
+        # Whether this caller holds IDENTITY_ASSERTION_KEY and may therefore
+        # assert an arbitrary user_email when auth-DB lookup misses (see
+        # app.py's is_identity_trusted_caller). Defaults to untrusted. Popped
+        # before WebhookRequest(**args) for symmetry with _handle_webhook_async,
+        # though WebhookRequest ignores unknown fields either way.
+        identity_trusted = bool(args.pop("_identity_trusted", False))
 
         # Parse webhook request
         webhook_req = WebhookRequest(**args)
@@ -2336,10 +2379,13 @@ def _handle_webhook(args: Dict[str, Any]) -> Dict[str, Any]:
             )
 
             if not user_email:
-                # If user_email was provided in webhook, use it as fallback
-                if webhook_req.user_email:
-                    user_email = webhook_req.user_email
-                else:
+                user_email = _resolve_email_lookup_fallback(
+                    webhook_req.user_email,
+                    identity_trusted,
+                    source=webhook_req.source,
+                    user_id=webhook_req.user_id,
+                )
+                if not user_email:
                     LOGGER.error(
                         f"Could not resolve email for {webhook_req.source} "
                         f"user {webhook_req.user_id}"
@@ -2515,6 +2561,10 @@ async def _handle_webhook_async(args: Dict[str, Any]) -> Dict[str, Any]:
         # Extract auth method (set by app.py based on which header was used)
         # "api" = return response in body, "telegram" = send via Bot API
         auth_method = args.pop("_auth_method", "api")
+        # Whether this caller holds IDENTITY_ASSERTION_KEY and may therefore
+        # assert an arbitrary user_email when auth-DB lookup misses (see
+        # app.py's is_identity_trusted_caller). Defaults to untrusted.
+        identity_trusted = bool(args.pop("_identity_trusted", False))
 
         # Parse webhook request
         webhook_req = WebhookRequest(**args)
@@ -2576,9 +2626,13 @@ async def _handle_webhook_async(args: Dict[str, Any]) -> Dict[str, Any]:
             )
 
             if not user_email:
-                if webhook_req.user_email:
-                    user_email = webhook_req.user_email
-                else:
+                user_email = _resolve_email_lookup_fallback(
+                    webhook_req.user_email,
+                    identity_trusted,
+                    source=webhook_req.source,
+                    user_id=webhook_req.user_id,
+                )
+                if not user_email:
                     LOGGER.error(
                         f"Could not resolve email for {webhook_req.source} "
                         f"user {webhook_req.user_id}"
