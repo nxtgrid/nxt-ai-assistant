@@ -13,7 +13,7 @@ import uuid
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from orchestrator.services.escalation_service import EscalationService
+from orchestrator.services.escalation_service import EscalationService, _is_closure_event
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -136,12 +136,16 @@ class _FakeTickets:
         ref_by_ticket_id: Optional[Dict[str, str]] = None,
         id_by_ref: Optional[Dict[str, str]] = None,
         backend_by_ref: Optional[Dict[str, str]] = None,
+        add_comment_error: Optional[Exception] = None,
     ) -> None:
         self.transition_to_done_calls: List[str] = []
         self._transition_error = transition_error
         self._ref_by_ticket_id = ref_by_ticket_id or {}
         self._id_by_ref = id_by_ref or {}
         self._backend_by_ref = backend_by_ref or {}
+        self.add_comment_calls: List[tuple] = []
+        self._add_comment_error = add_comment_error
+        self.notify_ticket_event_calls: List[Any] = []
 
     async def transition_to_done(self, ref: str) -> None:
         self.transition_to_done_calls.append(ref)
@@ -157,6 +161,16 @@ class _FakeTickets:
     async def get_backend_name(self, ref: str) -> str:
         return self._backend_by_ref.get(ref, "jira")
 
+    async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
+        self.add_comment_calls.append((ref, body, public))
+        if self._add_comment_error is not None:
+            raise self._add_comment_error
+        return True
+
+    async def notify_ticket_event(self, event: Any) -> bool:
+        self.notify_ticket_event_calls.append(event)
+        return True
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -171,13 +185,17 @@ def _mapping(ticket_ref: Optional[str]) -> Dict[str, Any]:
         "ticket_ref": ticket_ref,
         "customer_chat_id": "111",
         "customer_topic_id": None,
+        "escalation_message_id": 999,  # only read by handle_jira_comment
     }
 
 
 def _closed_payload(issue_key: str = "OPS-1") -> Dict[str, Any]:
     return {
         "webhookEvent": "jira:issue_updated",
-        "issue": {"key": issue_key, "fields": {}},
+        "issue": {
+            "key": issue_key,
+            "fields": {"status": {"statusCategory": {"key": "done"}}},
+        },
         "changelog": {"items": [{"field": "status", "toString": "Closed"}]},
     }
 
@@ -202,6 +220,38 @@ def _make_service(supa: _FakeSupabase, tickets: _FakeTickets) -> EscalationServi
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
+
+def test_closure_detected_for_a_custom_done_category_status():
+    """A workflow whose done status is named "Resolved" must still close --
+    the old literal match on "Done"/"Closed" silently ignored these."""
+    payload = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {"key": "OPS-5", "fields": {"status": {"statusCategory": {"key": "done"}}}},
+        "changelog": {"items": [{"field": "status", "toString": "Resolved"}]},
+    }
+    assert _is_closure_event(payload) is True
+
+
+def test_non_status_changes_are_not_closures():
+    payload = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {"key": "OPS-5", "fields": {"status": {"statusCategory": {"key": "new"}}}},
+        "changelog": {"items": [{"field": "assignee", "toString": "Ada"}]},
+    }
+    assert _is_closure_event(payload) is False
+
+
+def test_status_change_to_a_non_done_category_is_not_a_closure():
+    payload = {
+        "webhookEvent": "jira:issue_updated",
+        "issue": {
+            "key": "OPS-5",
+            "fields": {"status": {"statusCategory": {"key": "indeterminate"}}},
+        },
+        "changelog": {"items": [{"field": "status", "toString": "In Progress"}]},
+    }
+    assert _is_closure_event(payload) is False
 
 
 async def test_closure_webhook_marks_the_canonical_ticket_done():
@@ -336,6 +386,67 @@ async def test_handle_jira_comment_finds_nothing_when_ticket_ref_unmapped(monkey
     }
 
     await svc.handle_jira_comment(payload)  # must not raise
+
+
+async def test_handle_jira_comment_mirrors_and_notifies_for_a_mapped_ticket():
+    """A public ("Reply to customer") comment on a ticket with an active
+    escalation mapping must be mirrored into ticket_comments and routed
+    through the update notifier -- additive to the existing verbatim
+    escalation-group relay, which every public Jira comment still reaches."""
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw, mapping_by_jira_key={"OPS-1": _mapping("OPS-1")})
+    tickets = _FakeTickets()
+    svc = _make_service(supa, tickets)
+
+    payload = {
+        "comment": {
+            "author": {"emailAddress": "support@example.com", "displayName": "Ada"},
+            "jsdPublic": True,
+            "body": {"content": [{"content": [{"type": "text", "text": "Fixed the fuse."}]}]},
+        },
+        "issue": {"key": "OPS-1", "fields": {}},
+    }
+
+    await svc.handle_jira_comment(payload)
+
+    assert tickets.add_comment_calls == [("OPS-1", "Fixed the fuse.", True)]
+    assert len(tickets.notify_ticket_event_calls) == 1
+    event = tickets.notify_ticket_event_calls[0]
+    assert event.ticket_ref == "OPS-1"
+    assert event.kind == "comment"
+    assert event.comment_body == "Fixed the fuse."
+    assert event.comment_author == "Ada"
+
+
+async def test_handle_jira_comment_still_posts_to_escalation_group_when_mirroring_fails():
+    """The mirror/notify block is additive and best-effort -- a failure there
+    must not swallow the pre-existing escalation-group relay."""
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw, mapping_by_jira_key={"OPS-1": _mapping("OPS-1")})
+    tickets = _FakeTickets(add_comment_error=RuntimeError("db blip"))
+    svc = _make_service(supa, tickets)
+
+    sent = []
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        return {"ok": True}
+
+    svc._send_telegram_message = fake_send
+
+    payload = {
+        "comment": {
+            "author": {"emailAddress": "support@example.com", "displayName": "Ada"},
+            "jsdPublic": True,
+            "body": {"content": [{"content": [{"type": "text", "text": "Fixed the fuse."}]}]},
+        },
+        "issue": {"key": "OPS-1", "fields": {}},
+    }
+
+    await svc.handle_jira_comment(payload)  # must not raise
+
+    assert len(sent) == 1
+    assert "Fixed the fuse." in sent[0]["text"]
 
 
 async def test_close_escalation_by_mapping_canonical_skips_notification_on_race(monkeypatch):
