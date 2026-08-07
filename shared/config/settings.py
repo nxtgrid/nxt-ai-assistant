@@ -28,16 +28,6 @@ class DatabaseSettings(BaseSettings):
     # Chat Database (Supabase) - REST API access
     chat_db_url: Optional[str] = None
     chat_db_service_key: Optional[str] = None
-    # For direct PostgreSQL access (optional)
-    chat_db_user: Optional[str] = None
-    chat_db_password: Optional[str] = None
-
-    # TimescaleDB settings - Username/Password authentication
-    timescale_host: str = "localhost"
-    timescale_port: int = 5432
-    timescale_database: str = "tsdb"
-    timescale_user: Optional[str] = None
-    timescale_password: Optional[str] = None
 
     model_config = _CONFIG
 
