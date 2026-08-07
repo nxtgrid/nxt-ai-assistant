@@ -188,15 +188,3 @@ def build_view_state_url(packet_id: str) -> str | None:
     sig = _sign_identifier(packet_id)
     return f"{base_url}/?packet_id={packet_id}&view=state&sig={sig}"
 
-
-def build_agent_state_url(instance_id: str) -> str | None:
-    """Build the Mini App URL for an agent instance's read-only state view.
-
-    Same HMAC pattern as work packet View State but with instance_id.
-    """
-    base_url = os.getenv("MINI_APP_BASE_URL", "").rstrip("/")
-    if not base_url:
-        return None
-    base_url = _ensure_https(base_url)
-    sig = _sign_identifier(instance_id)
-    return f"{base_url}/?instance_id={instance_id}&view=agent_state&sig={sig}"

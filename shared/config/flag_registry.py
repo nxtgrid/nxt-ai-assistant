@@ -236,7 +236,6 @@ MCP_SERVER_NAMES: List[str] = [
     "grid_design",
     "solar",
     "knowledge",
-    "messaging",
     "reference",
 ]
 
@@ -510,13 +509,6 @@ _FLAGS: List[Flag] = [
         "Rolling conversation summarization.",
         group="conversation",
     ),
-    _b(
-        "PERSISTENT_AGENTS_ENABLED",
-        False,
-        "Enable user-created persistent monitoring agents.",
-        group="conversation",
-        restart_required=True,
-    ),
     _i(
         "AWAITING_INPUT_TIMEOUT_MINUTES",
         180,
@@ -541,26 +533,6 @@ _FLAGS: List[Flag] = [
         False,
         "Enable Langfuse LLM observability tracing.",
         group="conversation",
-        advanced=True,
-    ),
-    _i(
-        "AGENT_MAX_ACTIONS_PER_WAKE",
-        10,
-        "Maximum actions a persistent agent may take in one wake cycle.",
-        group="conversation",
-        depends_on="PERSISTENT_AGENTS_ENABLED",
-        minimum=1,
-        maximum=100,
-        advanced=True,
-    ),
-    _i(
-        "AGENT_MAX_TOOL_ROUNDS",
-        5,
-        "Maximum sequential tool-call rounds inside one persistent-agent action.",
-        group="conversation",
-        depends_on="PERSISTENT_AGENTS_ENABLED",
-        minimum=1,
-        maximum=20,
         advanced=True,
     ),
     _b(

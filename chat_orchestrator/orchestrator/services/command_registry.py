@@ -109,18 +109,6 @@ The user wants to manage scheduled messages.
 Default timezone: configured by DEFAULT_TIMEZONE env var (default UTC).
 """
 
-AGENTS_COMMAND_TEMPLATE = (
-    "The user wants to manage their monitoring agents. "
-    "Their message: '{args}'\n\n"
-    "If the message is EMPTY or blank: call schedule_list_user_agents to show their agents.\n"
-    "If they want to cancel/stop/remove an agent: call schedule_list_user_agents first to show the list, "
-    "then ask which one to cancel. When they confirm, call schedule_cancel_user_agent with the instance_id.\n"
-    "If they want to create a new agent: call schedule_create_user_agent. "
-    "IMPORTANT: The check_prompt MUST be a yes/no question (e.g., 'Have connections reached 500?'), "
-    "NOT a command or creation instruction. The response_prompt is the full detail query.\n"
-    "Format the response clearly for Telegram."
-)
-
 TICKETS_WITH_ARGS_TEMPLATE = (
     "Search for JIRA tickets related to '{args}'. "
     "Interpret '{args}' as follows and use the appropriate parameter:\n"
@@ -441,20 +429,6 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
             "schedule_cancel_user_schedule",
             "schedule_pause_user_schedule",
             "schedule_resume_user_schedule",
-        ],
-    ),
-    "agents": CommandDefinition(
-        command="agents",
-        command_type="tool",
-        description="List, create, or cancel persistent monitoring agents",
-        linked_tool="schedule_list_user_agents",
-        prompt_template=AGENTS_COMMAND_TEMPLATE,
-        requires_args=False,
-        staff_only=True,
-        exclusive_tools=[
-            "schedule_create_user_agent",
-            "schedule_list_user_agents",
-            "schedule_cancel_user_agent",
         ],
     ),
     "meta": CommandDefinition(
@@ -990,7 +964,6 @@ def match_nl_trigger(text: str, is_staff: bool = False) -> Optional[CommandDefin
 __all__ = [
     "CommandDefinition",
     "COMMAND_REGISTRY",
-    "AGENTS_COMMAND_TEMPLATE",
     "SCHEDULE_COMMAND_TEMPLATE",
     "TICKETS_WITH_ARGS_TEMPLATE",
     "get_command",

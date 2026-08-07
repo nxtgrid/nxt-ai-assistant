@@ -78,10 +78,6 @@ SERVER_METADATA = {
         "description": "Knowledge base summarization and exploration tools",
         "module": "servers.knowledge_server.knowledge_mcp_server",
     },
-    "messaging": {
-        "description": "Send messages to validated Telegram groups (persistent agents only)",
-        "module": "servers.messaging_server.messaging_mcp_server",
-    },
     "reference": {
         "description": "Nigerian import tariff, prohibition list, and standards lookups (staff only)",
         "module": "servers.reference_server.reference_mcp_server",

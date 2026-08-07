@@ -774,7 +774,6 @@ Anansi only reads these tables (never writes). Add `GRANT SELECT ON ...` for any
 | `chat_messages` | Full message history with role, content, and tool call records |
 | `agent_work_packets` | State for multi-step expert workflows (paused, running, completed, failed) |
 | `agent_work_packet_logs` | Execution log per workflow run — step timings, success/failure |
-| `persistent_agent_instances` | User-created monitoring agents with schedule and check/response prompts |
 | `pending_decisions` | Multi-turn decision state (e.g. "duplicate detected — resume or start fresh?") |
 | `documents` | RAG document store — metadata, access control, embeddings |
 | `document_chunks` | Chunked text with vector embeddings (pgvector) |

@@ -38,7 +38,6 @@ logger = get_logger(__name__)
 
 # Global scheduler instance
 scheduler: Optional[AsyncIOScheduler] = None
-agent_worker = None  # AgentWorker instance (if persistent agents enabled)
 
 # --- Graceful shutdown: track all active Telegram workflow tasks ---
 # asyncio.Tasks created here (not BackgroundTasks) so they are independently
@@ -425,66 +424,6 @@ async def startup_event():
         scheduler.start()
         logger.info("Scheduler started successfully")
 
-    # Initialize persistent agent worker if enabled
-    agents_enabled = os.getenv("PERSISTENT_AGENTS_ENABLED", "false").lower() in ("true", "1", "yes")
-    if agents_enabled:
-        try:
-            from orchestrator.services.agent_worker import AgentWorker
-
-            global agent_worker
-            supabase_url = os.getenv("CHAT_DB_URL") or os.getenv("SUPABASE_URL", "")
-            supabase_key = os.getenv("CHAT_DB_SERVICE_KEY") or os.getenv("SUPABASE_KEY", "")
-            agent_worker = AgentWorker(supabase_url=supabase_url, supabase_key=supabase_key)
-            await agent_worker.start()
-
-            # Ensure scheduler exists for agent jobs
-            if scheduler is None:
-                scheduler = AsyncIOScheduler()
-
-            # Safety poll: process batch every 15 minutes (fallback for missed NOTIFY)
-            # PG LISTEN/NOTIFY handles near-instant wake; this is just a fallback.
-            scheduler.add_job(
-                agent_worker.process_batch,
-                trigger="interval",
-                seconds=900,
-                max_instances=1,
-                coalesce=True,
-                id="agent_batch_poll",
-                name="Agent Event Safety Poll",
-                replace_existing=True,
-            )
-
-            # Scheduled wakes: check cron schedules every 15 minutes
-            scheduler.add_job(
-                agent_worker.queue_scheduled_wakes,
-                trigger="interval",
-                seconds=900,
-                max_instances=1,
-                coalesce=True,
-                id="agent_scheduled_wakes",
-                name="Agent Scheduled Wakes",
-                replace_existing=True,
-            )
-
-            # Reconciliation: auto-provision/terminate persistent agent instances every 5 minutes
-            scheduler.add_job(
-                agent_worker.reconcile_instances,
-                trigger="interval",
-                minutes=5,
-                max_instances=1,
-                coalesce=True,
-                id="reconcile_agents",
-                name="Reconcile Persistent Agent Instances",
-                replace_existing=True,
-            )
-
-            if not scheduler.running:
-                scheduler.start()
-
-            logger.info("Persistent agent worker initialized with scheduler jobs")
-        except Exception as e:
-            logger.error(f"Failed to start persistent agent worker: {e}", exc_info=True)
-
     # -------------------------------------------------------------------------
     # Escalation Jira sweep — runs daily at 9am WAT (08:00 UTC, WAT is UTC+1,
     # no DST).  Registered unconditionally so it fires even when METRICS_ENABLED
@@ -543,17 +482,7 @@ async def startup_event():
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Clean up agent worker and scheduler on application shutdown."""
-    # Stop agent worker
-    global agent_worker
-    if agent_worker:
-        try:
-            await agent_worker.stop()
-            logger.info("Agent worker stopped")
-        except Exception as e:
-            logger.warning(f"Agent worker shutdown failed (non-fatal): {e}")
-        agent_worker = None
-
+    """Clean up scheduler on application shutdown."""
     global scheduler
     if scheduler:
         scheduler.shutdown()

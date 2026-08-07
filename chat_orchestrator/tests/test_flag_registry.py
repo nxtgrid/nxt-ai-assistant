@@ -334,8 +334,6 @@ class TestNewlyRegisteredFlagsMatchTheirConsumers:
     """
 
     EXPECTED = {
-        "AGENT_MAX_ACTIONS_PER_WAKE": 10,
-        "AGENT_MAX_TOOL_ROUNDS": 5,
         "LOOP_DETECTION_ENABLED": True,
         "LOOP_DETECTION_THRESHOLD": 2,
         "MULTI_SITE_MAX_CONCURRENCY": 5,

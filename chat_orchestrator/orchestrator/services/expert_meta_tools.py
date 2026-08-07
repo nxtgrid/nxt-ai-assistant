@@ -23,15 +23,13 @@ in-process "virtual tools" (see `orchestrator.graphs.nodes.prepare_tools`'s
 `EXPERT_GET_PACKET_STATE_TOOL_DEF` / `EXPERT_RUN_STEPS_TOOL_DEF`) -- not
 backed by an mcp_servers server. Each is awaited directly and returns its
 result synchronously within the tool-call turn; there is no fire-and-poll
-background-task mechanism here (that pattern, used by
-`expert_tool_runner.py` for persistent agents invoking a FULL workflow run,
-does not apply here -- run_steps executes in-line and returns synchronously,
-same as the three read-only lookups).
+background-task mechanism here for a FULL, potentially multi-minute
+workflow run -- run_steps executes in-line and returns synchronously, same
+as the three read-only lookups.
 
 None of these functions raise to their caller -- every public function wraps
 its body in a broad try/except and returns an `{"error": ...}`-shaped dict on
-an UNEXPECTED failure, matching `expert_tool_runner.py`'s own defensive
-style. This is deliberate: the caller is a tool-call dispatcher that will
+an UNEXPECTED failure. This is deliberate: the caller is a tool-call dispatcher that will
 relay whatever comes back to the LLM (and from there, potentially the
 user), so an unhandled exception here would surface as an ugly 500 instead
 of a clean, actionable tool result. Expected/structured outcomes --
@@ -528,13 +526,11 @@ async def run_steps(
 
     Packet resolution: pass `packet_id` to act on an existing packet, or
     leave it out and pass `expert_id`/`packet_type`/`key_entity` to create a
-    new one (mirrors `expert_tool_runner.start_expert_workflow`'s
-    packet-creation block, minus its fire-and-poll background-task
-    machinery -- this function executes in-line and returns synchronously).
+    new one -- this function executes in-line and returns synchronously,
+    with no fire-and-poll background-task machinery.
 
     v1 scope decision -- no live progress pushes: the `StepContext` built
-    here uses `user_context=None`, exactly like
-    `expert_tool_runner._execute_headless`'s headless pattern. This means
+    here uses `user_context=None` (a headless-style invocation). This means
     `context.send_progress_to_user` is a silent no-op (see
     `step_context.py:327-352` -- it requires `user_context.chat_id` and does
     nothing without it), so a slow multi-step run triggered by this tool
@@ -686,7 +682,7 @@ async def run_steps(
         if expert_config is None:
             return {"error": f"Unknown expert_id: {resolved_expert_id!r}"}
 
-        # --- Build StepContext/WorkflowExecutor (mirrors expert_tool_runner._execute_headless) --
+        # --- Build StepContext/WorkflowExecutor for an in-line, headless-style run --
         from orchestrator.clients.factory import create_chat_llm_client
         from orchestrator.config.settings import GeminiModelConfig, get_settings
         from orchestrator.experts.step_context import StepContext

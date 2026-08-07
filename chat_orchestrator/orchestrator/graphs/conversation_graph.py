@@ -1323,10 +1323,8 @@ class ConversationGraphBuilder:
         lookups -- each is awaited directly and its result returned
         synchronously within this tool-call turn, exactly like
         _handle_preference_call above. There is deliberately no fire-and-poll
-        background-task mechanism here (that pattern in expert_tool_runner.py
-        exists for a different caller -- persistent agents launching a FULL,
-        potentially multi-minute workflow run -- not for these sub-second
-        introspection reads).
+        background-task mechanism here -- these are sub-second introspection
+        reads, not a potentially multi-minute workflow run.
 
         expert_id resolution: expert_list_steps requires the LLM to pass
         expert_id explicitly as a tool argument (see its schema in

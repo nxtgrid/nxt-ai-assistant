@@ -1014,194 +1014,6 @@ async def _save_passive_group_message(telegram_msg: Dict[str, Any], chat: Dict[s
     )
 
 
-async def _maybe_queue_agent_event(telegram_msg: Dict[str, Any], chat: Dict[str, Any]) -> None:
-    """Check if a Telegram message should wake a persistent agent.
-
-    Runs AFTER the normal message flow decision (respond/ignore) but
-    in parallel with passive message saving. Non-fatal — never breaks
-    the main webhook handler.
-    """
-    if os.getenv("PERSISTENT_AGENTS_ENABLED", "false").lower() not in ("true", "1", "yes"):
-        return
-
-    chat_id = str(chat.get("id", ""))
-    raw_topic = telegram_msg.get("message_thread_id")
-    topic_id = str(raw_topic) if raw_topic is not None else None
-    message_text = telegram_msg.get("text", "") or telegram_msg.get("caption", "")
-    message_id = str(telegram_msg.get("message_id", ""))
-    from_user = telegram_msg.get("from", {})
-
-    if not message_text or not chat_id:
-        return
-
-    # Pre-filter: should any agent care about this message?
-    from orchestrator.services.agent_event_filter import get_event_filter
-
-    event_filter = get_event_filter()
-    should_wake, event_type = event_filter.should_wake_agent(message_text, from_user)
-
-    # Find persistent agent instances watching this chat.
-    # Optimization: if the event filter didn't match, only query for user_agent
-    # instances (they wake on any message). This avoids a DB query for ~90% of
-    # messages that are irrelevant to system agents.
-    try:
-        supabase = get_supabase_client()._get_client()
-
-        query = (
-            supabase.table("persistent_agent_instances")
-            .select("id, instance_name, status, anchor_metadata, expert_id, last_woke_at")
-            .in_("status", ["active", "executing"])
-            .eq("anchor_metadata->>telegram_chat_id", chat_id)
-        )
-        if not should_wake:
-            # Only user agents wake on unfiltered messages
-            query = query.eq("expert_id", "user_agent")
-
-        result = query.execute()
-
-        matching_instances = []
-        now = datetime.now(timezone.utc)
-        for inst in result.data or []:
-            meta = inst.get("anchor_metadata", {})
-            # Topic matching still needed client-side (optional field)
-            raw_inst_topic = meta.get("telegram_topic_id")
-            inst_topic_id = str(raw_inst_topic) if raw_inst_topic is not None else None
-
-            if inst_topic_id and topic_id and inst_topic_id != topic_id:
-                continue
-
-            is_user_agent = inst.get("expert_id") == "user_agent"
-
-            # System agents: only wake if event filter matched
-            if not is_user_agent and not should_wake:
-                continue
-
-            # User agents: any message in their anchored group wakes them,
-            # but rate-limited to max once every 5 minutes per instance
-            if is_user_agent:
-                last_woke = inst.get("last_woke_at")
-                if last_woke:
-                    try:
-                        last_dt = datetime.fromisoformat(last_woke.replace("Z", "+00:00"))
-                        if (now - last_dt).total_seconds() < 300:
-                            LOGGER.debug(
-                                f"Skipping user agent {inst['instance_name']}: "
-                                f"woke {int((now - last_dt).total_seconds())}s ago (< 300s)"
-                            )
-                            continue
-                    except (ValueError, TypeError):
-                        pass
-
-            matching_instances.append((inst, "group_message" if is_user_agent else event_type))
-
-        if not matching_instances:
-            return
-
-        # Queue event for each matching agent
-        for inst, evt_type in matching_instances:
-            event_data = {
-                "text": message_text[:2000],
-                "from": {
-                    "id": from_user.get("id"),
-                    "first_name": from_user.get("first_name", ""),
-                    "username": from_user.get("username", ""),
-                },
-                "date": telegram_msg.get("date", ""),
-                "message_id": message_id,
-                "event_type": evt_type,
-            }
-            try:
-                supabase.table("agent_events").insert(
-                    {
-                        "target_instance_id": str(inst["id"]),
-                        "event_type": evt_type,
-                        "event_data": event_data,
-                        "source_message_id": f"tg_{chat_id}_{message_id}",
-                    }
-                ).execute()
-                LOGGER.info(
-                    f"Queued {evt_type} event for agent {inst['instance_name']} "
-                    f"(msg_id={message_id})"
-                )
-            except Exception as e:
-                # Dedup constraint violation is expected and fine
-                if "duplicate" in str(e).lower() or "unique" in str(e).lower():
-                    LOGGER.debug(f"Duplicate event skipped for agent {inst['instance_name']}")
-                else:
-                    LOGGER.warning(f"Failed to queue event for {inst['instance_name']}: {e}")
-
-    except Exception as e:
-        LOGGER.warning(f"Agent event queueing failed (non-fatal): {e}")
-
-
-async def _lookup_agent_for_message(chat_id: str, message_id: int) -> str | None:
-    """Look up which persistent agent sent a bot message.
-
-    Checks chat_messages.metadata->>'agent_instance_id' for the given
-    telegram_message_id. Returns the instance_id or None.
-    """
-    if os.getenv("PERSISTENT_AGENTS_ENABLED", "false").lower() not in ("true", "1", "yes"):
-        return None
-
-    try:
-        supabase = get_supabase_client()._get_client()
-        result = (
-            supabase.table("chat_messages")
-            .select("metadata")
-            .eq("telegram_message_id", int(message_id))
-            .eq("group_id", chat_id)
-            .limit(1)
-            .execute()
-        )
-        if result.data:
-            metadata = result.data[0].get("metadata") or {}
-            agent_id: str | None = metadata.get("agent_instance_id")
-            return agent_id
-    except Exception as e:
-        LOGGER.warning(f"Agent message lookup failed: {e}")
-    return None
-
-
-async def _queue_reply_to_agent(
-    telegram_msg: Dict[str, Any],
-    chat: Dict[str, Any],
-    agent_instance_id: str,
-) -> None:
-    """Queue a staff reply as an agent event for a persistent agent."""
-    message_text = telegram_msg.get("text", "") or telegram_msg.get("caption", "")
-    message_id = str(telegram_msg.get("message_id", ""))
-    chat_id = str(chat.get("id", ""))
-
-    if not message_text:
-        return
-
-    supabase = get_supabase_client()._get_client()
-
-    try:
-        supabase.table("agent_events").insert(
-            {
-                "target_instance_id": agent_instance_id,
-                "event_type": "staff_reply",
-                "event_data": {
-                    "text": message_text[:2000],
-                    "from": telegram_msg.get("from", {}),
-                    "date": telegram_msg.get("date", ""),
-                    "message_id": message_id,
-                    "chat_id": chat_id,
-                },
-                "source_message_id": f"tg_{chat_id}_{message_id}",
-            }
-        ).execute()
-
-        LOGGER.info(f"Queued staff_reply event for agent {agent_instance_id} (msg_id={message_id})")
-    except Exception as e:
-        # Dedup constraint violation is expected on webhook retries
-        if "duplicate" in str(e).lower() or "unique" in str(e).lower():
-            LOGGER.debug(f"Duplicate staff_reply event skipped for agent {agent_instance_id}")
-        else:
-            raise
-
-
 async def _handle_message_reaction(args: Dict[str, Any]) -> Dict[str, Any]:
     """
     Handle Telegram message_reaction updates.
@@ -1977,11 +1789,6 @@ async def async_main(args: Dict[str, Any]) -> Dict[str, Any]:
                         await _save_passive_group_message(_tg_msg, chat)
                     except Exception as e:
                         LOGGER.warning(f"Failed to save passive group message: {e}")
-                    # Check if persistent agents should be notified
-                    try:
-                        await _maybe_queue_agent_event(_tg_msg, chat)
-                    except Exception as e:
-                        LOGGER.warning(f"Agent event check failed (non-fatal): {e}")
                     return {
                         "success": True,
                         "message": "Ignored (no-reply group)",
@@ -2025,11 +1832,6 @@ async def async_main(args: Dict[str, Any]) -> Dict[str, Any]:
                         await _save_passive_group_message(_tg_msg, chat)
                     except Exception as e:
                         LOGGER.warning(f"Failed to save passive group message: {e}")
-                    # Check if persistent agents should be notified
-                    try:
-                        await _maybe_queue_agent_event(_tg_msg, chat)
-                    except Exception as e:
-                        LOGGER.warning(f"Agent event check failed (non-fatal): {e}")
                     return {
                         "success": True,
                         "message": "Ignored (group message without bot mention or reply)",
@@ -2139,27 +1941,6 @@ async def async_main(args: Dict[str, Any]) -> Dict[str, Any]:
                             "statusCode": 200,
                         }
 
-                    # Check if this is a reply to a persistent agent's message.
-                    # If so, route to the agent instead of the normal conversation graph.
-                    if _sg_reply_to_bot and _sg_reply.get("message_id"):
-                        _agent_instance_id = await _lookup_agent_for_message(
-                            _pre_chat_id, _sg_reply["message_id"]
-                        )
-                        if _agent_instance_id:
-                            LOGGER.info(
-                                f"Staff group {staff_group['name']}: routing reply "
-                                f"to persistent agent {_agent_instance_id}"
-                            )
-                            try:
-                                await _queue_reply_to_agent(_tg_msg, _pre_chat, _agent_instance_id)
-                            except Exception as e:
-                                LOGGER.warning(f"Agent reply queue failed: {e}")
-                            return {
-                                "success": True,
-                                "message": "Routed to persistent agent",
-                                "statusCode": 200,
-                            }
-
                     # Staff user in staff group → inject staff auth bypass
                     args.setdefault("metadata", {})
                     args["metadata"]["staff_group_auth"] = True
@@ -2185,10 +1966,6 @@ async def async_main(args: Dict[str, Any]) -> Dict[str, Any]:
                             await _save_passive_group_message(_tg_msg, _pre_chat)
                         except Exception as e:
                             LOGGER.warning(f"Failed to save passive message: {e}")
-                        try:
-                            await _maybe_queue_agent_event(_tg_msg, _pre_chat)
-                        except Exception as e:
-                            LOGGER.warning(f"Agent event queue failed: {e}")
                         return {
                             "success": True,
                             "message": "Ignored (unknown group)",
@@ -3132,44 +2909,6 @@ async def _process_telegram_async(
                 # Procedure buttons take precedence over decision buttons
                 reply_markup = proc_keyboard
                 LOGGER.info("Extracted procedure buttons from LLM response")
-
-        # Attach View State button for user agent creation responses
-        if not reply_markup and tool_results:
-            for tr in tool_results:
-                if (
-                    tr.name == "schedule_create_user_agent"
-                    and tr.raw_response
-                    and tr.raw_response.get("success")
-                ):
-                    tr_result = tr.raw_response.get("result", [])
-                    result_text = ""
-                    if isinstance(tr_result, list) and tr_result:
-                        result_text = (
-                            tr_result[0].text
-                            if hasattr(tr_result[0], "text")
-                            else str(tr_result[0])
-                        )
-                    try:
-                        import re
-
-                        from orchestrator.mini_app.schemas import build_agent_state_url
-
-                        uuid_match = re.search(
-                            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-                            result_text,
-                        )
-                        if uuid_match:
-                            view_url = build_agent_state_url(uuid_match.group())
-                            if view_url:
-                                reply_markup = {
-                                    "inline_keyboard": [
-                                        [{"text": "View Agent State", "web_app": {"url": view_url}}]
-                                    ]
-                                }
-                                LOGGER.info("Attached View State button to agent creation response")
-                    except Exception:
-                        pass
-                    break
 
         # Auto-escalate before sending a system error to a non-staff customer
         if response_text and not user_context.is_staff and _is_system_error_response(response_text):

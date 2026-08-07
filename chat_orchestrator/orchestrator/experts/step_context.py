@@ -77,8 +77,9 @@ class StepContext:
     # User interaction
     user_input: str = ""
 
-    # Headless execution (when called by persistent agent)
-    call_depth: int = 0  # 0 = user-invoked, 1 = agent-invoked, >1 = rejected
+    # Call depth for nested/headless invocation (0 = user-invoked, >0 = rejected
+    # past MAX_EXPERT_CALL_DEPTH). No caller currently sets this above 0.
+    call_depth: int = 0
 
     # RAG access (for retrieval during steps)
     rag_context: Optional[List[str]] = None  # Pre-fetched RAG context from prepare_context

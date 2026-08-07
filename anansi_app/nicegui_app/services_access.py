@@ -19,14 +19,6 @@ def get_reader():
 
 
 @lru_cache(maxsize=1)
-def get_agent_service():
-    """Return a process-wide ``AgentManagementService``."""
-    from services.agent_management_service import AgentManagementService
-
-    return AgentManagementService()
-
-
-@lru_cache(maxsize=1)
 def get_settings_service():
     """Return a process-wide ``SettingsService``."""
     from services.settings_service import SettingsService
