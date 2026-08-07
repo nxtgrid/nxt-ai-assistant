@@ -18,6 +18,8 @@ class _Query:
         self.payload = None
         self._mode = None
         self._filters: list[tuple] = []
+        self._order: tuple | None = None
+        self._limit: int | None = None
 
     def upsert(self, payload, **_kwargs):
         self.payload = payload
@@ -32,7 +34,12 @@ class _Query:
         self._filters.append((col, val))
         return self
 
-    def limit(self, _n):
+    def order(self, col, desc=False):
+        self._order = (col, desc)
+        return self
+
+    def limit(self, n):
+        self._limit = n
         return self
 
     def execute(self):
@@ -44,6 +51,11 @@ class _Query:
             for row in self.client.rows
             if all(row.get(col) == val for col, val in self._filters)
         ]
+        if self._order is not None:
+            col, desc = self._order
+            matches = sorted(matches, key=lambda r: r.get(col) or "", reverse=desc)
+        if self._limit is not None:
+            matches = matches[: self._limit]
         return _Response(matches)
 
 
@@ -124,3 +136,31 @@ async def test_find_escalation_delivery_returns_none_when_no_match():
     repository = DeliveryRepository(client=client)
 
     assert await repository.find_escalation_delivery(external_message_id=999) is None
+
+
+@pytest.mark.asyncio
+async def test_latest_for_ticket_returns_the_most_recently_sent_delivery():
+    """The notifier edits or replies to whatever it last posted about a
+    ticket, so "latest row wins" is the anchor semantics needed."""
+    client = _Client(
+        rows=[
+            {"ticket_id": "t-1", "channel": "telegram", "sent_at": "2026-08-07T09:00:00Z",
+             "external_chat_id": "-100123", "external_topic_id": "7", "external_message_id": 500},
+            {"ticket_id": "t-1", "channel": "telegram", "sent_at": "2026-08-07T10:00:00Z",
+             "external_chat_id": "-100123", "external_topic_id": "7", "external_message_id": 501},
+            # A different ticket's delivery must never match.
+            {"ticket_id": "t-2", "channel": "telegram", "sent_at": "2026-08-07T11:00:00Z",
+             "external_chat_id": "-100123", "external_topic_id": "7", "external_message_id": 502},
+        ]
+    )
+    repository = DeliveryRepository(client=client)
+
+    row = await repository.latest_for_ticket("t-1")
+
+    assert row["external_message_id"] == 501
+
+
+@pytest.mark.asyncio
+async def test_latest_for_ticket_returns_none_when_never_delivered():
+    client = _Client(rows=[])
+    assert await DeliveryRepository(client=client).latest_for_ticket("t-1") is None

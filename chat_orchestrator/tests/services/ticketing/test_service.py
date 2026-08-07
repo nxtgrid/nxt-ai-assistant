@@ -44,6 +44,7 @@ class _FakeBackend:
         self.create_error: Optional[Exception] = None
         self.create_calls: List[TicketCreateRequest] = []
         self.transition_to_done_calls: List[str] = []
+        self.transition_returns: bool = True
         self.status_by_ref: Dict[str, Optional[TicketStatus]] = {}
         self.get_status_calls: List[str] = []
         self.get_status_error: Optional[Exception] = None
@@ -54,8 +55,9 @@ class _FakeBackend:
     def has_credentials(self) -> bool:
         return True
 
-    async def transition_to_done(self, ref: str) -> None:
+    async def transition_to_done(self, ref: str) -> bool:
         self.transition_to_done_calls.append(ref)
+        return self.transition_returns
 
     async def get_status(self, ref: str) -> Optional[TicketStatus]:
         self.get_status_calls.append(ref)
@@ -90,6 +92,8 @@ class _FakeTicketRepository:
         self.refs_by_escalation: dict[str, str] = {}
         self.find_ref_for_escalation_calls: list[str] = []
         self.transition_to_done_by_ref_calls: list[str] = []
+        self.transition_returns: bool = True
+        self.comments_by_ref: dict[str, list[dict]] = {}
         self.open_refs_by_backend: dict[str, list[str]] = {}
         self.list_open_by_backend_calls: list[tuple] = []
 
@@ -126,8 +130,12 @@ class _FakeTicketRepository:
     async def get_status(self, ref: str):
         return None
 
-    async def transition_to_done_by_ref(self, ref: str) -> None:
+    async def list_comments_by_ref(self, ref: str, *, limit: int = 5) -> List[dict]:
+        return self.comments_by_ref.get(ref, [])
+
+    async def transition_to_done_by_ref(self, ref: str) -> bool:
         self.transition_to_done_by_ref_calls.append(ref)
+        return self.transition_returns
 
     async def list_open_by_backend(self, backend: str, *, limit: int = 200) -> List[str]:
         self.list_open_by_backend_calls.append((backend, limit))

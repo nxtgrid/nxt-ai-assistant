@@ -99,6 +99,29 @@ class DeliveryRepository:
         rows = getattr(response, "data", None) or []
         return rows[0] if rows else None
 
+    async def latest_for_ticket(self, ticket_id: str) -> Optional[Dict[str, Any]]:
+        """Most recent Telegram delivery for a ticket -- its update anchor.
+
+        The notifier edits or replies to whatever it last posted about this
+        ticket (or the original notification, if there have been no updates
+        yet), so "latest row wins" is exactly the anchor semantics wanted.
+        """
+        try:
+            response = (
+                self._raw_client()
+                .table("message_deliveries")
+                .select("*")
+                .eq("ticket_id", ticket_id)
+                .eq("channel", "telegram")
+                .order("sent_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+        except Exception:
+            return None
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None
+
     async def find_notification(
         self,
         *,

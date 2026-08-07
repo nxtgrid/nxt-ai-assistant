@@ -55,6 +55,12 @@ class _Query:
             self.client.rows.append(row)
             return _Response([row])
         if self.mode == "update":
+            # Simulates a guarded UPDATE (e.g. `.neq("status", "done")`)
+            # matching zero rows -- used to test idempotent transitions
+            # without teaching this fake to track real row state.
+            has_neq = any(isinstance(v, str) and v.startswith("neq:") for _, v in self.filters)
+            if has_neq and self.client.update_conflict:
+                return _Response([])
             row = {
                 "id": "ticket-1",
                 "summary": "Grid down",
@@ -71,6 +77,7 @@ class _Client:
         self.rows = []
         self.select_rows = []
         self.select_rows_by_table = {}
+        self.update_conflict = False
 
     def table(self, name):
         return _Query(self, name)
@@ -217,12 +224,65 @@ async def test_transition_to_done_by_ref_updates_canonical_ticket_state():
         "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
     }]
 
-    await TicketRepository(client=client).transition_to_done_by_ref("TKT-1")
+    flipped = await TicketRepository(client=client).transition_to_done_by_ref("TKT-1")
 
+    assert flipped is True
     table, mode, payload, filters = client.calls[-1]
-    assert (table, mode, filters) == ("tickets", "update", [("id", "ticket-1")])
+    assert table == "tickets"
+    assert mode == "update"
+    assert ("id", "ticket-1") in filters
+    assert ("status", "neq:done") in filters
     assert payload["status"] == "done"
     assert payload["resolved_at"]
+
+
+@pytest.mark.asyncio
+async def test_transition_to_done_by_ref_returns_false_when_already_done():
+    """A retried Jira webhook (or any second close attempt) must not report a
+    fresh closure -- otherwise the update notifier posts the same card twice."""
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "TKT-1", "backend": "internal",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+        "status": "done",
+    }]
+    client.update_conflict = True
+
+    flipped = await TicketRepository(client=client).transition_to_done_by_ref("TKT-1")
+
+    assert flipped is False
+
+
+@pytest.mark.asyncio
+async def test_list_comments_by_ref_returns_oldest_first():
+    client = _Client()
+    client.select_rows_by_table = {
+        "tickets": [{
+            "id": "ticket-1", "ticket_ref": "TKT-1", "backend": "internal",
+            "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+        }],
+        # Seeded as the query would return it (newest-first, matching the
+        # `.order("created_at", desc=True)` the real call makes) so the test
+        # exercises list_comments_by_ref's own chronological reversal.
+        "ticket_comments": [
+            {"author": "b", "body": "second", "is_public": False, "source": "staff",
+             "created_at": "2026-08-07T10:00:00Z"},
+            {"author": "a", "body": "first", "is_public": False, "source": "staff",
+             "created_at": "2026-08-07T09:00:00Z"},
+        ],
+    }
+
+    rows = await TicketRepository(client=client).list_comments_by_ref("TKT-1", limit=5)
+
+    assert [r["body"] for r in rows] == ["first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_list_comments_by_ref_returns_empty_for_unknown_ref():
+    client = _Client()
+    client.select_rows_by_table = {"tickets": []}
+
+    assert await TicketRepository(client=client).list_comments_by_ref("NOPE-1") == []
 
 
 @pytest.mark.asyncio
