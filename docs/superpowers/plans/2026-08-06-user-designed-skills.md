@@ -627,6 +627,117 @@ code):**
 - Archived messages do not return through the reply-era window.
 - A run whose email is not in `accounts` is rejected, not silently accepted.
 
+### Implementation notes
+
+1. **"Filter at `get_messages_filtered`" undersold the fix.** Grepping every
+   caller (as item 2's own text demanded) found `get_messages_filtered` has
+   exactly one caller — `init_services.py`'s main load. The other two named
+   call sites ("reply-era window", "cross-session context") both call a
+   *different* method, `get_messages_around_timestamp`, which builds its own
+   two raw queries and shares no helper with `get_messages_filtered`. Patching
+   only the named function would have left both reply-context paths
+   unfiltered — the exact shape of the 2026-08-02 incident this item warns
+   about, reintroduced by following the item's literal text instead of its
+   intent. Fixed by adding `archived_at IS NULL` at the query level to all
+   three raw query-builder chains across `get_messages`, `get_messages_filtered`,
+   and `get_messages_around_timestamp` (`supabase_client.py`) — `get_messages`
+   included, since `get_messages_filtered` itself delegates to it when
+   `exclude_types` is empty, and `handler.py`/`escalation_service.py` also
+   call it directly.
+
+2. **Rewind semantics: the clicked step's own message is archived too, not
+   just what follows.** "Archives that message and everything after it" (this
+   section's own text) is what's implemented — `archive_from_message_index`
+   cuts at `message_index >= target`, target included. Read against the
+   acceptance criterion literally ("rewinding to step 2... leaves 2 visible
+   steps"), this looks contradictory at first: archiving step 2 onward should
+   leave 1 step, not 2. It isn't — the criterion describes the state *after*
+   the resend that follows a rewind, not the archive click alone. Click
+   Rewind on step 2 of 5 → steps 2–5 archived, input repopulated with step
+   2's text, transcript now shows 1 step. Edit and resend → the new message
+   becomes the new step 2 → transcript shows 2 steps (1 + the resend), and
+   that resend's own conversation history load — the "fresh turn" the
+   criterion means — correctly never saw archived steps 2–5. Tested directly
+   (`test_rewinding_to_step_2_of_5_leaves_2_visible_steps`) against the
+   archive call itself rather than a full resend round-trip, since the
+   resend path is exactly Phase 4's existing POST /chat mechanism with
+   nothing new to verify.
+
+3. **Added a per-step "allow this step to make changes" toggle — not in this
+   section's original Work list.** Phase 2 built `ParsedStep.allow_write`
+   specifically to gate write-tool access per step, defaulting to `False`
+   with no other way to set it `True`. Without a builder control, no saved
+   skill could ever call a write tool, which silently breaks the "Skill
+   steps DO need tools" requirement for anything beyond read-only lookups.
+   Added as a switch next to "Also return this response" on every step.
+
+4. **Two new chat_orchestrator endpoints the plan didn't name:
+   `POST /skills/validate` and `POST /skills/summarize`.** `validate_skill_steps`
+   (Phase 2) and `generate_skill_summary` (Phase 3) both live in
+   `chat_orchestrator`, which the builder (`anansi_app`) cannot import
+   directly — separately deployed services, no shared import path outside
+   `shared/`. Both are thin, auth-gated (`X-Api-Key` only) wrappers with no
+   side effects; `/skills/validate` runs after every message to show inline
+   errors and again before Save, `/skills/summarize` runs once when the Save
+   dialog opens to prefill the editable summary.
+
+5. **`IDENTITY_ASSERTION_KEY`: the concrete shape of "gate the caller-supplied-email
+   fallback."** A new secret, distinct from `API_KEY`, sent as
+   `X-Identity-Assertion-Key`. `app.py`'s `is_identity_trusted_caller` checks
+   it (fails closed — unset or mismatched both mean "not trusted"); the flag
+   flows through `_auth_method`'s existing path into both `_handle_webhook`
+   and `_handle_webhook_async`, which now call a shared
+   `_resolve_email_lookup_fallback` helper instead of trusting
+   `webhook_req.user_email` unconditionally. Applied to *both* webhook
+   handlers (the plan named only the async one, `handler.py:2551`) — the
+   sync twin had the identical pattern and no separate caller in production,
+   but shipping a fixed and an unfixed copy of the same bug felt like
+   exactly the kind of gap this whole item exists to close.
+
+6. **Session identity: synthetic per-draft `user_id`, not per-user.**
+   `generate_session_id` derives a session deterministically from
+   `(source, chat_id, topic_id, user_id)` with no explicit session parameter
+   on the wire — so the builder sends `f"{email}:{draft_id}"` as `user_id`
+   (a fresh UUID per page load) rather than the email alone, or every
+   "New skill" attempt for one staff member would collapse into a single
+   ever-growing session. This is also *why* the identity-trust fallback is
+   load-bearing for the builder specifically: a synthetic `user_id` never
+   matches a real Auth DB account, so `get_user_email`'s lookup always
+   misses and the fallback always fires. No "resume a draft after closing
+   the tab" or drafts-list feature was built — out of scope for this phase;
+   losing an unsaved draft on reload is an accepted limitation of a first
+   cut, not a bug.
+
+7. **Scoped out of this pass: per-step token counts and attachments.**
+   The Work section's step envelope describes both. Token usage is tracked
+   per *workflow run* (Phase 0, `agent_work_packets.token_usage`), not per
+   `chat_messages` row — builder-mode turns go through the general `/chat`
+   path, not `WorkflowExecutor`, so there is nothing at message granularity
+   to read back after a reload. Attachments come from the API response's
+   `ResponseEnvelope` (Phase 1), which is not itself persisted verbatim into
+   `chat_messages`. Both are addressable later without a schema change by
+   widening what gets written to `metadata` at save-message time; deferred
+   rather than done half-right under this phase's time budget.
+
+8. **Deliberately did not filter `archived_at` in anansi_app's separate admin
+   chat viewer** (`nicegui_app/pages/chat.py` / `services/supabase_reader.py`).
+   That page is a full historical audit tool across every conversation, not
+   the builder's own live view — and "side effects of discarded steps stand"
+   (this doc's "Decisions already made") reads as "rewind hides from the
+   *author*," not "rewind redacts the record." An ops/support user
+   auditing what actually happened should still see it. Revisit if that
+   reading turns out to be wrong.
+
+9. **`SkillBuilderService` (anansi_app) talks to `chat_db` directly**, the
+   same pattern `SupabaseReader` already uses (including its own direct
+   writes, e.g. `delete_bot_message`) — not a new chat_orchestrator endpoint
+   for reads/writes that don't need chat_orchestrator's involvement at all.
+   Sending a message is the one thing that must go through chat_orchestrator
+   (that's where the LLM/expert routing lives); loading the transcript back
+   and archiving on Rewind are pure `chat_messages` operations with no
+   reason to round-trip through an HTTP hop that adds latency and a second
+   point of auth failure for no benefit.
+
 ---
 
 ## Phase 5 — Scheduling, entity fan-out, triggers
