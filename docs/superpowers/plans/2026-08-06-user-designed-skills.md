@@ -832,6 +832,182 @@ code):**
   1 + step 2's full response), then (summary of steps 3–4 + step 5's full
   response).
 
+### Implementation notes
+
+1. **The load-bearing gap this section's Work items assumed away: nothing
+   turned a saved skill into a runnable workflow.** "Lets the existing
+   expert router dispatch to the workflow" (item 1) reads as if that
+   dispatch already existed. It didn't: `execute_workflow` only ever
+   derived its `ParsedStep` list from `expert_config.get_workflow()` +
+   `parse_workflow()`'s plain-doc-text parser, which has no notion of
+   `is_skill_step`/`allow_write`/`is_response_step` — going through it
+   would have silently dropped every per-step flag Phases 2–4 built. Built
+   the missing bridge first, as groundwork the rest of this phase sits on:
+   - `ParsedStep` gained `is_response_step: bool = False`.
+   - `execute_workflow`/`_execute_workflow_inner` gained two additive,
+     opt-in params: `pre_parsed_steps` (bypasses `get_workflow()` +
+     `parse_workflow()` entirely when given) and `on_step_complete`
+     (fires once per step reaching a terminal outcome, with that step's
+     full response text — not just `StepExecutionRecord.result_summary`,
+     which is a short label like "Generated 340 chars", never the text
+     itself). Neither changes behavior for any existing caller.
+   - New `orchestrator/experts/skill_runner.py`: builds `ParsedStep`s
+     directly from a skill's stored `steps` (preserving every flag), a
+     minimal synthetic `ExpertConfig` stand-in, creates the packet, and
+     executes. Deliberately does **not** reuse `expert_handler.py`'s
+     `_create_new_packet` (LPP-specific input building, auto-cancel-
+     superseded-packets, slash-command parsing — none of it applies to an
+     unattended, linear skill run) or its resume/confirmation/cancellation
+     paths (nobody is present to resume anything mid-run). It *does* reuse
+     `_build_step_context` directly (generic enough to need no changes).
+   - `expert_router.py` gained an early branch: `metadata.skill_id` +
+     `metadata.scheduled_execution` routes straight to `expert_handler.py`
+     with a synthetic `matched_expert_id="skill:<uuid>"`, skipping all
+     NL/command-matching (a scheduled/triggered run already knows exactly
+     which skill to run — matching it against human free text makes no
+     sense and was never going to work, since a skill's UUID is nothing a
+     person would type). `expert_handler.py` checks for that prefix
+     immediately after its `matched_expert_id` null-check and delegates
+     to `skill_runner.run_skill_packet`, before it would otherwise call
+     `ExpertInstructionsProvider.get_expert_config()` (which has no notion
+     of skills at all).
+
+2. **`resolve_auth.py` needed a *third* auth branch, not the existing
+   `is_scheduled_execution` one.** The generic scheduled-command path
+   trusts a permissions snapshot captured when the schedule was created
+   (`metadata.scheduled_organization_id`/`scheduled_is_staff`). This
+   section's own item 2 explicitly rejects that for skills: "the chat is
+   authoritative... do not merge in the creator's permissions." Added
+   `elif is_scheduled_execution and metadata.get("skill_id"):`, ahead of
+   the generic branch, that calls `resolve_permissions_from_chat` fresh
+   every time — the same resolution a live Telegram message in that chat
+   would get. Unlike the live-chat branch, an unresolvable org here must
+   **not** raise `PermissionError` (there's no live user to see an error
+   response) — it returns normally with empty `organization_ids`, and
+   `skill_schedule_dispatch.py` treats that as a per-chat skip.
+
+3. **Entity fan-out gained an `"organization"` branch backed by a new query.**
+   `AuthService` had no `get_eligible_organizations_for_agents` — added it,
+   mirroring `get_eligible_grids_for_agents`'s shape (not deleted, has a
+   `developer_group_telegram_chat_id`). Lifted into
+   `orchestrator/experts/entity_fanout.py` per item 5; `agent_worker.py`'s
+   `_get_eligible_entities`/`_build_anchor_metadata` are now thin
+   delegating wrappers, not deleted (their own many internal call sites are
+   untouched) — Phase 6 deletes the whole file, so nothing further to do
+   there. Caught two identical bugs by testing before wiring in: both this
+   module's `get_eligible_entities` and, later,
+   `skill_schedule_dispatch.dispatch_skill_alert_trigger`, eagerly
+   constructed a real `AuthService` (a live DB connection) before checking
+   whether the call site actually needed one — an unsupported
+   `entity_type`/a rate-limited or inactive skill would still pay for a
+   connection attempt it never used. Both fixed to defer construction
+   until the first line that actually calls it.
+
+4. **The "debug channel" is `ESCALATION_TELEGRAM_CHAT_ID`, not `tele_debug`.**
+   Item 4 pointed at `handler.py:3106` — by the time this phase started
+   that line was `tele_debug(...)`, which is gated behind `DEBUG=true` and
+   therefore inert in production (`.env.example` documents `DEBUG=false` as
+   the expected value; `DEBUG=true` would also loosen `source` validation,
+   a security-relevant flag, so it isn't something production would ever
+   set for this reason). `ESCALATION_TELEGRAM_CHAT_ID` — already used
+   elsewhere in `handler.py` to auto-escalate customer-facing errors to
+   staff — is the mechanism that's actually live in production. Used that
+   instead; the run history (`user_schedule_logs`) is the primary,
+   always-reliable record regardless of which Telegram channel a failure
+   also reaches.
+
+5. **The dispatcher lives entirely inside `chat_orchestrator`, not
+   `anansi_app`.** Entity fan-out and per-run authorization both need
+   direct Auth DB access (`AUTH_DB_HOST`/`USER`/`PASSWORD`) — `anansi_app`'s
+   own `.env.example` has never had those, so `broadcast_scheduler.py`
+   could not do this work even if it tried. New
+   `orchestrator/experts/skill_schedule_dispatch.py` (chat_orchestrator)
+   does the fan-out, authorization, run-history logging, and failure
+   routing; a new `POST /skills/dispatch-schedule` endpoint is what
+   `broadcast_scheduler.py` calls once it recognizes a due skill row —
+   matching item 1's "the scheduler starts the run and hands off... it
+   does not execute steps" precisely: recognizing "due" and advancing
+   `next_run_at` is *all* `process_due_skill_schedules` does.
+   `user_schedules` rows with `skill_id` set don't fit the
+   `scheduled_messages` queue's one-row-one-chat model the existing
+   command path uses (a skill fans out to N entities per tick, not one),
+   so this queries `user_schedules` directly on a timer instead of going
+   through `claim_user_command_messages`.
+
+6. **Per-entity dispatch calls the conversation graph directly, in-process
+   — not `process_webhook_with_graph`, and not a second HTTP hop.** The
+   dispatcher already runs inside chat_orchestrator, so there's no reason
+   to loop back through its own `/chat` endpoint. It also needs
+   `expert_error`/`expert_executed` off the final graph state to decide
+   success vs. failure and where to route a failure — information
+   `process_webhook_with_graph`'s public contract narrows away (it returns
+   only `(text, tool_results, reply_markup, tokens)`). Calling
+   `build_full_conversation_graph` + `invoke_full_graph` directly, the same
+   two calls `process_webhook_with_graph` itself makes, gives the full
+   state dict without touching that function's signature (a wide-
+   blast-radius change — every existing caller unpacks its narrow tuple).
+
+7. **Ownership split between `skill_runner.py` and `skill_schedule_dispatch.py`.**
+   `skill_runner.py` executes the skill and delivers *success* messages
+   progressively as flagged steps complete (`_ResponseBuffer`); it has no
+   notion of run history or staff-vs-customer routing. The dispatcher owns
+   everything that happens once the graph call returns: logging the
+   outcome (item 3) and routing a *failure*'s notification (item 4),
+   reusing the org resolution already done for authorization rather than a
+   second lookup. A successful run's messages are already delivered by the
+   time the dispatcher sees the result; it only ever needs to log.
+
+8. **The alert trigger (item 6) is not a fan-out.** A cron-scheduled skill
+   fans one schedule out across every eligible entity of its
+   `anchor_entity_type`. An alert-triggered skill does the opposite: it
+   targets *exactly the one grid the alert concerns*, never every grid —
+   firing a grid's triggered skill into every *other* grid's chat would
+   obviously be wrong. Modeled as `user_schedules` rows with a new
+   `schedule_type='notify_trigger'` value (`cron_expression`/`next_run_at`
+   simply unused on these rows — `handle_notify` wakes them directly, no
+   poll loop involved) rather than a schema fork, so the same
+   `skill_id`/`anchor_entity_type`/authorization/dispatch machinery
+   applies unchanged; only *which* entity gets targeted differs
+   (`entity_fanout`'s eligibility query has no part in this path — the one
+   "entity" is already resolved by `handle_notify` via
+   `resolve_grid_notification_target`). Wired in as a backgrounded task
+   after `_resolve_notify_ticket_full` (the correlation decision) returns,
+   never before — firing earlier would re-run triggered skills on every
+   duplicate re-fire of the same alert, exactly the noise
+   `ALERT_CORRELATION_ENABLED` exists to prevent. Rate limit
+   (`ALERT_TRIGGER_MIN_INTERVAL_SECONDS = 300`) keyed on
+   `(schedule_id, grid_name)`, read from `user_schedule_logs`' own
+   `anchor_entity_id` column — no new table. A malformed/unparseable last-
+   run timestamp fails **open** (not rate-limited) rather than silently
+   blocking a grid's alerts forever on bad data.
+
+9. **`skills.created_by` liveness, not the schedule's own creator.** Item 2's
+   "look up the creating account" is about the *skill's* creator
+   (`skills.created_by`), checked once per skill dispatch — not
+   `user_schedules.created_by_email`, since one staff-authored skill can be
+   scheduled by several different `user_schedules` rows (different orgs
+   each scheduling the same skill), and "abort all runs of that skill" only
+   makes sense as a property of the skill itself. New
+   `AuthService.is_account_email_live` returns a tri-state
+   `Optional[bool]` (`True`/`False`/`None`-for-"couldn't check") rather
+   than a plain bool: a DB error must skip the tick, exactly like
+   `_reconcile_expert`'s pre-existing "0 eligible entities, skip — don't
+   mass-terminate" safety property (preserved unchanged in
+   `entity_fanout`'s callers) — a transient Auth DB outage must never flip
+   a skill to `unusable`.
+
+10. **`user_schedules.command` became nullable, with two new CHECK
+    constraints** (`db/migrations/0013_skill_scheduling.sql`): exactly one
+    of `command`/`skill_id` per row, and `anchor_entity_type` set if and
+    only if `skill_id` is. A skill row has no single command text — the
+    skill's own steps are what runs.
+
+11. **`skill_max_tool_rounds` (item 7) is read via `tools_payload is not None`,
+    not a new parameter.** `_call_llm_step_with_tools` already receives
+    `tools_payload=None` for every non-skill step (Phase 2) — that's
+    already the exact `is_skill_step` signal, so no signature change was
+    needed to pick the right ceiling.
+
 ---
 
 ## Phase 6 — Remove persistent agents
