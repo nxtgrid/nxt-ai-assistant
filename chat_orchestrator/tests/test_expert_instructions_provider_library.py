@@ -5,6 +5,30 @@ import pytest
 from orchestrator.services import expert_instructions_provider as eip
 
 
+@pytest.fixture(autouse=True)
+def _force_bundled_prompts(monkeypatch):
+    """Force PROMPTS to resolve "experts.definitions" from the bundled file,
+    regardless of what's configured in the environment.
+
+    This file's tests are about ExpertInstructionsProvider's *parsing* of the
+    bundled default document, not about live DB/Google-Doc override
+    resolution -- but PROMPTS is a process-wide singleton
+    (shared/prompts/core.py's _build_default_library) whose DB/GDoc lookups
+    activate automatically whenever CHAT_DB_URL / GOOGLE_SERVICE_ACCOUNT_JSON
+    happen to be configured, e.g. a developer's local .env copied in for
+    unrelated reasons. Without this, these tests silently stop testing the
+    committed bundled document and start testing whatever's live in the real
+    chat_db prompts table or Google Doc at the moment they happen to run --
+    which is exactly what produced a false "grid_analyst is missing"
+    failure during Phase 4 of
+    docs/superpowers/plans/2026-08-06-user-designed-skills.md (the live doc
+    had grid_analyst struck through at that moment; the bundled file never
+    did). Monkeypatch auto-reverts after each test.
+    """
+    monkeypatch.setattr(eip.PROMPTS, "_db_body_for", None)
+    monkeypatch.setattr(eip.PROMPTS, "_gdoc_body_for", None)
+
+
 def test_fallback_loader_is_gone():
     assert not hasattr(eip, "_load_fallback_expert_instructions")
 

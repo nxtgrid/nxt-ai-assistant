@@ -137,3 +137,62 @@ The log showed `h2 4.4.0 CVE-2026-71554, fix: 4.4.1` — `h2` is a transitive
 dependency of `httpx[http2]`, not anything this PR touched. Fixed with
 `uv lock --upgrade-package h2` (a 3-line lockfile diff), verified locally
 with the command above before pushing.
+
+## A local `.env` with real credentials makes some tests silently non-hermetic
+
+`shared.prompts.PROMPTS` (`shared/prompts/core.py`) is a **process-wide
+singleton**, built once at import time (`_build_default_library`) with its
+DB-override and Google-Doc lookups wired up automatically whenever
+`CHAT_DB_URL`/`CHAT_DB_SERVICE_KEY`/`GOOGLE_SERVICE_ACCOUNT_JSON` happen to be
+set — it has no "test mode." Any test that touches `PROMPTS` (directly, or
+indirectly through something like `ExpertInstructionsProvider`, which reads
+`experts.definitions` through it) inherits *whatever's live* in the real
+`chat_db` prompts table or Google Doc at that exact moment, the instant real
+credentials are present in the process's environment — including a
+`chat_orchestrator/.env` copied in from a working deployment for unrelated
+local-dev reasons (e.g. to test a DB-reading feature in a git worktree). CI
+never hits this (`ci.yml`'s Tests job sets only a placeholder
+`CHAT_DB_URL`/`CHAT_DB_SERVICE_KEY` and no Google credentials at all, so it
+always resolves to the bundled files) — this is purely a local-environment
+trap.
+
+**If a test whose name says "bundled" or a checksum/snapshot test
+(`test_prompt_parity.py`) fails locally, check what's in your `chat_orchestrator/.env`
+before suspecting the codebase.** A quick way to check without printing
+secrets: `awk -F= '{print $1"="length($2)}' chat_orchestrator/.env` — real
+values are tens to thousands of characters; template/placeholder values are
+usually empty or a handful of chars.
+
+**Fix for a test that needs deterministic bundled content:** don't import the
+`shared.prompts.PROMPTS` singleton. Construct a bare `PromptLibrary()`
+instead (`from shared.prompts import PromptLibrary`) — leaving
+`db_body_for`/`gdoc_body_for` unset always resolves from the bundled file,
+regardless of environment (see `test_prompt_parity.py`). For code with no
+injection seam (`ExpertInstructionsProvider` imports the module-level
+`PROMPTS` directly), monkeypatch the singleton's `_db_body_for`/
+`_gdoc_body_for` attributes to `None` for the test's duration instead (see
+`test_expert_instructions_provider_library.py`'s `_force_bundled_prompts`
+fixture) — pytest's `monkeypatch` reverts it automatically.
+
+**2026-08-07 incident (reference case):** During Phase 4 of
+`docs/superpowers/plans/2026-08-06-user-designed-skills.md`, a `chat_orchestrator/.env`
+copied into a git worktree (for the skill builder's own DB-reading work) had
+real `CHAT_DB_URL`/`GOOGLE_SERVICE_ACCOUNT_JSON`/`EXPERT_INSTRUCTIONS_DOC_ID`
+values. `test_get_all_expert_ids_returns_the_bundled_experts`,
+`test_bundled_experts_still_parse_despite_pre_existing_format_quirks`, and
+`test_prompt_text_has_not_drifted` all failed — the live experts-definitions
+source had `grid_analyst` struck through at that moment, and the live
+`customer.system`/`staff.system`/`experts.definitions` text didn't match the
+committed `prompt_checksums.json` snapshot, neither of which reflected
+anything actually wrong in the repo. A first investigation pass
+(`git stash --include-untracked` to check against a "clean" tree) missed
+this: `.env` is gitignored, and `--include-untracked` does not stash
+gitignored files, so the live-credentials `.env` stayed in place throughout
+that check and the failures reproduced regardless of any code diff — for
+the wrong reason. Root-caused on a second pass by testing in a worktree with
+no `.env` copied in at all (failures vanished) and confirming the mechanism
+directly (monkeypatching `PROMPTS._gdoc_body_for` to a fake live body made a
+freshly-checked-out `main` reproduce the exact same "missing expert"
+symptom). Fixed by making the three tests construct/force bundled-only
+resolution instead of touching `prompt_checksums.json` or any bundled
+content — there was no actual drift to reconcile.
