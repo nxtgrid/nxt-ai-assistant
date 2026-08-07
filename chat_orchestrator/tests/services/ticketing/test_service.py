@@ -44,6 +44,7 @@ class _FakeBackend:
         self.create_error: Optional[Exception] = None
         self.create_calls: List[TicketCreateRequest] = []
         self.transition_to_done_calls: List[str] = []
+        self.transition_returns: bool = True
         self.status_by_ref: Dict[str, Optional[TicketStatus]] = {}
         self.get_status_calls: List[str] = []
         self.get_status_error: Optional[Exception] = None
@@ -54,8 +55,9 @@ class _FakeBackend:
     def has_credentials(self) -> bool:
         return True
 
-    async def transition_to_done(self, ref: str) -> None:
+    async def transition_to_done(self, ref: str) -> bool:
         self.transition_to_done_calls.append(ref)
+        return self.transition_returns
 
     async def get_status(self, ref: str) -> Optional[TicketStatus]:
         self.get_status_calls.append(ref)
@@ -90,6 +92,8 @@ class _FakeTicketRepository:
         self.refs_by_escalation: dict[str, str] = {}
         self.find_ref_for_escalation_calls: list[str] = []
         self.transition_to_done_by_ref_calls: list[str] = []
+        self.transition_returns: bool = True
+        self.comments_by_ref: dict[str, list[dict]] = {}
         self.open_refs_by_backend: dict[str, list[str]] = {}
         self.list_open_by_backend_calls: list[tuple] = []
 
@@ -126,8 +130,12 @@ class _FakeTicketRepository:
     async def get_status(self, ref: str):
         return None
 
-    async def transition_to_done_by_ref(self, ref: str) -> None:
+    async def list_comments_by_ref(self, ref: str, *, limit: int = 5) -> List[dict]:
+        return self.comments_by_ref.get(ref, [])
+
+    async def transition_to_done_by_ref(self, ref: str) -> bool:
         self.transition_to_done_by_ref_calls.append(ref)
+        return self.transition_returns
 
     async def list_open_by_backend(self, backend: str, *, limit: int = 200) -> List[str]:
         self.list_open_by_backend_calls.append((backend, limit))
@@ -530,6 +538,110 @@ class TestTransitionToDone:
         # Internal backend already persists via the shared repository itself --
         # TicketService must not also call it, or resolved_at would be bumped twice.
         assert repository.transition_to_done_by_ref_calls == []
+
+    @pytest.mark.asyncio
+    async def test_announces_an_internal_closure(self, monkeypatch):
+        """Internal tickets take their flip signal from the backend, which is
+        the only thing that wrote the canonical row."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        internal = _FakeBackend("internal")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["TKT-1"] = TicketRecord(
+            id="ticket-1", ticket_ref="TKT-1", backend="internal",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, internal=internal, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        await service.transition_to_done("TKT-1")
+
+        assert len(events) == 1
+        assert events[0].ticket_ref == "TKT-1"
+        assert events[0].kind == "transition"
+        assert events[0].to_status == "done"
+        # The invariant from this class's existing tests still holds.
+        assert repository.transition_to_done_by_ref_calls == []
+
+    @pytest.mark.asyncio
+    async def test_announces_a_jira_closure(self, monkeypatch):
+        """Jira tickets take their flip signal from the canonical write, since
+        the Jira backend only talks to the Jira API."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        jira = _FakeBackend("jira")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        await service.transition_to_done("OPS-99")
+
+        assert [e.ticket_ref for e in events] == ["OPS-99"]
+
+    @pytest.mark.asyncio
+    async def test_stays_silent_on_a_redundant_jira_close(self, monkeypatch):
+        """A retried Jira webhook must not re-announce an already-closed ticket."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        jira = _FakeBackend("jira")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        repository.transition_returns = False  # row was already done
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        await service.transition_to_done("OPS-99")
+
+        assert events == []
+
+    @pytest.mark.asyncio
+    async def test_stays_silent_on_a_redundant_internal_close(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+        events: list = []
+
+        class _Notifier:
+            async def notify(self, event):
+                events.append(event)
+                return True
+
+        internal = _FakeBackend("internal")
+        internal.transition_returns = False  # row was already done
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["TKT-1"] = TicketRecord(
+            id="ticket-1", ticket_ref="TKT-1", backend="internal",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, internal=internal, ticket_repository=repository)
+        service._update_notifier = _Notifier()
+
+        await service.transition_to_done("TKT-1")
+
+        assert events == []
 
 
 class TestSyncJiraTicketStatuses:

@@ -169,11 +169,13 @@ class FakeCanonicalTicketRepository:
             ticket_type=ticket["ticket_type"],
         )
 
-    async def transition_to_done_by_ref(self, ref: str) -> None:
+    async def transition_to_done_by_ref(self, ref: str) -> bool:
         ticket = self._ticket(ref)
-        if ticket is not None:
-            ticket["status"] = "done"
-            ticket["resolved_at"] = "2026-01-01T00:01:00Z"
+        if ticket is None or ticket["status"] == "done":
+            return False
+        ticket["status"] = "done"
+        ticket["resolved_at"] = "2026-01-01T00:01:00Z"
+        return True
 
     async def find_ref_for_escalation(self, mapping_id: str) -> Optional[str]:
         if self.raise_on_find:
@@ -470,8 +472,9 @@ class TestTransitionToDone:
         backend, fake = _make_backend()
         _seed_ticket(fake)
 
-        await backend.transition_to_done("TKT-000001")
+        flipped = await backend.transition_to_done("TKT-000001")
 
+        assert flipped is True
         assert fake.canonical_tickets.tickets[0]["status"] == "done"
         assert "resolved_at" in fake.canonical_tickets.tickets[0]
 

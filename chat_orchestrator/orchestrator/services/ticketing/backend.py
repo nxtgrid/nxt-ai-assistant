@@ -162,8 +162,13 @@ class TicketBackend(Protocol):
         """Fetch the current status of a ticket, or None if not found."""
         ...
 
-    async def transition_to_done(self, ref: str) -> None:
-        """Mark a ticket as done/resolved. Non-blocking -- failures are logged, not raised."""
+    async def transition_to_done(self, ref: str) -> bool:
+        """Mark a ticket as done/resolved.
+
+        Returns True only when *this* call is what closed it, so callers can
+        announce a closure exactly once across retries and racing paths.
+        Non-blocking -- failures are logged and reported as False, not raised.
+        """
         ...
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:

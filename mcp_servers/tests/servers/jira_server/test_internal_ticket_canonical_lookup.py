@@ -193,23 +193,119 @@ async def test_add_internal_comment_returns_false_for_unknown_ref(fake_tables):
     assert fake_tables["ticket_comments"] == []
 
 
-async def test_close_internal_ticket_updates_canonical_tickets_row(fake_tables):
-    fake_tables["tickets"].append(
-        {
-            "id": "uuid-1",
-            "ticket_ref": "TKT-000001",
-            "backend": "internal",
-            "status": "open",
-            "resolved_at": None,
-        }
-    )
+class _FakeHttpResponse:
+    """Async context manager standing in for aiohttp's response object."""
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+
+    async def __aenter__(self) -> "_FakeHttpResponse":
+        return self
+
+    async def __aexit__(self, *_exc) -> bool:
+        return False
+
+
+class _FakeHttpSession:
+    """Async context manager standing in for aiohttp.ClientSession.
+
+    Exercises close_internal_ticket's standalone-deployment fallback path
+    (used when the in-process TicketService import isn't available -- see
+    its docstring), by forcing _DIRECT_TICKET_SERVICE_AVAILABLE to False.
+    """
+
+    def __init__(self, status: int = 200) -> None:
+        self._status = status
+        self.posted_urls: list[str] = []
+        self.posted_headers: list[dict] = []
+
+    async def __aenter__(self) -> "_FakeHttpSession":
+        return self
+
+    async def __aexit__(self, *_exc) -> bool:
+        return False
+
+    def post(self, url, **kwargs):
+        self.posted_urls.append(url)
+        self.posted_headers.append(kwargs.get("headers"))
+        return _FakeHttpResponse(self._status)
+
+
+async def test_close_internal_ticket_prefers_the_in_process_ticket_service(monkeypatch):
+    """The actual deployed topology: mcp_servers bundled inside the
+    chat-orchestrator image, both in one process -- see the
+    _DIRECT_TICKET_SERVICE_AVAILABLE import at module top."""
+    calls: list[str] = []
+
+    class _FakeTicketService:
+        def __init__(self, get_supabase_client):
+            assert get_supabase_client is jira_module._get_orchestrator_db
+
+        async def transition_to_done(self, ref: str) -> None:
+            calls.append(ref)
+
+    monkeypatch.setattr(jira_module, "_DIRECT_TICKET_SERVICE_AVAILABLE", True)
+    monkeypatch.setattr(jira_module, "_OrchestratorTicketService", _FakeTicketService)
 
     ok = await jira_module.client.close_internal_ticket("TKT-000001")
 
     assert ok is True
-    row = fake_tables["tickets"][0]
-    assert row["status"] == "done"
-    assert row["resolved_at"] is not None
+    assert calls == ["TKT-000001"]
+
+
+async def test_close_internal_ticket_in_process_failure_returns_false(monkeypatch):
+    class _FailingTicketService:
+        def __init__(self, get_supabase_client):
+            pass
+
+        async def transition_to_done(self, ref: str) -> None:
+            raise RuntimeError("db down")
+
+    monkeypatch.setattr(jira_module, "_DIRECT_TICKET_SERVICE_AVAILABLE", True)
+    monkeypatch.setattr(jira_module, "_OrchestratorTicketService", _FailingTicketService)
+
+    ok = await jira_module.client.close_internal_ticket("TKT-000001")
+
+    assert ok is False
+
+
+async def test_close_internal_ticket_posts_to_the_orchestrator(monkeypatch):
+    """Standalone-deployment fallback -- forced via _DIRECT_TICKET_SERVICE_AVAILABLE
+    since this test's own process doesn't have `orchestrator` on the path either
+    way, which is what makes this path live in the real standalone case."""
+    monkeypatch.setattr(jira_module, "_DIRECT_TICKET_SERVICE_AVAILABLE", False)
+    monkeypatch.setenv("CHAT_ORCHESTRATOR_URL", "http://orchestrator.internal")
+    monkeypatch.setenv("API_KEY", "secret-key")
+    fake_session = _FakeHttpSession(status=200)
+    monkeypatch.setattr(jira_module.aiohttp, "ClientSession", lambda: fake_session)
+
+    ok = await jira_module.client.close_internal_ticket("TKT-000001")
+
+    assert ok is True
+    assert fake_session.posted_urls == [
+        "http://orchestrator.internal/internal/tickets/TKT-000001/close"
+    ]
+    assert fake_session.posted_headers == [{"X-Api-Key": "secret-key"}]
+
+
+async def test_close_internal_ticket_returns_false_on_http_error(monkeypatch):
+    monkeypatch.setattr(jira_module, "_DIRECT_TICKET_SERVICE_AVAILABLE", False)
+    monkeypatch.setenv("CHAT_ORCHESTRATOR_URL", "http://orchestrator.internal")
+    fake_session = _FakeHttpSession(status=500)
+    monkeypatch.setattr(jira_module.aiohttp, "ClientSession", lambda: fake_session)
+
+    ok = await jira_module.client.close_internal_ticket("TKT-000001")
+
+    assert ok is False
+
+
+async def test_close_internal_ticket_returns_false_without_orchestrator_url(monkeypatch):
+    monkeypatch.setattr(jira_module, "_DIRECT_TICKET_SERVICE_AVAILABLE", False)
+    monkeypatch.delenv("CHAT_ORCHESTRATOR_URL", raising=False)
+
+    ok = await jira_module.client.close_internal_ticket("TKT-000001")
+
+    assert ok is False
 
 
 async def test_get_issue_tool_returns_internal_ticket_without_touching_jira(

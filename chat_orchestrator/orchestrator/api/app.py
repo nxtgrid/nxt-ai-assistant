@@ -571,6 +571,32 @@ async def list_scheduled_jobs(request: Request):
     return JSONResponse({"jobs": jobs})
 
 
+@app.post("/internal/tickets/{ticket_ref}/close")
+async def close_ticket_internal(ticket_ref: str, request: Request) -> JSONResponse:
+    """Close a ticket through TicketService, callable from the tools-service process.
+
+    The Jira MCP server's change_status action used to close internal tickets
+    by writing the `tickets` table directly, bypassing TicketRepository
+    (documented as the sole writer) and, now that TicketService.transition_to_done
+    posts the update card itself, meaning a bot-initiated close was the one
+    transition that never reached Telegram. Routing it here restores both.
+
+    Authentication:
+        - X-Api-Key header required (same as /api/v1/jobs above)
+    """
+    get_auth_method(request)
+
+    from orchestrator.services.supabase_client import get_supabase_client
+    from orchestrator.services.ticketing.service import TicketService
+
+    try:
+        await TicketService(get_supabase_client=get_supabase_client).transition_to_done(ticket_ref)
+    except Exception as exc:
+        logger.exception("Internal close failed for {!r}", ticket_ref)
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+    return JSONResponse(status_code=200, content={"ok": True, "ticket_ref": ticket_ref})
+
+
 async def _handle_jira_webhook(payload: dict) -> None:
     """Dispatch Jira webhook events to EscalationService handlers."""
     from orchestrator.services.escalation_service import EscalationService

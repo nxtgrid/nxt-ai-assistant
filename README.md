@@ -620,6 +620,7 @@ EXPERT_INSTRUCTIONS_DOC_ID=1ghi456jkl789  # Expert definitions
 JIRA_BASE_URL=https://your-domain.atlassian.net
 JIRA_USERNAME=your-email@example.com
 JIRA_API_TOKEN=your-api-token
+JIRA_WEBHOOK_SECRET=a-long-random-string  # see "Jira Webhook" below
 
 # Grafana (dashboard/panel tools)
 GRAFANA_URL=http://localhost:3000
@@ -987,6 +988,64 @@ curl "https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo"
 ```
 
 Re-run `setWebhook` after redeployments if the URL changes.
+
+### Jira Webhook
+
+Anansi is the single author of ticket updates in Telegram — for Jira tickets
+*and* internal (Jira-less) ones alike. Jira notifies Anansi of what changed;
+Anansi decides what, where, and whether to post. **Turn off any direct
+Jira → Telegram integration** (a native Jira app, an Automation rule, or an
+n8n flow that posts to Telegram on its own) before enabling this, or every
+ticket change gets announced twice.
+
+**1. Set the shared secret** alongside the other `JIRA_*` variables above:
+
+```bash
+JIRA_WEBHOOK_SECRET=<a long random string>
+```
+
+The endpoint is fail-closed: with no secret configured it rejects every
+request rather than accepting unauthenticated ones.
+
+**2. Create the webhook** in Jira: *Settings → System → Webhooks → Create*.
+
+| Field | Value |
+|---|---|
+| URL | `https://yourapp.example.com/webhook/jira` |
+| Secret | the same `JIRA_WEBHOOK_SECRET` value |
+| Issue events | **Issue updated**, **Comment created** |
+| JQL filter | `project = OPS` (match your `JIRA_PROJECT_KEY`) |
+
+Both event types are required — this is not a "pick one" setting:
+
+- **Issue updated** — status transitions. Closure is detected via Jira's
+  `statusCategory` (`done`), not status *names*, so a custom workflow status
+  like "Resolved" or "Completed" works without any extra configuration.
+- **Comment created** — public ("Reply to customer") comments are relayed to
+  the escalation group, forwarded to the customer when exactly one
+  organization matches, and mirrored into the canonical ticket-comment log so
+  closing summaries can read Jira and internal ticket history from one place.
+  The bot's own comments are filtered out by author email, so no reply loop
+  forms.
+
+Jira Cloud signs the request body with HMAC-SHA256 and sends the digest as
+`X-Hub-Signature: sha256=<hex>`; Anansi verifies it with a constant-time
+comparison and returns 401 on a mismatch.
+
+**What gets posted.** On a status transition, and on any comment an LLM
+judges operationally significant (a diagnosis, a root cause, a blocker, a
+resolution — not routine chatter), Anansi renders a ticket update card —
+reference, status, summary, and a short summary of recent activity — and
+places it against that ticket's own Telegram message: edited in place while
+the message is still on screen, or posted as a fresh reply once the chat has
+moved on. Internal tickets get the identical card from the same code path, so
+nothing about this changes if you later turn Jira off entirely.
+
+**Verifying it works.** After saving the webhook, transition a test issue and
+tail the orchestrator logs for `ticket update` and `Jira webhook` lines. An
+`HMAC mismatch` warning means the secret differs between Jira and your env
+vars. Silence on a real transition usually means the issue has no active
+escalation mapping — expected for a ticket Anansi never filed.
 
 ### Environment Variables in Production
 

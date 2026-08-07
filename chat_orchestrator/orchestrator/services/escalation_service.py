@@ -94,6 +94,31 @@ def _adf_to_text(adf: Any, _depth: int = 0, _max_depth: int = 50) -> str:
     return "".join(_adf_to_text(child, _depth + 1, _max_depth) for child in adf.get("content", []))
 
 
+def _is_closure_event(payload: Dict[str, Any]) -> bool:
+    """Whether a jira:issue_updated payload represents a move into Done.
+
+    Uses Jira's ``statusCategory`` rather than status *names*: category keys
+    are fixed ("new", "indeterminate", "done") while names are per-workflow,
+    so a project whose done status is called "Resolved" or "Completed" is
+    handled without configuration. This mirrors the check ``_fetch_jira_issue_fields``
+    already uses when reading issue status directly, and how
+    ``JiraTicketBackend._transition_jira_to_done`` picks its transition.
+    """
+    changed_status = any(
+        item.get("field") == "status" for item in payload.get("changelog", {}).get("items", [])
+    )
+    if not changed_status:
+        return False
+    category = (
+        payload.get("issue", {})
+        .get("fields", {})
+        .get("status", {})
+        .get("statusCategory", {})
+        .get("key", "")
+    )
+    return category == "done"
+
+
 class EscalationService:
     """Service for escalating customer support issues to internal Telegram group."""
 
@@ -3149,6 +3174,43 @@ class EscalationService:
 
         author_name = comment.get("author", {}).get("displayName", "Support")
 
+        # Mirror into the canonical comment log so a closing summary can read
+        # Jira and internal ticket activity from one table (ticket_comments.
+        # source already reserves 'jira' for exactly this), then let the
+        # ticket update notifier decide whether this specific comment is
+        # significant enough to post its own card -- independent of the
+        # verbatim escalation-group relay below, which every public Jira
+        # comment still reaches.
+        ticket_ref = mapping.get("ticket_ref")
+        if ticket_ref:
+            try:
+                await self._tickets.add_comment(ticket_ref, comment_text, public=is_public)
+            except Exception:
+                LOGGER.warning(
+                    "Jira webhook: failed to mirror comment for {}", ticket_ref, exc_info=True
+                )
+            try:
+                from orchestrator.services.ticketing.update_notifier import TicketEvent
+
+                ticket_url = (
+                    f"{self._jira_base_url.rstrip('/')}/browse/{issue_key}"
+                    if self._jira_base_url
+                    else None
+                )
+                await self._tickets.notify_ticket_event(
+                    TicketEvent(
+                        ticket_ref=ticket_ref,
+                        kind="comment",
+                        comment_body=comment_text,
+                        comment_author=author_name,
+                        ticket_url=ticket_url,
+                    )
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Jira webhook: comment notification failed for {}", ticket_ref, exc_info=True
+                )
+
         # Post to escalation group
         LOGGER.info(
             "Routing Jira comment on {} to escalation group (topic={})",
@@ -3183,13 +3245,16 @@ class EscalationService:
             )
 
     async def handle_jira_issue_updated(self, payload: Dict[str, Any]) -> None:
-        """Handle a jira:issue_updated webhook — notify on ticket closure."""
-        # Only act on transitions to Done/Closed
-        closed = any(
-            item.get("field") == "status" and item.get("toString", "") in ("Done", "Closed")
-            for item in payload.get("changelog", {}).get("items", [])
-        )
-        if not closed:
+        """Handle a jira:issue_updated webhook — close on ticket closure.
+
+        Does not post to Telegram directly: ``self._tickets.transition_to_done()``
+        (``TicketService``) already renders and places the update card itself
+        once the canonical write actually flips the row, so a retried webhook
+        delivery cannot double-announce a closure. This handler's own job is
+        just the escalation-session bookkeeping the ticket update alone
+        doesn't cover.
+        """
+        if not _is_closure_event(payload):
             return
 
         issue_key = payload.get("issue", {}).get("key", "")
@@ -3199,7 +3264,6 @@ class EscalationService:
             return
 
         mapping = ctx["mapping"]
-        escalation_topic_id = ctx["escalation_topic_id"]
         jira_orgs = ctx["jira_orgs"]
         escalation_org_name = ctx["escalation_org_name"]
 
@@ -3217,14 +3281,6 @@ class EscalationService:
                     ticket_ref,
                     exc_info=True,
                 )
-
-        # Notify escalation group
-        await self._send_telegram_message(
-            chat_id=self._escalation_chat_id,
-            text=f"✅ Jira ticket *{issue_key}* has been closed.",
-            topic_id=escalation_topic_id,
-            reply_markup=None,
-        )
 
         notify_customer = self._single_matching_org(jira_orgs, escalation_org_name)
         await self.close_escalation_by_mapping(mapping=mapping, notify_customer=notify_customer)

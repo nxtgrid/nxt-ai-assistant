@@ -900,8 +900,9 @@ class TestTransitionToDone:
         )
         backend = _make_backend()
 
-        await backend.transition_to_done("OPS-42")
+        flipped = await backend.transition_to_done("OPS-42")
 
+        assert flipped is True
         method, url, kwargs = fake_session.calls[-1]
         assert method == "POST"
         assert kwargs["json"] == {"transition": {"id": "31"}}
@@ -924,7 +925,9 @@ class TestTransitionToDone:
 
         # Should not raise, and should not attempt a POST (queue would raise
         # AssertionError on an unqueued POST if one were attempted).
-        await backend.transition_to_done("OPS-42")
+        flipped = await backend.transition_to_done("OPS-42")
+
+        assert flipped is False
 
 
 class TestFindByEscalation:

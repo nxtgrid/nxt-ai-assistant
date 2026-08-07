@@ -419,8 +419,8 @@ class JiraTicketBackend:
             raw_status=fields.get("raw_status", ""),
         )
 
-    async def transition_to_done(self, ref: str) -> None:
-        await self._transition_jira_to_done(ref)
+    async def transition_to_done(self, ref: str) -> bool:
+        return await self._transition_jira_to_done(ref)
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         return await self._search_jira_for_escalation(mapping_id)
@@ -802,7 +802,7 @@ class JiraTicketBackend:
             LOGGER.warning("Error adding Jira comment to {}: {}", issue_key, e)
             return False
 
-    async def _transition_jira_to_done(self, issue_key: str) -> None:
+    async def _transition_jira_to_done(self, issue_key: str) -> bool:
         """Transition a Jira issue to Done from whatever status it currently has.
 
         Fetches available transitions for the issue and picks the first one
@@ -810,7 +810,10 @@ class JiraTicketBackend:
         how handle_jira_issue_updated detects closures from Jira -- no hardcoded
         transition IDs required, works regardless of current workflow state.
 
-        Non-blocking -- failures are logged but never raised.
+        Non-blocking -- failures are logged but never raised. The return value
+        is advisory only: ``TicketService.transition_to_done`` takes its flip
+        signal from the canonical write instead, since this call has no
+        repository reference of its own to persist against.
         """
         transitions_url = f"{self._jira_base_url}/rest/api/3/issue/{issue_key}/transitions"
         try:
@@ -831,7 +834,7 @@ class JiraTicketBackend:
                         resp.status,
                         body,
                     )
-                    return
+                    return False
                 data = await resp.json()
 
             # 2. Find the transition that leads to "Done" status category
@@ -849,7 +852,7 @@ class JiraTicketBackend:
                     "No 'Done' transition available for {} -- already closed or workflow mismatch",
                     issue_key,
                 )
-                return
+                return False
 
             # 3. Execute the transition
             async with session.post(
@@ -866,13 +869,15 @@ class JiraTicketBackend:
                         resp.status,
                         body,
                     )
-                else:
-                    LOGGER.info(
-                        "Transitioned Jira {} to Done (transition {})", issue_key, transition_id
-                    )
+                    return False
+                LOGGER.info(
+                    "Transitioned Jira {} to Done (transition {})", issue_key, transition_id
+                )
+                return True
 
         except Exception:
             LOGGER.warning("Error transitioning Jira {} to Done", issue_key, exc_info=True)
+            return False
 
     async def _fetch_jira_issue_fields(self, issue_key: str) -> Optional[Dict[str, Any]]:
         """Fetch summary and status category for a Jira issue.

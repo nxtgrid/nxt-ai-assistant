@@ -189,17 +189,57 @@ class TicketRepository:
         if not getattr(response, "data", None):
             raise TicketRepositoryError("canonical ticket comment write returned no row")
 
-    async def transition_to_done_by_ref(self, ref: str) -> None:
+    async def list_comments_by_ref(self, ref: str, *, limit: int = 5) -> list[dict[str, Any]]:
+        """Return the most recent comments for a ticket, oldest-first.
+
+        Ordered newest-first in the query so ``limit`` keeps the *latest*
+        comments, then reversed so the summariser reads them chronologically.
+        Returns [] for an unknown ref rather than raising -- this feeds a
+        best-effort notification, not a correctness-critical path.
+        """
+        ticket = await self.get_by_ref(ref)
+        if ticket is None:
+            return []
+        try:
+            response = (
+                self._raw_client()
+                .table("ticket_comments")
+                .select("author,body,is_public,source,created_at")
+                .eq("ticket_id", ticket.id)
+                .order("created_at", desc=True)
+                .limit(limit)
+                .execute()
+            )
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to read canonical ticket comments: {exc}") from exc
+        rows = list(getattr(response, "data", None) or [])
+        return list(reversed(rows))
+
+    async def transition_to_done_by_ref(self, ref: str) -> bool:
+        """Close a ticket. Returns True only if this call is what closed it.
+
+        The ``status != 'done'`` guard makes this idempotent: Jira retries
+        webhook deliveries, and several close paths can race for the same
+        ticket. Callers use the return value to decide whether to announce
+        the closure, so a redundant close must report False rather than
+        raising (every caller already treats failures as non-fatal).
+        """
         ticket = await self.get_by_ref(ref)
         if ticket is None:
             raise TicketRepositoryError(f"cannot close: unknown ticket ref {ref}")
         payload = {"status": "done", "resolved_at": datetime.now(timezone.utc).isoformat()}
         try:
-            response = self._raw_client().table("tickets").update(payload).eq("id", ticket.id).execute()
+            response = (
+                self._raw_client()
+                .table("tickets")
+                .update(payload)
+                .eq("id", ticket.id)
+                .neq("status", "done")
+                .execute()
+            )
         except Exception as exc:
             raise TicketRepositoryError(f"failed to close canonical ticket: {exc}") from exc
-        if not getattr(response, "data", None):
-            raise TicketRepositoryError("canonical ticket close returned no row")
+        return bool(getattr(response, "data", None))
 
     async def update_by_ref(
         self, ref: str, *, summary: str | None = None, description: str | None = None
