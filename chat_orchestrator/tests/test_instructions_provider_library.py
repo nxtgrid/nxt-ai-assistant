@@ -330,3 +330,108 @@ async def test_get_instructions_with_no_organizations_scopes_to_none(monkeypatch
     await provider.get_instructions(user_context)
 
     assert captured["scope"] == RequestScope(organization_id=None)
+
+
+# ── skill catalog appended to context (Phase 3 of the skills plan) ─────────
+
+
+def _render_stub(context_text: str | None = None):
+    """A minimal PROMPTS.render stand-in, matching the _Rendered shape the
+    tests above already use."""
+    from shared.prompts.types import PromptSource
+
+    def capture_render(prompt_id, vars=None, scope=None):
+        class _Rendered:
+            system_text = "system"
+            source = PromptSource.BUNDLED
+            version = None
+            checksum = "abc12345"
+
+            def provenance(self):
+                return f"{prompt_id}@bundled:default:abc12345"
+
+        _Rendered.prompt_id = prompt_id
+        _Rendered.context_text = context_text
+        return _Rendered()
+
+    return capture_render
+
+
+def _skill(slug="find_tickets", summary="Finds open tickets.", staff_only=True):
+    from shared.prompts.skills import Skill
+
+    return Skill(id=f"id-{slug}", slug=slug, title=slug, summary=summary, staff_only=staff_only)
+
+
+@pytest.mark.asyncio
+async def test_staff_instructions_include_a_staff_only_skill(monkeypatch):
+    monkeypatch.setattr(ip.PROMPTS, "render", _render_stub())
+    monkeypatch.setattr(
+        "shared.prompts.skills.SKILL_CATALOG.all_skills", lambda: [_skill(staff_only=True)]
+    )
+
+    _system, context = await ip.InstructionsProvider()._get_staff_instructions_from_doc()
+
+    assert "# Available Skills" in context
+    assert "find_tickets" in context
+
+
+@pytest.mark.asyncio
+async def test_customer_instructions_exclude_a_staff_only_skill(monkeypatch):
+    monkeypatch.setattr(ip.PROMPTS, "render", _render_stub())
+    monkeypatch.setattr(
+        "shared.prompts.skills.SKILL_CATALOG.all_skills", lambda: [_skill(staff_only=True)]
+    )
+
+    _system, context = await ip.InstructionsProvider().get_customer_instructions()
+
+    assert context is None or "Available Skills" not in context
+
+
+@pytest.mark.asyncio
+async def test_customer_instructions_include_a_non_staff_only_skill(monkeypatch):
+    monkeypatch.setattr(ip.PROMPTS, "render", _render_stub())
+    monkeypatch.setattr(
+        "shared.prompts.skills.SKILL_CATALOG.all_skills", lambda: [_skill(staff_only=False)]
+    )
+
+    _system, context = await ip.InstructionsProvider().get_customer_instructions()
+
+    assert "find_tickets" in context
+
+
+@pytest.mark.asyncio
+async def test_no_skills_leaves_context_unchanged(monkeypatch):
+    monkeypatch.setattr(ip.PROMPTS, "render", _render_stub(context_text="existing knowledge block"))
+    monkeypatch.setattr("shared.prompts.skills.SKILL_CATALOG.all_skills", lambda: [])
+
+    _system, context = await ip.InstructionsProvider().get_customer_instructions()
+
+    assert context == "existing knowledge block"
+
+
+@pytest.mark.asyncio
+async def test_skill_catalog_appends_after_existing_context(monkeypatch):
+    monkeypatch.setattr(ip.PROMPTS, "render", _render_stub(context_text="existing knowledge block"))
+    monkeypatch.setattr(
+        "shared.prompts.skills.SKILL_CATALOG.all_skills", lambda: [_skill(staff_only=False)]
+    )
+
+    _system, context = await ip.InstructionsProvider().get_customer_instructions()
+
+    assert context.index("existing knowledge block") < context.index("# Available Skills")
+
+
+@pytest.mark.asyncio
+async def test_skill_catalog_fetch_failure_does_not_break_instructions(monkeypatch):
+    monkeypatch.setattr(ip.PROMPTS, "render", _render_stub(context_text="existing knowledge block"))
+
+    def boom():
+        raise RuntimeError("db unreachable")
+
+    monkeypatch.setattr("shared.prompts.skills.SKILL_CATALOG.all_skills", boom)
+
+    system, context = await ip.InstructionsProvider().get_customer_instructions()
+
+    assert system == "system"
+    assert context == "existing knowledge block"

@@ -203,6 +203,36 @@ def _cap_context(context_text: Optional[str]) -> Optional[str]:
     return clipped
 
 
+def _append_skill_catalog(context_message: Optional[str], *, is_staff: bool) -> Optional[str]:
+    """Append the '# Available Skills' block, if any skills are visible.
+
+    Runs on every turn here (both customer.system and staff.system are
+    rendered exactly once per turn), the same cadence as prepare_tools.py's
+    MCP tool-list assembly -- see
+    docs/superpowers/plans/2026-08-06-user-designed-skills.md Phase 3 for
+    why "presented alongside MCP tools" means this call site specifically.
+
+    Deliberately added AFTER _cap_context, not folded into the knowledge-
+    module budget it enforces: skill summaries are capped at save time
+    (Phase 3's "keep it under 200 chars"), so the catalog block stays small
+    on its own, and a skill's visibility shouldn't depend on how much
+    knowledge-module content happened to precede it in the same render.
+    """
+    from shared.prompts.skills import SKILL_CATALOG, render_skill_catalog, select_skills_for_context
+
+    try:
+        skills = SKILL_CATALOG.all_skills()
+    except Exception:
+        LOGGER.warning("Skill catalog fetch failed; continuing without", exc_info=True)
+        return context_message
+
+    visible = select_skills_for_context(skills, is_staff=is_staff)
+    catalog_block = render_skill_catalog(visible)
+    if not catalog_block:
+        return context_message
+    return f"{context_message}\n\n{catalog_block}" if context_message else catalog_block
+
+
 class Instruction(BaseModel):
     """Represents a system instruction."""
 
@@ -320,6 +350,7 @@ class InstructionsProvider:
         self._last_provenance = prompt_metadata(rendered)
         context_message = _postprocess_context(rendered.context_text, extract_staff_groups=False)
         context_message = _cap_context(context_message)
+        context_message = _append_skill_catalog(context_message, is_staff=False)
 
         LOGGER.info(
             f"Loaded customer instructions: {rendered.provenance()}, "
@@ -383,6 +414,7 @@ class InstructionsProvider:
         self._last_provenance = prompt_metadata(rendered)
         context_message = _postprocess_context(rendered.context_text, extract_staff_groups=True)
         context_message = _cap_context(context_message)
+        context_message = _append_skill_catalog(context_message, is_staff=True)
 
         LOGGER.info(
             f"Loaded staff instructions: {rendered.provenance()}, "

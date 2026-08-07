@@ -916,6 +916,23 @@ CREATE TABLE IF NOT EXISTS prompt_knowledge_overrides (
     PRIMARY KEY (prompt_id, module_id)
 );
 
+-- User-designed skills (docs/superpowers/plans/2026-08-06-user-designed-skills.md,
+-- Phase 3). See db/migrations/0011_skills.sql for the steps element shape.
+CREATE TABLE IF NOT EXISTS skills (
+    id             uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug           text NOT NULL UNIQUE,
+    title          text NOT NULL,
+    summary        text NOT NULL,
+    steps          jsonb NOT NULL DEFAULT '[]',
+    inputs         jsonb NOT NULL DEFAULT '[]',
+    staff_only     boolean NOT NULL DEFAULT true,
+    status         text NOT NULL DEFAULT 'active',
+    created_by     text NOT NULL,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    updated_at     timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT skills_status_chk CHECK (status IN ('active', 'disabled', 'unusable'))
+);
+
 -- ── Auto-update triggers ──────────────────────────────────────────────────────
 
 CREATE OR REPLACE FUNCTION update_updated_at()
@@ -937,7 +954,8 @@ BEGIN
         ('user_preferences'), ('broadcast_templates'), ('documents'),
         ('entities'), ('relationships'), ('persistent_agent_instances'),
         ('bot_artifacts'), ('internal_tickets'), ('ticket_correlations'),
-        ('prompt_labels'), ('knowledge_modules'), ('prompt_knowledge_overrides')
+        ('prompt_labels'), ('knowledge_modules'), ('prompt_knowledge_overrides'),
+        ('skills')
     LOOP
         EXECUTE format(
             'DROP TRIGGER IF EXISTS %I ON %I; CREATE TRIGGER %I BEFORE UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION update_updated_at()',
