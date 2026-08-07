@@ -10,7 +10,20 @@ import pathlib
 
 import pytest
 
-from shared.prompts import PROMPTS
+from shared.prompts import PromptLibrary
+
+# A bare PromptLibrary(), not the shared.prompts.PROMPTS singleton: PROMPTS is
+# built once at import time (_build_default_library) with its DB/GDoc lookups
+# wired up whenever CHAT_DB_URL / GOOGLE_SERVICE_ACCOUNT_JSON happen to be
+# configured -- a developer's local .env, copied in for unrelated reasons, is
+# enough. This file exists specifically to catch accidental edits to the
+# *committed bundled* prompt files (its own docstring: "review the diff
+# before committing"), so it must never be able to instead start checksumming
+# whatever's live in the real chat_db prompts table or a Google Doc at the
+# moment it happens to run. A bare PromptLibrary() leaves db_body_for/
+# gdoc_body_for unset, which resolves every prompt straight from the bundled
+# file, deterministically, regardless of environment.
+PROMPTS = PromptLibrary()
 
 SNAPSHOT = pathlib.Path(__file__).parent / "prompt_checksums.json"
 
