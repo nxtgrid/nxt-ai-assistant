@@ -454,11 +454,15 @@ class EnhancedSupabaseClient:
             # Calculate time threshold
             time_threshold = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
 
-            # Get messages ordered by message_index (chronological)
+            # Get messages ordered by message_index (chronological). Archived
+            # messages (rewound in the skill builder -- see
+            # 0012_message_archive.sql) are excluded at the query level so no
+            # caller can see one by forgetting to filter it out itself.
             response = (
                 client.table("chat_messages")
                 .select("*")
                 .eq("session_id", str(session_uuid))
+                .is_("archived_at", "null")
                 .gte("created_at", time_threshold.isoformat())
                 .order("message_index", desc=False)
                 .limit(max_messages)
@@ -544,6 +548,7 @@ class EnhancedSupabaseClient:
                 client.table("chat_messages")
                 .select("*")
                 .eq("session_id", str(session_uuid))
+                .is_("archived_at", "null")
                 .gte("created_at", time_threshold.isoformat())
                 .order("message_index", desc=False)
                 .limit(fetch_limit)
@@ -602,11 +607,15 @@ class EnhancedSupabaseClient:
             client = self._get_client()
             exclude_set = set(exclude_types or [])
 
-            # Fetch messages before the target timestamp
+            # Fetch messages before the target timestamp. Archived messages
+            # (rewound in the skill builder) are excluded at the query level
+            # -- see get_messages's comment for why this lives here rather
+            # than being left to callers.
             before_response = (
                 client.table("chat_messages")
                 .select("*")
                 .eq("session_id", str(session_uuid))
+                .is_("archived_at", "null")
                 .lte("created_at", target_timestamp)
                 .order("message_index", desc=True)
                 .limit(window_before + 5)  # Extra buffer for filtering
@@ -618,6 +627,7 @@ class EnhancedSupabaseClient:
                 client.table("chat_messages")
                 .select("*")
                 .eq("session_id", str(session_uuid))
+                .is_("archived_at", "null")
                 .gt("created_at", target_timestamp)
                 .order("message_index", desc=False)
                 .limit(window_after + 5)

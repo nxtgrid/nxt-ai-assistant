@@ -62,6 +62,39 @@ def get_api_key():
     return os.getenv("API_KEY", "")
 
 
+def get_identity_assertion_key() -> str:
+    """A secret distinct from API_KEY, held only by callers trusted to assert
+    an arbitrary user_email when auth-database lookup misses.
+
+    API_KEY alone must not grant this: it is shared by every "api"
+    auth_method caller (n8n, the scheduler, direct API integrations, the
+    skill builder), any of whom could otherwise impersonate any account by
+    setting user_email directly in the request body -- get_user_email's DB
+    lookup failing is exactly what reaches that fallback in handler.py's
+    _handle_webhook / _handle_webhook_async. See Phase 4 of
+    docs/superpowers/plans/2026-08-06-user-designed-skills.md, "Identity over
+    the API channel."
+    """
+    return os.getenv("IDENTITY_ASSERTION_KEY", "")
+
+
+def is_identity_trusted_caller(request: Request) -> bool:
+    """True only when the caller holds IDENTITY_ASSERTION_KEY.
+
+    Fails closed: unconfigured (no key set) or mismatched both return False.
+    A deployment that never sets IDENTITY_ASSERTION_KEY never honors a
+    caller-supplied user_email from anyone -- there is no default-trust
+    fallback to accidentally leave open.
+    """
+    import hmac
+
+    expected = get_identity_assertion_key()
+    if not expected:
+        return False
+    provided = request.headers.get("X-Identity-Assertion-Key", "")
+    return bool(provided) and hmac.compare_digest(provided, expected)
+
+
 def get_auth_method(request: Request) -> str:
     """
     Determine authentication method from request headers.
@@ -733,6 +766,7 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
     """
     # Verify authentication and get method
     auth_method = get_auth_method(request)
+    identity_trusted = is_identity_trusted_caller(request)
 
     try:
         body = await request.json()
@@ -786,6 +820,9 @@ async def handle_webhook(request: Request, background_tasks: BackgroundTasks):
 
     # Add auth method to body so handler knows how to respond
     body["_auth_method"] = auth_method
+    # Whether this caller may assert an arbitrary user_email when auth-DB
+    # lookup misses -- see is_identity_trusted_caller's docstring.
+    body["_identity_trusted"] = identity_trusted
 
     if auth_method == "telegram":
         # Return 200 immediately to prevent Telegram from retrying the webhook.
@@ -824,6 +861,109 @@ async def handle_chat(request: Request, background_tasks: BackgroundTasks):
     # Delegate to handle_webhook — including BOT_ENABLED handling, which is
     # staff-aware (visible notice for staff, silent for customers).
     return await handle_webhook(request, background_tasks)
+
+
+# ============================================================================
+# Skill builder support (Phase 4 of
+# docs/superpowers/plans/2026-08-06-user-designed-skills.md)
+#
+# The builder (anansi_app/nicegui_app/pages/skill_builder.py) sends chat
+# turns via POST /chat like any other "api" caller; these two endpoints
+# wrap the two Phase 2/3 functions that had no HTTP caller until now --
+# validate_skill_steps (pure, no LLM) and generate_skill_summary (one LLM
+# call). Builder-only tooling: no Telegram-format path, no BOT_ENABLED
+# handling, no side effects on chat_messages/skills.
+# ============================================================================
+
+
+class SkillStepPayload(BaseModel):
+    """One authored step, mirroring the stored skills.steps shape -- see
+    skill_validation.py's module docstring for the canonical shape."""
+
+    index: int
+    name: str
+    instruction: str
+    output_var: Optional[str] = None
+    allow_write: bool = False
+    is_response_step: bool = False
+
+
+class SkillValidationErrorPayload(BaseModel):
+    step_index: int
+    step_name: str
+    message: str
+    severity: str
+
+
+class SkillValidateRequest(BaseModel):
+    steps: List[SkillStepPayload]
+    declared_inputs: Optional[List[str]] = Field(
+        default=None,
+        description="The skill's own input names (Phase 3 concept). Omit until that exists.",
+    )
+
+
+class SkillValidateResponse(BaseModel):
+    errors: List[SkillValidationErrorPayload]
+
+
+@app.post("/skills/validate", response_model=SkillValidateResponse)
+async def validate_skill(request: Request, body: SkillValidateRequest) -> SkillValidateResponse:
+    """Inline + save-time validation for the skill builder.
+
+    Pure computation, no LLM call, no DB read/write -- see
+    skill_validation.py's validate_skill_steps. The builder calls this after
+    every new step and again immediately before Save.
+    """
+    get_auth_method(request)  # 401s on missing/invalid key
+
+    from orchestrator.experts.skill_validation import validate_skill_steps
+
+    errors = validate_skill_steps(
+        [step.model_dump() for step in body.steps],
+        declared_inputs=body.declared_inputs,
+    )
+    return SkillValidateResponse(
+        errors=[
+            SkillValidationErrorPayload(
+                step_index=e.step_index,
+                step_name=e.step_name,
+                message=e.message,
+                severity=e.severity,
+            )
+            for e in errors
+        ]
+    )
+
+
+class SkillSummarizeRequest(BaseModel):
+    steps: List[SkillStepPayload]
+    title: str = ""
+
+
+class SkillSummarizeResponse(BaseModel):
+    summary: str
+
+
+@app.post("/skills/summarize", response_model=SkillSummarizeResponse)
+async def summarize_skill(
+    request: Request, body: SkillSummarizeRequest
+) -> SkillSummarizeResponse:
+    """Auto-generate a skill's catalog summary for the builder's Save panel.
+
+    One LLM call -- see skill_summary.py. The result is a starting point;
+    MAX_SUMMARY_CHARS-capped, quote-stripped, but never validated for
+    accuracy. The author edits it before Save persists whatever text is in
+    the field at that point, generated or not.
+    """
+    get_auth_method(request)
+
+    from orchestrator.experts.skill_summary import generate_skill_summary
+
+    summary = await generate_skill_summary(
+        [step.model_dump() for step in body.steps], title=body.title
+    )
+    return SkillSummarizeResponse(summary=summary)
 
 
 # ============================================================================
