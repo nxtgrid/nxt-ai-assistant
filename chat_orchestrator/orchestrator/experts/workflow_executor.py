@@ -42,6 +42,7 @@ from typing import TYPE_CHECKING, Any, Callable, Coroutine, Dict, List, Optional
 # Without this import, Python's import system skips __init__.py when importing
 # directly from step_registry, leaving handlers unregistered
 import orchestrator.experts.handlers  # noqa: F401
+from orchestrator.config.settings import get_settings
 from orchestrator.experts.parameter_confirmation import (
     ConfirmationAction,
     format_confirmation_prompt,
@@ -54,6 +55,13 @@ from orchestrator.experts.parameter_resolver import (
     ResolvedParameter,
     get_parameter_resolver,
 )
+from orchestrator.experts.skill_step_bindings import (
+    EXTRACTION_INSTRUCTION,
+    extract_output_value,
+    filter_tools_for_step,
+    parse_output_binding,
+    strip_result_line,
+)
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import (
     get_step_contract,
@@ -61,9 +69,12 @@ from orchestrator.experts.step_registry import (
     get_step_registry,
 )
 from orchestrator.mini_app.schemas import build_mini_app_url, build_view_state_url
-from orchestrator.models.schemas import ConversationMessage
+from orchestrator.models.schemas import ConversationMessage, FunctionCall, ToolCallResult
+from orchestrator.services.user_permissions import get_permissions_service
 from shared.grid_design.artifact_log import sweep_state_for_artifacts
 from shared.grid_design.db import Repository
+from shared.prompts.render import render_body
+from shared.prompts.types import PromptRenderError
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.langfuse_utils import langfuse_observe, update_trace
 from shared.utils.logging import get_logger
@@ -76,7 +87,7 @@ from shared.utils.telegram_buttons import (
 )
 
 if TYPE_CHECKING:
-    from orchestrator.clients.gemini import GeminiClient
+    from orchestrator.clients.gemini import GeminiClient, GeminiTurnResult
     from orchestrator.services.expert_instructions_provider import ExpertConfig
     from orchestrator.services.work_packet_service import WorkPacketService
 
@@ -235,6 +246,20 @@ class ExecutionSummary:
         }
 
 
+class SkillStepVariableError(RuntimeError):
+    """A skill step's {{var}} read or write binding couldn't be satisfied.
+
+    Deliberately NOT caught by _execute_llm_step's blanket `except Exception`
+    -- it propagates to _execute_one_step's existing except-block, which
+    already fails the packet (packet_service.fail_packet) with the
+    exception's message as the reason. This is "pause the run with a clear
+    message" (see the skills plan's Phase 2, item 2) built on the terminal-
+    failure machinery that already exists, rather than a new resumable-pause
+    state -- a step that can't resolve its own variables is broken/mis-
+    designed, not waiting on a human the way an awaiting_input packet is.
+    """
+
+
 @dataclass
 class ParsedStep:
     """A parsed workflow step."""
@@ -244,6 +269,21 @@ class ParsedStep:
     name: str  # Step name or function name
     description: str
     serial: bool = False  # If True, run one site at a time in multi-site mode
+
+    # User-designed skill steps (Phase 2 of the skills plan). False for every
+    # step parsed from a Google Doc today -- zero behavior change for
+    # existing expert workflows. Phase 3 onward sets these when constructing
+    # ParsedStep from a stored skill's steps.
+    #
+    # is_skill_step: unlocks {{var}} read/write binding and tool access for
+    # this [llm] step (see WorkflowExecutor._execute_llm_step). Meaningless
+    # for [function] steps, which already have their own tool access.
+    is_skill_step: bool = False
+    # allow_write: only consulted when is_skill_step=True. False (default)
+    # restricts this step's tools to read-only-prefixed names -- see
+    # skill_step_bindings.READ_ONLY_TOOL_PREFIXES for why that default is
+    # what makes "a rewound step already took effect" survivable.
+    allow_write: bool = False
 
 
 @dataclass
@@ -2410,6 +2450,14 @@ class WorkflowExecutor:
         For parsing steps (step names containing 'parse'), the LLM is asked to
         include structured JSON which is then extracted and stored in accumulated_results.
 
+        User-designed skill steps (step.is_skill_step=True -- never true for a
+        step parsed from a Google Doc) additionally get: {{var}} reads
+        resolved against packet_state/packet_inputs before prompting, tool
+        access (read-only-prefixed unless step.allow_write), and an optional
+        {{var}} write extracted from the response and persisted to
+        packet_state. See skill_step_bindings.py and the skills plan's
+        Phase 2.
+
         Args:
             step: Parsed step definition
             expert_config: Expert configuration
@@ -2420,9 +2468,41 @@ class WorkflowExecutor:
 
         Returns:
             LLM response text
+
+        Raises:
+            SkillStepVariableError: A skill step's {{var}} read couldn't be
+                resolved, or its declared write produced no value. Propagates
+                to the caller's existing fail_packet handling -- see that
+                exception's docstring.
         """
         # Check if this is a parsing step that should output structured data
         is_parsing_step = "parse" in step.name.lower()
+
+        # --- Skill-step {{var}} read binding, before prompting -------------
+        # step.description is used completely unchanged when is_skill_step is
+        # False (every existing Google-Doc expert-workflow step, today) --
+        # this block is a no-op for them, not just "unlikely to match".
+        resolved_description = step.description
+        output_var: Optional[str] = None
+        if step.is_skill_step:
+            read_text, output_var = parse_output_binding(step.description)
+            packet_state = packet.get("packet_state") or {}
+            packet_inputs = packet.get("packet_inputs") or {}
+            values: Dict[str, Any] = {**packet_inputs, **packet_state}
+            declared = list(values.keys())
+            try:
+                resolved_description = render_body(
+                    read_text, values, declared, self._reject_skill_step_partial
+                )
+            except PromptRenderError as e:
+                # Outside the try/except below on purpose -- propagates to
+                # _execute_one_step's except-block (fail_packet), matching
+                # "pause the run with a clear message" rather than the
+                # generic sanitized-error-string return every other failure
+                # in this method gets. See SkillStepVariableError's docstring.
+                raise SkillStepVariableError(f"Step '{step.name}': {e}") from e
+            if output_var:
+                resolved_description = resolved_description + EXTRACTION_INSTRUCTION
 
         # Build prompt with full context
         prompt = self._build_llm_step_prompt(
@@ -2433,25 +2513,21 @@ class WorkflowExecutor:
             accumulated_results,
             is_parsing_step,
             execution_summary,
+            resolved_description=resolved_description,
         )
 
-        try:
-            # Note: tools aren't typically needed for LLM-only steps.
-            # The expert uses tools via function steps, not LLM steps.
-            response = await self.gemini.generate_messages(
-                [ConversationMessage(role="user", content=prompt)],
-                system_instructions=expert_config.system_instructions,
-                tools_payload=None,
-            )
+        # --- Skill-step tool access -----------------------------------------
+        # None (not []) for every non-skill step -- generate_messages treats
+        # both falsy, but None matches this method's pre-Phase-2 behavior
+        # exactly rather than merely producing an equivalent API payload.
+        tools_payload: Optional[List[Dict[str, Any]]] = None
+        if step.is_skill_step:
+            tools_payload = await self._resolve_skill_step_tools(step, context)
 
-            # Record token usage regardless of what happens next -- a blocked
-            # response still consumed input+output tokens. See
-            # WorkflowExecutor._persist_token_usage for where this lands.
-            if execution_summary is not None:
-                execution_summary.total_input_tokens += response.input_tokens
-                execution_summary.total_output_tokens += response.output_tokens
-                execution_summary.llm_rounds += 1
-                execution_summary.model_name = self.gemini.model_name
+        try:
+            response = await self._call_llm_step_with_tools(
+                prompt, expert_config, tools_payload, context, execution_summary
+            )
 
             # Check finishReason for blocked content
             finish_reason = response.finish_reason
@@ -2486,11 +2562,160 @@ class WorkflowExecutor:
                         context.session_id,
                     )
 
+            # --- Skill-step {{var}} write, after the response is in --------
+            if step.is_skill_step and output_var:
+                extracted = extract_output_value(text)
+                if extracted is None:
+                    # Never write empty, never continue silently -- see
+                    # SkillStepVariableError's docstring.
+                    raise SkillStepVariableError(
+                        f"Step '{step.name}' declared "
+                        + "{{" + output_var + "}}"
+                        + " but produced no value"
+                    )
+                await self.packet_service.update_state(
+                    packet["packet_id"], {output_var: extracted}, context.session_id
+                )
+                accumulated_results[f"{step.name}_output"] = extracted
+                # Don't leak the internal "RESULT: ..." parsing line into the
+                # step's user-visible/builder-visible response text.
+                text = strip_result_line(text)
+
             return text
 
+        except SkillStepVariableError:
+            raise  # see this exception's docstring -- deliberately not sanitized below
         except Exception as e:
             LOGGER.error(f"LLM step {step.name} failed: {e}")
             return sanitize_error_for_user(str(e), context="processing")
+
+    @staticmethod
+    def _reject_skill_step_partial(name: str) -> str:
+        """render_body's partial resolver, for skill step instructions.
+
+        Skill steps don't support {{> partials.x}} includes in Phase 2 --
+        that's a prompt-library concept (shared/prompts/knowledge.py) skill
+        authors have no access to. Raising here (rather than e.g. silently
+        returning "") turns an attempted partial include into the same clear,
+        run-pausing SkillStepVariableError every other binding failure gets.
+        """
+        raise PromptRenderError(
+            f"partials are not supported in skill step instructions (got '{{{{> {name}}}}}')"
+        )
+
+    def _record_llm_step_tokens(
+        self, response: "GeminiTurnResult", execution_summary: Optional[ExecutionSummary]
+    ) -> None:
+        """Accumulate one round's tokens onto execution_summary, if tracking.
+
+        Shared by every round _call_llm_step_with_tools makes -- a step that
+        took 3 tool-calling rounds spent tokens on all 3, not just the round
+        that produced the final text. See WorkflowExecutor._persist_token_usage
+        for where the accumulated total lands.
+        """
+        if execution_summary is None:
+            return
+        execution_summary.total_input_tokens += response.input_tokens
+        execution_summary.total_output_tokens += response.output_tokens
+        execution_summary.llm_rounds += 1
+        execution_summary.model_name = self.gemini.model_name
+
+    async def _call_llm_step_with_tools(
+        self,
+        prompt: str,
+        expert_config: "ExpertConfig",
+        tools_payload: Optional[List[Dict[str, Any]]],
+        context: StepContext,
+        execution_summary: Optional[ExecutionSummary],
+    ) -> "GeminiTurnResult":
+        """Call the LLM for one step, executing any tool calls it makes.
+
+        Non-skill steps (tools_payload=None) make exactly one call, same as
+        before Phase 2 -- the while loop below never executes, since
+        `response.tool_calls` is empty with no tools offered. Skill steps
+        with tools may loop up to settings.max_tool_rounds (shared with the
+        main chat graph's round cap; see the skills plan's Phase 5 for the
+        planned separate, higher setting for skill runs specifically).
+
+        Returns the final round's GeminiTurnResult. If the round cap is hit
+        while the model still wants to call tools, that response (whatever
+        text it has, if any) is returned as-is -- its un-executed tool_calls
+        are simply not acted on, rather than treating an exhausted budget as
+        a hard failure.
+        """
+        messages: List[ConversationMessage] = [ConversationMessage(role="user", content=prompt)]
+
+        response = await self.gemini.generate_messages(
+            messages,
+            system_instructions=expert_config.system_instructions,
+            tools_payload=tools_payload,
+        )
+        self._record_llm_step_tokens(response, execution_summary)
+
+        max_rounds = get_settings().max_tool_rounds
+        rounds = 0
+        while response.tool_calls and tools_payload and rounds < max_rounds:
+            rounds += 1
+            for call in response.tool_calls:
+                tool_result = await self._execute_skill_step_tool_call(call, context)
+                messages.append(ConversationMessage(role="model", function_call=call))
+                messages.append(ConversationMessage(role="tool", tool_result=tool_result))
+
+            response = await self.gemini.generate_messages(
+                messages,
+                system_instructions=expert_config.system_instructions,
+                tools_payload=tools_payload,
+            )
+            self._record_llm_step_tokens(response, execution_summary)
+
+        return response
+
+    async def _execute_skill_step_tool_call(
+        self, call: FunctionCall, context: StepContext
+    ) -> ToolCallResult:
+        """Run one tool call a skill step's LLM requested, via the same
+        context.mcp_executor function steps already use -- no second tool-
+        execution path. Never raises: a failed call becomes a ToolCallResult
+        with success=False, fed back to the LLM as a normal function
+        response, matching gtr_analysis_conversation.py's existing pattern
+        for LLM-driven tool loops elsewhere in this codebase.
+        """
+        if not context.mcp_executor:
+            return ToolCallResult(
+                name=call.name,
+                success=False,
+                output=None,
+                error="No tool executor available for this step",
+                tool_call_id=call.tool_call_id,
+            )
+        try:
+            output = await context.mcp_executor.call_tool(call.name, call.arguments)
+            return ToolCallResult(
+                name=call.name, success=True, output=output, tool_call_id=call.tool_call_id
+            )
+        except Exception as e:
+            LOGGER.warning(f"Skill step tool call {call.name} failed: {e}")
+            return ToolCallResult(
+                name=call.name,
+                success=False,
+                output=None,
+                error=str(e),
+                tool_call_id=call.tool_call_id,
+            )
+
+    async def _resolve_skill_step_tools(
+        self, step: ParsedStep, context: StepContext
+    ) -> List[Dict[str, Any]]:
+        """Resolve and filter the tool payload for one skill step.
+
+        Uses the same permissions_service.get_available_tools(user_context)
+        call prepare_tools.py makes for the main chat graph -- no second
+        tool-listing path to keep in sync. Filtered to read-only-prefixed
+        tools unless step.allow_write=True (see skill_step_bindings.py).
+        """
+        permissions_service = get_permissions_service()
+        all_tools = await permissions_service.get_available_tools(context.user_context)
+        return filter_tools_for_step(all_tools or [], allow_write=step.allow_write)
 
     def _extract_finish_reason(self, response: Dict[str, Any]) -> Optional[str]:
         """Extract finishReason from Gemini response.
@@ -2557,6 +2782,7 @@ class WorkflowExecutor:
         accumulated_results: Dict[str, Any],
         is_parsing_step: bool = False,
         execution_summary: Optional[ExecutionSummary] = None,
+        resolved_description: Optional[str] = None,
     ) -> str:
         """Build prompt for LLM step with full workflow context.
 
@@ -2568,10 +2794,20 @@ class WorkflowExecutor:
             accumulated_results: Results from previous steps
             is_parsing_step: If True, add JSON format instructions
             execution_summary: Optional execution summary for additional context
+            resolved_description: What to show under "## Current Step" instead
+                of step.description verbatim. Used by skill steps to embed
+                {{var}}-rendered text (and, when the step declares an output
+                var, the extraction instruction) without mutating the
+                ParsedStep itself -- see _execute_llm_step. None (the default
+                for every non-skill step) means "use step.description",
+                identical to this method's behavior before Phase 2.
 
         Returns:
             Formatted prompt string
         """
+        step_description = (
+            resolved_description if resolved_description is not None else step.description
+        )
         # Get workflow steps
         workflow = expert_config.get_workflow(packet["packet_type"])
         completed = set(packet.get("steps_completed", []) or [])
@@ -2694,7 +2930,7 @@ Extract the grid name from the user request. For time range, default to last 30 
 {execution_context}
 
 ## Current Step: {step.name}
-{step.description}
+{step_description}
 
 ## Results from Previous Steps
 {results_display}
