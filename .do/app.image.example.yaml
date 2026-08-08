@@ -41,6 +41,13 @@ envs:
     value: "${API_KEY}"
     scope: RUN_TIME
     type: SECRET
+  # Shared secret for the external notification passthrough (POST /chat/notify).
+  # n8n/VRM/Grafana upstream must send it in the X-Notify-Secret header.
+  # Fail-closed: if unset, /chat/notify rejects all requests.
+  - key: NOTIFY_SHARED_SECRET
+    value: "${NOTIFY_SHARED_SECRET}"
+    scope: RUN_TIME
+    type: SECRET
 
   # Logging (can be changed via anansi-app Settings UI)
   - key: LOG_LEVEL
