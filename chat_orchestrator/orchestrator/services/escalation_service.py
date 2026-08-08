@@ -2072,14 +2072,15 @@ class EscalationService:
         assignee_email: Optional[str] = None,
         auto_filed: bool = False,
     ) -> Dict[str, Any]:
-        """File a ticket for an escalation, notify the customer, store the ref.
+        """File a ticket for an escalation, notify the customer, attach the ref.
 
         Routes through TicketService, which picks the Jira or internal backend
         per TICKET_BACKEND_OVERRIDE / Jira health. On success the customer is
-        notified with a ref number and TicketService stamps ticket_ref /
-        ticket_backend onto the mapping row; for Jira-backed tickets the legacy
-        jira_ticket_key column is ALSO written here so inbound Jira webhooks keep
-        routing.
+        notified with a ref number and the canonical escalation is attached to
+        the new ticket (escalations.ticket_id) -- that attachment is what
+        inbound Jira webhooks and future dedup checks resolve through
+        (_get_mapping_by_ticket_ref_canonical), not any escalation_mappings
+        column.
 
         The caller is responsible for:
         - Atomically claiming the escalation (is_active = false)
@@ -2196,16 +2197,6 @@ class EscalationService:
                     if recovered_backend == "internal"
                     else f"{self._jira_base_url}/browse/{existing_ref}"
                 )
-                if supabase_client and recovered_backend == "jira":
-                    try:
-                        _client = supabase_client._get_client()
-                        _client.table("escalation_mappings").update(
-                            {"jira_ticket_key": existing_ref}
-                        ).eq("id", mapping_id).execute()
-                    except Exception as e:
-                        LOGGER.warning(
-                            "Dedup: failed to store recovered key {}: {}", existing_ref, e
-                        )
                 return {
                     "success": True,
                     "ticket_ref": existing_ref,
@@ -2221,8 +2212,7 @@ class EscalationService:
             # create the canonical row for escalations that predate it or
             # were never given a client-side mapping_id at creation time
             # (claim() requires the row to already exist). Best-effort: if
-            # this fails, ticket creation still proceeds on the legacy
-            # escalation_mappings.ticket_ref stamp alone -- only the durable
+            # this fails, ticket creation still proceeds -- only the durable
             # dedup backstop is lost for this attempt, not the ticket itself.
             try:
                 if await self._escalations.get(mapping_id) is None:
@@ -2279,45 +2269,12 @@ class EscalationService:
                     exc_info=True,
                 )
 
-            # 6+7+8. Run independent post-ticket operations concurrently.
-            async def _store_jira_key():
-                # Stamp ticket_ref + ticket_backend for ALL backends with retry so that
-                # get_stale_unfiled_escalations (which filters ticket_ref IS NULL) won't
-                # re-process this escalation on the next sweep run and fire a duplicate
-                # notification.  For Jira, also write jira_ticket_key so inbound webhook
-                # handlers can route comments back to the right escalation.
-                if not supabase_client:
-                    return
-                _client = supabase_client._get_client()
-                update_payload: dict = {
-                    "ticket_ref": ticket_ref,
-                    "ticket_backend": result.backend,
-                }
-                if result.backend == "jira":
-                    update_payload["jira_ticket_key"] = ticket_ref
-                for _attempt in range(3):
-                    try:
-                        _client.table("escalation_mappings").update(
-                            update_payload
-                        ).eq("id", mapping_id).execute()
-                        return
-                    except Exception:
-                        if _attempt == 2:
-                            raise
-                        await asyncio.sleep(0.5 * (_attempt + 1))
-
-            async def _release_session():
-                # Release session back to bot only if no other blocking escalations
-                # remain. Non-blocking ones (safety_escalation) never set is_escalated
-                # on the session, so they shouldn't prevent release.
-                sc = self._get_supabase_client()
-                if sc:
-                    remaining = await sc.count_active_blocking_escalations(session_id)
-                    if remaining == 0:
-                        await sc.update_session_escalation_status(
-                            session_id=session_id, is_escalated=False
-                        )
-
+            # escalations.state is now "tracked" (set by attach_ticket above),
+            # which excludes it from has_blocking_escalation's "open"/"processing"
+            # filter -- so is_session_escalated already reads this session as
+            # released on its next live check. There's no separate flag left to
+            # write (same reasoning as the close-callback's canonical cutover --
+            # see callback_handlers._handle_escalation_close_callback).
             async def _notify_customer():
                 try:
                     if auto_filed:
@@ -2388,18 +2345,10 @@ class EscalationService:
                 except Exception as e:
                     LOGGER.warning(f"Failed to notify customer about ticket {ticket_ref}: {e}")
 
-            results = await asyncio.gather(
-                _store_jira_key(),
-                _release_session(),
-                _notify_customer(),
-                return_exceptions=True,
-            )
-            store_result = results[0]
-            if isinstance(store_result, Exception):
-                LOGGER.warning(
-                    "Failed to store JIRA key for mapping {}: {}", mapping_id, store_result
-                )
-                return {"success": False, "error": f"DB write failed: {store_result}"}
+            # _notify_customer already swallows its own exceptions (a failed
+            # Telegram notification doesn't undo an already-filed, already-attached
+            # ticket) -- nothing left here that should turn success into failure.
+            await _notify_customer()
 
             return {
                 "success": True,
@@ -2441,8 +2390,8 @@ class EscalationService:
         Runs daily at 9am WAT (scheduled via APScheduler in app.py).  For each
         eligible escalation (active, no ticket, 1-24h old, not safety_escalation):
 
-        1. Atomically claim via claim_escalation_for_tracking()
-        2. Post-claim check: if jira_ticket_key already set (after-hours race), reactivate
+        1. Atomically claim via EscalationRepository.claim()
+        2. Post-claim check: if ticket_ref already set (after-hours race), release and skip
         3. Call track_as_ticket() with auto_filed=True
         4. On success: edit Telegram escalation message to show ticket ref
         5. On failure: call reactivate_escalation() so staff Track button still works
@@ -2497,13 +2446,13 @@ class EscalationService:
                 skipped += 1
                 continue
 
-            # 2. Post-claim check — guard against concurrent after-hours auto-create
-            # (_auto_create_jira_and_edit_message does not use claim; it writes the key
-            # directly.  If it ran concurrently, the fetched row will now have the key.)
-            # Also guard ticket_ref: internal (TKT) tickets don't set jira_ticket_key,
-            # but _store_jira_key now stamps ticket_ref for all backends, so either
-            # column being populated means this escalation is already filed.
-            if claimed_mapping.get("jira_ticket_key") or claimed_mapping.get("ticket_ref"):
+            # 2. Post-claim check — defense in depth. claim() above already
+            # requires state="open" (attach_ticket moves a filed escalation to
+            # "tracked", so a real race would fail to claim in the first place
+            # and get skipped above) -- this is a belt-and-suspenders check on
+            # claimed_mapping.ticket_ref (canonical, derived from
+            # escalations.ticket_id) in case that invariant is ever loosened.
+            if claimed_mapping.get("ticket_ref"):
                 await _release_claim(mapping_id)
                 skipped += 1
                 continue
@@ -2878,6 +2827,24 @@ class EscalationService:
                 messages, dummy_mapping, question_summary, telegram_link=telegram_link
             )
 
+            # Claim the canonical escalation before filing so attach_ticket()
+            # below can persist the durable dedup link (its conditional UPDATE
+            # requires state="processing" -- see EscalationRepository.claim()/
+            # .attach_ticket(), same sequencing track_as_ticket uses). This also
+            # gives the daily sweep's own claim() a real mutex against this path
+            # instead of racing on ticket_ref. Best-effort: if this fails, ticket
+            # creation still proceeds -- only the durable dedup/webhook-routing
+            # link is lost for this ticket.
+            try:
+                await self._escalations.claim(mapping_id)
+            except Exception:
+                LOGGER.warning(
+                    "Could not claim canonical escalation {} before after-hours "
+                    "ticket creation -- durable dedup won't apply if this races",
+                    mapping_id,
+                    exc_info=True,
+                )
+
             try:
                 result = await self._tickets.create_ticket(
                     TicketCreateRequest(
@@ -2898,6 +2865,18 @@ class EscalationService:
                     mapping_id,
                     e,
                 )
+                # Release the claim() above so the restored Track button's own
+                # claim (in _handle_escalation_track_callback) isn't silently
+                # blocked by this attempt's now-stale "processing" state.
+                try:
+                    await self._escalations.release(mapping_id)
+                except Exception:
+                    LOGGER.warning(
+                        "Could not release canonical escalation {} after failed "
+                        "after-hours ticket creation",
+                        mapping_id,
+                        exc_info=True,
+                    )
                 restore_keyboard = build_escalation_track_keyboard(mapping_id, include_track=True)
                 if question_summary:
                     escaped_summary = _escape_telegram_markdown(question_summary)
@@ -2920,17 +2899,30 @@ class EscalationService:
                 mapping_id,
             )
 
-            # Backward-compat: mirror the ref into the legacy jira_ticket_key column
-            # for Jira tickets so inbound Jira webhooks keep routing. TicketService
-            # already stamped ticket_ref/ticket_backend.
-            if supabase_client and result.backend == "jira":
+            # Attach the canonical escalation to its ticket -- this is what
+            # inbound Jira webhooks and future dedup checks resolve through
+            # (_get_mapping_by_ticket_ref_canonical / find_by_escalation), not
+            # any escalation_mappings column. Best-effort, but logged loudly:
+            # unlike track_as_ticket's attach, there's no caller-side retry
+            # path here to eventually recover a missed attach.
+            if result.ticket_id:
                 try:
-                    client = supabase_client._get_client()
-                    client.table("escalation_mappings").update(
-                        {"jira_ticket_key": ticket_ref}
-                    ).eq("id", mapping_id).execute()
-                except Exception as e:
-                    LOGGER.warning("Failed to store after-hours Jira key: {}", e)
+                    await self._escalations.attach_ticket(mapping_id, result.ticket_id)
+                except Exception:
+                    LOGGER.warning(
+                        "Could not attach canonical escalation {} to after-hours "
+                        "ticket {} -- durable dedup and webhook routing won't find it",
+                        mapping_id,
+                        ticket_ref,
+                        exc_info=True,
+                    )
+            else:
+                LOGGER.warning(
+                    "After-hours ticket {} for mapping {} has no canonical ticket id "
+                    "-- cannot attach",
+                    ticket_ref,
+                    mapping_id,
+                )
 
             # Edit the Telegram escalation message to prepend the ticket ref while
             # preserving the original question text so staff retain context. Internal

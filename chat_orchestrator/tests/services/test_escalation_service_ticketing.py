@@ -1,15 +1,16 @@
-"""Regression tests for EscalationService's Task-4 rewiring onto TicketService.
+"""Regression tests for EscalationService's rewiring onto TicketService.
 
 Covers the checklist's two headline guarantees:
-- mocked-healthy-Jira path reproduces today's DB writes + customer messages
-  (jira_ticket_key still written alongside ticket_ref/ticket_backend, the
-  return dict now carries "ticket_ref", customer wording unchanged), and
-- down-Jira path files an internal ticket end-to-end (jira_ticket_key stays
-  NULL, ticket_backend="internal", customer still gets a ref notification).
+- mocked-healthy-Jira path reproduces today's customer messages and canonical
+  linkage (escalations.ticket_id attached, no legacy escalation_mappings
+  write, the return dict carries "ticket_ref", customer wording unchanged), and
+- down-Jira path files an internal ticket end-to-end (ticket_backend="internal",
+  customer still gets a ref notification, still no legacy write).
 
 Plus: dedup-hit routing (jira vs internal), the after-hours auto-create
-URL-vs-no-URL message rendering, the follow-up comment path routing through
-TicketService, and the run_escalation_ticket_sweep rename + alias.
+URL-vs-no-URL message rendering and canonical attach, the follow-up comment
+path routing through TicketService, and the run_escalation_ticket_sweep
+rename + alias.
 """
 
 from __future__ import annotations
@@ -452,8 +453,9 @@ def _base_mapping() -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def test_track_as_ticket_jira_success_writes_jira_key_and_returns_ticket_ref():
+async def test_track_as_ticket_jira_success_returns_ticket_ref_with_no_legacy_write():
     raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "mapping-abcd1234", "state": "processing"}]
     supa = _FakeSupabase(raw)
     svc = _make_service(supa)
     jira = _FakeBackend("jira", available=True, ref="OPS-100", url="https://jira.test/browse/OPS-100")
@@ -470,7 +472,7 @@ async def test_track_as_ticket_jira_success_writes_jira_key_and_returns_ticket_r
 
     result = await svc.track_as_ticket(escalation_mapping=_base_mapping())
 
-    # Return key is now backend-agnostic "ticket_ref" (not "jira_ticket_key"),
+    # Return key is backend-agnostic "ticket_ref" (not "jira_ticket_key"),
     # plus ticket_backend/ticket_url so callers (e.g. the sweep) can render a
     # link without a second backend lookup.
     assert result == {
@@ -481,16 +483,10 @@ async def test_track_as_ticket_jira_success_writes_jira_key_and_returns_ticket_r
     }
     assert "jira_ticket_key" not in result
 
-    payloads = supa.em_update_payloads()
-    # TicketService stamped ticket_ref/ticket_backend ...
-    assert {"ticket_ref": "OPS-100", "ticket_backend": "jira"} in payloads
-    # ... and _store_jira_key's own stamp ALSO carries the legacy jira_ticket_key
-    # column in the same update (webhook back-compat).
-    assert {
-        "ticket_ref": "OPS-100",
-        "ticket_backend": "jira",
-        "jira_ticket_key": "OPS-100",
-    } in payloads
+    # Linkage is canonical-only: attach_ticket() attached the escalation to
+    # its ticket (verified by test_track_as_ticket_attaches_the_canonical_ticket_to_the_escalation);
+    # nothing here ever touches the legacy escalation_mappings table.
+    assert supa.em_update_payloads() == []
 
     # Customer wording unchanged from today's ref-number based text.
     assert any(
@@ -498,8 +494,9 @@ async def test_track_as_ticket_jira_success_writes_jira_key_and_returns_ticket_r
     ), sent
 
 
-async def test_track_as_ticket_internal_success_leaves_jira_key_null():
+async def test_track_as_ticket_internal_success_no_legacy_write():
     raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "mapping-abcd1234", "state": "processing"}]
     supa = _FakeSupabase(raw)
     svc = _make_service(supa)
     # Jira unavailable (down) -> resolve_backend routes to internal.
@@ -524,11 +521,7 @@ async def test_track_as_ticket_internal_success_leaves_jira_key_null():
         "ticket_url": None,
     }
     assert internal.create_calls == 1
-
-    payloads = supa.em_update_payloads()
-    assert {"ticket_ref": "TKT-000001", "ticket_backend": "internal"} in payloads
-    # jira_ticket_key must never be written for an internal ticket.
-    assert all("jira_ticket_key" not in p for p in payloads), payloads
+    assert supa.em_update_payloads() == []
 
     # Customer still gets a ref-number notification (same wording, different ref).
     assert any(
@@ -611,7 +604,7 @@ async def test_track_as_ticket_creates_canonical_escalation_with_resolved_chat_s
     assert escalation_rows[0]["chat_session_id"] == str(resolved_uuid)
 
 
-async def test_track_as_ticket_dedup_hit_jira_writes_jira_key():
+async def test_track_as_ticket_dedup_hit_jira_no_legacy_write():
     raw = _FakeRaw()
     supa = _FakeSupabase(raw)  # no internal_tickets rows -> recovered ref is Jira
     svc = _make_service(supa)
@@ -628,13 +621,15 @@ async def test_track_as_ticket_dedup_hit_jira_writes_jira_key():
     assert result["ticket_backend"] == "jira"
     assert result["ticket_url"] == f"{svc._jira_base_url}/browse/OPS-55"
     assert jira.create_calls == 0  # dedup skipped creation
-    assert {"jira_ticket_key": "OPS-55"} in supa.em_update_payloads()
+    # Dedup hit reuses the already-attached canonical ticket -- nothing to
+    # write, legacy or otherwise.
+    assert supa.em_update_payloads() == []
     assert canonical_tickets.find_calls == ["mapping-abcd1234"]
     assert canonical_tickets.backend_calls == ["OPS-55"]
     assert supa.internal_ticket_lookup_calls == []
 
 
-async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
+async def test_track_as_ticket_dedup_hit_internal_no_legacy_write():
     raw = _FakeRaw()
     supa = _FakeSupabase(raw, internal_rows={"TKT-9": {"ticket_ref": "TKT-9"}})
     svc = _make_service(supa)
@@ -652,8 +647,7 @@ async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
         "ticket_backend": "internal",
         "ticket_url": None,
     }
-    # Recovered ref is internal -> the legacy jira_ticket_key must stay untouched.
-    assert all("jira_ticket_key" not in p for p in supa.em_update_payloads())
+    assert supa.em_update_payloads() == []
     assert canonical_tickets.find_calls == ["mapping-abcd1234"]
     assert canonical_tickets.backend_calls == ["TKT-9"]
     assert supa.internal_ticket_lookup_calls == []
@@ -661,7 +655,7 @@ async def test_track_as_ticket_dedup_hit_internal_skips_jira_key():
 
 async def test_track_as_ticket_second_call_dedupes_via_canonical_escalation():
     """Regression: a second track_as_ticket() call for the same escalation
-    (e.g. a sweep retry after the legacy ticket_ref stamp failed, or a race
+    (e.g. a sweep retry after the customer notification failed, or a race
     with the staff Track button) must reuse the already-filed ticket instead
     of filing a second one on whatever backend happens to be healthy the
     second time around.
@@ -750,6 +744,7 @@ async def _run_auto_create(svc: EscalationService):
 
 async def test_auto_create_jira_renders_link():
     raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "m1", "state": "open"}]
     supa = _FakeSupabase(raw)
     svc = _make_service(supa)
     jira = _FakeBackend("jira", available=True, ref="OPS-77", url="https://jira.test/browse/OPS-77")
@@ -761,12 +756,18 @@ async def test_auto_create_jira_renders_link():
     text = edits[-1]["text"]
     assert "https://jira.test/browse/OPS-77" in text
     assert "](" in text  # markdown link syntax present
-    # jira_ticket_key back-compat write happened.
-    assert {"jira_ticket_key": "OPS-77"} in supa.em_update_payloads()
+    # Canonical attach happened (claim() moved open -> processing, then
+    # attach_ticket() moved processing -> tracked with the new ticket id) --
+    # no legacy escalation_mappings write of any kind.
+    assert raw.table("escalations").rows == [
+        {"id": "m1", "state": "tracked", "ticket_id": "ticket-1"}
+    ]
+    assert supa.em_update_payloads() == []
 
 
 async def test_auto_create_internal_renders_plain_bold():
     raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "m1", "state": "open"}]
     supa = _FakeSupabase(raw)
     svc = _make_service(supa)
     jira = _FakeBackend("jira", available=False, ref="OPS-77")
@@ -777,8 +778,31 @@ async def test_auto_create_internal_renders_plain_bold():
     text = edits[-1]["text"]
     assert "](" not in text  # no markdown link for internal
     assert "TKT" in text  # ref rendered as plain text
-    # No jira_ticket_key for internal.
-    assert all("jira_ticket_key" not in p for p in supa.em_update_payloads())
+    assert raw.table("escalations").rows == [
+        {"id": "m1", "state": "tracked", "ticket_id": "ticket-1"}
+    ]
+    assert supa.em_update_payloads() == []
+
+
+async def test_auto_create_claim_failure_still_creates_the_ticket():
+    """A claim() exception (e.g. a transient DB error) must not stop the
+    ticket from being filed -- claim/attach are best-effort linkage, not a
+    precondition for creating the actual ticket."""
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    svc = _make_service(supa)
+    jira = _FakeBackend("jira", available=True, ref="OPS-77", url="https://jira.test/browse/OPS-77")
+    internal = _FakeBackend("internal", ref="TKT-1", url=None)
+    _install_ticket_service(svc, jira, internal)
+
+    async def _boom(_mapping_id):
+        raise RuntimeError("db blip")
+
+    svc._escalations.claim = _boom
+
+    edits = await _run_auto_create(svc)
+    assert edits, "ticket creation and message edit still happened despite the claim failure"
+    assert "https://jira.test/browse/OPS-77" in edits[-1]["text"]
 
 
 # ---------------------------------------------------------------------------

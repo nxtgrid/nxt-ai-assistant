@@ -1,10 +1,9 @@
 """TicketService orchestration logic beyond resolve_backend().
 
-Covers: escalation_mappings stamping on create_ticket() (success and
-swallowed-failure), _backend_for_ref()'s three branches (found in
-internal_tickets / not found -> jira / lookup raises -> jira), and
-find_by_escalation()'s jira-then-internal composition including the
-TICKET_BACKEND_OVERRIDE=internal short-circuit.
+Covers: _backend_for_ref()'s three branches (found in internal_tickets / not
+found -> jira / lookup raises -> jira), and find_by_escalation()'s
+jira-then-internal composition including the TICKET_BACKEND_OVERRIDE=internal
+short-circuit.
 
 resolve_backend() itself is covered by test_service_resolve_backend.py.
 """
@@ -233,7 +232,6 @@ class _FakeRawClient:
     def __init__(self) -> None:
         self.tables: Dict[str, _FakeTable] = {
             "internal_tickets": _FakeTable(),
-            "escalation_mappings": _FakeTable(),
         }
 
     def table(self, name: str) -> _FakeTable:
@@ -267,7 +265,7 @@ class _RawClientWrapper:
         return self._raw
 
 
-class TestCreateTicketStamping:
+class TestCreateTicket:
     def test_default_internal_backend_shares_the_service_canonical_repository(self):
         repository = _FakeTicketRepository()
 
@@ -289,8 +287,13 @@ class TestCreateTicketStamping:
             ("backend", "ticket-1", "jira"),
             ("activate", "ticket-1", "OPS-42", "jira"),
         ]
+
     @pytest.mark.asyncio
-    async def test_stamps_ticket_ref_and_backend_on_success(self):
+    async def test_escalation_mapping_id_does_not_touch_escalation_mappings(self):
+        """create_ticket() links an escalation to its ticket purely through the
+        canonical repository (EscalationService.track_as_ticket calls
+        escalations.attach_ticket() itself) -- it must never reach for the
+        legacy escalation_mappings table, regardless of escalation_mapping_id."""
         raw = _FakeRawClient()
         jira = _FakeBackend("jira", ref="OPS-42")
         service = _make_service(raw, jira=jira)
@@ -299,36 +302,7 @@ class TestCreateTicketStamping:
         result = await service.create_ticket(req)
 
         assert result.ref == "OPS-42"
-        update_calls = [e for e in raw.tables["escalation_mappings"].executed if e[0] == "update"]
-        assert len(update_calls) == 1
-        _, filters, payload = update_calls[0]
-        assert filters == {"id": "mapping-1"}
-        assert payload == {"ticket_ref": "OPS-42", "ticket_backend": "jira"}
-
-    @pytest.mark.asyncio
-    async def test_does_not_stamp_when_no_escalation_mapping_id(self):
-        raw = _FakeRawClient()
-        service = _make_service(raw)
-
-        req = TicketCreateRequest(summary="x")  # no escalation_mapping_id -> e.g. /notify tickets
-        await service.create_ticket(req)
-
-        assert raw.tables["escalation_mappings"].executed == []
-
-    @pytest.mark.asyncio
-    async def test_create_ticket_still_succeeds_when_stamp_fails(self):
-        """A failed stamp UPDATE must not fail the overall create_ticket() call --
-        the ticket already exists in the backend; the mapping row just won't
-        know its ref until the next dedup lookup finds it independently."""
-        raw = _FakeRawClient()
-        raw.tables["escalation_mappings"].raise_on_execute = RuntimeError("db blip")
-        jira = _FakeBackend("jira", ref="OPS-7")
-        service = _make_service(raw, jira=jira)
-
-        req = TicketCreateRequest(summary="x", escalation_mapping_id="mapping-2")
-        result = await service.create_ticket(req)
-
-        assert result.ref == "OPS-7"  # no exception propagated
+        assert "escalation_mappings" not in raw.tables
 
 
 class TestNotifyTicketFallback:
