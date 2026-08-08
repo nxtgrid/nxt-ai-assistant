@@ -38,10 +38,10 @@ LOGGER = get_logger(__name__)
 class TicketService:
     """Resolves which ticket backend to use and delegates every call to it.
 
-    Every method stamps ``ticket_ref``/``ticket_backend`` on the
-    corresponding ``escalation_mappings`` row (when ``escalation_mapping_id``
-    is set) so the record is uniform and recoverable regardless of which
-    backend actually filed the ticket.
+    Ticket <-> escalation linkage is canonical-only: callers that pass
+    ``escalation_mapping_id`` get it recorded via the canonical
+    ``escalations``/``tickets`` tables (see ``EscalationRepository.attach_ticket``),
+    not the legacy ``escalation_mappings.ticket_ref``/``ticket_backend`` columns.
     """
 
     def __init__(
@@ -55,8 +55,7 @@ class TicketService:
         """
         Args:
             supabase_client: An ``EnhancedSupabaseClient``-like wrapper (has
-                ``_get_client()``), used to stamp ``escalation_mappings`` and,
-                by default, to back ``InternalTicketBackend``.
+                ``_get_client()``), used by default to back ``InternalTicketBackend``.
             get_supabase_client: Getter callable that lazily produces the
                 wrapper above -- mirrors
                 ``EscalationService._get_supabase_client()``. Used when
@@ -151,38 +150,6 @@ class TicketService:
         raise TicketBackendError(f"unsupported canonical ticket backend for ref {ref}")
 
     # ------------------------------------------------------------------
-    # Escalation-mapping stamping
-    # ------------------------------------------------------------------
-
-    async def _stamp_escalation_mapping(self, mapping_id: str, ref: str, backend: str) -> None:
-        """Best-effort -- a failure here is safe to swallow, not just convenient to.
-
-        If this UPDATE fails after the ticket was already created, the mapping
-        row's ticket_ref/ticket_backend stay NULL despite a real ticket
-        existing. That's recoverable without a retry loop here: both backends'
-        find_by_escalation() locate the ticket independently of this stamp
-        (Jira via the caller-supplied escalation label, internal via the
-        escalation_mapping_id column on the ticket row itself) -- so the next
-        dedup check still finds it rather than filing a duplicate.
-        """
-        raw = self._raw_client()
-        if raw is None:
-            LOGGER.warning(
-                "ticket service: no Supabase client -- cannot stamp ticket_ref for mapping {}",
-                mapping_id,
-            )
-            return
-        try:
-            raw.table("escalation_mappings").update(
-                {"ticket_ref": ref, "ticket_backend": backend}
-            ).eq("id", mapping_id).execute()
-        except Exception:
-            LOGGER.warning(
-                "ticket service: failed to stamp ticket_ref for mapping {}", mapping_id,
-                exc_info=True,
-            )
-
-    # ------------------------------------------------------------------
     # TicketBackend-shaped public API
     # ------------------------------------------------------------------
 
@@ -198,9 +165,6 @@ class TicketService:
         result = await backend.create_ticket(req)
         await self._tickets.activate(intent.id, result)
         if req.escalation_mapping_id:
-            await self._stamp_escalation_mapping(
-                req.escalation_mapping_id, result.ref, result.backend
-            )
             await self._sync_attachments(req.escalation_mapping_id, intent.id, result.ref, backend)
         return result.model_copy(update={"ticket_id": intent.id})
 
@@ -260,10 +224,6 @@ class TicketService:
                 )
             await self._tickets.activate(intent.id, result)
             canonical_result = result.model_copy(update={"ticket_id": intent.id})
-            if req.escalation_mapping_id:
-                await self._stamp_escalation_mapping(
-                    req.escalation_mapping_id, result.ref, result.backend
-                )
             return TicketCreateOutcome(
                 result=canonical_result,
                 error=str(primary_error),
@@ -272,8 +232,6 @@ class TicketService:
 
         await self._tickets.activate(intent.id, result)
         canonical_result = result.model_copy(update={"ticket_id": intent.id})
-        if req.escalation_mapping_id:
-            await self._stamp_escalation_mapping(req.escalation_mapping_id, result.ref, result.backend)
         return TicketCreateOutcome(result=canonical_result)
 
     async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:

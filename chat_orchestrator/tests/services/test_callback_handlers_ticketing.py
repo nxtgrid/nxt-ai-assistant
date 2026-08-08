@@ -180,6 +180,23 @@ def _escalation_group_env(monkeypatch):
     monkeypatch.setenv("ESCALATION_TELEGRAM_CHAT_ID", "-100999")
 
 
+def _install_escalation_service_returning(monkeypatch, escalation: Dict[str, Any]) -> None:
+    """Every EscalationService() constructed for the rest of this test
+    resolves get_escalation_by_id_canonical to `escalation` instead of
+    _FakeEscalationService's fixed default -- needed for tests that check
+    behavior keyed off escalation content (ticket_ref/jira_ticket_key) the
+    default doesn't carry."""
+
+    def _factory(*_a, **_k):
+        svc = _FakeEscalationService()
+        svc.get_escalation_by_id_canonical = AsyncMock(return_value=escalation)
+        return svc
+
+    monkeypatch.setattr(
+        "orchestrator.services.escalation_service.EscalationService", _factory
+    )
+
+
 # ---------------------------------------------------------------------------
 # Track callback
 # ---------------------------------------------------------------------------
@@ -189,13 +206,13 @@ async def test_track_callback_reads_ticket_ref_not_jira_ticket_key(monkeypatch):
     """The bug this test guards: track_as_ticket's return key is "ticket_ref"
     (renamed in Task 4). If the handler still reads "jira_ticket_key" this
     raises a KeyError instead of returning a result."""
-    monkeypatch.setattr(
-        ch, "get_supabase_client", lambda: _FakeSupabase(claim_row={"id": "m1"})
-    )
+    mapping_id = "00000000-0000-0000-0000-000000000001"
+    supa = _FakeSupabase(claim_row=None, escalations_state={mapping_id: {"state": "open"}})
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
 
     result = await ch._handle_escalation_track_callback(
         callback_id="cb1",
-        mapping_id="00000000-0000-0000-0000-000000000001",
+        mapping_id=mapping_id,
         chat_id="-100999",
         message_id=42,
         original_text="original escalation text",
@@ -209,13 +226,13 @@ async def test_track_callback_reads_ticket_ref_not_jira_ticket_key(monkeypatch):
 
 
 async def test_track_callback_edits_message_with_ticket_ref(_patch_telegram_transport, monkeypatch):
-    monkeypatch.setattr(
-        ch, "get_supabase_client", lambda: _FakeSupabase(claim_row={"id": "m1"})
-    )
+    mapping_id = "00000000-0000-0000-0000-000000000001"
+    supa = _FakeSupabase(claim_row=None, escalations_state={mapping_id: {"state": "open"}})
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
 
     await ch._handle_escalation_track_callback(
         callback_id="cb1",
-        mapping_id="00000000-0000-0000-0000-000000000001",
+        mapping_id=mapping_id,
         chat_id="-100999",
         message_id=42,
         original_text="original escalation text",
@@ -225,47 +242,6 @@ async def test_track_callback_edits_message_with_ticket_ref(_patch_telegram_tran
     assert edits, "expected the escalation message to be edited"
     assert "TKT-000005" in edits[-1]["text"]
     assert "Tracked as" in edits[-1]["text"]
-
-
-async def test_track_callback_reactivates_on_failure(monkeypatch):
-    monkeypatch.setattr(
-        ch, "get_supabase_client", lambda: _FakeSupabase(claim_row={"id": "m1"})
-    )
-
-    def _install_failing(*_a, **_k):
-        svc = _FakeEscalationService()
-        svc.track_as_ticket = AsyncMock(return_value={"success": False, "error": "boom"})
-        return svc
-
-    monkeypatch.setattr(
-        "orchestrator.services.escalation_service.EscalationService", _install_failing
-    )
-    supa = _FakeSupabase(claim_row={"id": "m1"})
-    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
-
-    result = await ch._handle_escalation_track_callback(
-        callback_id="cb1",
-        mapping_id="00000000-0000-0000-0000-000000000001",
-        chat_id="-100999",
-        message_id=42,
-        original_text="original escalation text",
-    )
-
-    assert result["message"] == "Escalation tracking: failed"
-    assert supa.reactivate_calls == ["00000000-0000-0000-0000-000000000001"]
-    canonical_release_calls = [
-        c for c in supa.canonical_calls if c[0] == "escalations" and c[1].get("state") == "open"
-    ]
-    assert canonical_release_calls == [
-        (
-            "escalations",
-            {"state": "open"},
-            [
-                ("id", "00000000-0000-0000-0000-000000000001"),
-                ("state", "processing"),
-            ],
-        )
-    ]
 
 
 async def test_track_callback_uses_canonical_claim_once_legacy_writes_stopped(monkeypatch):
@@ -360,21 +336,13 @@ async def test_close_callback_resolves_canonical_escalation(monkeypatch):
     filed) is the only escalation lifecycle exit that had zero canonical
     dual-write -- without this, escalations.state stays stuck at
     open/processing forever for a silently- or notify-closed escalation."""
-    supa = _FakeSupabase(
-        claim_row={
-            "id": "m1",
-            "session_id": "telegram_abc",
-            "ticket_ref": None,
-            "jira_ticket_key": None,
-            "customer_chat_id": "123",
-            "customer_topic_id": None,
-        }
-    )
+    mapping_id = "00000000-0000-0000-0000-000000000009"
+    supa = _FakeSupabase(claim_row=None, escalations_state={mapping_id: {"state": "open"}})
     monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
 
     await ch._handle_escalation_close_callback(
         callback_id="cb1",
-        mapping_id="00000000-0000-0000-0000-000000000009",
+        mapping_id=mapping_id,
         chat_id="-100999",
         message_id=42,
         original_text="original escalation text",
@@ -448,21 +416,24 @@ async def test_close_callback_transitions_internal_ticket_to_done(monkeypatch):
     """Regression: previously this only fired for jira_ticket_key, so an
     internal ticket's status was never set to 'done' on close. Now it must
     route through TicketService via ticket_ref."""
-    supa = _FakeSupabase(
-        claim_row={
-            "id": "m1",
+    mapping_id = "00000000-0000-0000-0000-000000000002"
+    supa = _FakeSupabase(claim_row=None, escalations_state={mapping_id: {"state": "open"}})
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+    _install_escalation_service_returning(
+        monkeypatch,
+        {
+            "id": mapping_id,
             "session_id": "telegram_abc",
             "ticket_ref": "TKT-000005",
             "jira_ticket_key": None,
             "customer_chat_id": "123",
             "customer_topic_id": None,
-        }
+        },
     )
-    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
 
     await ch._handle_escalation_close_callback(
         callback_id="cb1",
-        mapping_id="00000000-0000-0000-0000-000000000002",
+        mapping_id=mapping_id,
         chat_id="-100999",
         message_id=42,
         original_text="original escalation text",
@@ -477,21 +448,24 @@ async def test_close_callback_transitions_jira_ticket_to_done_via_legacy_fallbac
     """A legacy/pre-migration row with only jira_ticket_key (no ticket_ref)
     must still route through TicketService (which correctly dispatches to
     the Jira backend for a Jira-shaped ref)."""
-    supa = _FakeSupabase(
-        claim_row={
-            "id": "m1",
+    mapping_id = "00000000-0000-0000-0000-000000000003"
+    supa = _FakeSupabase(claim_row=None, escalations_state={mapping_id: {"state": "open"}})
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+    _install_escalation_service_returning(
+        monkeypatch,
+        {
+            "id": mapping_id,
             "session_id": "telegram_abc",
             "ticket_ref": None,
             "jira_ticket_key": "OPS-42",
             "customer_chat_id": "123",
             "customer_topic_id": None,
-        }
+        },
     )
-    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
 
     await ch._handle_escalation_close_callback(
         callback_id="cb1",
-        mapping_id="00000000-0000-0000-0000-000000000003",
+        mapping_id=mapping_id,
         chat_id="-100999",
         message_id=42,
         original_text="original escalation text",
@@ -503,29 +477,32 @@ async def test_close_callback_transitions_jira_ticket_to_done_via_legacy_fallbac
 
 
 async def test_close_callback_skips_transition_when_no_ticket(monkeypatch):
-    supa = _FakeSupabase(
-        claim_row={
-            "id": "m1",
+    mapping_id = "00000000-0000-0000-0000-000000000004"
+    supa = _FakeSupabase(claim_row=None, escalations_state={mapping_id: {"state": "open"}})
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+    _install_escalation_service_returning(
+        monkeypatch,
+        {
+            "id": mapping_id,
             "session_id": "telegram_abc",
             "ticket_ref": None,
             "jira_ticket_key": None,
             "customer_chat_id": "123",
             "customer_topic_id": None,
-        }
+        },
     )
-    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
 
     await ch._handle_escalation_close_callback(
         callback_id="cb1",
-        mapping_id="00000000-0000-0000-0000-000000000004",
+        mapping_id=mapping_id,
         chat_id="-100999",
         message_id=42,
         original_text="original escalation text",
         notify_customer=False,
     )
 
-    # No EscalationService is even constructed for the transition step when
-    # there's no ticket_ref/jira_ticket_key to transition.
+    # No second EscalationService is even constructed for the transition step
+    # when there's no ticket_ref/jira_ticket_key to transition.
     assert all(
         svc._tickets.transition_to_done_calls == []
         for svc in _FakeEscalationService.instances

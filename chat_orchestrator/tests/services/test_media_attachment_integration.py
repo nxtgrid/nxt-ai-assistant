@@ -10,6 +10,7 @@ they each mock their own collaborators.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -130,7 +131,6 @@ async def test_media_from_escalation_reaches_the_internal_ticket() -> None:
     service._get_or_create_escalation_topic = AsyncMock(return_value=None)
 
     wrapper = MagicMock()
-    wrapper.save_escalation_mapping = AsyncMock(return_value="mapping-1")
     wrapper._get_client = MagicMock(return_value=raw_client)
     service._get_supabase_client = MagicMock(return_value=wrapper)
     service._resolve_chat_session_uuid = AsyncMock(return_value="session-uuid-1")
@@ -138,9 +138,16 @@ async def test_media_from_escalation_reaches_the_internal_ticket() -> None:
     async def fake_download(file_id: str, bot_token: str, max_size_bytes: int):
         return "ZmFrZS1ieXRlcw==", "image/jpeg"  # base64("fake-bytes")
 
-    with patch(
-        "orchestrator.services.telegram_transport.download_telegram_photo",
-        new=fake_download,
+    # escalate_to_support pre-generates the escalation's own id (no more
+    # legacy save_escalation_mapping call to assign one on write) -- fix it
+    # so the attachment lookup below knows what to ask for.
+    mapping_id = "11111111-1111-1111-1111-111111111111"
+    with (
+        patch(
+            "orchestrator.services.telegram_transport.download_telegram_photo",
+            new=fake_download,
+        ),
+        patch("orchestrator.services.escalation_service.uuid.uuid4", return_value=uuid.UUID(mapping_id)),
     ):
         escalate_result = await service.escalate_to_support(
             question_summary="Meter sparking, see photo",
@@ -150,7 +157,7 @@ async def test_media_from_escalation_reaches_the_internal_ticket() -> None:
         )
     assert escalate_result["success"] is True
 
-    attachments = await AttachmentRepository(client=raw_client).list_by_escalation("mapping-1")
+    attachments = await AttachmentRepository(client=raw_client).list_by_escalation(mapping_id)
     assert len(attachments) == 1
     assert attachments[0].mime_type == "image/jpeg"
     assert raw_client.storage.from_("escalation-media").objects[attachments[0].storage_path] == (
@@ -160,11 +167,11 @@ async def test_media_from_escalation_reaches_the_internal_ticket() -> None:
     ticket_result = await service._tickets.create_ticket(
         TicketCreateRequest(
             summary="Meter sparking",
-            escalation_mapping_id="mapping-1",
+            escalation_mapping_id=mapping_id,
             source="escalation",
         ),
         backend_override="internal",
     )
 
-    linked = await AttachmentRepository(client=raw_client).list_by_escalation("mapping-1")
+    linked = await AttachmentRepository(client=raw_client).list_by_escalation(mapping_id)
     assert linked[0].ticket_id == ticket_result.ticket_id

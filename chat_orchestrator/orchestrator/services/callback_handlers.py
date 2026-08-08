@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import os
 import uuid as uuid_mod
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from orchestrator.models.schemas import UserContext
@@ -25,7 +24,6 @@ from orchestrator.services.telegram_transport import (
 from orchestrator.utils.session_id import generate_session_id
 from shared.auth import get_auth_service
 from shared.auth.auth_service import STAFF_ORG_ID as _STAFF_ORG_ID
-from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
 from shared.utils.telegram_buttons import (
     ESCALATION_CLOSE_NOTIFY_PREFIX,
@@ -810,31 +808,28 @@ async def _handle_escalation_track_callback(
         escalation_service = EscalationService()
 
         # Atomic claim: only first click wins
-        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
-            canonical_escalations = _canonical_escalations(supabase_client)
-            claimed = await canonical_escalations.claim(mapping_id)
-            escalation = None
-            if claimed:
-                escalation = await escalation_service.get_escalation_by_id_canonical(mapping_id)
-                if escalation is None:
-                    # Claimed but couldn't resolve the context needed to file
-                    # a ticket -- release so a retry (or another staff click)
-                    # isn't permanently blocked by this claim.
+        canonical_escalations = _canonical_escalations(supabase_client)
+        claimed = await canonical_escalations.claim(mapping_id)
+        escalation = None
+        if claimed:
+            escalation = await escalation_service.get_escalation_by_id_canonical(mapping_id)
+            if escalation is None:
+                # Claimed but couldn't resolve the context needed to file
+                # a ticket -- release so a retry (or another staff click)
+                # isn't permanently blocked by this claim.
+                LOGGER.warning(
+                    "Claimed canonical escalation {} but could not resolve "
+                    "its context -- releasing",
+                    mapping_id,
+                )
+                try:
+                    await canonical_escalations.release(mapping_id)
+                except Exception:
                     LOGGER.warning(
-                        "Claimed canonical escalation {} but could not resolve "
-                        "its context -- releasing",
+                        "Could not release canonical escalation {}",
                         mapping_id,
+                        exc_info=True,
                     )
-                    try:
-                        await canonical_escalations.release(mapping_id)
-                    except Exception:
-                        LOGGER.warning(
-                            "Could not release canonical escalation {}",
-                            mapping_id,
-                            exc_info=True,
-                        )
-        else:
-            escalation = await supabase_client.claim_escalation_for_tracking(mapping_id)
         if not escalation:
             await _answer_callback_query(
                 callback_id, "Escalation already closed or tracked", show_alert=True
@@ -878,8 +873,6 @@ async def _handle_escalation_track_callback(
             LOGGER.info(f"Escalation {mapping_id} tracked as {ticket_ref}")
         else:
             # Revert: re-activate the escalation since ticket creation failed
-            if not fr.get("STOP_LEGACY_ESCALATION_WRITES"):
-                await supabase_client.reactivate_escalation(mapping_id)
             try:
                 await _canonical_escalations(supabase_client).release(mapping_id)
             except Exception:
@@ -940,33 +933,29 @@ async def _handle_escalation_close_callback(
 
         supabase_client = get_supabase_client()
         escalation_service = EscalationService()
-        stop_legacy_writes = fr.get("STOP_LEGACY_ESCALATION_WRITES")
 
         # Atomic claim: only first click wins
-        if stop_legacy_writes:
-            canonical_escalations = _canonical_escalations(supabase_client)
-            claimed_row = await canonical_escalations.claim(mapping_id)
-            escalation = (
-                await escalation_service.get_escalation_by_id_canonical(mapping_id)
-                if claimed_row
-                else None
+        canonical_escalations = _canonical_escalations(supabase_client)
+        claimed_row = await canonical_escalations.claim(mapping_id)
+        escalation = (
+            await escalation_service.get_escalation_by_id_canonical(mapping_id)
+            if claimed_row
+            else None
+        )
+        if claimed_row and escalation is None:
+            LOGGER.warning(
+                "Claimed canonical escalation {} but could not resolve its "
+                "context -- releasing",
+                mapping_id,
             )
-            if claimed_row and escalation is None:
+            try:
+                await canonical_escalations.release(mapping_id)
+            except Exception:
                 LOGGER.warning(
-                    "Claimed canonical escalation {} but could not resolve its "
-                    "context -- releasing",
+                    "Could not release canonical escalation {}",
                     mapping_id,
+                    exc_info=True,
                 )
-                try:
-                    await canonical_escalations.release(mapping_id)
-                except Exception:
-                    LOGGER.warning(
-                        "Could not release canonical escalation {}",
-                        mapping_id,
-                        exc_info=True,
-                    )
-        else:
-            escalation = await supabase_client.claim_escalation_for_tracking(mapping_id)
         if not escalation:
             await _answer_callback_query(
                 callback_id, "Escalation already closed or tracked", show_alert=True
@@ -975,20 +964,6 @@ async def _handle_escalation_close_callback(
             return {"success": True, "message": "Already claimed", "statusCode": 200}
 
         claimed = True
-
-        if not stop_legacy_writes:
-            # Set resolved_at immediately so orphan recovery (which reactivates
-            # is_active=False rows without resolved_at) never re-opens this
-            # intentional close.
-            try:
-                _db = supabase_client._get_client()
-                _db.table("escalation_mappings").update(
-                    {"resolved_at": datetime.now(timezone.utc).isoformat()}
-                ).eq("id", mapping_id).execute()
-            except Exception:
-                LOGGER.warning(
-                    "Could not set resolved_at for mapping {}", mapping_id, exc_info=True
-                )
 
         # Canonical mirror: nothing else transitions escalations.state to
         # "resolved" for a close that never goes through track_as_ticket (no
@@ -1010,18 +985,11 @@ async def _handle_escalation_close_callback(
         action_label = "Closing & notifying..." if notify_customer else "Closing silently..."
         await _answer_callback_query(callback_id, action_label)
 
-        # The claim already set this mapping to is_active=false (or, once
-        # legacy writes are stopped, escalations.state="processing"). Legacy's
-        # is_escalated flag on chat_sessions is a cached mirror this close
-        # only needs to clear when that flag is still being written --
-        # once it's not, is_session_escalated reads escalations.state live,
-        # so there's nothing left to release here.
-        if not stop_legacy_writes:
-            remaining = await supabase_client.count_active_blocking_escalations(session_id)
-            if remaining == 0:
-                await supabase_client.update_session_escalation_status(
-                    session_id=session_id, is_escalated=False
-                )
+        # The claim already set escalations.state="processing". Legacy's
+        # is_escalated flag on chat_sessions was a cached mirror this close
+        # used to clear -- now that legacy writes have stopped,
+        # is_session_escalated reads escalations.state live, so there's
+        # nothing left to release here.
 
         # Notify customer if requested
         if notify_customer:
@@ -1072,13 +1040,6 @@ async def _handle_escalation_close_callback(
     except Exception as e:
         LOGGER.exception(f"Error handling escalation close callback: {e}")
         if claimed and supabase_client:
-            if not fr.get("STOP_LEGACY_ESCALATION_WRITES"):
-                try:
-                    await supabase_client.reactivate_escalation(mapping_id)
-                except Exception:
-                    LOGGER.error(
-                        f"CRITICAL: Failed to reactivate escalation {mapping_id} after error"
-                    )
             try:
                 await _canonical_escalations(supabase_client).reopen(mapping_id)
             except Exception:

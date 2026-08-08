@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -29,14 +30,18 @@ def _make_service() -> EscalationService:
 @pytest.mark.asyncio
 async def test_escalate_to_support_captures_media_when_present() -> None:
     service = _make_service()
-    service._get_supabase_client.return_value.save_escalation_mapping = AsyncMock(
-        return_value="mapping-1"
-    )
     service._record_canonical_escalation = AsyncMock()
-    with patch(
-        "orchestrator.services.escalation_service.capture_escalation_media",
-        new=AsyncMock(),
-    ) as fake_capture:
+    # escalate_to_support pre-generates the escalation's own id (no more
+    # legacy save_escalation_mapping call to assign one on write) -- fix it
+    # so the capture-call assertion below knows what to expect.
+    mapping_id = "11111111-1111-1111-1111-111111111111"
+    with (
+        patch(
+            "orchestrator.services.escalation_service.capture_escalation_media",
+            new=AsyncMock(),
+        ) as fake_capture,
+        patch("orchestrator.services.escalation_service.uuid.uuid4", return_value=uuid.UUID(mapping_id)),
+    ):
         result = await service.escalate_to_support(
             question_summary="Meter is sparking, see photo",
             session_id="telegram_abc",
@@ -47,16 +52,13 @@ async def test_escalate_to_support_captures_media_when_present() -> None:
     assert result["success"] is True
     fake_capture.assert_awaited_once()
     call_kwargs = fake_capture.await_args.kwargs
-    assert call_kwargs["escalation_id"] == "mapping-1"
+    assert call_kwargs["escalation_id"] == mapping_id
     assert call_kwargs["media_file_ids"] == [{"type": "image", "file_id": "photo1"}]
 
 
 @pytest.mark.asyncio
 async def test_escalate_to_support_skips_capture_when_no_media() -> None:
     service = _make_service()
-    service._get_supabase_client.return_value.save_escalation_mapping = AsyncMock(
-        return_value="mapping-1"
-    )
     service._record_canonical_escalation = AsyncMock()
     with patch(
         "orchestrator.services.escalation_service.capture_escalation_media",
@@ -73,9 +75,6 @@ async def test_escalate_to_support_skips_capture_when_no_media() -> None:
 @pytest.mark.asyncio
 async def test_escalation_still_succeeds_when_capture_raises() -> None:
     service = _make_service()
-    service._get_supabase_client.return_value.save_escalation_mapping = AsyncMock(
-        return_value="mapping-1"
-    )
     service._record_canonical_escalation = AsyncMock()
     with patch(
         "orchestrator.services.escalation_service.capture_escalation_media",
