@@ -1388,9 +1388,23 @@ class EscalationService:
             if session is None or not session.telegram_chat_id:
                 return None
             ticket_ref = None
+            ticket_backend = None
             ticket_id = escalation.get("ticket_id")
             if ticket_id:
                 ticket_ref = await self._tickets.get_ref_by_id(ticket_id)
+                if ticket_ref:
+                    # Needed by handler.py's Close flow to gate the Jira
+                    # transition call the same way the legacy jira_ticket_key
+                    # column implicitly did (only set for Jira-backed rows).
+                    # get_backend_name raises when a ticket's backend isn't
+                    # recorded yet (e.g. still provisioning) -- appropriate
+                    # for its usual callers, which need a definitive answer,
+                    # but not fatal here: an unknown backend just means the
+                    # downstream Jira-transition gate treats it as "skip".
+                    try:
+                        ticket_backend = await self._tickets.get_backend_name(ticket_ref)
+                    except TicketBackendError:
+                        ticket_backend = None
             return {
                 "is_active": escalation.get("state") == "open",
                 "customer_chat_id": session.telegram_chat_id,
@@ -1399,6 +1413,7 @@ class EscalationService:
                 "escalation_topic_id": delivery.get("external_topic_id"),
                 "session_id": session.session_id,
                 "ticket_ref": ticket_ref,
+                "ticket_backend": ticket_backend,
             }
         except Exception:
             LOGGER.warning(
@@ -1408,6 +1423,33 @@ class EscalationService:
                 exc_info=True,
             )
             return None
+
+    async def resolve_escalation_by_message_id(
+        self, reply_to_message_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """Resolve a Telegram escalation-message id to its mapping/escalation
+        info -- canonical-first with a legacy fallback, gated by the same two
+        rollout flags everywhere else in this class.
+
+        Extracted from handle_support_reply so other message-reply
+        entrypoints (handler.py's reply "Reopen"/"Closed" commands) share one
+        resolution path instead of each hand-rolling the flag checks and
+        calling the legacy supabase_client.get_escalation_mapping directly.
+        """
+        supabase_client = self._get_supabase_client()
+        mapping = None
+
+        if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
+            mapping = await self._resolve_support_reply_canonical(reply_to_message_id)
+
+        if mapping is None and supabase_client and not fr.get("STOP_LEGACY_ESCALATION_WRITES"):
+            # Once legacy writes have stopped, a legacy row here (if one even
+            # exists) may be stale -- an unresolved canonical lookup is
+            # treated as "no escalation found" rather than risk routing a
+            # reply using out-of-date data.
+            mapping = await supabase_client.get_escalation_mapping(reply_to_message_id)
+
+        return mapping
 
     async def handle_support_reply(
         self,
@@ -1428,17 +1470,7 @@ class EscalationService:
         """
         # Look up customer chat from database
         supabase_client = self._get_supabase_client()
-        mapping = None
-
-        if fr.get("CANONICAL_ESCALATION_READS_ENABLED"):
-            mapping = await self._resolve_support_reply_canonical(reply_to_message_id)
-
-        if mapping is None and supabase_client and not fr.get("STOP_LEGACY_ESCALATION_WRITES"):
-            # Once legacy writes have stopped, a legacy row here (if one even
-            # exists) may be stale -- an unresolved canonical lookup is
-            # treated as "no escalation found" rather than risk routing a
-            # reply using out-of-date data.
-            mapping = await supabase_client.get_escalation_mapping(reply_to_message_id)
+        mapping = await self.resolve_escalation_by_message_id(reply_to_message_id)
 
         if not mapping:
             LOGGER.warning(

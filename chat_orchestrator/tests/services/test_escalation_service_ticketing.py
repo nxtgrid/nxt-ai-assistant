@@ -1704,6 +1704,107 @@ async def test_handle_support_reply_uses_legacy_when_flag_off(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# resolve_escalation_by_message_id -- the public extraction handler.py's
+# Reopen/Closed reply commands use, and _resolve_support_reply_canonical's
+# ticket_backend field (needed to gate the Jira-transition call correctly).
+# ---------------------------------------------------------------------------
+
+
+def _canonical_fixture_rows(*, ticket_backend: Optional[str]) -> "_FakeRaw":
+    raw = _FakeRaw()
+    raw.table("message_deliveries").rows = [
+        {
+            "escalation_id": "esc-1",
+            "external_message_id": 555,
+            "purpose": "escalation",
+            "external_topic_id": "9",
+        }
+    ]
+    raw.table("escalations").rows = [
+        {
+            "id": "esc-1",
+            "chat_session_id": "session-uuid-1",
+            "state": "open",
+            "customer_email": "cust@example.com",
+            "ticket_id": "ticket-1",
+        }
+    ]
+    ticket_row: Dict[str, Any] = {
+        "id": "ticket-1",
+        "ticket_ref": "OPS-77",
+        "created_via": "escalation",
+        "provisioning_state": "active",
+        "summary": "Meter offline",
+    }
+    if ticket_backend is not None:
+        ticket_row["backend"] = ticket_backend
+    raw.table("tickets").rows = [ticket_row]
+    return raw
+
+
+async def test_resolve_escalation_by_message_id_directly_callable(monkeypatch):
+    """handler.py's Reopen/Closed commands call this public method directly
+    (not through handle_support_reply) -- prove it works standalone."""
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    supa = _FakeSupabase(_canonical_fixture_rows(ticket_backend="jira"))
+    supa.session_by_id_result = SimpleNamespace(
+        telegram_chat_id="123", telegram_topic_id=None, session_id="telegram_abc"
+    )
+    svc = _make_service(supa)
+
+    mapping = await svc.resolve_escalation_by_message_id(555)
+
+    assert mapping is not None
+    assert mapping["session_id"] == "telegram_abc"
+    assert mapping["escalation_topic_id"] == "9"
+
+
+async def test_resolve_support_reply_canonical_reports_jira_backend(monkeypatch):
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    supa = _FakeSupabase(_canonical_fixture_rows(ticket_backend="jira"))
+    supa.session_by_id_result = SimpleNamespace(
+        telegram_chat_id="123", telegram_topic_id=None, session_id="telegram_abc"
+    )
+    svc = _make_service(supa)
+
+    mapping = await svc.resolve_escalation_by_message_id(555)
+
+    assert mapping["ticket_ref"] == "OPS-77"
+    assert mapping["ticket_backend"] == "jira"
+
+
+async def test_resolve_support_reply_canonical_reports_internal_backend(monkeypatch):
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    supa = _FakeSupabase(_canonical_fixture_rows(ticket_backend="internal"))
+    supa.session_by_id_result = SimpleNamespace(
+        telegram_chat_id="123", telegram_topic_id=None, session_id="telegram_abc"
+    )
+    svc = _make_service(supa)
+
+    mapping = await svc.resolve_escalation_by_message_id(555)
+
+    assert mapping["ticket_backend"] == "internal"
+
+
+async def test_resolve_support_reply_canonical_backend_none_when_not_yet_recorded(monkeypatch):
+    """A ticket that's still provisioning (no backend recorded yet) must not
+    blow up the whole resolution -- get_backend_name raises TicketBackendError
+    for exactly this case, which is fatal for its usual callers but not here."""
+    monkeypatch.setenv("CANONICAL_ESCALATION_READS_ENABLED", "true")
+    supa = _FakeSupabase(_canonical_fixture_rows(ticket_backend=None))
+    supa.session_by_id_result = SimpleNamespace(
+        telegram_chat_id="123", telegram_topic_id=None, session_id="telegram_abc"
+    )
+    svc = _make_service(supa)
+
+    mapping = await svc.resolve_escalation_by_message_id(555)
+
+    assert mapping is not None
+    assert mapping["ticket_ref"] == "OPS-77"
+    assert mapping["ticket_backend"] is None
+
+
+# ---------------------------------------------------------------------------
 # ALWAYS_FILE_ESCALATION_AS_TICKET
 # ---------------------------------------------------------------------------
 
