@@ -1,7 +1,7 @@
 # Model tier selection: thinking / fast / lite
 
 **Date:** 2026-08-08
-**Status:** Draft, pending approval
+**Status:** Approved
 
 ## Problem
 
@@ -56,7 +56,7 @@ Cross-checked against `flag_registry.py`'s actual registered defaults (the autho
 | `experts.definitions.prompt`'s `site_visit_tracker` expert, using `GEMINI_AGENT_PRO_MODEL` (only expert in the file with an explicit Model field -- confirmed by grepping every `Model` field in the file, not just this one hit) | `gemini-2.5-pro` | thinking | High on tier, same conflict |
 | The other ~14 prompts (no dedicated env var today, never had explicit selection) | none | **fast** (proposed) | Proposal, not a finding -- "fast" is the closest analog to "no special treatment." Will list by name in the plan for a real per-prompt look rather than a blanket assumption. |
 
-**One real conflict, not yet resolved:** `GEMINI_DEEP_THINKING_MODEL` and `GEMINI_AGENT_PRO_MODEL` both collapse into `thinking`, but their registered defaults disagree -- `gemini-pro-latest` (a floating alias) vs. `gemini-2.5-pro` (a pinned version). `MODEL_THINKING` needs exactly one default; picking wrong changes either the deep-thinking command's or `site_visit_tracker`'s behavior. Proposing `gemini-2.5-pro` (pinned, predictable, matches the more specific of the two) but this needs a direct answer, not a guess.
+**Resolved:** `MODEL_THINKING` defaults to `gemini-pro-latest`, `MODEL_FAST` to `gemini-flash-latest` (matching `project.yml`'s existing value for the same role), `MODEL_LITE` to `gemini-2.5-flash-lite` (the value already shared identically across `THREAD_CLASSIFIER_MODEL`/`VERIFICATION_MODEL`/`INTENT_ROUTER_MODEL` today, so this one carries zero behavior change for any of those three).
 
 `verification.sanitize_system` and `verification.criteria` aren't in this table -- `verification.sanitize_system` is almost certainly the same `lite` tier as `verification.sanitize` (same service, same call), and `verification.criteria` is Google-Doc-driven with its own separate history (see `test_prompt_library_contents.py`'s `OVERRIDABLE` set); both get confirmed by name, not assumed, when the plan lists every prompt.
 
