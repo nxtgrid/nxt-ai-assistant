@@ -1,19 +1,25 @@
-"""Every prompt in the library parses, and the protected set stays protected."""
+"""Every prompt in the library parses, and prompts with a specific override policy keep it."""
 
 import pytest
 
 from shared.prompts import PROMPTS
 from shared.prompts.components import COMPONENT_LABELS
 
-NON_OVERRIDABLE = {
-    "ticketing.correlation",
-}
-
 # Historically Google-Doc-driven (VERIFICATION_DOC_ID) with no bundled
 # fallback at all; kept overridable so the doc keeps working exactly as
 # before (Phase 1 parity), even though verification is safety-sensitive.
 OVERRIDABLE = {
     "verification.criteria",
+}
+
+# Both unlocked for ops/eng drafting, but correlation keeps publish eng-only
+# -- it feeds alert-grouping decisions and used to be overridable: false for
+# that reason (see correlation_rules.py's docstring). Drafting is open to
+# both; only eng can promote a correlation change to live. See
+# docs/superpowers/specs/2026-08-08-prompt-permissions-design.md.
+TICKETING_ACCESS = {
+    "ticketing.jira_issue_types": (["eng", "ops"], ["eng", "ops"]),
+    "ticketing.correlation": (["eng", "ops"], ["eng"]),
 }
 
 
@@ -40,9 +46,13 @@ def test_every_prompt_declares_a_component_we_recognise():
         assert PROMPTS.spec(prompt_id).component in COMPONENT_LABELS, prompt_id
 
 
-@pytest.mark.parametrize("prompt_id", sorted(NON_OVERRIDABLE))
-def test_protected_prompts_are_not_overridable(prompt_id):
-    assert PROMPTS.spec(prompt_id).overridable is False
+@pytest.mark.parametrize("prompt_id", sorted(TICKETING_ACCESS))
+def test_ticketing_prompts_have_the_expected_access(prompt_id):
+    spec = PROMPTS.spec(prompt_id)
+    edit, publish = TICKETING_ACCESS[prompt_id]
+    assert spec.overridable is True
+    assert sorted(spec.access.edit) == edit
+    assert sorted(spec.access.publish) == publish
 
 
 @pytest.mark.parametrize("prompt_id", sorted(OVERRIDABLE))

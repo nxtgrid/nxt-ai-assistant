@@ -1,15 +1,15 @@
 ---
 id: ticketing.correlation
-description: Alert-correlation grouping policy. Versioned with the application; not editable at runtime.
+description: Alert-correlation grouping policy. Draft changes are open to ops/eng from the Prompts admin page; only eng can publish one live.
 owner: eng
 component: orchestrator_ticketing
-overridable: false
+overridable: true
 output: text
 sections: [system_instructions]
 access:
   view: [ops, eng]
-  edit: []
-  publish: []
+  edit: [ops, eng]
+  publish: [eng]
 ---
 # System Instructions
 
