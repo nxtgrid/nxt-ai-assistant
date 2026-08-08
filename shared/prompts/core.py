@@ -9,6 +9,7 @@ import PROMPTS``.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.prompts.bundled import BundledStore
@@ -36,9 +37,10 @@ class PromptLibrary:
     Resolution order per id: DB override, then attached Google Doc, then the
     bundled file -- unless the prompt's doc binding has its override flag set,
     in which case the doc goes first instead (see _resolve_body). Frontmatter
-    always comes from the bundled file, so an override can supply body text
+    always comes from the bundled file, so a body override can supply text
     but can never change a prompt's overridability, output schema or access
-    lists.
+    lists. Model tier is the one deliberate exception -- see spec() -- since
+    a tier choice is meant to be admin-changeable without a PR.
     """
 
     def __init__(
@@ -76,7 +78,26 @@ class PromptLibrary:
         return self._bundled.ids()
 
     def spec(self, prompt_id: str) -> PromptSpec:
-        return self._bundled.get(prompt_id)
+        """This prompt's frontmatter, with a live model-tier override merged
+        in if one exists.
+
+        The only merge point: overrides never change overridability, output
+        schema or access (see the class docstring) -- model tier is the one
+        exception, deliberately, because a tier choice is meant to be
+        admin-changeable without a PR. getattr-with-default, not a direct
+        attribute access: existing minimal overrides fakes that predate
+        model_tier_for (e.g. shared/tests/test_prompt_write_api.py's
+        RecordingStore) have no reason to grow it just to keep constructing,
+        same rationale as doc_override_for above.
+        """
+        base = self._bundled.get(prompt_id)
+        if self._overrides is None:
+            return base
+        model_tier_for = getattr(self._overrides, "model_tier_for", None)
+        tier = model_tier_for(prompt_id) if model_tier_for else None
+        if tier is None:
+            return base
+        return dataclasses.replace(base, model=tier)
 
     def reload(self) -> None:
         self._bundled.reload()

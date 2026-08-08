@@ -59,6 +59,19 @@ def test_defaults_are_conservative():
     assert spec.overridable is False
     assert spec.output == "text"
     assert spec.owner == "eng"
+    assert spec.model == "fast"
+
+
+def test_model_field_parses_a_valid_tier():
+    text = "---\nid: a.b\ndescription: d\nmodel: thinking\n---\nbody"
+    spec = parse_prompt_file(text, path="a.b.prompt")
+    assert spec.model == "thinking"
+
+
+def test_model_field_rejects_an_invalid_tier():
+    text = "---\nid: a.b\ndescription: d\nmodel: medium\n---\nbody"
+    with pytest.raises(ValueError, match="model"):
+        parse_prompt_file(text, path="a.b.prompt")
 
 
 def test_checksum_is_stable_and_body_only():

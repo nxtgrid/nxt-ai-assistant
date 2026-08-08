@@ -40,7 +40,7 @@ class PromptSpec:
     overridable: bool = False
     output: str = "text"
     schema: Optional[Dict[str, Any]] = None
-    model: Optional[str] = None
+    model: str = "fast"
     variables: List[str] = field(default_factory=list)
     sections: List[str] = field(default_factory=list)
     access: AccessSpec = field(default_factory=AccessSpec)
@@ -75,6 +75,12 @@ def parse_prompt_file(text: str, *, path: str) -> PromptSpec:
     if output == "json" and not schema:
         raise ValueError(f"{path}: output 'json' requires a 'schema' field")
 
+    model = raw.get("model", "fast")
+    if model not in ("thinking", "fast", "lite"):
+        raise ValueError(
+            f"{path}: frontmatter 'model' must be one of thinking/fast/lite, got {model!r}"
+        )
+
     access_raw = raw.get("access") or {}
     access = AccessSpec(
         view=list(access_raw.get("view") or []),
@@ -92,7 +98,7 @@ def parse_prompt_file(text: str, *, path: str) -> PromptSpec:
         overridable=bool(raw.get("overridable", False)),
         output=str(output),
         schema=schema,
-        model=raw.get("model"),
+        model=model,
         variables=list(raw.get("variables") or []),
         sections=list(raw.get("sections") or []),
         access=access,

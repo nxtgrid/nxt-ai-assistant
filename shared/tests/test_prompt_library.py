@@ -115,6 +115,37 @@ def test_spec_exposes_frontmatter(bundled):
     assert lib.spec("locked").overridable is False
 
 
+def test_spec_falls_back_to_bundled_model_without_an_override(bundled):
+    lib = PromptLibrary(bundled=bundled)
+    assert lib.spec("a.b").model == "fast"
+
+
+def test_spec_reflects_a_live_model_override(bundled):
+    class FakeOverrides:
+        def body_for(self, prompt_id):
+            return None
+
+        def model_tier_for(self, prompt_id):
+            return "thinking" if prompt_id == "a.b" else None
+
+    lib = PromptLibrary(bundled=bundled, overrides=FakeOverrides())
+    assert lib.spec("a.b").model == "thinking"
+    assert lib.spec("locked").model == "fast"
+
+
+def test_spec_model_override_is_optional_on_minimal_overrides_fakes(bundled):
+    """Pre-existing minimal overrides doubles (duck-typed, no model_tier_for)
+    must keep working -- mirrors the same getattr-with-default tolerance
+    doc_override_for already has, for the same reason."""
+
+    class MinimalOverrides:
+        def body_for(self, prompt_id):
+            return None
+
+    lib = PromptLibrary(bundled=bundled, overrides=MinimalOverrides())
+    assert lib.spec("a.b").model == "fast"
+
+
 def test_invalidate_doc_cache_calls_the_hook(bundled):
     calls = []
     lib = PromptLibrary(bundled=bundled, invalidate_gdoc=lambda: calls.append(1))

@@ -35,6 +35,8 @@ class OverrideStore:
         self._body_cache: Dict[Tuple[str, int], str] = {}
         self._doc_binding_cache: Optional[Dict[str, Tuple[str, bool]]] = None
         self._doc_binding_expires: float = 0.0
+        self._model_override_cache: Optional[Dict[str, str]] = None
+        self._model_override_expires: float = 0.0
 
     # ── construction ─────────────────────────────────────────────────────────
     @classmethod
@@ -70,6 +72,8 @@ class OverrideStore:
         self._body_cache.clear()
         self._doc_binding_cache = None
         self._doc_binding_expires = 0.0
+        self._model_override_cache = None
+        self._model_override_expires = 0.0
 
     def _labels(self) -> Dict[str, int]:
         if self._label_cache is not None and time.time() < self._label_expires:
@@ -189,6 +193,41 @@ class OverrideStore:
         """
         return dict(self._doc_bindings())
 
+    def _model_overrides(self) -> Dict[str, str]:
+        """Every prompt_id -> tier override, one query for all of them,
+        cached for DOC_BINDING_TTL_SECONDS -- same shape as _doc_bindings()."""
+        if (
+            self._model_override_cache is not None
+            and time.time() < self._model_override_expires
+        ):
+            return self._model_override_cache
+        if not self._client:
+            return {}
+        try:
+            result = (
+                self._client.table("prompt_model_overrides")
+                .select("prompt_id, tier")
+                .execute()
+            )
+            self._model_override_cache = {
+                row["prompt_id"]: row["tier"] for row in (result.data or [])
+            }
+        except Exception:
+            LOGGER.warning("Model override fetch failed; using bundled tiers only", exc_info=True)
+            self._model_override_cache = {}
+        self._model_override_expires = time.time() + DOC_BINDING_TTL_SECONDS
+        return self._model_override_cache
+
+    def model_tier_for(self, prompt_id: str) -> Optional[str]:
+        """This prompt's live tier override, or None if it's on the
+        frontmatter default."""
+        return self._model_overrides().get(prompt_id)
+
+    def all_model_overrides(self) -> Dict[str, str]:
+        """Every prompt_id -> tier override. For the Prompts list page,
+        same rationale as all_doc_bindings()."""
+        return dict(self._model_overrides())
+
     # ── writes ───────────────────────────────────────────────────────────────
     def propose(self, prompt_id: str, body: str, note: str, actor: str, via: str = "ui") -> int:
         """Append a new version. Does NOT make it live."""
@@ -271,3 +310,25 @@ class OverrideStore:
         self._client.table("prompt_doc_bindings").delete().eq("prompt_id", prompt_id).execute()
         self.invalidate()
         LOGGER.info(f"Cleared doc binding for {prompt_id} by {actor}")
+
+    def set_model_override(self, prompt_id: str, tier: str, actor: str) -> None:
+        """Set (or update) this prompt's live model tier.
+
+        Upserts on prompt_id, the table's primary key -- same pattern as
+        set_doc_binding.
+        """
+        if not self._client:
+            raise RuntimeError("prompt override store is not configured")
+        self._client.table("prompt_model_overrides").upsert(
+            {"prompt_id": prompt_id, "tier": tier, "updated_by": actor}
+        ).execute()
+        self.invalidate()
+        LOGGER.info(f"Set model tier for {prompt_id} -> {tier} by {actor}")
+
+    def clear_model_override(self, prompt_id: str, actor: str) -> None:
+        """Revert this prompt's tier to its frontmatter default."""
+        if not self._client:
+            raise RuntimeError("prompt override store is not configured")
+        self._client.table("prompt_model_overrides").delete().eq("prompt_id", prompt_id).execute()
+        self.invalidate()
+        LOGGER.info(f"Reverted {prompt_id}'s model tier to bundled default by {actor}")
