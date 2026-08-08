@@ -425,6 +425,42 @@ async def test_in_progress_webhook_failure_is_non_fatal():
     await svc.handle_jira_issue_updated(_in_progress_payload("OPS-1"))  # must not raise
 
 
+async def test_in_progress_webhook_syncs_even_when_the_ticket_has_no_escalation_mapping():
+    """Alert-correlation-created tickets (filed via /chat/notify -- a
+    monitoring alert auto-opening a Jira ticket, never a Telegram customer
+    escalation) have no escalation_mappings row at all, so ctx resolves to
+    None. issue_key doubles as ticket_ref for the Jira backend, so the
+    canonical sync must still run -- this is the bug behind an alert
+    ticket's Telegram card never picking up an "In Progress" move made
+    directly in Jira."""
+    supa = _FakeSupabase(_FakeRaw())  # no mapping_by_jira_key entry for OPS-9
+    tickets = _FakeTickets()
+    svc = _make_service(supa, tickets)
+
+    await svc.handle_jira_issue_updated(_in_progress_payload("OPS-9"))
+
+    assert tickets.mark_in_progress_calls == [
+        {"ref": "OPS-9", "fallback_chat_id": "-100123456", "fallback_topic_id": None}
+    ]
+    # No escalation session exists for this ticket -- nothing to close.
+    assert supa.close_escalation_calls == []
+
+
+async def test_closure_webhook_syncs_canonical_ticket_even_when_the_ticket_has_no_escalation_mapping():
+    """Same gap for closures: an alert-correlation ticket closed directly in
+    Jira must still flip the canonical row and notify, even with no
+    escalation session to close alongside it."""
+    supa = _FakeSupabase(_FakeRaw())  # no mapping for OPS-9
+    tickets = _FakeTickets()
+    svc = _make_service(supa, tickets)
+
+    await svc.handle_jira_issue_updated(_closed_payload("OPS-9"))
+
+    assert tickets.transition_to_done_calls == ["OPS-9"]
+    assert tickets.transition_to_done_kwargs == [{"already_confirmed_externally": True}]
+    assert supa.close_escalation_calls == []
+
+
 # ---------------------------------------------------------------------------
 # Canonical rewrite (STOP_LEGACY_ESCALATION_WRITES) -- Task 12
 # ---------------------------------------------------------------------------
