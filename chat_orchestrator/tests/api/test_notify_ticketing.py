@@ -1334,6 +1334,8 @@ class TestResolveNotifyTicketAutoFailureModes:
 
     async def test_lock_timeout_falls_back_to_plain_create(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
 
         from contextlib import asynccontextmanager
 
