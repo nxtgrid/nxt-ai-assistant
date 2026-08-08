@@ -42,6 +42,13 @@ jobs:
           GOOGLE_API_KEY: test-key  # pragma: allowlist secret
           CHAT_DB_URL: https://placeholder.supabase.co  # pragma: allowlist secret
           CHAT_DB_SERVICE_KEY: placeholder  # pragma: allowlist secret
+          # resolve_model() raises rather than silently falling back (unlike the
+          # scattered os.getenv(..., "default") calls it replaced), so these must
+          # be set explicitly for any test that constructs a generation gateway.
+          MODEL_THINKING: gemini-pro-latest
+          MODEL_FAST: gemini-flash-latest
+          MODEL_LITE: gemini-2.5-flash-lite
+          FALLBACK_MODEL: gemini-2.5-flash-lite
         run: uv run pytest tests/ -x -q
       # shared/ has no venv of its own; chat_orchestrator's dependency set covers
       # it, and chat_orchestrator imports it, so it is tested here rather than in

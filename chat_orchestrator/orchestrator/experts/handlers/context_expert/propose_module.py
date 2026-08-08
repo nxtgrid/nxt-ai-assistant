@@ -6,13 +6,13 @@ decides whether to fetch the body.
 """
 
 import json
-import os
 import re
 from typing import Dict
 
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm.model_tiers import resolve_model
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
@@ -59,7 +59,7 @@ async def propose_module(context: StepContext) -> StepResult:
     if not body.strip():
         return StepResult.failure("No content to build a context module from.")
 
-    model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+    model = resolve_model("fast")
     gateway = get_default_generation_gateway(default_model=model)
     response = await gateway.generate(
         [LLMMessage(role="user", text=PROPOSAL_PROMPT.format(body=body[:8000]))],
