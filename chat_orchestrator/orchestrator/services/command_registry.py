@@ -58,7 +58,9 @@ class CommandDefinition:
     """Whether this command is restricted to staff users (default: True)"""
 
     model_override: str = ""
-    """Env var name for model override (e.g., 'GEMINI_DEEP_THINKING_MODEL'). Resolved at runtime."""
+    """Tier name for model override ('thinking'/'fast'/'lite'), resolved via
+    shared.llm.model_tiers.resolve_model() at runtime. Empty means no override --
+    the command uses whatever the caller's default gateway model is."""
 
     max_tool_rounds_override: int = 0
     """Override for orchestrator/graphs/state.py's max_rounds for this command's conversation turn.
@@ -804,7 +806,7 @@ COMMAND_REGISTRY: Dict[str, CommandDefinition] = {
             "equipment_diagnostics_get_historical_power_data",
             "equipment_diagnostics_analyze_grid_outage",
         ],
-        model_override="GEMINI_DEEP_THINKING_MODEL",
+        model_override="thinking",
         nl_triggers=[
             "edit this document",
             "edit the document",

@@ -4,12 +4,12 @@ This node processes Telegram slash commands and natural language
 trigger matching, transforming user input accordingly.
 """
 
-import os
 from typing import Any, Dict
 
 from loguru import logger as LOGGER
 
 from orchestrator.graphs.state import ConversationState
+from shared.llm.model_tiers import resolve_model
 
 
 async def parse_command(state: ConversationState) -> Dict[str, Any]:
@@ -58,7 +58,10 @@ async def parse_command(state: ConversationState) -> Dict[str, Any]:
             unlocked = nl_match.exclusive_tools or []
             model_ov = ""
             if nl_match.model_override:
-                model_ov = os.getenv(nl_match.model_override, "")
+                try:
+                    model_ov = resolve_model(nl_match.model_override)
+                except (ValueError, RuntimeError) as e:
+                    LOGGER.warning(f"NL trigger model_override tier unresolvable: {e}")
 
             result = {
                 "user_input": prompt,

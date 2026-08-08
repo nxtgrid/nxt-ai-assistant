@@ -15,6 +15,7 @@ from typing import Optional
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
@@ -26,11 +27,16 @@ MAX_QUALITY_ITERATIONS = 3
 
 
 async def _call_gemini(
-    prompt: str, json_output: bool = False, max_tokens: int = 2048
+    prompt: str, model: str, json_output: bool = False, max_tokens: int = 2048
 ) -> Optional[str]:
-    """Call Gemini Flash for content improvement tasks."""
+    """Call Gemini for content improvement tasks.
+
+    ``model`` is resolved by the caller from its own prompt's tier -- naming,
+    modification and quality-eval are three different prompts that happen to
+    share this helper; each independently resolves its own PromptSpec.model
+    rather than the helper hardcoding one tier for all three.
+    """
     try:
-        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
         gateway = get_default_generation_gateway(
             default_model=model,
         )
@@ -126,7 +132,12 @@ async def _auto_generate_title(content: str, doc_type: str, uploader_name: str) 
         uploader_name=uploader_name,
     )
 
-    title = await _call_gemini(prompt, json_output=False, max_tokens=128)
+    title = await _call_gemini(
+        prompt,
+        model=resolve_model(PROMPTS.spec("ingestion.improve_content.naming").model),
+        json_output=False,
+        max_tokens=128,
+    )
 
     # Strip quotes that LLMs sometimes wrap titles in
     if title:
@@ -253,7 +264,12 @@ async def improve_content(context: StepContext) -> StepResult:
             user_instructions=user_response,
         )
 
-        new_version = await _call_gemini(prompt, json_output=False, max_tokens=4096)
+        new_version = await _call_gemini(
+            prompt,
+            model=resolve_model(PROMPTS.spec("ingestion.improve_content.modification").model),
+            json_output=False,
+            max_tokens=4096,
+        )
         if not new_version:
             # LLM failed - accept current suggestion
             LOGGER.warning("LLM modification failed, accepting current suggestion")
@@ -302,7 +318,12 @@ async def improve_content(context: StepContext) -> StepResult:
         content=content[:6000],
     )
 
-    response_text = await _call_gemini(prompt, json_output=True, max_tokens=4096)
+    response_text = await _call_gemini(
+        prompt,
+        model=resolve_model(PROMPTS.spec("ingestion.improve_content.quality_eval").model),
+        json_output=True,
+        max_tokens=4096,
+    )
     if not response_text:
         # LLM failed - accept as-is and proceed to naming
         LOGGER.warning("Quality eval failed, accepting content as-is")

@@ -8,7 +8,6 @@ Transforms /commands based on the unified command registry.
 
 from __future__ import annotations
 
-import os
 import re as _re
 from typing import TYPE_CHECKING, List, Tuple
 
@@ -18,6 +17,7 @@ from orchestrator.services.command_registry import (
     CommandDefinition,
     get_command,
 )
+from shared.llm.model_tiers import resolve_model
 from shared.utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -162,12 +162,16 @@ class CommandParser:
             prompt = self._build_prompt(cmd_def, args)
         unlocked_tools = cmd_def.exclusive_tools or []
 
-        # Resolve model override from env var name to actual model string
+        # Resolve model override from a tier name to an actual model string.
+        # Fails open (empty override, caller's default gateway model wins) rather
+        # than raising -- an unresolvable tier shouldn't break command processing.
         model_override = ""
         if cmd_def.model_override:
-            model_override = os.getenv(cmd_def.model_override, "")
-            if model_override:
+            try:
+                model_override = resolve_model(cmd_def.model_override)
                 LOGGER.info(f"Command /{command} uses model override: {model_override}")
+            except (ValueError, RuntimeError) as e:
+                LOGGER.warning(f"Command /{command}'s model_override tier unresolvable: {e}")
 
         max_tool_rounds = cmd_def.max_tool_rounds_override
         if max_tool_rounds:
