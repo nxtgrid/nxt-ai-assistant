@@ -217,6 +217,55 @@ def _mapping(ticket_ref: Optional[str]) -> Dict[str, Any]:
     }
 
 
+def _seed_canonical_mapping(
+    raw: _FakeRaw,
+    tickets: _FakeTickets,
+    supa: _FakeSupabase,
+    *,
+    issue_key: str = "OPS-1",
+) -> None:
+    """Wire the chain _get_mapping_by_ticket_ref_canonical resolves through
+    (tickets.get_id_by_ref -> escalations.get_by_ticket_id ->
+    get_escalation_by_id_canonical, which also needs get_session_by_id and a
+    message_deliveries row) so a Jira-key lookup succeeds. Mirrors
+    _mapping()'s field values (session_id="telegram_abc",
+    customer_chat_id="111", escalation_message_id=999) so tests written
+    against the legacy shape need no other changes.
+
+    Unlike the legacy get_escalation_mapping_by_jira_key, this can't resolve
+    to a mapping with an empty ticket_ref -- the lookup key *is* the ref, so
+    a resolved mapping has one by construction. That combination (mapping
+    found, ticket_ref empty) was a legacy pre-cutover-only state and has no
+    canonical equivalent.
+    """
+    ticket_id = "ticket-1"
+    escalation_id = "esc-1"
+    chat_session_uuid = str(uuid.uuid4())
+    tickets._id_by_ref[issue_key] = ticket_id
+    tickets._ref_by_ticket_id[ticket_id] = issue_key
+    raw.table("escalations").rows.append(
+        {"id": escalation_id, "chat_session_id": chat_session_uuid, "ticket_id": ticket_id}
+    )
+    raw.table("message_deliveries").rows.append(
+        {
+            "escalation_id": escalation_id,
+            "purpose": "escalation",
+            "external_message_id": 999,
+            "external_topic_id": None,
+        }
+    )
+    supa.session_by_id_result = SimpleNamespace(
+        session_id="telegram_abc",
+        telegram_chat_id="111",
+        telegram_topic_id=None,
+        organization_id=None,
+    )
+    # close_escalation resolves the *text* session_id ("telegram_abc") to
+    # this same chat_session_id UUID via a separate lookup (get_session, not
+    # get_session_by_id) before it can touch the escalations row above.
+    supa.session_result = SimpleNamespace(id=uuid.UUID(chat_session_uuid))
+
+
 def _closed_payload(issue_key: str = "OPS-1") -> Dict[str, Any]:
     return {
         "webhookEvent": "jira:issue_updated",
@@ -308,11 +357,9 @@ def test_reopen_to_the_backlog_is_not_announced():
 
 async def test_closure_webhook_marks_the_canonical_ticket_done():
     raw = _FakeRaw()
-    raw.tables["escalation_mappings"].rows = [
-        {"id": "mapping-1", "session_id": "telegram_abc", "is_active": True}
-    ]
-    supa = _FakeSupabase(raw, mapping_by_jira_key={"OPS-1": _mapping("OPS-1")})
+    supa = _FakeSupabase(raw)
     tickets = _FakeTickets()
+    _seed_canonical_mapping(raw, tickets, supa, issue_key="OPS-1")
     svc = _make_service(supa, tickets)
 
     await svc.handle_jira_issue_updated(_closed_payload("OPS-1"))
@@ -322,41 +369,45 @@ async def test_closure_webhook_marks_the_canonical_ticket_done():
     # TicketService to redundantly re-drive Jira's own transitions API.
     assert tickets.transition_to_done_kwargs == [{"already_confirmed_externally": True}]
     # The existing escalation-session closure must still happen alongside it.
-    assert supa.close_escalation_calls == ["telegram_abc"]
-
-
-async def test_closure_webhook_skips_canonical_close_when_mapping_has_no_ticket_ref():
-    """Legacy mappings that only ever recorded jira_ticket_key (pre-canonical-
-    ``tickets``-table) have no canonical row to close -- must not attempt it."""
-    raw = _FakeRaw()
-    raw.tables["escalation_mappings"].rows = [
-        {"id": "mapping-1", "session_id": "telegram_abc", "is_active": True}
-    ]
-    supa = _FakeSupabase(raw, mapping_by_jira_key={"OPS-1": _mapping(None)})
-    tickets = _FakeTickets()
-    svc = _make_service(supa, tickets)
-
-    await svc.handle_jira_issue_updated(_closed_payload("OPS-1"))
-
-    assert tickets.transition_to_done_calls == []
-    assert supa.close_escalation_calls == ["telegram_abc"]
+    assert raw.table("escalations").rows[0]["state"] == "resolved"
 
 
 async def test_closure_webhook_still_closes_escalation_when_canonical_close_fails():
     """A failure marking the canonical ticket done is non-fatal -- the
     Telegram-facing escalation close must still go through."""
     raw = _FakeRaw()
-    raw.tables["escalation_mappings"].rows = [
-        {"id": "mapping-1", "session_id": "telegram_abc", "is_active": True}
-    ]
-    supa = _FakeSupabase(raw, mapping_by_jira_key={"OPS-1": _mapping("OPS-1")})
+    supa = _FakeSupabase(raw)
     tickets = _FakeTickets(transition_error=RuntimeError("db blip"))
+    _seed_canonical_mapping(raw, tickets, supa, issue_key="OPS-1")
     svc = _make_service(supa, tickets)
 
     await svc.handle_jira_issue_updated(_closed_payload("OPS-1"))
 
     assert tickets.transition_to_done_calls == ["OPS-1"]
-    assert supa.close_escalation_calls == ["telegram_abc"]
+    assert raw.table("escalations").rows[0]["state"] == "resolved"
+
+
+async def test_closure_webhook_skips_canonical_close_when_no_mapping_resolves():
+    """No escalation mapping at all (e.g. a ticket the alert-correlation
+    pipeline filed via /chat/notify, never a Telegram customer escalation)
+    -- the canonical ticket transition still fires (issue_key doubles as
+    ticket_ref for Jira), but there's no Telegram-facing session to close."""
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    tickets = _FakeTickets()
+    svc = _make_service(supa, tickets)
+
+    close_calls: List[Dict[str, Any]] = []
+
+    async def fake_close_by_mapping(**kwargs):
+        close_calls.append(kwargs)
+
+    svc.close_escalation_by_mapping = fake_close_by_mapping
+
+    await svc.handle_jira_issue_updated(_closed_payload("OPS-1"))
+
+    assert tickets.transition_to_done_calls == ["OPS-1"]
+    assert close_calls == []
 
 
 async def test_non_closure_status_change_is_ignored():
@@ -397,20 +448,6 @@ async def test_in_progress_webhook_syncs_status_with_the_escalation_group_as_fal
     # closure's close_escalation_by_mapping -- must not touch that at all.
     assert supa.close_escalation_calls == []
     assert tickets.transition_to_done_calls == []
-
-
-async def test_in_progress_webhook_skips_sync_when_mapping_has_no_ticket_ref():
-    raw = _FakeRaw()
-    raw.tables["escalation_mappings"].rows = [
-        {"id": "mapping-1", "session_id": "telegram_abc", "is_active": True}
-    ]
-    supa = _FakeSupabase(raw, mapping_by_jira_key={"OPS-1": _mapping(None)})
-    tickets = _FakeTickets()
-    svc = _make_service(supa, tickets)
-
-    await svc.handle_jira_issue_updated(_in_progress_payload("OPS-1"))
-
-    assert tickets.mark_in_progress_calls == []
 
 
 async def test_in_progress_webhook_failure_is_non_fatal():
@@ -586,8 +623,9 @@ async def test_handle_jira_comment_still_posts_to_escalation_group_when_mirrorin
     """The mirror/notify block is additive and best-effort -- a failure there
     must not swallow the pre-existing escalation-group relay."""
     raw = _FakeRaw()
-    supa = _FakeSupabase(raw, mapping_by_jira_key={"OPS-1": _mapping("OPS-1")})
+    supa = _FakeSupabase(raw)
     tickets = _FakeTickets(add_comment_error=RuntimeError("db blip"))
+    _seed_canonical_mapping(raw, tickets, supa, issue_key="OPS-1")
     svc = _make_service(supa, tickets)
 
     sent = []

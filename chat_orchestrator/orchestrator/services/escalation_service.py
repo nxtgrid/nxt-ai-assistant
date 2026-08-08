@@ -3082,10 +3082,7 @@ class EscalationService:
             LOGGER.error("No Supabase client — cannot route Jira event for {}", issue_key)
             return None
 
-        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
-            mapping = await self._get_mapping_by_ticket_ref_canonical(issue_key)
-        else:
-            mapping = await supabase_client.get_escalation_mapping_by_jira_key(issue_key)
+        mapping = await self._get_mapping_by_ticket_ref_canonical(issue_key)
         if not mapping:
             LOGGER.debug("No active escalation mapping for Jira ticket {}", issue_key)
             return None
@@ -3344,49 +3341,21 @@ class EscalationService:
 
         # Atomically claim the close. If another handler already closed this mapping,
         # the UPDATE affects 0 rows and we skip the customer notification.
-        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
-            claimed = False
-            if mapping_id:
-                try:
-                    claimed = await self._escalations.resolve_if_active(mapping_id)
-                except Exception:
-                    LOGGER.warning(
-                        "Could not atomically close canonical escalation {}",
-                        mapping_id,
-                        exc_info=True,
-                    )
-            if not claimed:
-                LOGGER.info(
-                    "Mapping {} already closed by concurrent handler — skipping", mapping_id
+        claimed = False
+        if mapping_id:
+            try:
+                claimed = await self._escalations.resolve_if_active(mapping_id)
+            except Exception:
+                LOGGER.warning(
+                    "Could not atomically close canonical escalation {}",
+                    mapping_id,
+                    exc_info=True,
                 )
-                return
-        else:
-            supabase_client = self._get_supabase_client()
-            if supabase_client and mapping_id:
-                try:
-                    client = supabase_client._get_client()
-                    result = (
-                        client.table("escalation_mappings")
-                        .update(
-                            {
-                                "is_active": False,
-                                "resolved_at": datetime.now(timezone.utc).isoformat(),
-                            }
-                        )
-                        .eq("id", mapping_id)
-                        .eq("is_active", True)  # only update if currently active
-                        .execute()
-                    )
-                    if not result.data:
-                        LOGGER.info(
-                            "Mapping {} already closed by concurrent handler — skipping",
-                            mapping_id,
-                        )
-                        return
-                except Exception as e:
-                    LOGGER.warning(
-                        "Could not atomically close mapping {}: {} — proceeding", mapping_id, e
-                    )
+        if not claimed:
+            LOGGER.info(
+                "Mapping {} already closed by concurrent handler — skipping", mapping_id
+            )
+            return
 
         if notify_customer:
             customer_chat_id = mapping.get("customer_chat_id", "")
@@ -3413,47 +3382,23 @@ class EscalationService:
         Returns:
             Dict with success status
         """
-        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
-            chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
-            if not chat_session_uuid:
-                LOGGER.warning(
-                    "Could not resolve chat session for {} — cannot close escalation", session_id
-                )
-                return {"success": False, "error": "Could not resolve session"}
-            try:
-                await self._escalations.resolve_all_for_session(chat_session_uuid)
-            except Exception:
-                LOGGER.warning(
-                    "Failed to close canonical escalations for session {}",
-                    session_id,
-                    exc_info=True,
-                )
-                return {"success": False, "error": "Failed to close escalation"}
-            LOGGER.info(f"Closed escalation for session {session_id}")
-            return {"success": True, "message": "Escalation closed"}
-
-        supabase_client = self._get_supabase_client()
-        if not supabase_client:
-            LOGGER.error("No Supabase client available - cannot close escalation")
-            return {
-                "success": False,
-                "error": "Database not available",
-            }
-
-        success = await supabase_client.close_escalation(session_id)
-
-        if success:
-            LOGGER.info(f"Closed escalation for session {session_id}")
-            return {
-                "success": True,
-                "message": "Escalation closed",
-            }
-        else:
-            LOGGER.warning(f"Failed to close escalation for session {session_id}")
-            return {
-                "success": False,
-                "error": "Failed to close escalation",
-            }
+        chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
+        if not chat_session_uuid:
+            LOGGER.warning(
+                "Could not resolve chat session for {} — cannot close escalation", session_id
+            )
+            return {"success": False, "error": "Could not resolve session"}
+        try:
+            await self._escalations.resolve_all_for_session(chat_session_uuid)
+        except Exception:
+            LOGGER.warning(
+                "Failed to close canonical escalations for session {}",
+                session_id,
+                exc_info=True,
+            )
+            return {"success": False, "error": "Failed to close escalation"}
+        LOGGER.info(f"Closed escalation for session {session_id}")
+        return {"success": True, "message": "Escalation closed"}
 
     async def reopen_escalation(
         self, session_id: str, escalation_message_id: int
@@ -3471,63 +3416,29 @@ class EscalationService:
         Returns:
             Dict with success status
         """
-        supabase_client = self._get_supabase_client()
-        if not supabase_client:
-            LOGGER.error("No Supabase client available - cannot reopen escalation")
-            return {
-                "success": False,
-                "error": "Database not available",
-            }
-
-        if fr.get("STOP_LEGACY_ESCALATION_WRITES"):
-            try:
-                delivery = await self._deliveries.find_escalation_delivery(
-                    external_message_id=escalation_message_id
-                )
-                escalation_id = delivery.get("escalation_id") if delivery else None
-                if not escalation_id:
-                    LOGGER.warning(
-                        "Could not resolve canonical escalation for session {} "
-                        "message {}",
-                        session_id,
-                        escalation_message_id,
-                    )
-                    return {"success": False, "error": "Failed to reopen escalation"}
-                await self._escalations.reopen(escalation_id)
-            except Exception:
+        try:
+            delivery = await self._deliveries.find_escalation_delivery(
+                external_message_id=escalation_message_id
+            )
+            escalation_id = delivery.get("escalation_id") if delivery else None
+            if not escalation_id:
                 LOGGER.warning(
-                    "Failed to reopen canonical escalation for session {}",
+                    "Could not resolve canonical escalation for session {} "
+                    "message {}",
                     session_id,
-                    exc_info=True,
+                    escalation_message_id,
                 )
                 return {"success": False, "error": "Failed to reopen escalation"}
-            LOGGER.info(f"Reopened escalation for session {session_id}")
-            return {"success": True, "message": "Escalation reopened"}
-
-        success = await supabase_client.reopen_escalation(session_id, escalation_message_id)
-
-        if success:
-            # Canonical mirror: the escalation this reply reopens was resolved
-            # (state="resolved") by the close flow -- without this, a
-            # canonical-reads consumer would keep seeing it as closed even
-            # though the legacy row (source of truth here) is active again.
-            try:
-                delivery = await self._deliveries.find_escalation_delivery(
-                    external_message_id=escalation_message_id
-                )
-                if delivery and delivery.get("escalation_id"):
-                    await self._escalations.reopen(delivery["escalation_id"])
-            except Exception:
-                LOGGER.warning(
-                    "Could not reopen canonical escalation for session {}",
-                    session_id,
-                    exc_info=True,
-                )
-            LOGGER.info(f"Reopened escalation for session {session_id}")
-            return {"success": True, "message": "Escalation reopened"}
-        else:
-            LOGGER.warning(f"Failed to reopen escalation for session {session_id}")
+            await self._escalations.reopen(escalation_id)
+        except Exception:
+            LOGGER.warning(
+                "Failed to reopen canonical escalation for session {}",
+                session_id,
+                exc_info=True,
+            )
             return {"success": False, "error": "Failed to reopen escalation"}
+        LOGGER.info(f"Reopened escalation for session {session_id}")
+        return {"success": True, "message": "Escalation reopened"}
 
     async def escalate_verification_failure(
         self,

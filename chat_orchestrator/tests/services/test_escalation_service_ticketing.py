@@ -2119,34 +2119,6 @@ async def test_reopen_escalation_reopens_the_canonical_escalation_row():
     assert escalation_row["resolved_at"] is None
 
 
-async def test_reopen_escalation_does_not_dual_write_when_legacy_reopen_fails():
-    raw = _FakeRaw()
-    raw.table("message_deliveries").rows = [
-        {"escalation_id": "esc-1", "external_message_id": 555, "purpose": "escalation"}
-    ]
-    raw.table("escalations").rows = [{"id": "esc-1", "state": "resolved"}]
-    supa = _FakeSupabase(raw)
-    supa.reopen_escalation_result = False
-    svc = _make_service(supa)
-
-    result = await svc.reopen_escalation("telegram_abc", 555)
-
-    assert result["success"] is False
-    assert raw.table("escalations").rows[0]["state"] == "resolved"
-
-
-async def test_reopen_escalation_succeeds_even_when_no_canonical_delivery_found():
-    """No message_deliveries row (e.g. an escalation that predates Phase 1)
-    must not turn a successful legacy reopen into a reported failure."""
-    raw = _FakeRaw()
-    supa = _FakeSupabase(raw)
-    svc = _make_service(supa)
-
-    result = await svc.reopen_escalation("telegram_abc", 555)
-
-    assert result == {"success": True, "message": "Escalation reopened"}
-
-
 async def test_reopen_escalation_uses_canonical_only_once_legacy_writes_stopped(monkeypatch):
     monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
     raw = _FakeRaw()
