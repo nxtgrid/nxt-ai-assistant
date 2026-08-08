@@ -3171,27 +3171,25 @@ class EscalationService:
             LOGGER.debug("Jira comment on {} has no extractable text — skipping", issue_key)
             return
 
+        author_name = comment.get("author", {}).get("displayName", "Support")
+
         issue_fields = payload.get("issue", {}).get("fields", {})
         ctx = await self._resolve_escalation_context_for_jira_key(issue_key, issue_fields)
-        if ctx is None:
-            return
-
-        mapping = ctx["mapping"]
-        escalation_message_id: int = mapping["escalation_message_id"]
-        escalation_topic_id = ctx["escalation_topic_id"]
-        jira_orgs = ctx["jira_orgs"]
-        escalation_org_name = ctx["escalation_org_name"]
-
-        author_name = comment.get("author", {}).get("displayName", "Support")
+        mapping = ctx["mapping"] if ctx else None
+        ticket_ref = mapping.get("ticket_ref") if mapping else issue_key
 
         # Mirror into the canonical comment log so a closing summary can read
         # Jira and internal ticket activity from one table (ticket_comments.
         # source already reserves 'jira' for exactly this), then let the
         # ticket update notifier decide whether this specific comment is
-        # significant enough to post its own card -- independent of the
-        # verbatim escalation-group relay below, which every public Jira
-        # comment still reaches.
-        ticket_ref = mapping.get("ticket_ref")
+        # significant enough to post its own card. Runs even with no
+        # escalation mapping at all (e.g. an alert-correlation-created
+        # ticket) -- issue_key doubles as ticket_ref for the Jira backend,
+        # and the notifier finds wherever the ticket's own card actually
+        # lives rather than assuming the escalation group, so it's the
+        # right destination either way. Additive to (and independent of)
+        # the escalation-group relay below, which -- unlike this -- is
+        # genuinely specific to a Telegram-escalation origin.
         if ticket_ref:
             try:
                 await self._tickets.add_comment(ticket_ref, comment_text, public=is_public)
@@ -3214,12 +3212,25 @@ class EscalationService:
                         comment_body=comment_text,
                         comment_author=author_name,
                         ticket_url=ticket_url,
+                        fallback_chat_id=self._escalation_chat_id,
+                        fallback_topic_id=ctx["escalation_topic_id"] if ctx else None,
                     )
                 )
             except Exception:
                 LOGGER.warning(
                     "Jira webhook: comment notification failed for {}", ticket_ref, exc_info=True
                 )
+
+        # Everything below is specific to a Telegram-escalation origin -- the
+        # escalation group itself, and the customer thread to maybe forward
+        # into, only exist for a ticket that actually came from one.
+        if mapping is None:
+            return
+
+        escalation_message_id: int = mapping["escalation_message_id"]
+        escalation_topic_id = ctx["escalation_topic_id"]
+        jira_orgs = ctx["jira_orgs"]
+        escalation_org_name = ctx["escalation_org_name"]
 
         # Post to escalation group
         LOGGER.info(

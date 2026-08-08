@@ -509,13 +509,28 @@ async def test_closure_webhook_resolves_canonically_once_legacy_writes_stopped(m
     assert escalation_row["resolved_at"] is not None
 
 
-async def test_handle_jira_comment_finds_nothing_when_ticket_ref_unmapped(monkeypatch):
-    """A Jira comment on a ticket ref with no canonical tickets row (or no
-    escalation attached to it) must be a no-op, not raise."""
+async def test_handle_jira_comment_mirrors_via_issue_key_but_skips_relay_when_unmapped(
+    monkeypatch,
+):
+    """A Jira comment on an issue with no escalation mapping at all (no
+    canonical ticket row resolvable from it, or a ticket that's simply never
+    been escalated in Telegram -- e.g. one the alert-correlation pipeline
+    filed) still mirrors into ticket_comments/notify_ticket_event: issue_key
+    doubles as ticket_ref for the Jira backend either way. The escalation-
+    group relay and customer-forward, which need a mapping's
+    escalation_message_id and org/topic, are skipped -- not raised."""
     monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
     supa = _FakeSupabase(_FakeRaw())
     tickets = _FakeTickets()  # id_by_ref empty -> ticket_id resolution misses
     svc = _make_service(supa, tickets)
+
+    sent = []
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        return {"ok": True}
+
+    svc._send_telegram_message = fake_send
 
     payload = {
         "comment": {
@@ -527,6 +542,14 @@ async def test_handle_jira_comment_finds_nothing_when_ticket_ref_unmapped(monkey
     }
 
     await svc.handle_jira_comment(payload)  # must not raise
+
+    assert tickets.add_comment_calls == [("OPS-404", "hi", True)]
+    assert len(tickets.notify_ticket_event_calls) == 1
+    event = tickets.notify_ticket_event_calls[0]
+    assert event.ticket_ref == "OPS-404"
+    assert event.fallback_chat_id == "-100123456"
+    assert event.fallback_topic_id is None
+    assert sent == []  # no escalation group/customer to relay into
 
 
 async def test_handle_jira_comment_mirrors_and_notifies_for_a_mapped_ticket():
