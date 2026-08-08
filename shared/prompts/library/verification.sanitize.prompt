@@ -3,7 +3,7 @@ id: verification.sanitize
 description: Checks a customer-facing response for leaked internal technical details and rewrites it if needed.
 owner: eng
 component: orchestrator_services
-overridable: false
+overridable: true
 output: json
 schema:
   type: object
