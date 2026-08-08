@@ -1386,22 +1386,6 @@ class EnhancedSupabaseClient:
             LOGGER.error(f"Error closing escalation: {e}")
             return False
 
-    async def count_active_escalations(self, session_id: str) -> int:
-        """Count active escalation mappings for a session."""
-        try:
-            client = self._get_client()
-            result = (
-                client.table("escalation_mappings")
-                .select("id", count="exact")
-                .eq("session_id", session_id)
-                .eq("is_active", True)
-                .execute()
-            )
-            return result.count if result.count is not None else 0
-        except Exception as e:
-            LOGGER.error(f"Error counting active escalations: {e}")
-            return 0
-
     async def count_active_blocking_escalations(self, session_id: str) -> int:
         """Count active escalation mappings that block the chat session.
 
@@ -1828,63 +1812,6 @@ class EnhancedSupabaseClient:
             ).execute()
         except Exception as e:
             LOGGER.error(f"Error saving thread {thread_id}: {e}")
-
-    async def get_open_issues_for_org(
-        self,
-        organization_id: int,
-        issue_type: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """Return open escalation_mappings for an org, joined with chat_threads for issue_type.
-
-        Uses PostgREST embedding (FK relationship) to join chat_threads inline.
-        """
-        try:
-            client = self._get_client()
-            query = (
-                client.table("escalation_mappings")
-                .select(
-                    "id, question_text, reason, action_type, created_at, thread_id, "
-                    "chat_threads(issue_type)"
-                )
-                .eq("organization_id", organization_id)
-                .eq("is_active", True)
-                .order("created_at", desc=True)
-                .limit(50)
-            )
-            if issue_type:
-                # PostgREST: filter on embedded table column
-                query = query.eq("chat_threads.issue_type", issue_type)
-            response = query.execute()
-            rows = response.data or []
-
-            results = []
-            for row in rows:
-                thread_data = row.get("chat_threads") or {}
-                row_issue_type = (
-                    thread_data.get("issue_type") if isinstance(thread_data, dict) else None
-                )
-                if issue_type and row_issue_type != issue_type:
-                    # PostgREST embedded filters don't always exclude rows; guard here.
-                    continue
-                results.append(
-                    {
-                        "id": row.get("id"),
-                        "thread_id": row.get("thread_id"),
-                        "issue_type": row_issue_type or "unknown",
-                        "summary": row.get("question_text"),
-                        "reason": row.get("reason"),
-                        "action_type": row.get("action_type"),
-                        "created_at": row.get("created_at"),
-                    }
-                )
-            return results
-        except Exception as e:
-            LOGGER.warning(
-                f"Error fetching open issues for org={organization_id} "
-                f"(possible schema/FK issue — run chat_threads migration?): {e}"
-            )
-            return []
-
 
 # Backward compatibility alias
 SupabaseClient = EnhancedSupabaseClient
