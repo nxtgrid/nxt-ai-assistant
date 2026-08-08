@@ -18,6 +18,20 @@ def test_all_remaining_prompts_exist():
         assert prompt_id in PROMPTS.ids()
 
 
+# Unlocked (was overridable: false) but with no ops/eng grant added -- only
+# an admin can edit/publish these, via access.py's is_prompt_admin() bypass.
+# See docs/superpowers/specs/2026-08-08-prompt-permissions-design.md.
+ADMIN_ONLY_IDS = ["doc_editing.edit_highlighted", "doc_editor.locate_edits"]
+
+
+def test_admin_only_misc_prompts_have_no_team_grants():
+    for prompt_id in ADMIN_ONLY_IDS:
+        spec = PROMPTS.spec(prompt_id)
+        assert spec.overridable is True
+        assert spec.access.edit == []
+        assert spec.access.publish == []
+
+
 def test_grafana_prompt_flag_is_retired():
     assert "GRAFANA_PANEL_DESCRIPTION_PROMPT" not in flag_registry.FLAGS
 

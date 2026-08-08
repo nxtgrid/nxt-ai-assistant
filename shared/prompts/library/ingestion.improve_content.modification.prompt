@@ -3,7 +3,7 @@ id: ingestion.improve_content.modification
 description: Applies a user's requested changes to a previously-suggested improved version of ingestion content.
 owner: eng
 component: orchestrator_experts_ingestion
-overridable: false
+overridable: true
 output: text
 sections: []
 variables: [doc_type, original, suggestion, user_instructions]

@@ -1,9 +1,11 @@
 """Versioned alert-correlation policy and supporting operational context.
 
-The LLM instructions and safety bounds in this module ship with the
-application. Deployments may disable correlation with the kill switch, but
-cannot silently substitute different grouping rules, confidence bounds, or
-prompt limits.
+The safety bounds in this module (``CorrelationPolicy`` below) ship with the
+application and cannot be changed without a PR. The grouping-rules prompt
+text is different: ops/eng can draft a change from the Prompts admin page,
+but only eng can publish one live -- see ``get_correlation_instructions``
+and docs/superpowers/specs/2026-08-08-prompt-permissions-design.md.
+Deployments may disable correlation entirely with the kill switch.
 """
 
 from __future__ import annotations
@@ -46,14 +48,16 @@ DEFAULT_CORRELATION_POLICY = CorrelationPolicy()
 
 
 def get_correlation_instructions() -> Dict[str, str]:
-    """Load the bundled correlation policy.
+    """Load the live correlation policy (bundled default, or a published
+    override).
 
-    There is intentionally no document id or other deployment override: rule
-    changes are reviewed and versioned with the application. The
-    ``ticketing.correlation`` prompt is declared ``overridable: false``, so
-    the prompt library always resolves it from the bundled file regardless
-    of any DB or Google Doc state — the guarantee this module's docstring
-    describes is enforced one layer down now, not duplicated here.
+    ``ticketing.correlation`` is ``overridable: true`` with
+    ``access.edit: [eng, ops]`` and ``access.publish: [eng]``: ops/eng can
+    draft a grouping-rule change from the Prompts admin page, but only an
+    eng account can publish it live. That is a permission gate, not code
+    review -- nothing here re-checks a published change's content, and an
+    eng account can draft and publish its own change with nobody else
+    looking at it. There is still no document override for this prompt.
     """
     return {"system_instructions": PROMPTS.render("ticketing.correlation").system_text}
 

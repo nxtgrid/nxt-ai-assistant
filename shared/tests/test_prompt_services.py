@@ -5,7 +5,11 @@ import pytest
 from shared.prompts import PROMPTS
 
 OVERRIDABLE = {"conversation.summarize", "procedure.suggest"}
-LOCKED = {
+
+# Unlocked (was overridable: false) but with no ops/eng grant added -- only
+# an admin can edit/publish these, via access.py's is_prompt_admin() bypass.
+# See docs/superpowers/specs/2026-08-08-prompt-permissions-design.md.
+ADMIN_ONLY = {
     "context_filter.relevance",
     "thread_assignment.classify",
     "intent_router.route",
@@ -15,14 +19,17 @@ LOCKED = {
 }
 
 
-@pytest.mark.parametrize("prompt_id", sorted(OVERRIDABLE | LOCKED))
+@pytest.mark.parametrize("prompt_id", sorted(OVERRIDABLE | ADMIN_ONLY))
 def test_service_prompt_exists(prompt_id):
     assert prompt_id in PROMPTS.ids()
 
 
-@pytest.mark.parametrize("prompt_id", sorted(LOCKED))
-def test_locked_service_prompts_are_locked(prompt_id):
-    assert PROMPTS.spec(prompt_id).overridable is False
+@pytest.mark.parametrize("prompt_id", sorted(ADMIN_ONLY))
+def test_admin_only_service_prompts_have_no_team_grants(prompt_id):
+    spec = PROMPTS.spec(prompt_id)
+    assert spec.overridable is True
+    assert spec.access.edit == []
+    assert spec.access.publish == []
 
 
 @pytest.mark.parametrize("prompt_id", sorted(OVERRIDABLE))

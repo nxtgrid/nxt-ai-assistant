@@ -3,7 +3,7 @@ id: context_filter.relevance
 description: Decides which candidate conversation-history messages are relevant to the incoming message.
 owner: eng
 component: orchestrator_services
-overridable: false
+overridable: true
 output: json
 schema:
   type: object

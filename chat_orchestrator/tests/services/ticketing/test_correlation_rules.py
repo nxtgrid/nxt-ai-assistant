@@ -31,13 +31,18 @@ class TestGetCorrelationInstructions:
 
         assert sections == {"system_instructions": "from bundled file"}
 
-    def test_the_ticketing_correlation_prompt_is_not_overridable(self):
-        """There is intentionally no document id or DB override for this
-        policy: the guarantee this module's docstring describes is enforced
-        by the prompt spec, not by a fallback-of-a-fallback here."""
+    def test_the_ticketing_correlation_prompt_requires_eng_to_publish(self):
+        """Drafting a grouping-rule change is open to ops/eng, but only eng
+        can publish one live -- the guarantee this module's docstring used
+        to describe (a PR-only lock) is now a permission gate enforced by
+        the prompt spec's access.publish, not a fallback-of-a-fallback here.
+        See docs/superpowers/specs/2026-08-08-prompt-permissions-design.md."""
         from shared.prompts import PROMPTS
 
-        assert PROMPTS.spec("ticketing.correlation").overridable is False
+        spec = PROMPTS.spec("ticketing.correlation")
+        assert spec.overridable is True
+        assert sorted(spec.access.edit) == ["eng", "ops"]
+        assert spec.access.publish == ["eng"]
 
     def test_uses_real_bundled_file_by_default(self):
         """Sanity check against the actual shipped file (no monkeypatching) --

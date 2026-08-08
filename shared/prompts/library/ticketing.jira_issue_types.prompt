@@ -3,7 +3,7 @@ id: ticketing.jira_issue_types
 description: Selects the most appropriate Jira issue type for an alert from the project's issue-type catalogue.
 owner: eng
 component: orchestrator_ticketing
-overridable: false
+overridable: true
 output: json
 schema:
   type: object
@@ -15,8 +15,8 @@ sections: []
 variables: [catalogue_json, summary, description, operational_context_block]
 access:
   view: [ops, eng]
-  edit: []
-  publish: []
+  edit: [ops, eng]
+  publish: [ops, eng]
 ---
 Choose the single most appropriate Jira issue type for this alert. Return JSON only: {"issue_type_id": "...", "reason": "..."}. issue_type_id must be copied exactly from the catalogue.
 

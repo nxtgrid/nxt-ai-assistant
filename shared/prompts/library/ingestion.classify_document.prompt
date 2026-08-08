@@ -3,7 +3,7 @@ id: ingestion.classify_document
 description: Classifies an ingested document into exactly one knowledge-base category.
 owner: eng
 component: orchestrator_experts_ingestion
-overridable: false
+overridable: true
 output: json
 schema:
   type: object

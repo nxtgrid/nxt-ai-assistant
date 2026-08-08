@@ -2,7 +2,10 @@
 
 from shared.prompts import PROMPTS
 
-LOCKED_IDS = [
+# Unlocked (was overridable: false) but with no ops/eng grant added -- only
+# an admin can edit/publish these, via access.py's is_prompt_admin() bypass.
+# See docs/superpowers/specs/2026-08-08-prompt-permissions-design.md.
+ADMIN_ONLY_IDS = [
     "ingestion.classify_document",
     "ingestion.detect_contradictions",
     "ingestion.extract_entities",
@@ -18,13 +21,16 @@ OVERRIDABLE_IDS = [
 
 
 def test_all_ingestion_prompts_exist():
-    for prompt_id in LOCKED_IDS + OVERRIDABLE_IDS:
+    for prompt_id in ADMIN_ONLY_IDS + OVERRIDABLE_IDS:
         assert prompt_id in PROMPTS.ids()
 
 
-def test_locked_ingestion_prompts_are_locked():
-    for prompt_id in LOCKED_IDS:
-        assert PROMPTS.spec(prompt_id).overridable is False
+def test_admin_only_ingestion_prompts_have_no_team_grants():
+    for prompt_id in ADMIN_ONLY_IDS:
+        spec = PROMPTS.spec(prompt_id)
+        assert spec.overridable is True
+        assert spec.access.edit == []
+        assert spec.access.publish == []
 
 
 def test_type_selection_is_overridable_and_has_no_variables():
@@ -34,7 +40,7 @@ def test_type_selection_is_overridable_and_has_no_variables():
 
 
 def test_json_prompts_declare_a_schema():
-    for prompt_id in LOCKED_IDS:
+    for prompt_id in ADMIN_ONLY_IDS:
         spec = PROMPTS.spec(prompt_id)
         if spec.output == "json":
             assert spec.schema, f"{prompt_id} declares json output but no schema"
