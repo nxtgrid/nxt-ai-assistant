@@ -27,8 +27,8 @@ class TestVisibleFlags:
         assert "BOT_ENABLED" in names
 
     def test_search_matches_the_human_label(self):
-        names = [f.name for f in page.visible_flags("models", _pending(), True, "main model")]
-        assert "GEMINI_MODEL" in names
+        names = [f.name for f in page.visible_flags("models", _pending(), True, "fast-tier")]
+        assert "MODEL_FAST" in names
 
     def test_search_is_case_insensitive(self):
         assert page.visible_flags("bot_control", _pending(), True, "LOG_LEVEL")
@@ -87,11 +87,10 @@ def test_page_contains_no_hardcoded_flag_names():
         "GRAFANA_FOLDER_NAME",
         "GRAFANA_PANEL_DESCRIPTION_PROMPT",
         "LLM_PROVIDER",
-        "GEMINI_MODEL",
-        "GEMINI_FALLBACK_MODEL",
-        "GEMINI_DEEP_THINKING_MODEL",
-        "INTENT_ROUTER_MODEL",
-        "VERIFICATION_MODEL",
+        "MODEL_THINKING",
+        "MODEL_FAST",
+        "MODEL_LITE",
+        "FALLBACK_MODEL",
         "OPENROUTER_MODEL",
         "OPENROUTER_PROVIDER_ORDER",
         "OPENROUTER_ALLOW_FALLBACKS",

@@ -38,11 +38,10 @@ from shared.config import flag_registry as registry
 from shared.config.flag_registry import FlagType
 
 _ROLE_MODEL_KEYS = (
-    "GEMINI_MODEL",
-    "GEMINI_FALLBACK_MODEL",
-    "GEMINI_DEEP_THINKING_MODEL",
-    "INTENT_ROUTER_MODEL",
-    "VERIFICATION_MODEL",
+    "MODEL_THINKING",
+    "MODEL_FAST",
+    "MODEL_LITE",
+    "FALLBACK_MODEL",
 )
 
 _OPENROUTER_ONLY_KEYS = {
@@ -87,7 +86,7 @@ def _model_select_options(svc, current: dict[str, Any]) -> dict[str, Any]:
     openrouter_models = svc.get_openrouter_models() if provider == "openrouter" else []
     active_models = openrouter_models if provider == "openrouter" else gemini_models
     route_model = _to_openrouter_model(
-        str(current.get("GEMINI_MODEL") or (active_models[0] if active_models else ""))
+        str(current.get("MODEL_FAST") or (active_models[0] if active_models else ""))
     )
     provider_routes = (
         svc.get_openrouter_provider_routes(route_model) if provider == "openrouter" else {}
@@ -96,11 +95,10 @@ def _model_select_options(svc, current: dict[str, Any]) -> dict[str, Any]:
         "__GEMINI_MODELS": gemini_models,
         "__OPENROUTER_MODELS": openrouter_models,
         "LLM_PROVIDER": svc.get_llm_provider_options(),
-        "GEMINI_MODEL": active_models,
-        "GEMINI_FALLBACK_MODEL": active_models,
-        "GEMINI_DEEP_THINKING_MODEL": ["", *active_models],
-        "INTENT_ROUTER_MODEL": active_models,
-        "VERIFICATION_MODEL": active_models,
+        "MODEL_THINKING": active_models,
+        "MODEL_FAST": active_models,
+        "MODEL_LITE": active_models,
+        "FALLBACK_MODEL": active_models,
         "OPENROUTER_PROVIDER_ORDER": provider_routes,
     }
     # Any registry flag opted into a Gemini-only model picker (as opposed to
@@ -196,12 +194,12 @@ def _role_model_options(model_options: dict[str, Any], pending: dict[str, Any]) 
     if _selected_provider(pending) == "openrouter":
         return list(
             model_options.get("__OPENROUTER_MODELS")
-            or model_options.get("GEMINI_MODEL")
+            or model_options.get("MODEL_FAST")
             or []
         )
     return list(
         model_options.get("__GEMINI_MODELS")
-        or model_options.get("GEMINI_MODEL")
+        or model_options.get("MODEL_FAST")
         or []
     )
 
@@ -253,12 +251,11 @@ def group_is_inert(group_id: str, pending: dict[str, Any]) -> bool:
     Showing Grafana's dashboard/panel pickers when the Grafana server is
     disabled, or the Layout Engine's knobs when grid design is off, is the
     single largest source of noise on this page. But a group can also host a
-    lone flag that depends on some unrelated toggle defined elsewhere (e.g.
-    "models" has THREAD_CLASSIFIER_MODEL, gated by the "conversation" group's
-    THREAD_DISENTANGLEMENT_ENABLED) without the group itself being about that
-    toggle — that single flag being off must not hide LLM_PROVIDER and the
-    rest of an otherwise unconditional group. Require most of the group's
-    flags to share the dependency before treating the whole section as inert.
+    lone flag that depends on some unrelated toggle defined elsewhere without
+    the group itself being about that toggle -- that single flag being off
+    must not hide LLM_PROVIDER and the rest of an otherwise unconditional
+    group. Require most of the group's flags to share the dependency before
+    treating the whole section as inert.
     """
     flags = [f for f in registry.flags_in_group(group_id) if f.show_in_settings]
     if not flags:
@@ -933,8 +930,6 @@ def _render_flag(
             ui.textarea(label, value=str(value or ""), on_change=handler).classes("w-full")
         elif name in _ROLE_MODEL_KEYS:
             opts = _options_with_current(_role_model_options(model_options, pending), value)
-            if name == "GEMINI_DEEP_THINKING_MODEL" and "" not in opts:
-                opts = ["", *opts]
             (
                 ui.select(opts, value=value, label=label, with_input=True, on_change=handler)
                 .props("outlined dense clearable")
