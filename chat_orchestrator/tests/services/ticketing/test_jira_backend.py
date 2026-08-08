@@ -669,6 +669,7 @@ class TestCreateTicket:
 
         assert not any(method == "POST" for method, _url, _kwargs in fake_session.calls)
 
+    @pytest.mark.asyncio
     async def test_no_compatible_type_error_names_the_blocking_type_and_field(self, fake_session):
         _queue_createmeta(
             fake_session,
@@ -685,6 +686,7 @@ class TestCreateTicket:
         with pytest.raises(TicketBackendError, match="Unsupported.*customfield_unknown"):
             await _make_backend().create_ticket(TicketCreateRequest(summary="Help"))
 
+    @pytest.mark.asyncio
     async def test_no_compatible_type_error_distinguishes_no_types_at_all(self, fake_session):
         _queue_createmeta(fake_session, "OPS", [])
 
