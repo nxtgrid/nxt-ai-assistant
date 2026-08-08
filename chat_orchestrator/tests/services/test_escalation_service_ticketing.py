@@ -1030,6 +1030,14 @@ async def _drive_followup(svc: EscalationService, is_done: bool):
     svc._send_telegram_reply = fake_reply
 
     tickets = _FakeTickets(status=TicketStatus(summary="s", is_done=is_done))
+
+    async def fake_get_id_by_ref(ref: str) -> Optional[str]:
+        # Only ever called with existing_ref, which _escalate_to_telegram
+        # clears to None before this when the parent ticket is Done -- so
+        # the done-ticket test never actually exercises this branch.
+        return "ticket-1" if ref == "OPS-77" else None
+
+    tickets.get_id_by_ref = fake_get_id_by_ref
     svc._tickets = tickets
 
     await svc.escalate_to_support(
@@ -1051,11 +1059,11 @@ async def test_followup_open_ticket_adds_comment_and_prelinks():
     assert tickets.add_comment_calls == [
         ("OPS-77", "Follow-up from customer:\n\nfollow up q", False)
     ]
-    assert supa.save_calls, "expected a follow-up mapping to be saved"
-    saved = supa.save_calls[-1]
-    assert saved["ticket_ref"] == "OPS-77"
-    assert saved["ticket_backend"] == "jira"
-    assert saved["jira_ticket_key"] == "OPS-77"
+    assert supa.save_calls == []  # legacy escalation_mappings write skipped entirely
+
+    escalation_rows = raw.tables["escalations"].rows
+    assert len(escalation_rows) == 1
+    assert escalation_rows[0]["ticket_id"] == "ticket-1"  # prelinked to the open parent
 
 
 async def test_followup_done_ticket_does_not_comment_or_prelink():
@@ -1067,9 +1075,11 @@ async def test_followup_done_ticket_does_not_comment_or_prelink():
 
     assert tickets.get_status_calls == ["OPS-77"]
     assert tickets.add_comment_calls == []  # parent Done -> no comment
-    saved = supa.save_calls[-1]
-    assert saved["ticket_ref"] is None
-    assert saved["jira_ticket_key"] is None
+    assert supa.save_calls == []  # legacy escalation_mappings write skipped entirely
+
+    escalation_rows = raw.tables["escalations"].rows
+    assert len(escalation_rows) == 1
+    assert escalation_rows[0]["ticket_id"] is None  # not prelinked -- sweep files fresh
 
 
 # ---------------------------------------------------------------------------
