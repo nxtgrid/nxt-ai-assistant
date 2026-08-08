@@ -1418,10 +1418,9 @@ async def _handle_escalation_reply(telegram_msg: Dict[str, Any]) -> Dict[str, An
         if cleaned_text in ("reopen", "reopened", "re open"):
             LOGGER.info(f"Detected 'Reopen' command for escalation message {reply_to_message_id}")
 
-            supabase_client = escalation_service._get_supabase_client()
-            mapping = None
-            if supabase_client:
-                mapping = await supabase_client.get_escalation_mapping(reply_to_message_id)
+            mapping = await escalation_service.resolve_escalation_by_message_id(
+                reply_to_message_id
+            )
 
             if mapping:
                 session_id = mapping.get("session_id")
@@ -1460,11 +1459,12 @@ async def _handle_escalation_reply(telegram_msg: Dict[str, Any]) -> Dict[str, An
         if cleaned_text in ("close", "closed"):
             LOGGER.info(f"Detected 'Closed' command for escalation message {reply_to_message_id}")
 
-            # Find mapping from database
-            supabase_client = escalation_service._get_supabase_client()
-            mapping = None
-            if supabase_client:
-                mapping = await supabase_client.get_escalation_mapping(reply_to_message_id)
+            # Find mapping via the canonical-first resolver (falls back to
+            # the legacy escalation_mappings lookup only while
+            # STOP_LEGACY_ESCALATION_WRITES is off).
+            mapping = await escalation_service.resolve_escalation_by_message_id(
+                reply_to_message_id
+            )
 
             if mapping:
                 # Get session_id from mapping (already stored in database)
@@ -1510,7 +1510,17 @@ async def _handle_escalation_reply(telegram_msg: Dict[str, Any]) -> Dict[str, An
                         # reply_to_message_id IS the escalation_message_id (the message staff
                         # replied "Closed" to). Run concurrently; failures are non-fatal.
                         cleanup_coros = []
-                        jira_key = mapping.get("jira_ticket_key")
+                        # ticket_backend is carried by both resolution paths
+                        # (canonical: resolve_escalation_by_message_id;
+                        # legacy: the escalation_mappings row's own
+                        # ticket_backend column) -- gate on it explicitly
+                        # rather than relying on jira_ticket_key only ever
+                        # being set for Jira-backed rows.
+                        jira_key = (
+                            mapping.get("ticket_ref")
+                            if mapping.get("ticket_backend") == "jira"
+                            else None
+                        )
                         if jira_key:
                             cleanup_coros.append(
                                 escalation_service._transition_jira_to_done(jira_key)
