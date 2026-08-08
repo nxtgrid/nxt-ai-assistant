@@ -3171,27 +3171,25 @@ class EscalationService:
             LOGGER.debug("Jira comment on {} has no extractable text — skipping", issue_key)
             return
 
+        author_name = comment.get("author", {}).get("displayName", "Support")
+
         issue_fields = payload.get("issue", {}).get("fields", {})
         ctx = await self._resolve_escalation_context_for_jira_key(issue_key, issue_fields)
-        if ctx is None:
-            return
-
-        mapping = ctx["mapping"]
-        escalation_message_id: int = mapping["escalation_message_id"]
-        escalation_topic_id = ctx["escalation_topic_id"]
-        jira_orgs = ctx["jira_orgs"]
-        escalation_org_name = ctx["escalation_org_name"]
-
-        author_name = comment.get("author", {}).get("displayName", "Support")
+        mapping = ctx["mapping"] if ctx else None
+        ticket_ref = mapping.get("ticket_ref") if mapping else issue_key
 
         # Mirror into the canonical comment log so a closing summary can read
         # Jira and internal ticket activity from one table (ticket_comments.
         # source already reserves 'jira' for exactly this), then let the
         # ticket update notifier decide whether this specific comment is
-        # significant enough to post its own card -- independent of the
-        # verbatim escalation-group relay below, which every public Jira
-        # comment still reaches.
-        ticket_ref = mapping.get("ticket_ref")
+        # significant enough to post its own card. Runs even with no
+        # escalation mapping at all (e.g. an alert-correlation-created
+        # ticket) -- issue_key doubles as ticket_ref for the Jira backend,
+        # and the notifier finds wherever the ticket's own card actually
+        # lives rather than assuming the escalation group, so it's the
+        # right destination either way. Additive to (and independent of)
+        # the escalation-group relay below, which -- unlike this -- is
+        # genuinely specific to a Telegram-escalation origin.
         if ticket_ref:
             try:
                 await self._tickets.add_comment(ticket_ref, comment_text, public=is_public)
@@ -3214,12 +3212,25 @@ class EscalationService:
                         comment_body=comment_text,
                         comment_author=author_name,
                         ticket_url=ticket_url,
+                        fallback_chat_id=self._escalation_chat_id,
+                        fallback_topic_id=ctx["escalation_topic_id"] if ctx else None,
                     )
                 )
             except Exception:
                 LOGGER.warning(
                     "Jira webhook: comment notification failed for {}", ticket_ref, exc_info=True
                 )
+
+        # Everything below is specific to a Telegram-escalation origin -- the
+        # escalation group itself, and the customer thread to maybe forward
+        # into, only exist for a ticket that actually came from one.
+        if mapping is None:
+            return
+
+        escalation_message_id: int = mapping["escalation_message_id"]
+        escalation_topic_id = ctx["escalation_topic_id"]
+        jira_orgs = ctx["jira_orgs"]
+        escalation_org_name = ctx["escalation_org_name"]
 
         # Post to escalation group
         LOGGER.info(
@@ -3264,6 +3275,18 @@ class EscalationService:
         handler's own job for a closure is the escalation-session bookkeeping
         the ticket update alone doesn't cover; "in progress" has no
         equivalent bookkeeping, so it's just the canonical sync + notify.
+
+        The canonical sync runs even when this issue has no escalation
+        mapping at all (``ctx is None``) -- e.g. a ticket the alert-
+        correlation pipeline filed via ``/chat/notify`` rather than a
+        Telegram customer escalation. ``issue_key`` doubles as ``ticket_ref``
+        for the Jira backend either way (see ``JiraTicketBackend``), so it's
+        used directly as the fallback. A mapping that *does* exist but
+        predates the canonical ``tickets`` table (``ticket_ref`` empty) is
+        a different case and is still skipped, as before. Only the
+        escalation-session bookkeeping below (closing it, deciding whether
+        to notify the customer's org) is actually specific to a Telegram-
+        escalation origin, so it alone stays gated on having a mapping.
         """
         kind = _status_transition_kind(payload)
         if kind is None:
@@ -3272,11 +3295,16 @@ class EscalationService:
         issue_key = payload.get("issue", {}).get("key", "")
         issue_fields = payload.get("issue", {}).get("fields", {})
         ctx = await self._resolve_escalation_context_for_jira_key(issue_key, issue_fields)
-        if ctx is None:
-            return
+        mapping = ctx["mapping"] if ctx else None
+        ticket_ref = mapping.get("ticket_ref") if mapping else issue_key
 
-        mapping = ctx["mapping"]
-        ticket_ref = mapping.get("ticket_ref")
+        LOGGER.info(
+            "Jira webhook: {} transition for {} (ticket_ref={}, escalation_mapping={})",
+            kind,
+            issue_key,
+            ticket_ref or None,
+            "yes" if mapping else "no",
+        )
 
         if kind == "in_progress":
             if ticket_ref:
@@ -3284,7 +3312,7 @@ class EscalationService:
                     await self._tickets.mark_in_progress_from_webhook(
                         ticket_ref,
                         fallback_chat_id=self._escalation_chat_id,
-                        fallback_topic_id=ctx["escalation_topic_id"],
+                        fallback_topic_id=ctx["escalation_topic_id"] if ctx else None,
                     )
                 except Exception:
                     LOGGER.warning(
@@ -3293,9 +3321,6 @@ class EscalationService:
                         exc_info=True,
                     )
             return
-
-        jira_orgs = ctx["jira_orgs"]
-        escalation_org_name = ctx["escalation_org_name"]
 
         # Close the canonical ticket record too -- this is the only place a
         # human closing the ticket directly in Jira flows into the internal
@@ -3316,6 +3341,11 @@ class EscalationService:
                     exc_info=True,
                 )
 
+        if mapping is None:
+            return
+
+        jira_orgs = ctx["jira_orgs"]
+        escalation_org_name = ctx["escalation_org_name"]
         notify_customer = self._single_matching_org(jira_orgs, escalation_org_name)
         await self.close_escalation_by_mapping(mapping=mapping, notify_customer=notify_customer)
 

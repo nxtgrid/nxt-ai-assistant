@@ -425,6 +425,42 @@ async def test_in_progress_webhook_failure_is_non_fatal():
     await svc.handle_jira_issue_updated(_in_progress_payload("OPS-1"))  # must not raise
 
 
+async def test_in_progress_webhook_syncs_even_when_the_ticket_has_no_escalation_mapping():
+    """Alert-correlation-created tickets (filed via /chat/notify -- a
+    monitoring alert auto-opening a Jira ticket, never a Telegram customer
+    escalation) have no escalation_mappings row at all, so ctx resolves to
+    None. issue_key doubles as ticket_ref for the Jira backend, so the
+    canonical sync must still run -- this is the bug behind an alert
+    ticket's Telegram card never picking up an "In Progress" move made
+    directly in Jira."""
+    supa = _FakeSupabase(_FakeRaw())  # no mapping_by_jira_key entry for OPS-9
+    tickets = _FakeTickets()
+    svc = _make_service(supa, tickets)
+
+    await svc.handle_jira_issue_updated(_in_progress_payload("OPS-9"))
+
+    assert tickets.mark_in_progress_calls == [
+        {"ref": "OPS-9", "fallback_chat_id": "-100123456", "fallback_topic_id": None}
+    ]
+    # No escalation session exists for this ticket -- nothing to close.
+    assert supa.close_escalation_calls == []
+
+
+async def test_closure_webhook_syncs_canonical_ticket_even_when_the_ticket_has_no_escalation_mapping():
+    """Same gap for closures: an alert-correlation ticket closed directly in
+    Jira must still flip the canonical row and notify, even with no
+    escalation session to close alongside it."""
+    supa = _FakeSupabase(_FakeRaw())  # no mapping for OPS-9
+    tickets = _FakeTickets()
+    svc = _make_service(supa, tickets)
+
+    await svc.handle_jira_issue_updated(_closed_payload("OPS-9"))
+
+    assert tickets.transition_to_done_calls == ["OPS-9"]
+    assert tickets.transition_to_done_kwargs == [{"already_confirmed_externally": True}]
+    assert supa.close_escalation_calls == []
+
+
 # ---------------------------------------------------------------------------
 # Canonical rewrite (STOP_LEGACY_ESCALATION_WRITES) -- Task 12
 # ---------------------------------------------------------------------------
@@ -473,13 +509,28 @@ async def test_closure_webhook_resolves_canonically_once_legacy_writes_stopped(m
     assert escalation_row["resolved_at"] is not None
 
 
-async def test_handle_jira_comment_finds_nothing_when_ticket_ref_unmapped(monkeypatch):
-    """A Jira comment on a ticket ref with no canonical tickets row (or no
-    escalation attached to it) must be a no-op, not raise."""
+async def test_handle_jira_comment_mirrors_via_issue_key_but_skips_relay_when_unmapped(
+    monkeypatch,
+):
+    """A Jira comment on an issue with no escalation mapping at all (no
+    canonical ticket row resolvable from it, or a ticket that's simply never
+    been escalated in Telegram -- e.g. one the alert-correlation pipeline
+    filed) still mirrors into ticket_comments/notify_ticket_event: issue_key
+    doubles as ticket_ref for the Jira backend either way. The escalation-
+    group relay and customer-forward, which need a mapping's
+    escalation_message_id and org/topic, are skipped -- not raised."""
     monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
     supa = _FakeSupabase(_FakeRaw())
     tickets = _FakeTickets()  # id_by_ref empty -> ticket_id resolution misses
     svc = _make_service(supa, tickets)
+
+    sent = []
+
+    async def fake_send(**kwargs):
+        sent.append(kwargs)
+        return {"ok": True}
+
+    svc._send_telegram_message = fake_send
 
     payload = {
         "comment": {
@@ -491,6 +542,14 @@ async def test_handle_jira_comment_finds_nothing_when_ticket_ref_unmapped(monkey
     }
 
     await svc.handle_jira_comment(payload)  # must not raise
+
+    assert tickets.add_comment_calls == [("OPS-404", "hi", True)]
+    assert len(tickets.notify_ticket_event_calls) == 1
+    event = tickets.notify_ticket_event_calls[0]
+    assert event.ticket_ref == "OPS-404"
+    assert event.fallback_chat_id == "-100123456"
+    assert event.fallback_topic_id is None
+    assert sent == []  # no escalation group/customer to relay into
 
 
 async def test_handle_jira_comment_mirrors_and_notifies_for_a_mapped_ticket():
