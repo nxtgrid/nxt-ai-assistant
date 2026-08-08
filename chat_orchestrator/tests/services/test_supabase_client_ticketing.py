@@ -1,15 +1,19 @@
-"""Tests for SupabaseClient's Task 3 ticket-backend-agnostic query surface.
+"""Tests for SupabaseClient's remaining (non-escalation-mapping) query surface.
 
 Covers:
-  - save_escalation_mapping persisting ticket_ref/ticket_backend alongside
-    the pre-existing jira_ticket_key.
-  - The 4 has-ticket predicate readers (get_stale_unfiled_escalations,
-    get_orphaned_claimed_escalations, get_old_unfiled_escalations,
-    get_active_tracked_escalations) filtering on ticket_ref rather than
-    jira_ticket_key.
-  - get_escalation_mapping_by_ticket_ref mirroring
-    get_escalation_mapping_by_jira_key.
+  - get_session_by_id's UUID-keyed lookup.
+  - Internal-ticket CRUD/comment helpers (retired, kept skipped -- see the
+    "Retired internal-ticket helper regression cases" section below).
   - tag_message_as_ticket_comment's non-clobbering metadata merge.
+
+save_escalation_mapping, the 4 has-ticket predicate readers
+(get_stale_unfiled_escalations, get_orphaned_claimed_escalations,
+get_old_unfiled_escalations, get_active_tracked_escalations),
+get_escalation_mapping_by_ticket_ref, update_session_escalation_status, and
+count_active_blocking_escalations are gone (STOP_LEGACY_ESCALATION_WRITES
+cutover: writes/reads for escalation_mappings/chat_sessions.is_escalated are
+now exclusively canonical, via EscalationRepository -- see
+test_does_not_expose_legacy_escalation_mapping_helpers below).
 
 Uses a small fake standing in for the real Supabase (postgrest) client's
 fluent API -- the same style as
@@ -214,6 +218,24 @@ def test_does_not_expose_legacy_internal_ticket_helpers():
         assert not hasattr(SupabaseClient, method_name)
 
 
+def test_does_not_expose_legacy_escalation_mapping_helpers():
+    """STOP_LEGACY_ESCALATION_WRITES cutover: escalation_mappings/
+    chat_sessions.is_escalated are no longer written or read anywhere --
+    EscalationRepository (the canonical `escalations` table) is the sole
+    writer/reader. These methods must stay gone."""
+    for method_name in (
+        "save_escalation_mapping",
+        "get_escalation_mapping_by_ticket_ref",
+        "update_session_escalation_status",
+        "count_active_blocking_escalations",
+        "get_stale_unfiled_escalations",
+        "get_orphaned_claimed_escalations",
+        "get_old_unfiled_escalations",
+        "get_active_tracked_escalations",
+    ):
+        assert not hasattr(SupabaseClient, method_name)
+
+
 # ---------------------------------------------------------------------------
 # get_session_by_id
 # ---------------------------------------------------------------------------
@@ -248,271 +270,6 @@ class TestGetSessionById:
         client = _make_client(raw)
 
         assert await client.get_session_by_id("missing") is None
-
-
-# ---------------------------------------------------------------------------
-# save_escalation_mapping
-# ---------------------------------------------------------------------------
-
-
-class TestSaveEscalationMapping:
-    @pytest.mark.asyncio
-    async def test_persists_ticket_ref_and_backend_alongside_jira_key(self):
-        raw = _FakeRawClient()
-        client = _make_client(raw)
-
-        result = await client.save_escalation_mapping(
-            escalation_message_id=123,
-            customer_chat_id="chat-1",
-            session_id="session-1",
-            mapping_id="mapping-1",
-            jira_ticket_key=None,
-            ticket_ref="TKT-000001",
-            ticket_backend="internal",
-        )
-
-        assert result == "mapping-1"
-        row = raw.table("escalation_mappings").rows[0]
-        assert row["ticket_ref"] == "TKT-000001"
-        assert row["ticket_backend"] == "internal"
-        assert row["jira_ticket_key"] is None
-
-    @pytest.mark.asyncio
-    async def test_defaults_new_params_to_none_when_omitted(self):
-        raw = _FakeRawClient()
-        client = _make_client(raw)
-
-        await client.save_escalation_mapping(
-            escalation_message_id=1,
-            customer_chat_id="chat-1",
-            session_id="session-1",
-            mapping_id="mapping-1",
-        )
-
-        row = raw.table("escalation_mappings").rows[0]
-        assert row["ticket_ref"] is None
-        assert row["ticket_backend"] is None
-
-
-# ---------------------------------------------------------------------------
-# Has-ticket predicate readers -- ticket_ref, not jira_ticket_key
-# ---------------------------------------------------------------------------
-
-
-class TestHasTicketPredicateReaders:
-    @pytest.mark.asyncio
-    async def test_get_stale_unfiled_escalations_filters_on_ticket_ref(self):
-        # Row A: no jira key AND no ticket_ref -> genuinely unfiled, should appear.
-        # Row B: no jira key BUT ticket_ref set (internal ticket already filed)
-        #        -> must NOT appear. If the code still filtered on
-        #        jira_ticket_key this row would incorrectly show up, since its
-        #        jira_ticket_key is also None.
-        unfiled = {
-            "id": "row-a",
-            "session_id": "s-a",
-            "org_hashtag": None,
-            "customer_email": None,
-            "customer_username": None,
-            "customer_chat_id": "c-a",
-            "customer_topic_id": None,
-            "organization_id": 1,
-            "escalation_message_id": 1,
-            "escalation_topic_id": None,
-            "reason": "could_not_answer",
-            "jira_ticket_key": None,
-            "ticket_ref": None,
-            "ticket_backend": None,
-            "question_text": "q",
-            "created_at": "2026-07-20T00:00:00+00:00",
-            "is_active": True,
-        }
-        already_filed_internally = {
-            **unfiled,
-            "id": "row-b",
-            "jira_ticket_key": None,
-            "ticket_ref": "TKT-000009",
-            "ticket_backend": "internal",
-        }
-        raw = _FakeRawClient(
-            tables={"escalation_mappings": [unfiled, already_filed_internally]}
-        )
-        client = _make_client(raw)
-
-        result = await client.get_stale_unfiled_escalations(
-            min_age_hours=0, max_age_hours=999, limit=20
-        )
-
-        ids = [r["id"] for r in result]
-        assert ids == ["row-a"]
-
-        # Confirm the executed select's filters reference ticket_ref, not
-        # jira_ticket_key, for the is-null predicate.
-        op, filters, _ = raw.table("escalation_mappings").executed[0]
-        assert op == "select"
-        assert ("is", "ticket_ref", "null") in filters
-        assert ("is", "jira_ticket_key", "null") not in filters
-
-    @pytest.mark.asyncio
-    async def test_get_orphaned_claimed_escalations_filters_on_ticket_ref(self):
-        orphaned = {
-            "id": "row-a",
-            "session_id": "s-a",
-            "created_at": "2026-07-20T00:00:00+00:00",
-            "is_active": False,
-            "jira_ticket_key": None,
-            "ticket_ref": None,
-            "ticket_backend": None,
-            "resolved_at": None,
-        }
-        already_ticketed = {
-            **orphaned,
-            "id": "row-b",
-            "ticket_ref": "TKT-000009",
-            "ticket_backend": "internal",
-        }
-        raw = _FakeRawClient(tables={"escalation_mappings": [orphaned, already_ticketed]})
-        client = _make_client(raw)
-
-        result = await client.get_orphaned_claimed_escalations(max_age_hours=999, limit=50)
-
-        ids = [r["id"] for r in result]
-        assert ids == ["row-a"]
-        op, filters, _ = raw.table("escalation_mappings").executed[0]
-        assert ("is", "ticket_ref", "null") in filters
-        assert ("is", "jira_ticket_key", "null") not in filters
-
-    @pytest.mark.asyncio
-    async def test_get_old_unfiled_escalations_filters_on_ticket_ref(self):
-        unfiled = {
-            "id": "row-a",
-            "org_hashtag": None,
-            "customer_username": None,
-            "customer_email": None,
-            "escalation_message_id": 1,
-            "created_at": "2000-01-01T00:00:00+00:00",
-            "is_active": True,
-            "jira_ticket_key": None,
-            "ticket_ref": None,
-            "ticket_backend": None,
-            "reason": "could_not_answer",
-        }
-        already_filed_internally = {
-            **unfiled,
-            "id": "row-b",
-            "ticket_ref": "TKT-000009",
-            "ticket_backend": "internal",
-        }
-        raw = _FakeRawClient(
-            tables={"escalation_mappings": [unfiled, already_filed_internally]}
-        )
-        client = _make_client(raw)
-
-        result = await client.get_old_unfiled_escalations(max_age_hours=1, limit=20)
-
-        ids = [r["id"] for r in result]
-        assert ids == ["row-a"]
-        op, filters, _ = raw.table("escalation_mappings").executed[0]
-        assert ("is", "ticket_ref", "null") in filters
-        assert ("is", "jira_ticket_key", "null") not in filters
-
-    @pytest.mark.asyncio
-    async def test_get_active_tracked_escalations_filters_on_ticket_ref(self):
-        # Row A: ticket_ref set -> tracked, should appear.
-        # Row B: jira_ticket_key set but ticket_ref NOT set -> must NOT appear
-        #        under the new ticket_ref-keyed predicate (proves the filter
-        #        moved off jira_ticket_key, since row B *would* have matched
-        #        the old `.filter("jira_ticket_key", "not.is", "null")`).
-        tracked = {
-            "id": "row-a",
-            "session_id": "s-a",
-            "customer_chat_id": "c-a",
-            "customer_topic_id": None,
-            "jira_ticket_key": None,
-            "ticket_ref": "TKT-000001",
-            "ticket_backend": "internal",
-            "org_hashtag": None,
-            "customer_username": None,
-            "created_at": "2026-07-20T00:00:00+00:00",
-            "is_active": True,
-        }
-        legacy_jira_only = {
-            **tracked,
-            "id": "row-b",
-            "jira_ticket_key": "OPS-1",
-            "ticket_ref": None,
-            "ticket_backend": None,
-        }
-        raw = _FakeRawClient(tables={"escalation_mappings": [tracked, legacy_jira_only]})
-        client = _make_client(raw)
-
-        result = await client.get_active_tracked_escalations(limit=100)
-
-        ids = [r["id"] for r in result]
-        assert ids == ["row-a"]
-        op, filters, _ = raw.table("escalation_mappings").executed[0]
-        assert ("filter", "ticket_ref", "not.is", "null") in filters
-        assert ("filter", "jira_ticket_key", "not.is", "null") not in filters
-
-
-# ---------------------------------------------------------------------------
-# get_escalation_mapping_by_ticket_ref
-# ---------------------------------------------------------------------------
-
-
-class TestGetEscalationMappingByTicketRef:
-    @pytest.mark.asyncio
-    async def test_returns_most_recent_active_mapping(self):
-        older = {
-            "id": "map-old",
-            "ticket_ref": "TKT-1",
-            "is_active": True,
-            "created_at": "2026-01-01T00:00:00+00:00",
-        }
-        newer = {
-            "id": "map-new",
-            "ticket_ref": "TKT-1",
-            "is_active": True,
-            "created_at": "2026-02-01T00:00:00+00:00",
-        }
-        inactive_newest = {
-            "id": "map-inactive",
-            "ticket_ref": "TKT-1",
-            "is_active": False,
-            "created_at": "2026-03-01T00:00:00+00:00",
-        }
-        raw = _FakeRawClient(
-            tables={"escalation_mappings": [older, newer, inactive_newest]}
-        )
-        client = _make_client(raw)
-
-        result = await client.get_escalation_mapping_by_ticket_ref("TKT-1")
-
-        assert result is not None
-        assert result["id"] == "map-new"
-
-    @pytest.mark.asyncio
-    async def test_returns_none_when_not_found(self):
-        raw = _FakeRawClient(tables={"escalation_mappings": []})
-        client = _make_client(raw)
-
-        result = await client.get_escalation_mapping_by_ticket_ref("TKT-missing")
-
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_returns_none_on_error(self):
-        raw = _FakeRawClient()
-
-        class _RaisingTable:
-            def select(self, *_a, **_k):
-                raise RuntimeError("boom")
-
-        raw._tables["escalation_mappings"] = _RaisingTable()
-        client = _make_client(raw)
-
-        result = await client.get_escalation_mapping_by_ticket_ref("TKT-1")
-
-        assert result is None
 
 
 # ---------------------------------------------------------------------------
