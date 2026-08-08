@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm.model_tiers import resolve_model
 
 
 def compute_variables_hash(variables: List[Dict[str, Any]]) -> str:
@@ -371,8 +372,8 @@ class GeminiDescriptionGenerator:
         """
         self.api_key = api_key
         self.system_prompt = system_prompt
-        # Use main GEMINI_MODEL env var for consistency across the app
-        self.model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        # Use the "fast" tier for consistency across the app
+        self.model = resolve_model("fast")
         self.gateway = get_default_generation_gateway(api_key=api_key, default_model=self.model)
 
     def generate_description(

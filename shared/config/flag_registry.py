@@ -133,9 +133,9 @@ class Flag:
             flag as a select populated from the live Gemini model list
             (fetched via the Google API) instead of free text. Unlike
             :attr:`choices`, the option list isn't known statically. Distinct
-            from the provider-aware "role model" fields (``GEMINI_MODEL`` and
-            friends), which switch between Gemini and OpenRouter model lists
-            based on ``LLM_PROVIDER``.
+            from the provider-aware "role model" fields (``MODEL_THINKING``,
+            ``MODEL_FAST``, ``MODEL_LITE``, ``FALLBACK_MODEL``), which switch
+            between Gemini and OpenRouter model lists based on ``LLM_PROVIDER``.
     """
 
     name: str

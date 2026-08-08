@@ -22,6 +22,7 @@ from mcp.types import ServerCapabilities
 from shared_code.tool_registry import ToolRegistry
 
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
 
 from .tool_schemas import TOOL_SCHEMAS
@@ -159,7 +160,7 @@ async def summarize_with_llm(
 ) -> str:
     """Use Gemini to summarize the retrieved knowledge."""
     try:
-        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        model = resolve_model("fast")
         gateway = get_default_generation_gateway(
             default_model=model,
         )

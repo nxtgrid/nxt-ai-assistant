@@ -51,6 +51,7 @@ from orchestrator.services.webhook_processor import (
 from orchestrator.utils.session_id import generate_session_id
 from shared.auth import get_auth_service
 from shared.auth.auth_service import STAFF_ORG_ID as _STAFF_ORG_ID
+from shared.llm.model_tiers import resolve_model
 from shared.utils.error_messages import ErrorCategory, categorize_error
 from shared.utils.logging import get_logger
 from shared.utils.telegram_buttons import (
@@ -3368,8 +3369,8 @@ def _get_settings() -> AppSettings:
         openrouter_api_key=openrouter_api_key,
         debug=os.getenv("DEBUG", "false").lower() == "true",
         gemini=GeminiModelConfig(
-            model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-            fallback_model=os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-lite"),
+            model=resolve_model("fast"),
+            fallback_model=os.environ.get("FALLBACK_MODEL", ""),
             temperature=temperature,
         ),
         allow_parallel_calls=os.getenv("ALLOW_PARALLEL_CALLS", "true").lower() == "true",

@@ -27,6 +27,7 @@ from rapidfuzz import fuzz
 from shared_code.tool_registry import ToolRegistry
 
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm.model_tiers import resolve_model
 from shared.utils.response_formatters import compose_json_response
 
 from .tool_schemas import TOOL_SCHEMAS
@@ -199,7 +200,7 @@ async def _translate_tariff_query(query: str) -> str:
         f"Item: {query}"
     )
     try:
-        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        model = resolve_model("fast")
         gateway = get_default_generation_gateway(api_key=api_key, default_model=model)
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],

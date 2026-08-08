@@ -539,7 +539,7 @@ def _render_models_section(
     plan = _model_section_plan(names, pending)
 
     provider_routes = model_options.get("OPENROUTER_PROVIDER_ORDER") or {}
-    selected_model = pending.get("GEMINI_MODEL") or ""
+    selected_model = pending.get("MODEL_FAST") or ""
     if plan.show_openrouter_routes and not provider_routes:
         provider_routes = _route_fallbacks_for_model(selected_model)
     section_model_options = dict(model_options)
