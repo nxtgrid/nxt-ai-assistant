@@ -17,8 +17,14 @@
 BEGIN;
 
 -- claim_agent_events operated on agent_events; drop before the table so
--- there's no window with a function referencing a gone relation.
-DROP FUNCTION IF EXISTS claim_agent_events(uuid, int);
+-- there's no window with a function referencing a gone relation. Signature
+-- is (integer, text), not (uuid, int) -- this function predates the
+-- migrations directory (created directly against the live DB, never
+-- captured in a CREATE FUNCTION migration), so there is no other source of
+-- truth for it than the live catalog. Confirmed via the DROP TABLE failure
+-- this caused when the wrong signature made this line a silent no-op
+-- (`DROP FUNCTION IF EXISTS` doesn't error on a non-matching overload).
+DROP FUNCTION IF EXISTS claim_agent_events(integer, text);
 
 -- agent_events.target_instance_id FKs to persistent_agent_instances, so drop
 -- it first even though CASCADE below would handle the order regardless.
