@@ -217,6 +217,10 @@ class _FakeSupabase:
         self.mapping_for_reply: Optional[Dict[str, Any]] = None
         self.session_escalation_info: Optional[Dict[str, Any]] = None
         self.session_by_id_result: Optional[SimpleNamespace] = None
+        # Keyed lookup, checked before the single-value fallback above --
+        # needed when a test resolves more than one distinct chat_session_id
+        # (e.g. two escalations for two different customers).
+        self.session_by_id_map: Dict[str, SimpleNamespace] = {}
         self.escalation_by_session_result: Optional[Dict[str, Any]] = None
         self.reopen_escalation_result: bool = True
         self.reopen_escalation_calls: List[tuple] = []
@@ -259,7 +263,9 @@ class _FakeSupabase:
     async def get_session_by_chat_id(self, **_k):
         return SimpleNamespace(id=uuid.uuid4())
 
-    async def get_session_by_id(self, _session_uuid):
+    async def get_session_by_id(self, session_uuid):
+        if session_uuid in self.session_by_id_map:
+            return self.session_by_id_map[session_uuid]
         return self.session_by_id_result
 
     async def get_messages(self, **_k):
@@ -1152,9 +1158,12 @@ def _wire_sweep_telegram(svc: EscalationService) -> Dict[str, List[Any]]:
 
 async def test_sweep_files_jira_ticket_and_renders_link():
     raw = _FakeRaw()
+    raw.table("escalations").rows = [_canonical_escalation_row("esc-1")]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-1", "purpose": "escalation", "external_message_id": 555}
+    ]
     supa = _FakeSupabase(raw)
-    supa.stale_unfiled = [_stale_row("m1")]
-    supa.claim_returns = {"m1": _stale_row("m1")}
+    _wire_canonical_session(supa)
     svc = _make_service(supa)
     calls = _wire_sweep_telegram(svc)
 
@@ -1176,9 +1185,12 @@ async def test_sweep_files_jira_ticket_and_renders_link():
 
 async def test_sweep_files_internal_ticket_and_renders_plain_bold():
     raw = _FakeRaw()
+    raw.table("escalations").rows = [_canonical_escalation_row("esc-1")]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-1", "purpose": "escalation", "external_message_id": 555}
+    ]
     supa = _FakeSupabase(raw)
-    supa.stale_unfiled = [_stale_row("m1")]
-    supa.claim_returns = {"m1": _stale_row("m1")}
+    _wire_canonical_session(supa)
     svc = _make_service(supa)
     calls = _wire_sweep_telegram(svc)
 
@@ -1205,26 +1217,43 @@ async def test_sweep_files_internal_ticket_and_renders_plain_bold():
 
 async def test_sweep_reconciles_closed_ticket_and_notifies_open_one():
     raw = _FakeRaw()
-    supa = _FakeSupabase(raw)
-    # One Jira-backed row using the new ticket_ref column (closed -> reconciled),
-    # one legacy row with only jira_ticket_key set (open -> customer notified),
-    # exercising the `ticket_ref or jira_ticket_key` fallback on both sides.
-    supa.active_tracked = [
+    # Two tracked escalations (state=open, ticket_id set) for two different
+    # customer sessions: one Jira ticket already Done (-> reconciled, no
+    # message), one still open (-> customer notified it's in progress).
+    raw.table("escalations").rows = [
+        _canonical_escalation_row("closed-mapping", ticket_id="ticket-1"),
+        _canonical_escalation_row("open-mapping", ticket_id="ticket-2"),
+    ]
+    raw.table("tickets").rows = [
         {
-            "id": "closed-mapping",
+            "id": "ticket-1",
             "ticket_ref": "OPS-1",
-            "jira_ticket_key": "OPS-1",
-            "customer_chat_id": "111",
-            "customer_topic_id": None,
+            "backend": "jira",
+            "created_via": "escalation",
+            "provisioning_state": "active",
         },
         {
-            "id": "open-legacy-mapping",
-            "ticket_ref": None,
-            "jira_ticket_key": "OPS-2",
-            "customer_chat_id": "222",
-            "customer_topic_id": None,
+            "id": "ticket-2",
+            "ticket_ref": "OPS-2",
+            "backend": "jira",
+            "created_via": "escalation",
+            "provisioning_state": "active",
         },
     ]
+    supa = _FakeSupabase(raw)
+    supa.session_by_id_map = {
+        "11111111-1111-1111-1111-111111111111": SimpleNamespace(
+            session_id="telegram_abc", telegram_chat_id="111", telegram_topic_id=None,
+            organization_id=None,
+        ),
+    }
+    # Both rows share _canonical_escalation_row's default chat_session_id --
+    # override the second one so the two sessions resolve independently.
+    raw.table("escalations").rows[1]["chat_session_id"] = "22222222-2222-2222-2222-222222222222"
+    supa.session_by_id_map["22222222-2222-2222-2222-222222222222"] = SimpleNamespace(
+        session_id="telegram_def", telegram_chat_id="222", telegram_topic_id=None,
+        organization_id=None,
+    )
     svc = _make_service(supa)
     calls = _wire_sweep_telegram(svc)
 
@@ -1232,25 +1261,19 @@ async def test_sweep_reconciles_closed_ticket_and_notifies_open_one():
         by_ref={
             "OPS-1": TicketStatus(summary="Meter issue", is_done=True),
             "OPS-2": TicketStatus(summary="Billing issue", is_done=False),
-        }
+        },
+        ref_by_ticket_id={"ticket-1": "OPS-1", "ticket-2": "OPS-2"},
+        backend_by_ref={"OPS-1": "jira", "OPS-2": "jira"},
     )
     svc._tickets = tickets
 
     result = await svc.run_escalation_ticket_sweep()
 
-    # Both refs were looked up via the fallback (ticket_ref for the first row,
-    # jira_ticket_key for the legacy second row).
     assert set(tickets.get_status_calls) == {"OPS-1", "OPS-2"}
 
-    # Closed ticket -> mapping reconciled (is_active=False), no customer message
-    # sent for it.
+    # Closed ticket -> canonical escalation resolved, no customer message sent for it.
     assert result["reconciled"] == 1
-    close_updates = [
-        f
-        for op, f, p in raw.tables["escalation_mappings"].calls
-        if op == "update" and f.get("id") == "closed-mapping"
-    ]
-    assert close_updates, "expected the closed mapping to be reconciled via an UPDATE"
+    assert raw.table("escalations").rows[0]["state"] == "resolved"
 
     # Open ticket -> customer notified with the ticket ref and a "still open" message.
     assert result["notified_groups"] == 1

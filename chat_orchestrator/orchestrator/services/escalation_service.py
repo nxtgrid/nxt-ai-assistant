@@ -2469,31 +2469,20 @@ class EscalationService:
             LOGGER.error("Escalation sweep: no Supabase client, aborting")
             return {"eligible": 0, "filed": 0, "skipped": 0, "failed": 0}
 
-        stop_legacy_writes = fr.get("STOP_LEGACY_ESCALATION_WRITES")
-
-        if stop_legacy_writes:
-            now = datetime.now(timezone.utc)
-            cutoff_recent = (now - timedelta(hours=min_age_hours)).isoformat()
-            cutoff_old = (now - timedelta(hours=max_age_hours)).isoformat()
-            try:
-                eligible = await self._escalations.list_unfiled(
-                    state="open",
-                    created_after=cutoff_old,
-                    created_before=cutoff_recent,
-                    exclude_reasons=("safety_escalation",),
-                    limit=limit,
-                )
-            except Exception:
-                LOGGER.warning(
-                    "Escalation sweep: canonical eligible-list query failed", exc_info=True
-                )
-                eligible = []
-        else:
-            eligible = await supabase_client.get_stale_unfiled_escalations(
-                min_age_hours=min_age_hours,
-                max_age_hours=max_age_hours,
+        now = datetime.now(timezone.utc)
+        cutoff_recent = (now - timedelta(hours=min_age_hours)).isoformat()
+        cutoff_old = (now - timedelta(hours=max_age_hours)).isoformat()
+        try:
+            eligible = await self._escalations.list_unfiled(
+                state="open",
+                created_after=cutoff_old,
+                created_before=cutoff_recent,
+                exclude_reasons=("safety_escalation",),
                 limit=limit,
             )
+        except Exception:
+            LOGGER.warning("Escalation sweep: canonical eligible-list query failed", exc_info=True)
+            eligible = []
 
         if len(eligible) == limit:
             LOGGER.warning(
@@ -2503,29 +2492,21 @@ class EscalationService:
         filed = skipped = failed = 0
 
         async def _release_claim(mapping_id: str) -> None:
-            if stop_legacy_writes:
-                try:
-                    await self._escalations.release(mapping_id)
-                except Exception:
-                    LOGGER.warning(
-                        "Sweep: could not release canonical claim {}", mapping_id, exc_info=True
-                    )
-            else:
-                await supabase_client.reactivate_escalation(mapping_id)
+            try:
+                await self._escalations.release(mapping_id)
+            except Exception:
+                LOGGER.warning(
+                    "Sweep: could not release canonical claim {}", mapping_id, exc_info=True
+                )
 
         for idx, mapping in enumerate(eligible):
             mapping_id = mapping["id"]
 
             # 1. Atomic claim — prevents race with staff clicking Track button
-            if stop_legacy_writes:
-                claimed_row = await self._escalations.claim(mapping_id)
-                claimed_mapping = (
-                    await self.get_escalation_by_id_canonical(mapping_id)
-                    if claimed_row
-                    else None
-                )
-            else:
-                claimed_mapping = await supabase_client.claim_escalation_for_tracking(mapping_id)
+            claimed_row = await self._escalations.claim(mapping_id)
+            claimed_mapping = (
+                await self.get_escalation_by_id_canonical(mapping_id) if claimed_row else None
+            )
             if not claimed_mapping:
                 skipped += 1
                 continue
@@ -2614,29 +2595,22 @@ class EscalationService:
         # Alert staff about escalations that aged out of the sweep window.
         # Always check — the batch cap guards against processing too many, but old
         # stragglers exist even when the batch is small.
-        if stop_legacy_writes:
-            cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
-            try:
-                old_rows = await self._escalations.list_unfiled(
-                    state="open",
-                    created_before=cutoff,
-                    exclude_reasons=("safety_escalation",),
-                    limit=20,
-                )
-            except Exception:
-                LOGGER.warning(
-                    "Escalation sweep: canonical old-unfiled query failed", exc_info=True
-                )
-                old_rows = []
-            old_escalations = []
-            for row in old_rows:
-                full = await self.get_escalation_by_id_canonical(row["id"])
-                if full:
-                    old_escalations.append(full)
-        else:
-            old_escalations = await supabase_client.get_old_unfiled_escalations(
-                max_age_hours=max_age_hours
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+        try:
+            old_rows = await self._escalations.list_unfiled(
+                state="open",
+                created_before=cutoff,
+                exclude_reasons=("safety_escalation",),
+                limit=20,
             )
+        except Exception:
+            LOGGER.warning("Escalation sweep: canonical old-unfiled query failed", exc_info=True)
+            old_rows = []
+        old_escalations = []
+        for row in old_rows:
+            full = await self.get_escalation_by_id_canonical(row["id"])
+            if full:
+                old_escalations.append(full)
         if old_escalations and self._escalation_chat_id:
             old_count = len(old_escalations)
             lines = [
@@ -2669,21 +2643,16 @@ class EscalationService:
         # path, then notify each customer group of their remaining open issues in one message.
         reconciled = 0
         notified_groups = 0
-        if stop_legacy_writes:
-            try:
-                tracked_rows = await self._escalations.list_active_tracked()
-            except Exception:
-                LOGGER.warning(
-                    "Escalation sweep: canonical active-tracked query failed", exc_info=True
-                )
-                tracked_rows = []
-            tracked = []
-            for row in tracked_rows:
-                full = await self.get_escalation_by_id_canonical(row["id"])
-                if full:
-                    tracked.append(full)
-        else:
-            tracked = await supabase_client.get_active_tracked_escalations()
+        try:
+            tracked_rows = await self._escalations.list_active_tracked()
+        except Exception:
+            LOGGER.warning("Escalation sweep: canonical active-tracked query failed", exc_info=True)
+            tracked_rows = []
+        tracked = []
+        for row in tracked_rows:
+            full = await self.get_escalation_by_id_canonical(row["id"])
+            if full:
+                tracked.append(full)
         if tracked:
             open_tracked: List[tuple] = []
             # Fetch all ticket statuses concurrently (cap at 10 parallel to avoid rate limits).
@@ -2715,26 +2684,11 @@ class EscalationService:
                 if fields and fields["is_done"]:
                     # Ticket closed outside the webhook path — close the mapping silently
                     LOGGER.info("Reconciling closed ticket {} (mapping {})", ref, esc["id"])
-                    if stop_legacy_writes:
-                        reconciled += 1
-                    else:
-                        try:
-                            client = supabase_client._get_client()
-                            client.table("escalation_mappings").update(
-                                {
-                                    "is_active": False,
-                                    "resolved_at": datetime.now(timezone.utc).isoformat(),
-                                }
-                            ).eq("id", esc["id"]).eq("is_active", True).execute()
-                            reconciled += 1
-                        except Exception:
-                            LOGGER.warning(
-                                "Could not reconcile mapping {}", esc["id"], exc_info=True
-                            )
-                    # Canonical mirror -- a ticket closed directly (outside our
-                    # button flow) never transitioned escalations.state before;
-                    # without this a canonical-reads consumer would keep
-                    # seeing this escalation as open.
+                    reconciled += 1
+                    # Best-effort: a ticket closed directly (outside our button
+                    # flow) never transitioned escalations.state before; without
+                    # this a canonical-reads consumer would keep seeing this
+                    # escalation as open. Not fatal to reconciliation itself.
                     try:
                         await self._escalations.resolve(esc["id"])
                     except Exception:
