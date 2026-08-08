@@ -1210,29 +1210,6 @@ class EnhancedSupabaseClient:
             LOGGER.error(f"Error saving escalation mapping: {e}")
             return None
 
-    async def get_escalation_mapping_by_jira_key(
-        self, jira_ticket_key: str
-    ) -> Optional[Dict[str, Any]]:
-        """Get the active escalation mapping for a Jira ticket key.
-
-        Returns the most recent active mapping, or None if not found.
-        """
-        try:
-            client = self._get_client()
-            response = (
-                client.table("escalation_mappings")
-                .select("*")
-                .eq("jira_ticket_key", jira_ticket_key)
-                .eq("is_active", True)
-                .order("created_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-            return dict(response.data[0]) if response.data else None
-        except Exception as e:
-            LOGGER.error(f"Error fetching escalation mapping for Jira key {jira_ticket_key}: {e}")
-            return None
-
     async def get_escalation_mapping_by_ticket_ref(
         self, ticket_ref: str
     ) -> Optional[Dict[str, Any]]:
@@ -1256,35 +1233,6 @@ class EnhancedSupabaseClient:
             return dict(response.data[0]) if response.data else None
         except Exception as e:
             LOGGER.error(f"Error fetching escalation mapping for ticket ref {ticket_ref}: {e}")
-            return None
-
-    async def get_escalation_mapping(self, escalation_message_id: int) -> Optional[Dict[str, Any]]:
-        """
-        Get escalation mapping by message ID.
-
-        Args:
-            escalation_message_id: Telegram message ID of escalation
-
-        Returns:
-            Mapping dict or None if not found
-        """
-        try:
-            client = self._get_client()
-
-            response = (
-                client.table("escalation_mappings")
-                .select("*")
-                .eq("escalation_message_id", escalation_message_id)
-                .execute()
-            )
-
-            if response.data:
-                result: Dict[str, Any] = response.data[0]
-                return result
-            return None
-
-        except Exception as e:
-            LOGGER.error(f"Error getting escalation mapping: {e}")
             return None
 
     async def update_session_escalation_status(
@@ -1355,37 +1303,6 @@ class EnhancedSupabaseClient:
             LOGGER.error(f"Error getting session escalation info: {e}")
             return None
 
-    async def close_escalation(self, session_id: str) -> bool:
-        """
-        Close all active escalations for a session.
-
-        Deactivates ALL escalation mappings and clears the session's
-        is_escalated flag so the user resumes chatting with the bot.
-
-        Args:
-            session_id: Chat session identifier
-
-        Returns:
-            True if closed successfully, False otherwise
-        """
-        try:
-            client = self._get_client()
-
-            # Update session
-            await self.update_session_escalation_status(session_id=session_id, is_escalated=False)
-
-            # Deactivate ALL mappings for this session
-            client.table("escalation_mappings").update(
-                {"is_active": False, "resolved_at": datetime.now(timezone.utc).isoformat()}
-            ).eq("session_id", session_id).execute()
-
-            LOGGER.info(f"Closed escalation for session {session_id}")
-            return True
-
-        except Exception as e:
-            LOGGER.error(f"Error closing escalation: {e}")
-            return False
-
     async def count_active_blocking_escalations(self, session_id: str) -> int:
         """Count active escalation mappings that block the chat session.
 
@@ -1406,83 +1323,6 @@ class EnhancedSupabaseClient:
         except Exception as e:
             LOGGER.error(f"Error counting active blocking escalations: {e}")
             return 0
-
-    async def claim_escalation_for_tracking(self, mapping_id: str) -> Optional[Dict[str, Any]]:
-        """Atomically claim an escalation for JIRA ticket tracking.
-
-        Sets is_active=false and returns the row only if it was active.
-        Returns None if already claimed/closed (prevents double-click race).
-        """
-        try:
-            client = self._get_client()
-            # Atomic claim: update only if still active
-            result = (
-                client.table("escalation_mappings")
-                .update({"is_active": False})
-                .eq("id", mapping_id)
-                .eq("is_active", True)
-                .execute()
-            )
-            updated: list[Dict[str, Any]] = result.data or []
-            if not updated:
-                LOGGER.info(f"Escalation {mapping_id} already claimed or closed")
-                return None
-
-            # Fetch the full row after claiming
-            fetch = client.table("escalation_mappings").select("*").eq("id", mapping_id).execute()
-            data = fetch.data or []
-            if data:
-                LOGGER.info(f"Claimed escalation {mapping_id} for ticket tracking")
-                return dict(data[0])
-            return None
-        except Exception as e:
-            LOGGER.exception(f"Error claiming escalation {mapping_id}: {e}")
-            return None
-
-    async def reactivate_escalation(self, mapping_id: str) -> None:
-        """Re-activate an escalation after failed ticket creation."""
-        try:
-            client = self._get_client()
-            client.table("escalation_mappings").update({"is_active": True}).eq(
-                "id", mapping_id
-            ).execute()
-            LOGGER.info(f"Reactivated escalation {mapping_id}")
-        except Exception as e:
-            LOGGER.warning(f"Failed to reactivate escalation {mapping_id}: {e}")
-
-    async def reopen_escalation(self, session_id: str, escalation_message_id: int) -> bool:
-        """
-        Reopen a closed escalation for a session.
-
-        Re-activates the specific escalation mapping and sets the session's
-        is_escalated flag so user messages route to the escalation group again.
-
-        Args:
-            session_id: Chat session identifier
-            escalation_message_id: The escalation message to reactivate
-
-        Returns:
-            True if reopened successfully, False otherwise
-        """
-        try:
-            client = self._get_client()
-
-            # Re-activate the specific mapping
-            client.table("escalation_mappings").update({"is_active": True, "resolved_at": None}).eq(
-                "session_id", session_id
-            ).eq("escalation_message_id", escalation_message_id).execute()
-
-            # Set session back to escalated
-            await self.update_session_escalation_status(session_id=session_id, is_escalated=True)
-
-            LOGGER.info(
-                f"Reopened escalation for session {session_id}, message_id={escalation_message_id}"
-            )
-            return True
-
-        except Exception as e:
-            LOGGER.error(f"Error reopening escalation: {e}")
-            return False
 
     async def get_escalation_by_session(self, session_id: str) -> Optional[Dict[str, Any]]:
         """
