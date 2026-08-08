@@ -44,15 +44,21 @@ Confirmed in scope. `pricing.py`'s own docstring lists `GEMINI_MODEL` / `GEMINI_
 
 Given how deep this reaches (a prompt's *content*, not just code, references one of these env vars; `shared/llm/pricing.py` and `shared/config/flag_registry.py` both key off the exact variable names for cost tracking and flag registration respectively), I'm not going to claim a complete migration table here that I haven't fully verified. What's confirmed so far:
 
-| Signal | Likely tier | Confidence |
-|---|---|---|
-| `thread_assignment.classify` (default `gemini-2.5-flash-lite` via `THREAD_CLASSIFIER_MODEL`) | lite | High |
-| `conversation.summarize`, `context_filter.relevance` (both via shared `VERIFICATION_MODEL`, default `gemini-2.5-flash-lite`) | lite | High |
-| `verification.sanitize` (via `VERIFICATION_MODEL`) | lite | Medium -- `verification.criteria` and `verification.sanitize_system`'s exact consumers span `verification_service.py`, `instructions_provider.py`, `app.py`, and `settings.py`; not fully traced |
-| `ingestion.classify_document`, `ingestion.detect_contradictions`, `ingestion.extract_entities`, `ingestion.improve_content.*` (bare `GEMINI_MODEL` default via a shared `_call_gemini` helper) | fast | Medium |
-| `intent_router.route` (`INTENT_ROUTER_MODEL` or `GEMINI_FALLBACK_MODEL`) | fast | Low -- don't know the current deployed value of `INTENT_ROUTER_MODEL` |
-| The `command_registry.py` command using `GEMINI_DEEP_THINKING_MODEL`, and whatever in `experts.definitions.prompt` uses `GEMINI_AGENT_PRO_MODEL` | thinking | High on tier, but the expert-definitions content edit itself needs its own careful pass -- it's prompt *text* an LLM reads, not code |
-| The other ~14 prompts (no dedicated env var today, never had explicit selection) | **fast** (proposed) | Proposal, not a finding -- "fast" is the closest existing analog to "no special treatment," matching how the bare-default ingestion prompts are already read. Flag if any of these 14 should actually be lite or thinking; I'll list them by name in the plan for a real per-prompt look rather than a blanket assumption. |
+Cross-checked against `flag_registry.py`'s actual registered defaults (the authoritative source -- more reliable than inferring from code-level fallback values scattered across call sites):
+
+| Signal | Registered default | Tier | Confidence |
+|---|---|---|---|
+| `thread_assignment.classify` (`THREAD_CLASSIFIER_MODEL`) | `gemini-2.5-flash-lite` | lite | High |
+| `conversation.summarize`, `context_filter.relevance`, `verification.sanitize` (all via shared `VERIFICATION_MODEL`) | `gemini-2.5-flash-lite` | lite | High |
+| `intent_router.route` (`INTENT_ROUTER_MODEL`) | `gemini-2.5-flash-lite` | **lite** -- corrected from an earlier guess of "fast" before checking the registry; the registered default is explicitly lite-tier | High |
+| `ingestion.classify_document`, `ingestion.detect_contradictions`, `ingestion.extract_entities`, `ingestion.improve_content.*` (bare `GEMINI_MODEL` default) | `gemini-2.5-flash` | fast | High |
+| The `command_registry.py` command using `GEMINI_DEEP_THINKING_MODEL` | `gemini-pro-latest` | thinking | High on tier, but see the version conflict below |
+| `experts.definitions.prompt`'s `site_visit_tracker` expert, using `GEMINI_AGENT_PRO_MODEL` (only expert in the file with an explicit Model field -- confirmed by grepping every `Model` field in the file, not just this one hit) | `gemini-2.5-pro` | thinking | High on tier, same conflict |
+| The other ~14 prompts (no dedicated env var today, never had explicit selection) | none | **fast** (proposed) | Proposal, not a finding -- "fast" is the closest analog to "no special treatment." Will list by name in the plan for a real per-prompt look rather than a blanket assumption. |
+
+**One real conflict, not yet resolved:** `GEMINI_DEEP_THINKING_MODEL` and `GEMINI_AGENT_PRO_MODEL` both collapse into `thinking`, but their registered defaults disagree -- `gemini-pro-latest` (a floating alias) vs. `gemini-2.5-pro` (a pinned version). `MODEL_THINKING` needs exactly one default; picking wrong changes either the deep-thinking command's or `site_visit_tracker`'s behavior. Proposing `gemini-2.5-pro` (pinned, predictable, matches the more specific of the two) but this needs a direct answer, not a guess.
+
+`verification.sanitize_system` and `verification.criteria` aren't in this table -- `verification.sanitize_system` is almost certainly the same `lite` tier as `verification.sanitize` (same service, same call), and `verification.criteria` is Google-Doc-driven with its own separate history (see `test_prompt_library_contents.py`'s `OVERRIDABLE` set); both get confirmed by name, not assumed, when the plan lists every prompt.
 
 **First task of the implementation plan, before any code changes:** a complete grep/read audit of every reference to all seven existing env var names (`GEMINI_MODEL`, `GEMINI_FALLBACK_MODEL`, `GEMINI_DEEP_THINKING_MODEL`, `GEMINI_AGENT_PRO_MODEL`, `VERIFICATION_MODEL`, `THREAD_CLASSIFIER_MODEL`, `INTENT_ROUTER_MODEL`) across the whole repo -- code, prompt content, tests, `.env.example`, `flag_registry.py`, `pricing.py` -- producing the exhaustive table this design doc doesn't have yet. Assigning a wrong tier silently changes which model a prompt uses; guessing isn't good enough here the way it was for permissions' boolean flags.
 
