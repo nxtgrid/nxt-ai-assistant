@@ -34,6 +34,16 @@ envs:
     value: "${NOTIFY_SHARED_SECRET}"
     scope: RUN_TIME
     type: SECRET
+  # Distinct from API_KEY -- lets identity-trusted callers (e.g. the Skill
+  # Builder) assert a caller-supplied user_email when auth-DB lookup misses.
+  # Must be set to the same value anansi-app sends as X-Identity-Assertion-Key
+  # (see anansi_app/.env.example). Unset (default) fails closed: nobody can
+  # use the fallback. See chat_orchestrator/orchestrator/api/app.py's
+  # is_identity_trusted_caller.
+  - key: IDENTITY_ASSERTION_KEY
+    value: "${IDENTITY_ASSERTION_KEY}"
+    scope: RUN_TIME
+    type: SECRET
 
   # Logging (can be changed via anansi-app Settings UI)
   - key: LOG_LEVEL
