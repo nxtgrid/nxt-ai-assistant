@@ -130,7 +130,6 @@ async def classify_issue_type(user_input: str) -> str:
     Not tied to a specific library prompt (the prompt text below is hand-built,
     not from thread_assignment.classify) -- resolves the lite tier directly.
     """
-    model = resolve_model("lite")
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     prompt = (
         f"TODAY'S DATE AND TIME: {now_str}\n\n"
@@ -146,6 +145,10 @@ async def classify_issue_type(user_input: str) -> str:
         f'Return JSON: {{"issue_type": "<one of the categories above>"}}'
     )
     try:
+        # Inside the try, not before it: resolve_model raises if MODEL_LITE is
+        # unset, and this function's contract (see docstring) is to fall back
+        # to "other" on ANY error, not just gateway failures.
+        model = resolve_model("lite")
         gateway = get_default_generation_gateway(default_model=model)
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],

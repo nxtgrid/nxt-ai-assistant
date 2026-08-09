@@ -13,6 +13,7 @@ from orchestrator.services.thread_assignment import (
     _find_by_telegram_msg_id,
     _get_active_thread_ids,
     _new_thread_id,
+    classify_issue_type,
     filter_history_by_thread,
     is_thread_disentanglement_enabled,
 )
@@ -357,6 +358,47 @@ class TestFailOpen:
                 conversation_history=[],
             )
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# classify_issue_type
+#
+# Zero coverage before this -- the model-tier-selection refactor moved
+# resolve_model("lite") to the top of the function, ahead of its own try
+# block, silently breaking the docstring's "falls back to 'other' on any
+# error" contract for exactly one failure mode (an unset MODEL_LITE). Fixed
+# by moving the call inside the try; this pins that fix.
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyIssueType:
+    @pytest.mark.asyncio
+    async def test_falls_back_to_other_when_model_tier_env_var_is_unset(self, monkeypatch):
+        monkeypatch.delenv("MODEL_LITE", raising=False)
+        result = await classify_issue_type("my meter shows an error")
+        assert result == "other"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_other_on_gateway_error(self, monkeypatch):
+        monkeypatch.setenv("MODEL_LITE", "gemini-2.5-flash-lite")
+        with patch(
+            "orchestrator.services.thread_assignment.get_default_generation_gateway",
+            side_effect=RuntimeError("boom"),
+        ):
+            result = await classify_issue_type("my meter shows an error")
+        assert result == "other"
+
+    @pytest.mark.asyncio
+    async def test_returns_classified_type_on_success(self, monkeypatch):
+        monkeypatch.setenv("MODEL_LITE", "gemini-2.5-flash-lite")
+        gateway = AsyncMock()
+        gateway.generate.return_value.text = '{"issue_type": "meter"}'
+        with patch(
+            "orchestrator.services.thread_assignment.get_default_generation_gateway",
+            return_value=gateway,
+        ):
+            result = await classify_issue_type("my meter shows an error")
+        assert result == "meter"
 
 
 # ---------------------------------------------------------------------------

@@ -389,7 +389,7 @@ class TestRegistryMatchesOrchestratorDefaults:
     def test_fallback_model_matches_the_orchestrator(self):
         assert fr.get("FALLBACK_MODEL", env={}) == "gemini-2.5-flash-lite"
 
-    def test_deep_thinking_model_matches_the_orchestrator(self):
+    def test_model_thinking_matches_the_orchestrator(self):
         assert fr.get("MODEL_THINKING", env={}) == "gemini-pro-latest"
 
     def test_temperature_is_editable(self):

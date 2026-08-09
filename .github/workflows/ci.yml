@@ -23,6 +23,22 @@ jobs:
   test:
     name: Tests (chat_orchestrator)
     runs-on: ubuntu-latest
+    env:
+      # Minimal env for unit tests — no real credentials needed
+      GOOGLE_API_KEY: test-key  # pragma: allowlist secret
+      CHAT_DB_URL: https://placeholder.supabase.co  # pragma: allowlist secret
+      CHAT_DB_SERVICE_KEY: placeholder  # pragma: allowlist secret
+      # resolve_model() raises rather than silently falling back (unlike the
+      # scattered os.getenv(..., "default") calls it replaced), so these must
+      # be set explicitly for any test that constructs a generation gateway.
+      # Job-level (not just the "Run tests" step below): the sibling "Run
+      # tests (shared)" step needs them too -- steps don't inherit each
+      # other's step-level env, which is exactly the gap that broke this the
+      # first time these were added (caught by this PR's own CI run).
+      MODEL_THINKING: gemini-pro-latest
+      MODEL_FAST: gemini-flash-latest
+      MODEL_LITE: gemini-2.5-flash-lite
+      FALLBACK_MODEL: gemini-2.5-flash-lite
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v9.0.0
@@ -37,18 +53,6 @@ jobs:
         run: uv sync --extra dev
       - name: Run tests
         working-directory: chat_orchestrator
-        env:
-          # Minimal env for unit tests — no real credentials needed
-          GOOGLE_API_KEY: test-key  # pragma: allowlist secret
-          CHAT_DB_URL: https://placeholder.supabase.co  # pragma: allowlist secret
-          CHAT_DB_SERVICE_KEY: placeholder  # pragma: allowlist secret
-          # resolve_model() raises rather than silently falling back (unlike the
-          # scattered os.getenv(..., "default") calls it replaced), so these must
-          # be set explicitly for any test that constructs a generation gateway.
-          MODEL_THINKING: gemini-pro-latest
-          MODEL_FAST: gemini-flash-latest
-          MODEL_LITE: gemini-2.5-flash-lite
-          FALLBACK_MODEL: gemini-2.5-flash-lite
         run: uv run pytest tests/ -x -q
       # shared/ has no venv of its own; chat_orchestrator's dependency set covers
       # it, and chat_orchestrator imports it, so it is tested here rather than in
