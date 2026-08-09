@@ -56,13 +56,15 @@ class TestGroupIsInert:
         assert page.group_is_inert("bot_control", _pending()) is False
 
     def test_a_group_is_not_inert_when_only_one_flag_depends_on_an_unrelated_toggle(self):
-        """"models" hosts LLM_PROVIDER/GEMINI_MODEL/etc alongside
-        THREAD_CLASSIFIER_MODEL, whose depends_on (THREAD_DISENTANGLEMENT_ENABLED)
-        belongs to a different feature entirely. That one flag being
-        off must not hide the whole provider/model section.
+        """"conversation" hosts 15 flags; only ACTIVE_THREAD_WINDOW_MINUTES
+        depends_on THREAD_DISENTANGLEMENT_ENABLED, a toggle that belongs to a
+        different feature entirely (the other two dependent flags in this
+        group -- VERIFICATION_DOC_ID and LOOP_DETECTION_THRESHOLD -- each
+        depend on their own, still different, toggles). That one flag being
+        off must not hide the whole conversation section.
         """
         pending = _pending(THREAD_DISENTANGLEMENT_ENABLED=False)
-        assert page.group_is_inert("models", pending) is False
+        assert page.group_is_inert("conversation", pending) is False
 
 
 def test_page_contains_no_hardcoded_flag_names():

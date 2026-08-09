@@ -65,3 +65,39 @@ class TestEstimateCostUsd:
         for model, (input_price, output_price) in PRICES.items():
             assert input_price > 0, f"{model} has non-positive input price"
             assert output_price > 0, f"{model} has non-positive output price"
+
+
+class TestModuleDocstringNamesCurrentEnvVars:
+    """Pins the module docstring to the 3-tier env vars (model-tier-selection).
+
+    estimate_cost_usd() itself keys purely off the resolved model *string*
+    passed in, never an env var name -- confirmed by grep, no functional
+    change from that migration. But the docstring names the vars an operator
+    should look at to change which model is being priced, and it already
+    drifted once (still said GEMINI_MODEL/GEMINI_AGENT_PRO_MODEL/etc. after
+    those were retired). Regression guard so a future rename doesn't let it
+    drift silently again.
+    """
+
+    def test_docstring_names_the_current_tier_env_vars(self):
+        import shared.llm.pricing as pricing_module
+
+        doc = pricing_module.__doc__ or ""
+        for name in ("MODEL_THINKING", "MODEL_FAST", "MODEL_LITE", "FALLBACK_MODEL"):
+            assert name in doc, f"pricing.py's docstring no longer mentions {name}"
+
+    def test_docstring_does_not_name_retired_env_vars(self):
+        import shared.llm.pricing as pricing_module
+
+        doc = pricing_module.__doc__ or ""
+        retired = (
+            "GEMINI_MODEL",
+            "GEMINI_FALLBACK_MODEL",
+            "GEMINI_DEEP_THINKING_MODEL",
+            "GEMINI_AGENT_PRO_MODEL",
+            "VERIFICATION_MODEL",
+            "THREAD_CLASSIFIER_MODEL",
+            "INTENT_ROUTER_MODEL",
+        )
+        for name in retired:
+            assert name not in doc, f"pricing.py's docstring still mentions retired {name}"

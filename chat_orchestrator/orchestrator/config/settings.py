@@ -291,11 +291,6 @@ class AppSettings(BaseSettings):
         alias="VERIFICATION_DOC_ID",
         description="Google Doc ID for verification criteria",
     )
-    verification_model: str = Field(
-        default="gemini-2.5-flash-lite",
-        alias="VERIFICATION_MODEL",
-        description="Model to use for response verification",
-    )
 
     # Langfuse LLM observability
     langfuse_enabled: bool = Field(

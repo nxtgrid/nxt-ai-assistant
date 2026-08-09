@@ -182,8 +182,14 @@ AUTH_DB_USER=readonly_user
 AUTH_DB_PASSWORD=your_password
 AUTH_DB_SSL_MODE=require
 
-# Gemini Config (optional)
-GEMINI_MODEL=gemini-1.5-flash
+# Gemini Config
+# MODEL_THINKING/MODEL_FAST/MODEL_LITE are required -- each prompt declares
+# which of the 3 tiers it uses (shared/llm/model_tiers.py), and resolving an
+# unset tier raises rather than silently falling back.
+MODEL_THINKING=gemini-pro-latest
+MODEL_FAST=gemini-flash-latest
+MODEL_LITE=gemini-2.5-flash-lite
+FALLBACK_MODEL=gemini-2.5-flash-lite
 GEMINI_TEMPERATURE=0.7
 
 # OpenRouter compatibility (optional; keep LLM_PROVIDER=gemini unless testing it)
@@ -254,7 +260,9 @@ Gemini is the supported default:
 ```bash
 LLM_PROVIDER=gemini
 GOOGLE_API_KEY=your-gemini-api-key
-GEMINI_MODEL=gemini-2.5-flash
+MODEL_THINKING=gemini-pro-latest
+MODEL_FAST=gemini-flash-latest
+MODEL_LITE=gemini-2.5-flash-lite
 ```
 
 The shared generation gateway can also call OpenRouter using OpenAI-compatible chat completions:

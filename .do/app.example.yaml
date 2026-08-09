@@ -148,23 +148,23 @@ envs:
   - key: GEMINI_TEMPERATURE
     value: "0.2"
     scope: RUN_TIME
-  - key: GEMINI_MODEL
+  # MODEL_THINKING/MODEL_FAST/MODEL_LITE/FALLBACK_MODEL must stay app-level,
+  # not under any specific service's envs: below. DigitalOcean gives a
+  # per-service env entry precedence over an app-level one with the same key,
+  # so if any of these ever gets added under a service's envs: block, an
+  # operator changing it from the Settings UI (which always writes app-level)
+  # will silently have no effect on that service.
+  - key: MODEL_THINKING
+    value: "gemini-pro-latest"
+    scope: RUN_TIME
+  - key: MODEL_FAST
     value: "gemini-flash-latest"
     scope: RUN_TIME
-  - key: GEMINI_FALLBACK_MODEL
+  - key: MODEL_LITE
+    value: "gemini-2.5-flash-lite"
+    scope: RUN_TIME
+  - key: FALLBACK_MODEL
     value: "gemini-2.5-flash"
-    scope: RUN_TIME
-  # VERIFICATION_MODEL and THREAD_CLASSIFIER_MODEL must stay app-level, same as
-  # the other model flags above -- not under a specific service's envs: below.
-  # DigitalOcean gives a per-service env entry precedence over an app-level one
-  # with the same key, so if either ever gets added under a service's envs:
-  # block, an operator changing it from the Settings UI (which always writes
-  # app-level) will silently have no effect on that service.
-  - key: VERIFICATION_MODEL
-    value: "gemini-2.5-flash-lite"
-    scope: RUN_TIME
-  - key: THREAD_CLASSIFIER_MODEL
-    value: "gemini-2.5-flash-lite"
     scope: RUN_TIME
 
   # Feature Flags
@@ -457,7 +457,7 @@ services:
         scope: RUN_TIME
 
       # Response Verification (LLM-as-judge for customer mode)
-      # VERIFICATION_MODEL lives at app level (see envs: above), not here.
+      # Its model tier (MODEL_LITE) lives at app level (see envs: above), not here.
       - key: VERIFICATION_ENABLED
         value: "true"
         scope: RUN_TIME

@@ -100,9 +100,9 @@ services:
       - key: ESCALATION_TELEGRAM_CHAT_ID
         scope: RUN_TIME
         value: ${ESCALATION_TELEGRAM_CHAT_ID}
-      - key: GEMINI_MODEL
+      - key: MODEL_FAST
         scope: RUN_TIME
-        value: ${GEMINI_MODEL:-gemini-flash-latest}
+        value: ${MODEL_FAST:-gemini-flash-latest}
       - key: GEMINI_TEMPERATURE
         scope: RUN_TIME
         value: "0.2"

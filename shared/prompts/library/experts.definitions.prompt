@@ -1000,7 +1000,7 @@ grid
 Wake Schedule
 0 9,13,17 * * 1-5
 Model
-GEMINI_AGENT_PRO_MODEL
+thinking
 Triggers
 * track site visit
 * follow the visit at

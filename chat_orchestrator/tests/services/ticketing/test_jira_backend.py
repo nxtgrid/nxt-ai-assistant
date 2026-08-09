@@ -492,7 +492,6 @@ class TestCreateTicket:
     async def test_notify_selects_a_creatable_type_from_the_generic_project(
         self, fake_session, monkeypatch
     ):
-        monkeypatch.setenv("GEMINI_MODEL", "fake-model")
         _queue_createmeta_with_task_and_disruption(fake_session)
         _stub_type_selector_to_choose(monkeypatch, "disruption-id")
         fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-7"}))

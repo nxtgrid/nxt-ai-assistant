@@ -77,3 +77,56 @@ async def test_cache_is_used_across_calls():
     first = await provider.get_all_experts()
     second = await provider.get_all_experts()
     assert first is second
+
+
+# ---------------------------------------------------------------------------
+# _parse_single_expert: model tier resolution
+#
+# The bundled default document's flat text (no "## " prefixes -- see
+# test_bundled_experts_still_parse_despite_pre_existing_format_quirks above)
+# can't exercise subsection parsing at all, so these use synthetic
+# well-structured content matching what a real Google Doc override produces
+# (this module's own docstring's documented format), the shape this parsing
+# actually runs against in production via EXPERT_INSTRUCTIONS_DOC_ID.
+# ---------------------------------------------------------------------------
+
+
+def test_settings_model_tier_resolves_through_resolve_model(monkeypatch):
+    monkeypatch.setenv("MODEL_THINKING", "gemini-pro-latest")
+    provider = eip.ExpertInstructionsProvider()
+    content = "## Settings\nmodel: thinking\n"
+    config = provider._parse_single_expert("some_expert", content, [])
+    assert config is not None
+    assert config.model == "gemini-pro-latest"
+
+
+def test_legacy_model_section_tier_resolves_through_resolve_model(monkeypatch):
+    monkeypatch.setenv("MODEL_FAST", "gemini-flash-latest")
+    provider = eip.ExpertInstructionsProvider()
+    content = "## Model\nfast\n"
+    config = provider._parse_single_expert("some_expert", content, [])
+    assert config is not None
+    assert config.model == "gemini-flash-latest"
+
+
+def test_model_tier_fails_open_when_env_var_unset(monkeypatch):
+    monkeypatch.delenv("MODEL_LITE", raising=False)
+    provider = eip.ExpertInstructionsProvider()
+    content = "## Settings\nmodel: lite\n"
+    config = provider._parse_single_expert("some_expert", content, [])
+    assert config is not None
+    # resolve_model("lite") raises RuntimeError with MODEL_LITE unset; parsing
+    # must not propagate it -- the declared tier name is left as-is.
+    assert config.model == "lite"
+
+
+def test_literal_model_string_passes_through_unresolved():
+    """A literal model name (not one of the 3 tier names) is used as-is --
+    e.g. the two experts.definitions.prompt experts with an explicit
+    "### Settings\\nmodel: gemini-2.5-flash" already bypass tier resolution
+    entirely by design (see model-tier-selection design doc)."""
+    provider = eip.ExpertInstructionsProvider()
+    content = "## Settings\nmodel: gemini-2.5-flash\n"
+    config = provider._parse_single_expert("some_expert", content, [])
+    assert config is not None
+    assert config.model == "gemini-2.5-flash"

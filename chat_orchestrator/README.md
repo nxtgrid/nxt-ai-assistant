@@ -131,7 +131,12 @@ STAFF_SUPPORT_DOC_ID=doc-id
 GOOGLE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
 
 # Gemini Settings
-GEMINI_MODEL=gemini-flash-latest
+# Required: each prompt declares which of the 3 tiers it uses
+# (shared/llm/model_tiers.py); resolving an unset tier raises.
+MODEL_THINKING=gemini-pro-latest
+MODEL_FAST=gemini-flash-latest
+MODEL_LITE=gemini-2.5-flash-lite
+FALLBACK_MODEL=gemini-2.5-flash-lite
 GEMINI_TEMPERATURE=0.2
 MAX_TOOL_ROUNDS=3
 
@@ -153,7 +158,9 @@ ALLOW_PARALLEL_CALLS=true
 # Response Verification (optional, customer mode only)
 VERIFICATION_ENABLED=false
 VERIFICATION_DOC_ID=your-verification-doc-id
-VERIFICATION_MODEL=gemini-2.5-flash-lite
+# No separate model var: verification.criteria and verification.sanitize
+# each declare their own tier in shared/prompts/library/*.prompt (model:
+# lite by default), admin-editable from the Prompts page.
 ```
 
 Provider smoke test:
@@ -343,8 +350,10 @@ VERIFICATION_ENABLED=true
 # Google Doc with verification criteria
 VERIFICATION_DOC_ID=your-verification-doc-id
 
-# Model for verification (lightweight, fast)
-VERIFICATION_MODEL=gemini-2.5-flash-lite
+# Model: not a standalone var -- verification.criteria and
+# verification.sanitize each declare their own tier (model: lite by
+# default) in shared/prompts/library/*.prompt, admin-editable from the
+# Prompts page. Resolved through MODEL_LITE.
 ```
 
 ### Verification Criteria
