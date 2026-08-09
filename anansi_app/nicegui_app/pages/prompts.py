@@ -374,7 +374,7 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                             ui.notify("Doc binding cleared", type="positive")
                         dialog.close()
                         refresh()
-                    except (PermissionError, RuntimeError) as e:
+                    except Exception as e:  # noqa: BLE001 -- surfaced to the operator
                         ui.notify(str(e), type="negative")
 
                 with ui.row().classes("justify-end w-full"):
@@ -395,7 +395,7 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                         ui.notify(f"Tier set to {tier_select.value}", type="positive")
                         dialog.close()
                         refresh()
-                    except (PermissionError, RuntimeError) as e:
+                    except Exception as e:  # noqa: BLE001 -- surfaced to the operator
                         ui.notify(str(e), type="negative")
 
                 async def revert_tier() -> None:
@@ -404,7 +404,7 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                         ui.notify("Tier reverted to bundled default", type="positive")
                         dialog.close()
                         refresh()
-                    except (PermissionError, RuntimeError) as e:
+                    except Exception as e:  # noqa: BLE001 -- surfaced to the operator
                         ui.notify(str(e), type="negative")
 
                 with ui.row().classes("justify-end w-full gap-2"):
@@ -426,9 +426,7 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                         ui.notify(f"Saved as v{version} (not yet live)", type="positive")
                         dialog.close()
                         refresh()
-                    except PermissionError as e:
-                        ui.notify(str(e), type="negative")
-                    except RuntimeError as e:
+                    except Exception as e:  # noqa: BLE001 -- surfaced to the operator
                         ui.notify(str(e), type="negative")
 
                 async def publish_latest() -> None:
@@ -443,9 +441,7 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                         ui.notify(f"Published v{version}", type="positive")
                         dialog.close()
                         refresh()
-                    except PermissionError as e:
-                        ui.notify(str(e), type="negative")
-                    except RuntimeError as e:
+                    except Exception as e:  # noqa: BLE001 -- surfaced to the operator
                         ui.notify(str(e), type="negative")
 
                 async def revert() -> None:
@@ -454,7 +450,7 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                         ui.notify("Reverted to the bundled default", type="positive")
                         dialog.close()
                         refresh()
-                    except (PermissionError, RuntimeError) as e:
+                    except Exception as e:  # noqa: BLE001 -- surfaced to the operator
                         ui.notify(str(e), type="negative")
 
                 async def reload_cache() -> None:
