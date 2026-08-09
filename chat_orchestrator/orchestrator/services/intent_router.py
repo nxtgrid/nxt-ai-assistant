@@ -7,9 +7,9 @@ import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from orchestrator.config.settings import get_settings
 from orchestrator.services.command_registry import get_expert_command_mapping
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
@@ -30,7 +30,7 @@ _EXPERT_INTENT_PREFILTER_TERMS = (
 
 
 def _intent_router_model() -> str:
-    return os.getenv("INTENT_ROUTER_MODEL") or get_settings().gemini.fallback_model
+    return resolve_model(PROMPTS.spec("intent_router.route").model)
 
 
 def _clean_json_text(text: str) -> str:

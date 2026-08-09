@@ -4,6 +4,7 @@ description: Expert, workflow and packet-type definitions parsed into ExpertConf
 owner: eng
 component: orchestrator_services
 overridable: true
+model: fast
 output: text
 sections: []
 access:
@@ -999,7 +1000,7 @@ grid
 Wake Schedule
 0 9,13,17 * * 1-5
 Model
-GEMINI_AGENT_PRO_MODEL
+thinking
 Triggers
 * track site visit
 * follow the visit at

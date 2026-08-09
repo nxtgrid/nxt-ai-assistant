@@ -162,10 +162,22 @@ envs:
   - key: GEMINI_TEMPERATURE
     value: "0.2"
     scope: RUN_TIME
-  - key: GEMINI_MODEL
+  # MODEL_THINKING/MODEL_FAST/MODEL_LITE/FALLBACK_MODEL must stay app-level,
+  # not under any specific service's envs: below. DigitalOcean gives a
+  # per-service env entry precedence over an app-level one with the same key,
+  # so if any of these ever gets added under a service's envs: block, an
+  # operator changing it from the Settings UI (which always writes app-level)
+  # will silently have no effect on that service.
+  - key: MODEL_THINKING
+    value: "gemini-pro-latest"
+    scope: RUN_TIME
+  - key: MODEL_FAST
     value: "gemini-flash-latest"
     scope: RUN_TIME
-  - key: GEMINI_FALLBACK_MODEL
+  - key: MODEL_LITE
+    value: "gemini-2.5-flash-lite"
+    scope: RUN_TIME
+  - key: FALLBACK_MODEL
     value: "gemini-2.5-flash"
     scope: RUN_TIME
 
@@ -460,14 +472,16 @@ services:
         scope: RUN_TIME
 
       # Response Verification (LLM-as-judge for customer mode)
+      # Its model tier (MODEL_LITE) lives at app level (see envs: above), not
+      # here -- it used to sit under this service as VERIFICATION_MODEL,
+      # which is exactly the precedence footgun the app-level comment above
+      # warns about (a per-service entry silently wins over the Settings
+      # UI's app-level writes). Moved up rather than carried forward as-is.
       - key: VERIFICATION_ENABLED
         value: "true"
         scope: RUN_TIME
       - key: VERIFICATION_DOC_ID
         value: "your-verification-doc-id"  # pragma: allowlist secret
-        scope: RUN_TIME
-      - key: VERIFICATION_MODEL
-        value: "gemini-2.5-flash-lite"
         scope: RUN_TIME
 
       # Urgent /chat/notify live inverter-output lookup budget

@@ -49,8 +49,28 @@ def test_build_rows_marks_overridden(monkeypatch):
             overridable=True,
             can_edit=True,
             can_publish=True,
+            tier="fast",
         )
     ]
+
+
+def test_build_rows_reflects_the_prompts_tier(monkeypatch):
+    from shared.prompts.spec import AccessSpec, PromptSpec
+    from shared.prompts.types import PromptSource
+
+    monkeypatch.setenv("PROMPT_ADMINS", "root@x.com")
+    spec = PromptSpec(
+        id="a.b",
+        description="d",
+        body="x",
+        checksum="c",
+        overridable=True,
+        model="lite",
+        access=AccessSpec(view=["ops"]),
+    )
+    resolved = ("x", PromptSource.BUNDLED, None)
+    rows = build_rows(FakeLibrary({"a.b": spec}, {"a.b": resolved}), "root@x.com")
+    assert rows[0].tier == "lite"
 
 
 def test_build_rows_hides_prompts_the_user_cannot_view(monkeypatch):
@@ -251,6 +271,7 @@ def _row(prompt_id: str, component: str = "orchestrator_services") -> PromptRow:
         overridable=False,
         can_edit=False,
         can_publish=False,
+        tier="fast",
         component=component,
     )
 

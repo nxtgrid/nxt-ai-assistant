@@ -39,11 +39,11 @@ Usage:
 
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
 from shared.utils.gdrive_doc_fetcher import parse_sections
 from shared.utils.logging import get_logger
@@ -339,8 +339,7 @@ class ExpertInstructionsProvider:
             settings = self._parse_settings(subsections.get("settings", ""))
 
             # Model can come from ### Settings or legacy ### Model section.
-            # Supports env var references: GEMINI_MODEL, GEMINI_AGENT_PRO_MODEL,
-            # GEMINI_FALLBACK_MODEL, VERIFICATION_MODEL etc.
+            # Supports a bare tier name: thinking, fast, or lite.
             model = settings.get("model")
             if not model:
                 # Fallback to legacy ### Model section
@@ -351,13 +350,20 @@ class ExpertInstructionsProvider:
                         if line and not line.startswith("-") and not line.startswith("*"):
                             model = line
                             break
-            # Resolve env var references (e.g., "GEMINI_AGENT_PRO_MODEL", "VERIFICATION_MODEL")
-            # Any ALL_CAPS_WITH_UNDERSCORES value is treated as an env var name
-            if model and model == model.upper() and "_" in model:
-                resolved = os.getenv(model)
-                if resolved:
-                    LOGGER.info(f"Resolved model variable {model} → {resolved}")
+            # Resolve a declared tier name through the same resolve_model() helper
+            # every other prompt-tied consumer uses, so an expert's Model field
+            # picks up whatever MODEL_THINKING/MODEL_FAST/MODEL_LITE currently
+            # resolves to -- admin-editable the same way, no separate per-expert
+            # env-var-name mechanism. Fails open (leaves model as declared) if the
+            # tier's env var isn't set, since this parses at cache-load time for
+            # every expert at once, not inside any one expert's own call site.
+            if model in ("thinking", "fast", "lite"):
+                try:
+                    resolved = resolve_model(model)
+                    LOGGER.info(f"Resolved model tier {model!r} → {resolved}")
                     model = resolved
+                except RuntimeError as e:
+                    LOGGER.warning(f"Could not resolve model tier {model!r}: {e}")
 
             # Expert type (## Type)
             expert_type = (

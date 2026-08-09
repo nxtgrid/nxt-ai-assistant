@@ -4,6 +4,7 @@ description: Extracts entities and relationships from document content for Graph
 owner: eng
 component: orchestrator_experts_ingestion
 overridable: true
+model: fast
 output: json
 schema:
   type: object

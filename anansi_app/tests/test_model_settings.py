@@ -136,15 +136,15 @@ def test_model_setting_options_keep_provider_contexts_separate():
                 "google-ai-studio": "Google AI Studio",
             },
         ),
-        {"LLM_PROVIDER": "gemini", "GEMINI_MODEL": "gemini-2.5-flash"},
+        {"LLM_PROVIDER": "gemini", "MODEL_FAST": "gemini-2.5-flash"},
     )
 
     assert opts["LLM_PROVIDER"] == {
         "gemini": "Gemini (Google direct)",
         "openrouter": "OpenRouter",
     }
-    assert opts["GEMINI_MODEL"] == ["gemini-2.5-flash"]
-    assert opts["GEMINI_FALLBACK_MODEL"] == ["gemini-2.5-flash"]
+    assert opts["MODEL_FAST"] == ["gemini-2.5-flash"]
+    assert opts["FALLBACK_MODEL"] == ["gemini-2.5-flash"]
     assert "OPENROUTER_MODEL" not in opts
     assert opts["OPENROUTER_PROVIDER_ORDER"] == {}
 
@@ -160,37 +160,21 @@ def test_model_setting_options_use_openrouter_models_for_role_fields():
                 "google-ai-studio": "Google AI Studio",
             },
         ),
-        {"LLM_PROVIDER": "openrouter", "GEMINI_MODEL": "google/gemini-2.5-flash"},
+        {"LLM_PROVIDER": "openrouter", "MODEL_FAST": "google/gemini-2.5-flash"},
     )
 
     for key in (
-        "GEMINI_MODEL",
-        "GEMINI_FALLBACK_MODEL",
-        "INTENT_ROUTER_MODEL",
-        "VERIFICATION_MODEL",
+        "MODEL_THINKING",
+        "MODEL_FAST",
+        "MODEL_LITE",
+        "FALLBACK_MODEL",
     ):
         assert opts[key] == ["google/gemini-2.5-flash"]
-    assert opts["GEMINI_DEEP_THINKING_MODEL"] == ["", "google/gemini-2.5-flash"]
     assert "OPENROUTER_MODEL" not in opts
     assert opts["OPENROUTER_PROVIDER_ORDER"] == {
         "google-vertex": "Google Vertex",
         "google-ai-studio": "Google AI Studio",
     }
-
-
-def test_model_setting_options_include_gemini_only_model_fields():
-    opts = settings_page._model_select_options(
-        SimpleNamespace(
-            get_llm_provider_options=lambda: {},
-            get_gemini_models=lambda: ["gemini-2.5-pro", "gemini-2.5-flash-lite"],
-            get_openrouter_models=lambda: ["google/gemini-2.5-flash"],
-            get_openrouter_provider_routes=lambda model: {},
-        ),
-        {"LLM_PROVIDER": "openrouter", "GEMINI_MODEL": "google/gemini-2.5-flash"},
-    )
-
-    assert opts["GEMINI_AGENT_PRO_MODEL"] == ["gemini-2.5-pro", "gemini-2.5-flash-lite"]
-    assert opts["THREAD_CLASSIFIER_MODEL"] == ["gemini-2.5-pro", "gemini-2.5-flash-lite"]
 
 
 def test_model_setting_options_use_role_model_for_provider_routes():
@@ -201,7 +185,7 @@ def test_model_setting_options_use_role_model_for_provider_routes():
             get_openrouter_models=lambda: ["google/gemini-2.5-flash"],
             get_openrouter_provider_routes=lambda model: {"seen": model},
         ),
-        {"LLM_PROVIDER": "openrouter", "GEMINI_MODEL": "google/gemini-3.1-flash-lite"},
+        {"LLM_PROVIDER": "openrouter", "MODEL_FAST": "google/gemini-3.1-flash-lite"},
     )
 
     assert opts["OPENROUTER_PROVIDER_ORDER"] == {"seen": "google/gemini-3.1-flash-lite"}
@@ -210,71 +194,62 @@ def test_model_setting_options_use_role_model_for_provider_routes():
 def test_provider_change_normalizes_role_model_values():
     pending = {
         "LLM_PROVIDER": "gemini",
-        "GEMINI_MODEL": "gemini-2.5-flash",
-        "GEMINI_FALLBACK_MODEL": "gemini-2.5-flash-lite",
-        "VERIFICATION_MODEL": "gemini-3.1-flash-lite",
-        "INTENT_ROUTER_MODEL": "",
+        "MODEL_THINKING": "gemini-pro-latest",
+        "MODEL_FAST": "gemini-2.5-flash",
+        "MODEL_LITE": "gemini-3.1-flash-lite",
+        "FALLBACK_MODEL": "",
     }
 
     changes = settings_page._apply_llm_provider_change(pending, "openrouter")
 
     assert pending["LLM_PROVIDER"] == "openrouter"
-    assert pending["GEMINI_MODEL"] == "google/gemini-2.5-flash"
-    assert pending["GEMINI_FALLBACK_MODEL"] == "google/gemini-2.5-flash-lite"
-    assert pending["VERIFICATION_MODEL"] == "google/gemini-3.1-flash-lite"
-    assert pending["INTENT_ROUTER_MODEL"] == ""
+    assert pending["MODEL_THINKING"] == "google/gemini-pro-latest"
+    assert pending["MODEL_FAST"] == "google/gemini-2.5-flash"
+    assert pending["MODEL_LITE"] == "google/gemini-3.1-flash-lite"
+    assert pending["FALLBACK_MODEL"] == ""
     assert changes == {
         "LLM_PROVIDER",
-        "GEMINI_MODEL",
-        "GEMINI_FALLBACK_MODEL",
-        "VERIFICATION_MODEL",
+        "MODEL_THINKING",
+        "MODEL_FAST",
+        "MODEL_LITE",
     }
 
     changes = settings_page._apply_llm_provider_change(pending, "gemini")
 
     assert pending["LLM_PROVIDER"] == "gemini"
-    assert pending["GEMINI_MODEL"] == "gemini-2.5-flash"
-    assert pending["GEMINI_FALLBACK_MODEL"] == "gemini-2.5-flash-lite"
-    assert pending["VERIFICATION_MODEL"] == "gemini-3.1-flash-lite"
+    assert pending["MODEL_THINKING"] == "gemini-pro-latest"
+    assert pending["MODEL_FAST"] == "gemini-2.5-flash"
+    assert pending["MODEL_LITE"] == "gemini-3.1-flash-lite"
     assert changes == {
         "LLM_PROVIDER",
-        "GEMINI_MODEL",
-        "GEMINI_FALLBACK_MODEL",
-        "VERIFICATION_MODEL",
+        "MODEL_THINKING",
+        "MODEL_FAST",
+        "MODEL_LITE",
     }
 
 
 def test_model_section_visibility_is_provider_specific():
-    gemini_plan = settings_page._model_section_plan(
-        [
-            "LLM_PROVIDER",
-            "GEMINI_MODEL",
-            "GEMINI_FALLBACK_MODEL",
-            "OPENROUTER_MODEL",
-            "OPENROUTER_PROVIDER_ORDER",
-            "OPENROUTER_ALLOW_FALLBACKS",
-            "OPENROUTER_REQUIRE_PARAMETERS",
-        ],
-        {"LLM_PROVIDER": "gemini"},
-    )
-    openrouter_plan = settings_page._model_section_plan(
-        [
-            "LLM_PROVIDER",
-            "GEMINI_MODEL",
-            "GEMINI_FALLBACK_MODEL",
-            "OPENROUTER_MODEL",
-            "OPENROUTER_PROVIDER_ORDER",
-            "OPENROUTER_ALLOW_FALLBACKS",
-            "OPENROUTER_REQUIRE_PARAMETERS",
-        ],
-        {"LLM_PROVIDER": "openrouter"},
-    )
+    names = [
+        "LLM_PROVIDER",
+        "MODEL_THINKING",
+        "MODEL_FAST",
+        "MODEL_LITE",
+        "FALLBACK_MODEL",
+        "OPENROUTER_MODEL",
+        "OPENROUTER_PROVIDER_ORDER",
+        "OPENROUTER_ALLOW_FALLBACKS",
+        "OPENROUTER_REQUIRE_PARAMETERS",
+    ]
+    gemini_plan = settings_page._model_section_plan(names, {"LLM_PROVIDER": "gemini"})
+    openrouter_plan = settings_page._model_section_plan(names, {"LLM_PROVIDER": "openrouter"})
 
     assert gemini_plan.show_openrouter_routes is False
     assert gemini_plan.primary_keys == [
         "LLM_PROVIDER",
-        "GEMINI_MODEL",
-        "GEMINI_FALLBACK_MODEL",
+        "MODEL_THINKING",
+        "MODEL_FAST",
+        "MODEL_LITE",
+        "FALLBACK_MODEL",
     ]
     assert "OPENROUTER_MODEL" not in gemini_plan.primary_keys + gemini_plan.remaining_keys
     assert "OPENROUTER_PROVIDER_ORDER" not in gemini_plan.primary_keys + gemini_plan.remaining_keys
@@ -283,8 +258,10 @@ def test_model_section_visibility_is_provider_specific():
     assert openrouter_plan.show_openrouter_routes is True
     assert openrouter_plan.primary_keys == [
         "LLM_PROVIDER",
-        "GEMINI_MODEL",
-        "GEMINI_FALLBACK_MODEL",
+        "MODEL_THINKING",
+        "MODEL_FAST",
+        "MODEL_LITE",
+        "FALLBACK_MODEL",
         "OPENROUTER_PROVIDER_ORDER",
         "OPENROUTER_ALLOW_FALLBACKS",
         "OPENROUTER_REQUIRE_PARAMETERS",
@@ -310,9 +287,10 @@ def test_common_generation_controls_have_provider_neutral_labels():
     # rather than a "(read-only)" suffix baked into the label itself.
     from shared.config import flag_registry as fr
 
-    assert fr.FLAGS["GEMINI_MODEL"].display_label == "Main model"
-    assert fr.FLAGS["GEMINI_FALLBACK_MODEL"].display_label == "Fallback model"
-    assert fr.FLAGS["GEMINI_DEEP_THINKING_MODEL"].display_label == "Deep-thinking model"
+    assert fr.FLAGS["MODEL_THINKING"].display_label == "Thinking-tier model"
+    assert fr.FLAGS["MODEL_FAST"].display_label == "Fast-tier model"
+    assert fr.FLAGS["MODEL_LITE"].display_label == "Lite-tier model"
+    assert fr.FLAGS["FALLBACK_MODEL"].display_label == "Fallback model"
     assert fr.FLAGS["GEMINI_TEMPERATURE"].display_label == "Temperature"
     assert fr.FLAGS["GEMINI_MAX_OUTPUT_TOKENS"].display_label == "Main model max output tokens"
     assert fr.FLAGS["GEMINI_MAX_OUTPUT_TOKENS"].editable is True

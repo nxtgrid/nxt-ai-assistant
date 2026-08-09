@@ -12,11 +12,12 @@ import os
 import sys
 
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm.model_tiers import resolve_model
 
 
 async def main() -> int:
-    provider = os.getenv("LLM_PROVIDER", "gemini")
-    model = os.getenv("GEMINI_MODEL")
+    provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+    model = resolve_model("fast") if provider in {"gemini", ""} else os.getenv("OPENROUTER_MODEL")
     gateway = get_default_generation_gateway(default_model=model)
     result = await gateway.generate(
         [LLMMessage(role="user", text="Reply with exactly: ok")],

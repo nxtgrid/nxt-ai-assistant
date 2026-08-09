@@ -4,6 +4,7 @@ description: Matches a support conversation example to the closest existing supp
 owner: eng
 component: orchestrator_services
 overridable: true
+model: fast
 output: text
 sections: []
 variables: [procedure_descriptions, content]

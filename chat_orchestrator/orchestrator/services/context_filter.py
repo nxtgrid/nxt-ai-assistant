@@ -23,6 +23,7 @@ from shared.llm import (
     LLMMessage,
     get_default_generation_gateway,
 )
+from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
@@ -47,7 +48,7 @@ class ContextFilterService:
         gateway: Optional[GenerationGateway] = None,
     ) -> None:
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
-        self._model = model or os.getenv("VERIFICATION_MODEL", "gemini-2.5-flash-lite")
+        self._model = model or resolve_model(PROMPTS.spec("context_filter.relevance").model)
         self._gateway = gateway or get_default_generation_gateway(
             api_key=self._api_key,
             default_model=self._model,

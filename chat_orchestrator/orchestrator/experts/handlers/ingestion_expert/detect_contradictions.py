@@ -26,6 +26,7 @@ from typing import Optional
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
@@ -117,7 +118,7 @@ def _format_contradiction_prompt(contradictions: list) -> str:
 
 async def _run_gemini_contradiction_check(prompt: str) -> Optional[dict]:
     """Call Gemini with JSON output mode. Returns parsed dict or None on failure."""
-    model = os.getenv("GEMINI_MODEL")
+    model = resolve_model(PROMPTS.spec("ingestion.detect_contradictions").model)
     gateway = get_default_generation_gateway(
         default_model=model,
     )

@@ -160,8 +160,9 @@ async def draft_summary(title: str, body: str) -> str:
     """LLM-drafted catalog line; falls back to the first sentence."""
     try:
         from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+        from shared.llm.model_tiers import resolve_model
 
-        model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        model = resolve_model("fast")
         gateway = get_default_generation_gateway(default_model=model)
         response = await gateway.generate(
             [LLMMessage(role="user", text=SUMMARY_PROMPT.format(title=title, body=body[:4000]))],

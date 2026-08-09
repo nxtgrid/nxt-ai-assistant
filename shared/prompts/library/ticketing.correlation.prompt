@@ -4,6 +4,7 @@ description: Alert-correlation grouping policy. Draft changes are open to ops/en
 owner: eng
 component: orchestrator_ticketing
 overridable: true
+model: fast
 output: text
 sections: [system_instructions]
 access:

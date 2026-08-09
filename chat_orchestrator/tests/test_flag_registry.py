@@ -180,10 +180,10 @@ class TestSettingsServiceConsistency:
         defaults = fr.settings_defaults(env={})
         for k in (
             "LLM_PROVIDER",
-            "GEMINI_MODEL",
-            "GEMINI_FALLBACK_MODEL",
-            "INTENT_ROUTER_MODEL",
-            "VERIFICATION_MODEL",
+            "MODEL_THINKING",
+            "MODEL_FAST",
+            "MODEL_LITE",
+            "FALLBACK_MODEL",
             "OPENROUTER_PROVIDER_ORDER",
             "OPENROUTER_ALLOW_FALLBACKS",
             "OPENROUTER_REQUIRE_PARAMETERS",
@@ -211,9 +211,9 @@ class TestBackends:
     def test_envfile_writes_editable_model_settings(self, tmp_path):
         path = tmp_path / "settings.env"
         backend = EnvFileBackend(path=str(path))
-        backend.update({"GEMINI_MODEL": "gemini-2.5-flash", "JIRA_ENABLED": False})
+        backend.update({"MODEL_FAST": "gemini-2.5-flash", "JIRA_ENABLED": False})
         contents = path.read_text(encoding="utf-8")
-        assert "GEMINI_MODEL=gemini-2.5-flash" in contents
+        assert "MODEL_FAST=gemini-2.5-flash" in contents
         assert "JIRA_ENABLED=false" in contents
 
     def test_envfile_get_all_reads_env(self, monkeypatch, tmp_path):
@@ -250,13 +250,13 @@ class TestBackends:
             {
                 "JIRA_ENABLED": False,
                 "VERIFICATION_ENABLED": True,
-                "GEMINI_MODEL": "gemini-2.5-flash",
+                "MODEL_FAST": "gemini-2.5-flash",
                 "LLM_PROVIDER": "openrouter",
             },
         )
         global_keys = {e["key"] for e in spec["envs"]}
         service_keys = {e["key"] for e in spec["services"][0]["envs"]}
-        assert global_keys == {"JIRA_ENABLED", "VERIFICATION_ENABLED", "GEMINI_MODEL", "LLM_PROVIDER"}
+        assert global_keys == {"JIRA_ENABLED", "VERIFICATION_ENABLED", "MODEL_FAST", "LLM_PROVIDER"}
         assert service_keys == set()
 
 
@@ -343,8 +343,6 @@ class TestNewlyRegisteredFlagsMatchTheirConsumers:
         "METRICS_TIMEZONE": "UTC",
         "AFTER_HOURS_START_HOUR": 19,
         "GEMINI_THINKING_BUDGET": 4096,
-        "GEMINI_AGENT_PRO_MODEL": "gemini-2.5-pro",
-        "THREAD_CLASSIFIER_MODEL": "gemini-2.5-flash-lite",
         "GOOGLE_SEARCH_GROUNDING": True,
         "GRAFANA_ACTIONS_ENABLED": False,
         "GRAFANA_QUERY_TIMEOUT": 180,
@@ -389,10 +387,10 @@ class TestRegistryMatchesOrchestratorDefaults:
     """The settings page must not display a value the orchestrator ignores."""
 
     def test_fallback_model_matches_the_orchestrator(self):
-        assert fr.get("GEMINI_FALLBACK_MODEL", env={}) == "gemini-2.5-flash-lite"
+        assert fr.get("FALLBACK_MODEL", env={}) == "gemini-2.5-flash-lite"
 
-    def test_deep_thinking_model_matches_the_orchestrator(self):
-        assert fr.get("GEMINI_DEEP_THINKING_MODEL", env={}) == "gemini-pro-latest"
+    def test_model_thinking_matches_the_orchestrator(self):
+        assert fr.get("MODEL_THINKING", env={}) == "gemini-pro-latest"
 
     def test_temperature_is_editable(self):
         # Rendered read-only at 0.2 while the orchestrator treats empty as "use

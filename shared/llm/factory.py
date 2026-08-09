@@ -6,6 +6,7 @@ import os
 from typing import Any
 
 from shared.llm.gemini import GeminiGateway
+from shared.llm.model_tiers import resolve_model
 from shared.llm.openrouter import OpenRouterGateway
 from shared.utils.logging import get_logger
 
@@ -69,8 +70,8 @@ def get_default_generation_gateway(
         )
     return GeminiGateway(
         api_key=api_key or os.getenv("GOOGLE_API_KEY"),
-        default_model=default_model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
-        fallback_model=fallback_model or os.getenv("GEMINI_FALLBACK_MODEL"),
+        default_model=default_model or resolve_model("fast"),
+        fallback_model=fallback_model or os.getenv("FALLBACK_MODEL"),
     )
 
 

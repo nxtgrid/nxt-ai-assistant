@@ -4,6 +4,7 @@ description: Summarizes retrieved knowledge-base chunks about a topic for the kn
 owner: ops
 component: mcp_servers
 overridable: true
+model: fast
 output: text
 sections: []
 variables: [topic, chunks_text, tools_text, max_words]

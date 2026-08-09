@@ -8,9 +8,8 @@ shown to an operator is this table's price multiplied by observed tokens, not
 a number the provider billed.
 
 Prices below cover the direct Gemini Developer API models configured via
-``GEMINI_MODEL`` / ``GEMINI_FALLBACK_MODEL`` / ``GEMINI_AGENT_PRO_MODEL`` /
-``GEMINI_DEEP_THINKING_MODEL`` / ``VERIFICATION_MODEL`` in
-``orchestrator/config/settings.py``.
+``MODEL_THINKING`` / ``MODEL_FAST`` / ``MODEL_LITE`` / ``FALLBACK_MODEL``
+(see ``shared/llm/model_tiers.py``).
 
 *** PRICING NOT LIVE-VERIFIED THIS SESSION ***
 The web lookup used to confirm these against ai.google.dev/gemini-api/docs/pricing

@@ -11,6 +11,7 @@ import re
 import time
 from typing import Any, Callable
 
+from shared.llm.model_tiers import resolve_model
 from shared.llm.types import (
     EmbeddingOptions,
     EmbeddingVector,
@@ -220,8 +221,8 @@ class GeminiGateway:
     ) -> None:
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY")
         self._client = client
-        self._default_model = default_model or os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        self._fallback_model = fallback_model or os.getenv("GEMINI_FALLBACK_MODEL")
+        self._default_model = default_model or resolve_model("fast")
+        self._fallback_model = fallback_model or os.getenv("FALLBACK_MODEL")
         self._default_embedding_model = default_embedding_model or os.getenv(
             "EMBEDDING_MODEL",
             "gemini-embedding-001",

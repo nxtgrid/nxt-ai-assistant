@@ -4,6 +4,7 @@ description: Checks a customer-facing response for leaked internal technical det
 owner: eng
 component: orchestrator_services
 overridable: true
+model: lite
 output: json
 schema:
   type: object

@@ -4,6 +4,7 @@ description: Selects the most appropriate Jira issue type for an alert from the 
 owner: eng
 component: orchestrator_ticketing
 overridable: true
+model: fast
 output: json
 schema:
   type: object

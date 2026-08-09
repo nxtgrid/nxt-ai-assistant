@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from shared.llm.model_tiers import resolve_model
+
 
 def _parse_optional_float(value: Optional[str]) -> Optional[float]:
     """Parse optional float from env var, returning None if unset or 'auto'."""
@@ -22,20 +24,12 @@ class GeminiModelConfig(BaseModel):
     """Configuration for Gemini generateContent calls."""
 
     model: str = Field(
-        default_factory=lambda: os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
-        description="Primary model for the selected generation provider.",
+        default_factory=lambda: resolve_model("fast"),
+        description="Primary model for the selected generation provider (the 'fast' tier's configured model).",
     )
     fallback_model: str = Field(
-        default_factory=lambda: os.environ.get("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-lite"),
+        default_factory=lambda: os.environ.get("FALLBACK_MODEL", ""),
         description="Fallback model for rate limit recovery.",
-    )
-    agent_pro_model: str = Field(
-        default_factory=lambda: os.environ.get("GEMINI_AGENT_PRO_MODEL", "gemini-2.5-pro"),
-        description="Pro model for complex agent tasks (analysis, multi-step reasoning, regulatory interpretation)",
-    )
-    deep_thinking_model: str = Field(
-        default_factory=lambda: os.environ.get("GEMINI_DEEP_THINKING_MODEL", "gemini-pro-latest"),
-        description="Model for deep thinking tasks (document editing, complex analysis). No thinking budget cap applied.",
     )
     endpoint_template: str = Field(
         default="https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
@@ -296,11 +290,6 @@ class AppSettings(BaseSettings):
         default=None,
         alias="VERIFICATION_DOC_ID",
         description="Google Doc ID for verification criteria",
-    )
-    verification_model: str = Field(
-        default="gemini-2.5-flash-lite",
-        alias="VERIFICATION_MODEL",
-        description="Model to use for response verification",
     )
 
     # Langfuse LLM observability

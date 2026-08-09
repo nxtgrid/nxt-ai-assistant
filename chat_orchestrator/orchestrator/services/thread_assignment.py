@@ -19,6 +19,7 @@ from typing import List, Optional
 
 from orchestrator.models.schemas import ConversationMessage
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
 
@@ -30,9 +31,6 @@ ACTIVE_THREAD_WINDOW_SECONDS = ACTIVE_THREAD_WINDOW_MINUTES * 60
 
 # LLM confidence threshold — below this, start a new thread
 CONFIDENCE_THRESHOLD = 0.5
-
-# Default model for thread classification
-DEFAULT_CLASSIFIER_MODEL = "gemini-2.5-flash-lite"
 
 # Issue type taxonomy — used for thread classification and open-issue queries.
 ISSUE_TYPES = ("token", "hps", "meter", "transaction", "commissioning", "other")
@@ -128,8 +126,10 @@ async def classify_issue_type(user_input: str) -> str:
     """Classify the user's first message into one of the ISSUE_TYPES buckets.
 
     Uses Flash Lite for low-latency classification. Falls back to 'other' on any error.
+
+    Not tied to a specific library prompt (the prompt text below is hand-built,
+    not from thread_assignment.classify) -- resolves the lite tier directly.
     """
-    model = os.getenv("THREAD_CLASSIFIER_MODEL", DEFAULT_CLASSIFIER_MODEL)
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     prompt = (
         f"TODAY'S DATE AND TIME: {now_str}\n\n"
@@ -145,6 +145,10 @@ async def classify_issue_type(user_input: str) -> str:
         f'Return JSON: {{"issue_type": "<one of the categories above>"}}'
     )
     try:
+        # Inside the try, not before it: resolve_model raises if MODEL_LITE is
+        # unset, and this function's contract (see docstring) is to fall back
+        # to "other" on ANY error, not just gateway failures.
+        model = resolve_model("lite")
         gateway = get_default_generation_gateway(default_model=model)
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],
@@ -262,7 +266,7 @@ class ThreadAssignmentService:
         history: List[ConversationMessage],
     ) -> ThreadAssignment:
         """Use Gemini Flash Lite for binary classification."""
-        model = os.getenv("THREAD_CLASSIFIER_MODEL", DEFAULT_CLASSIFIER_MODEL)
+        model = resolve_model(PROMPTS.spec("thread_assignment.classify").model)
 
         # Build thread summaries (last 3 messages per thread)
         thread_summaries = []

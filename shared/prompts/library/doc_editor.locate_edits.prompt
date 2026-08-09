@@ -4,6 +4,7 @@ description: Identifies the exact document section to edit for a chat-driven (no
 owner: eng
 component: orchestrator_experts_doc_editor
 overridable: true
+model: fast
 output: json
 schema:
   type: object

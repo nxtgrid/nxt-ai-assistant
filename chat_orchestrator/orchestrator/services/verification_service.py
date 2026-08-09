@@ -25,6 +25,7 @@ from shared.llm import (
     LLMMessage,
     get_default_generation_gateway,
 )
+from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
 from shared.utils.langfuse_utils import langfuse_observe, score_trace
 from shared.utils.logging import get_logger
@@ -57,7 +58,6 @@ class ResponseVerificationService:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: Optional[str] = None,
         gateway: Optional[GenerationGateway] = None,
     ):
         """
@@ -65,14 +65,16 @@ class ResponseVerificationService:
 
         Args:
             api_key: Google API key (defaults to GOOGLE_API_KEY env var)
-            model: Gemini model to use (defaults to VERIFICATION_MODEL env var)
+
+        No single model for the whole service: verify_response() and
+        sanitize_technical_response() each resolve their own prompt's tier
+        independently (verification.criteria and verification.sanitize
+        respectively), passed explicitly per call to _call_gemini(). A
+        previous ``model`` constructor parameter was removed -- confirmed
+        unused by every real call site in the codebase.
         """
         self._api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
-        self._model = model or os.getenv("VERIFICATION_MODEL", "gemini-2.5-flash-lite")
-        self._gateway = gateway or get_default_generation_gateway(
-            api_key=self._api_key,
-            default_model=self._model,
-        )
+        self._gateway = gateway or get_default_generation_gateway(api_key=self._api_key)
 
     async def verify_response(
         self,
@@ -132,10 +134,11 @@ class ResponseVerificationService:
         )
 
         try:
-            # Call Gemini with verification model
+            # Call Gemini with verification.criteria's configured model tier
             result = await self._call_gemini(
                 system_instruction=dated_instructions,
                 user_message=verification_prompt,
+                model=resolve_model(PROMPTS.spec("verification.criteria").model),
             )
 
             # Parse the response
@@ -278,9 +281,15 @@ Respond with a JSON object (and nothing else):
         self,
         system_instruction: str,
         user_message: str,
+        model: str,
     ) -> str:
-        """Make a Gemini API call for verification."""
-        LOGGER.debug(f"Verification model: {self._model}")
+        """Make a Gemini API call for verification.
+
+        ``model`` is resolved by the caller from its own prompt's configured
+        tier (verification.criteria or verification.sanitize) so the admin
+        tier dropdown for each prompt actually takes effect independently.
+        """
+        LOGGER.debug(f"Verification model: {model}")
 
         result = await self._gateway.generate(
             [
@@ -288,7 +297,7 @@ Respond with a JSON object (and nothing else):
                 LLMMessage(role="user", text=user_message),
             ],
             GenerationOptions(
-                model=self._model,
+                model=model,
                 temperature=0.1,
                 max_output_tokens=int(os.getenv("GEMINI_LITE_MAX_OUTPUT_TOKENS", "1024")),
                 response_format="json",
@@ -393,6 +402,7 @@ Respond with a JSON object (and nothing else):
             result = await self._call_gemini(
                 system_instruction=PROMPTS.text("verification.sanitize_system"),
                 user_message=sanitization_prompt,
+                model=resolve_model(PROMPTS.spec("verification.sanitize").model),
             )
 
             # Parse the response

@@ -44,6 +44,7 @@ class PromptRow:
     overridable: bool
     can_edit: bool
     can_publish: bool
+    tier: str
     component: str = UNCATEGORIZED
     # doc_id falls back to the legacy env var when no UI binding exists, so
     # the row reflects what doc_id_for() would actually resolve to -- not
@@ -147,6 +148,7 @@ def build_rows(
                 overridable=spec.overridable,
                 can_edit=can_edit_prompt(spec, email),
                 can_publish=can_publish_prompt(spec, email),
+                tier=spec.model,
                 doc_id=doc_id,
                 doc_override=doc_override,
                 doc_is_live=doc_is_live,
@@ -261,6 +263,7 @@ def _render_row(row: PromptRow, store: OverrideStore, refresh, user_email: str) 
                         "text-caption text-grey"
                     )
             ui.badge(row.source, color="primary" if row.source == "Overridden" else "grey")
+            ui.label(f"tier:{row.tier}").classes("text-caption text-grey")
             if row.version is not None:
                 ui.label(f"v{row.version}").classes("text-caption")
             if not row.overridable:
@@ -378,6 +381,39 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                     ui.button("Save doc settings", on_click=save_doc_binding).props(
                         "flat"
                     ).set_visibility(row.can_edit)
+
+                ui.separator().classes("q-my-sm")
+                ui.label("Model Tier").classes("text-caption text-bold")
+                tier_select = ui.select(
+                    ["thinking", "fast", "lite"], value=spec.model, label="Tier"
+                ).props("dense").classes("w-48")
+                tier_select.set_enabled(row.can_edit)
+
+                async def save_tier() -> None:
+                    try:
+                        store.set_model_override(row.prompt_id, tier_select.value, actor=user_email)
+                        ui.notify(f"Tier set to {tier_select.value}", type="positive")
+                        dialog.close()
+                        refresh()
+                    except (PermissionError, RuntimeError) as e:
+                        ui.notify(str(e), type="negative")
+
+                async def revert_tier() -> None:
+                    try:
+                        store.clear_model_override(row.prompt_id, actor=user_email)
+                        ui.notify("Tier reverted to bundled default", type="positive")
+                        dialog.close()
+                        refresh()
+                    except (PermissionError, RuntimeError) as e:
+                        ui.notify(str(e), type="negative")
+
+                with ui.row().classes("justify-end w-full gap-2"):
+                    ui.button("Revert tier", on_click=revert_tier).props("flat").set_visibility(
+                        row.can_edit
+                    )
+                    ui.button("Save tier", on_click=save_tier).props("flat").set_visibility(
+                        row.can_edit
+                    )
 
                 async def save_draft() -> None:
                     try:

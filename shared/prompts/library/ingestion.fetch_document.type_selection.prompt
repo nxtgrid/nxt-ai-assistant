@@ -4,6 +4,7 @@ description: User-facing message asking which document type is being ingested (i
 owner: ops
 component: orchestrator_experts_ingestion
 overridable: true
+model: fast
 output: text
 sections: []
 variables: []
