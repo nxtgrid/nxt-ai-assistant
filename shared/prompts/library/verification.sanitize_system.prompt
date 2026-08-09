@@ -4,6 +4,7 @@ description: System instruction for the response-sanitization LLM-as-judge call.
 owner: eng
 component: orchestrator_services
 overridable: true
+model: lite
 output: text
 sections: []
 variables: []

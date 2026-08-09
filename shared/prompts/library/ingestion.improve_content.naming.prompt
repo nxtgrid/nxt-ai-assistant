@@ -4,6 +4,7 @@ description: Generates a descriptive title for a newly-ingested knowledge base d
 owner: eng
 component: orchestrator_experts_ingestion
 overridable: true
+model: fast
 output: text
 sections: []
 variables: [doc_type, content_preview, uploader_name]

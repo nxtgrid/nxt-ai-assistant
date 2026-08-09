@@ -4,6 +4,7 @@ description: System prompt for the Grids Technical Reviewer's interactive KPI an
 owner: ops
 component: orchestrator_experts_gtr
 overridable: true
+model: fast
 output: text
 sections: []
 variables: []

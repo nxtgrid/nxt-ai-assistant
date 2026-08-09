@@ -4,6 +4,7 @@ description: Classifies an ingested document into exactly one knowledge-base cat
 owner: eng
 component: orchestrator_experts_ingestion
 overridable: true
+model: fast
 output: json
 schema:
   type: object

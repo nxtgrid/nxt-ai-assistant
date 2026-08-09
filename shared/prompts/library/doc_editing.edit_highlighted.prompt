@@ -4,6 +4,7 @@ description: Generates markdown replacement text for a highlighted section of a 
 owner: eng
 component: shared
 overridable: true
+model: fast
 output: text
 sections: []
 variables: [instruction, highlighted_text, context_block, context_summary, reference_block]

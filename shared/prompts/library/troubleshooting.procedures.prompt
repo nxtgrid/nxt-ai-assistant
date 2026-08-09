@@ -4,6 +4,7 @@ description: Shared troubleshooting procedures appended to customer and staff sy
 owner: ops
 component: orchestrator_services
 overridable: true
+model: fast
 output: text
 sections: []
 access:

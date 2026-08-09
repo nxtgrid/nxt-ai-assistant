@@ -4,6 +4,7 @@ description: Summarizes a batch of old conversation messages into a compact cont
 owner: ops
 component: orchestrator_services
 overridable: true
+model: lite
 output: text
 sections: []
 variables: [messages]

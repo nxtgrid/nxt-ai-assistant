@@ -4,6 +4,7 @@ description: Expert, workflow and packet-type definitions parsed into ExpertConf
 owner: eng
 component: orchestrator_services
 overridable: true
+model: fast
 output: text
 sections: []
 access:

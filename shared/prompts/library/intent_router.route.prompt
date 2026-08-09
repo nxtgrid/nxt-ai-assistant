@@ -4,6 +4,7 @@ description: Decides whether a staff message clearly asks to start an expert wor
 owner: eng
 component: orchestrator_services
 overridable: true
+model: lite
 output: json
 schema:
   type: object

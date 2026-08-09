@@ -4,6 +4,7 @@ description: LLM-as-judge criteria for verifying customer-facing responses befor
 owner: eng
 component: orchestrator_services
 overridable: true
+model: lite
 output: text
 sections: []
 access:

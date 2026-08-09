@@ -4,6 +4,7 @@ description: Applies a user's requested changes to a previously-suggested improv
 owner: eng
 component: orchestrator_experts_ingestion
 overridable: true
+model: fast
 output: text
 sections: []
 variables: [doc_type, original, suggestion, user_instructions]

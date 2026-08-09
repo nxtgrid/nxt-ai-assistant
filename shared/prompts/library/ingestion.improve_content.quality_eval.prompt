@@ -4,6 +4,7 @@ description: Evaluates whether manually-pasted ingestion content is well-structu
 owner: eng
 component: orchestrator_experts_ingestion
 overridable: true
+model: fast
 output: json
 schema:
   type: object

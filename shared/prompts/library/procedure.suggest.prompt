@@ -4,6 +4,7 @@ description: Generates a suggested support-documentation procedure from a suppor
 owner: ops
 component: orchestrator_services
 overridable: true
+model: fast
 output: text
 sections: []
 variables: [next_number, existing_list, content]
