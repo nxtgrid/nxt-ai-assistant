@@ -102,6 +102,18 @@ def test_page_renders_only_recorded_delivery_links_with_purpose_labels():
     assert "Escalation message" in src
 
 
+def test_ticket_row_badges_read_real_ticket_list_view_columns():
+    """affected_keys_count/comment_count were never real ticket_list_view
+    columns (the view has affected_count/activity_count) -- both badges
+    silently rendered 0 for every ticket. Guard against reintroducing
+    either stale key."""
+    src = open(_TICKETS_PATH).read()
+    assert 'ticket.get("affected_keys_count")' not in src
+    assert "ticket.get('comment_count'" not in src
+    assert 'ticket.get("affected_count")' in src
+    assert "ticket.get('activity_count'" in src
+
+
 def test_page_has_no_mutation_control_tokens():
     src = open(_TICKETS_PATH).read()
     forbidden = [

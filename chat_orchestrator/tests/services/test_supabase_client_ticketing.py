@@ -2,9 +2,10 @@
 
 Covers:
   - get_session_by_id's UUID-keyed lookup.
-  - Internal-ticket CRUD/comment helpers (retired, kept skipped -- see the
-    "Retired internal-ticket helper regression cases" section below).
-  - tag_message_as_ticket_comment's non-clobbering metadata merge.
+  - tag_message_as_ticket_comment's non-clobbering metadata merge and
+    ticket_id resolution. The internal-ticket CRUD/comment helper regression
+    cases that used to live here were deleted alongside their now-removed
+    SupabaseClient methods once the SQL contract migration (0005b) landed.
 
 save_escalation_mapping, the 4 has-ticket predicate readers
 (get_stale_unfiled_escalations, get_orphaned_claimed_escalations,
@@ -195,6 +196,7 @@ class _FakeRawClient:
             "internal_ticket_comments": _FakeTable(tables.get("internal_ticket_comments")),
             "chat_messages": _FakeTable(tables.get("chat_messages")),
             "chat_sessions": _FakeTable(tables.get("chat_sessions")),
+            "tickets": _FakeTable(tables.get("tickets")),
         }
 
     def table(self, name: str) -> Any:
@@ -273,272 +275,6 @@ class TestGetSessionById:
 
 
 # ---------------------------------------------------------------------------
-# Retired internal-ticket helper regression cases.  Keep the historical cases
-# visible until the dedicated test file is deleted after the SQL contract
-# migration; they must not run now that the public helper surface is gone.
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skip(reason="legacy Supabase internal-ticket helper surface removed")
-class TestInternalTicketsCrud:
-    @pytest.mark.asyncio
-    async def test_get_internal_ticket_found(self):
-        row = {"id": "1", "ticket_ref": "TKT-1", "status": "open"}
-        raw = _FakeRawClient(tables={"internal_tickets": [row]})
-        client = _make_client(raw)
-
-        result = await client.get_internal_ticket("TKT-1")
-
-        assert result == row
-
-    @pytest.mark.asyncio
-    async def test_get_internal_ticket_not_found(self):
-        raw = _FakeRawClient(tables={"internal_tickets": []})
-        client = _make_client(raw)
-
-        result = await client.get_internal_ticket("TKT-missing")
-
-        assert result is None
-
-    @pytest.mark.asyncio
-    async def test_list_internal_tickets_no_filters(self):
-        rows = [
-            {"id": "1", "ticket_ref": "TKT-1", "status": "open", "organization_id": 1,
-             "created_at": "2026-01-01T00:00:00+00:00"},
-            {"id": "2", "ticket_ref": "TKT-2", "status": "done", "organization_id": 2,
-             "created_at": "2026-02-01T00:00:00+00:00"},
-        ]
-        raw = _FakeRawClient(tables={"internal_tickets": rows})
-        client = _make_client(raw)
-
-        result = await client.list_internal_tickets()
-
-        assert [r["id"] for r in result] == ["2", "1"]  # created_at desc
-
-    @pytest.mark.asyncio
-    async def test_list_internal_tickets_filtered_by_status_and_org(self):
-        rows = [
-            {"id": "1", "ticket_ref": "TKT-1", "status": "open", "organization_id": 1,
-             "created_at": "2026-01-01T00:00:00+00:00"},
-            {"id": "2", "ticket_ref": "TKT-2", "status": "done", "organization_id": 1,
-             "created_at": "2026-02-01T00:00:00+00:00"},
-            {"id": "3", "ticket_ref": "TKT-3", "status": "open", "organization_id": 2,
-             "created_at": "2026-03-01T00:00:00+00:00"},
-        ]
-        raw = _FakeRawClient(tables={"internal_tickets": rows})
-        client = _make_client(raw)
-
-        result = await client.list_internal_tickets(status="open", organization_id=1)
-
-        assert [r["id"] for r in result] == ["1"]
-
-    @pytest.mark.asyncio
-    async def test_update_internal_ticket_status_to_done_sets_resolved_at(self):
-        row = {"id": "1", "ticket_ref": "TKT-1", "status": "open", "resolved_at": None}
-        raw = _FakeRawClient(tables={"internal_tickets": [row]})
-        client = _make_client(raw)
-
-        ok = await client.update_internal_ticket_status("TKT-1", "done")
-
-        assert ok is True
-        assert row["status"] == "done"
-        assert row["resolved_at"] is not None
-
-    @pytest.mark.asyncio
-    async def test_update_internal_ticket_status_non_done_leaves_resolved_at_untouched(self):
-        row = {"id": "1", "ticket_ref": "TKT-1", "status": "open", "resolved_at": None}
-        raw = _FakeRawClient(tables={"internal_tickets": [row]})
-        client = _make_client(raw)
-
-        ok = await client.update_internal_ticket_status("TKT-1", "in_progress")
-
-        assert ok is True
-        assert row["status"] == "in_progress"
-        assert row["resolved_at"] is None
-
-    @pytest.mark.asyncio
-    async def test_update_internal_ticket_status_returns_false_on_error(self):
-        raw = _FakeRawClient()
-
-        class _RaisingTable:
-            def update(self, *_a, **_k):
-                raise RuntimeError("boom")
-
-        raw._tables["internal_tickets"] = _RaisingTable()
-        client = _make_client(raw)
-
-        ok = await client.update_internal_ticket_status("TKT-1", "done")
-
-        assert ok is False
-
-
-# ---------------------------------------------------------------------------
-# legacy internal-ticket comments helpers
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.skip(reason="legacy Supabase internal-ticket helper surface removed")
-class TestInternalTicketComments:
-    @pytest.mark.asyncio
-    async def test_add_internal_ticket_comment_inserts_expected_row(self):
-        raw = _FakeRawClient()
-        client = _make_client(raw)
-
-        ok = await client.add_internal_ticket_comment(
-            ticket_ref="TKT-1",
-            body="Looking into it",
-            author="staff@example.com",
-            is_public=True,
-            source="staff",
-        )
-
-        assert ok is True
-        row = raw.table("internal_ticket_comments").rows[0]
-        assert row["ticket_ref"] == "TKT-1"
-        assert row["body"] == "Looking into it"
-        assert row["author"] == "staff@example.com"
-        assert row["is_public"] is True
-        assert row["source"] == "staff"
-
-    @pytest.mark.asyncio
-    async def test_add_internal_ticket_comment_returns_false_on_error(self):
-        raw = _FakeRawClient()
-
-        class _RaisingTable:
-            def insert(self, *_a, **_k):
-                raise RuntimeError("boom")
-
-        raw._tables["internal_ticket_comments"] = _RaisingTable()
-        client = _make_client(raw)
-
-        ok = await client.add_internal_ticket_comment(ticket_ref="TKT-1", body="x")
-
-        assert ok is False
-
-    @pytest.mark.asyncio
-    async def test_get_ticket_comments_merges_and_sorts_both_sources(self):
-        comments = [
-            {
-                "id": "c1",
-                "ticket_ref": "TKT-1",
-                "author": "staff@example.com",
-                "body": "Second comment",
-                "is_public": True,
-                "source": "staff",
-                "created_at": "2026-01-02T00:00:00+00:00",
-            },
-        ]
-        messages = [
-            {
-                "id": "m1",
-                "content": "First message forwarded to ticket",
-                "sender_telegram_id": "12345",
-                "role": "user",
-                "metadata": {"ticket_ref": "TKT-1", "ticket_role": "comment"},
-                "created_at": "2026-01-01T00:00:00+00:00",
-            },
-            {
-                "id": "m2",
-                "content": "Unrelated message for a different ticket",
-                "sender_telegram_id": "999",
-                "role": "user",
-                "metadata": {"ticket_ref": "TKT-OTHER", "ticket_role": "comment"},
-                "created_at": "2026-01-01T12:00:00+00:00",
-            },
-        ]
-        raw = _FakeRawClient(
-            tables={"internal_ticket_comments": comments, "chat_messages": messages}
-        )
-        client = _make_client(raw)
-
-        result = await client.get_ticket_comments("TKT-1")
-
-        # Only the TKT-1-tagged message should be included, not the unrelated one.
-        assert len(result) == 2
-        assert [entry["body"] for entry in result] == [
-            "First message forwarded to ticket",
-            "Second comment",
-        ]
-        assert [entry["source"] for entry in result] == ["chat_message", "internal_ticket_comments"]
-        # Chronological order (message before comment).
-        assert result[0]["created_at"] < result[1]["created_at"]
-        assert result[0]["author"] == "12345"
-        assert result[1]["author"] == "staff@example.com"
-
-    @pytest.mark.asyncio
-    async def test_get_ticket_comments_chat_message_is_public_defaults_true(self):
-        """A tagged chat_message with no explicit is_public in its metadata
-        represents a forwarded customer<->staff exchange, so it must default
-        to public -- not silently read as an internal-only note."""
-        messages = [
-            {
-                "id": "m1",
-                "content": "No explicit is_public key",
-                "sender_telegram_id": "12345",
-                "role": "user",
-                "metadata": {"ticket_ref": "TKT-1", "ticket_role": "comment"},
-                "created_at": "2026-01-01T00:00:00+00:00",
-            },
-            {
-                "id": "m2",
-                "content": "Explicitly marked non-public",
-                "sender_telegram_id": "12345",
-                "role": "user",
-                "metadata": {
-                    "ticket_ref": "TKT-1",
-                    "ticket_role": "comment",
-                    "is_public": False,
-                },
-                "created_at": "2026-01-01T01:00:00+00:00",
-            },
-        ]
-        raw = _FakeRawClient(tables={"internal_ticket_comments": [], "chat_messages": messages})
-        client = _make_client(raw)
-
-        result = await client.get_ticket_comments("TKT-1")
-
-        assert result[0]["is_public"] is True
-        assert result[1]["is_public"] is False
-
-    @pytest.mark.asyncio
-    async def test_get_ticket_comments_caps_total_at_limit(self):
-        comments = [
-            {
-                "id": f"c{i}",
-                "ticket_ref": "TKT-1",
-                "author": "staff",
-                "body": f"comment {i}",
-                "is_public": True,
-                "created_at": f"2026-01-01T00:0{i}:00+00:00",
-            }
-            for i in range(3)
-        ]
-        raw = _FakeRawClient(tables={"internal_ticket_comments": comments, "chat_messages": []})
-        client = _make_client(raw)
-
-        result = await client.get_ticket_comments("TKT-1", limit=2)
-
-        assert len(result) == 2
-        # Most recent 2 of the 3 kept, still chronologically ordered.
-        assert [entry["body"] for entry in result] == ["comment 1", "comment 2"]
-
-    @pytest.mark.asyncio
-    async def test_get_ticket_comments_returns_empty_list_on_error(self):
-        raw = _FakeRawClient()
-
-        class _RaisingTable:
-            def select(self, *_a, **_k):
-                raise RuntimeError("boom")
-
-        raw._tables["internal_ticket_comments"] = _RaisingTable()
-        client = _make_client(raw)
-
-        result = await client.get_ticket_comments("TKT-1")
-
-        assert result == []
-
-
-# ---------------------------------------------------------------------------
 # tag_message_as_ticket_comment
 # ---------------------------------------------------------------------------
 
@@ -610,3 +346,39 @@ class TestTagMessageAsTicketComment:
         await client.tag_message_as_ticket_comment("m1", "TKT-1")
 
         assert row["metadata"] == {"existing": "value"}
+
+    @pytest.mark.asyncio
+    async def test_sets_ticket_id_when_ticket_exists(self):
+        """chat_messages.ticket_id is the canonical FK the ticket-schema
+        contract migration (0005b) requires -- resolve it via the tickets
+        table's ticket_ref, same as the metadata tag, instead of leaving it
+        for a one-time backfill to keep drifting back out of sync."""
+        message_row = {"id": "m1", "metadata": {}}
+        raw = _FakeRawClient(
+            tables={
+                "chat_messages": [message_row],
+                "tickets": [{"id": "ticket-uuid-1", "ticket_ref": "TKT-1"}],
+            }
+        )
+        client = _make_client(raw)
+
+        await client.tag_message_as_ticket_comment("m1", "TKT-1")
+
+        assert message_row["ticket_id"] == "ticket-uuid-1"
+        assert message_row["metadata"]["ticket_ref"] == "TKT-1"
+
+    @pytest.mark.asyncio
+    async def test_leaves_ticket_id_unset_when_ticket_not_found(self):
+        """The canonical ticket row not existing yet (e.g. notify-source
+        races) must not block the metadata tag -- degrade the same way the
+        existing not-found/failure cases already do."""
+        message_row = {"id": "m1", "metadata": {}}
+        raw = _FakeRawClient(
+            tables={"chat_messages": [message_row], "tickets": []}
+        )
+        client = _make_client(raw)
+
+        await client.tag_message_as_ticket_comment("m1", "TKT-1")
+
+        assert "ticket_id" not in message_row
+        assert message_row["metadata"]["ticket_ref"] == "TKT-1"

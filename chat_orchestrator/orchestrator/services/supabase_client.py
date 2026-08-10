@@ -1171,9 +1171,17 @@ class EnhancedSupabaseClient:
         Not atomic -- fine here since tagging a message right after creating it
         isn't a concurrency-sensitive operation.
 
-        Best-effort: logs a warning and returns (doesn't raise) on failure,
-        since this is annotation only and must never break the caller's
-        actual message-forwarding flow.
+        Also resolves ticket_ref against the canonical `tickets` table and
+        sets chat_messages.ticket_id in the same update. This is the FK the
+        ticket-schema contract migration's mirror-completeness check (and
+        ticket_list_view's activity_count) actually reads -- metadata.ticket_ref
+        alone left it permanently unset. Best-effort: if the ticket isn't
+        resolvable yet (e.g. a notify-source race), the metadata tag still
+        applies and ticket_id is simply left unset rather than blocking.
+
+        Best-effort throughout: logs a warning and returns (doesn't raise) on
+        failure, since this is annotation only and must never break the
+        caller's actual message-forwarding flow.
         """
         try:
             client = self._get_client()
@@ -1197,8 +1205,25 @@ class EnhancedSupabaseClient:
                 "ticket_ref": ticket_ref,
                 "ticket_role": ticket_role,
             }
+            update_payload: Dict[str, Any] = {"metadata": merged_metadata}
 
-            client.table("chat_messages").update({"metadata": merged_metadata}).eq(
+            ticket_response = (
+                client.table("tickets")
+                .select("id")
+                .eq("ticket_ref", ticket_ref)
+                .limit(1)
+                .execute()
+            )
+            ticket_rows = ticket_response.data or []
+            if ticket_rows:
+                update_payload["ticket_id"] = ticket_rows[0]["id"]
+            else:
+                LOGGER.warning(
+                    f"tag_message_as_ticket_comment: no canonical ticket found for "
+                    f"ref {ticket_ref!r}; metadata tagged but ticket_id left unset"
+                )
+
+            client.table("chat_messages").update(update_payload).eq(
                 "id", message_id
             ).execute()
         except Exception as e:

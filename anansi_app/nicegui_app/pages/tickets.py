@@ -273,13 +273,13 @@ def _ticket_row(db, ticket: dict) -> None:
     ref = ticket.get("ticket_ref") or "—"
     summary = ticket.get("summary") or ""
     summary_short = summary if len(summary) <= 70 else summary[:69] + "…"
-    affected_count = ticket.get("affected_keys_count") or 0
+    affected_count = ticket.get("affected_count") or 0
     correlation_suffix = f"  ·  🔗 {affected_count} affected" if affected_count > 1 else ""
     escalated_prefix = "🔴 " if ticket.get("escalated") else ""
     header = (
         f"{escalated_prefix}{_backend_chip(ticket.get('backend'))}  ·  {ref}  ·  {summary_short}"
         f"  ·  {_format_time_ago(ticket.get('created_at'))}"
-        f"  ·  💬 {ticket.get('comment_count', 0)}"
+        f"  ·  💬 {ticket.get('activity_count', 0)}"
         f"{correlation_suffix}"
     )
 
