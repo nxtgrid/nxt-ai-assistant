@@ -52,6 +52,16 @@
 -- (chat_orchestrator) never set ticket_id at all. Fixed in code (it now
 -- resolves and sets it) and backfilled for pre-fix rows by step 0b below.
 --
+-- Update 3: third run hit step 6's chat_sessions check (9 rows marked
+-- is_escalated with no open/processing escalations row). Not a data-loss
+-- risk -- the close flow used to clear this legacy mirror, but that write
+-- was deliberately removed once STOP_LEGACY_ESCALATION_WRITES landed
+-- (is_session_escalated reads escalations.state live now; see the comment
+-- in callback_handlers.py's close handler). Every one of the 9 already has
+-- a real escalations row that just isn't open/processing anymore (1 to 21
+-- per session, none missing entirely), so the correct value is unambiguous.
+-- Cleared by step 5b below.
+--
 -- Idempotent: safe to run twice. The second run finds the legacy tables
 -- already archived/columns already dropped and no-ops those steps.
 --
@@ -319,6 +329,43 @@ END $$;
 UPDATE chat_messages
 SET metadata = metadata - 'ticket_ref' - 'ticket_role'
 WHERE metadata ?| array['ticket_ref', 'ticket_role'];
+
+-- ── Step 5b: clear stale chat_sessions.is_escalated flags ───────────────────
+-- The close flow used to clear this legacy mirror when an escalation
+-- resolved; that write was removed once STOP_LEGACY_ESCALATION_WRITES
+-- landed (is_session_escalated reads escalations.state live now -- see the
+-- comment in callback_handlers.py's close handler -- so there was nothing
+-- left to release). Any session flagged escalated before that removal,
+-- then closed after it, is stuck at is_escalated=true forever with no code
+-- path left to clear it. Correct them here before step 6's assertion runs;
+-- the value is unambiguous since every affected session already has a real
+-- escalations row that just isn't open/processing.
+
+DO $$
+DECLARE
+    cleared_flags integer;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'chat_sessions' AND column_name = 'is_escalated'
+    ) THEN
+        RETURN;
+    END IF;
+
+    UPDATE chat_sessions s
+    SET is_escalated = false
+    WHERE s.is_escalated
+      AND NOT EXISTS (
+          SELECT 1 FROM escalations e
+          WHERE e.chat_session_id = s.id
+            AND e.state IN ('open', 'processing')
+      );
+
+    GET DIAGNOSTICS cleared_flags = ROW_COUNT;
+    IF cleared_flags > 0 THEN
+        RAISE NOTICE 'Step 5b: cleared % stale chat_sessions.is_escalated flag(s)', cleared_flags;
+    END IF;
+END $$;
 
 -- ── Step 6: remove redundant session escalation columns ─────────────────────
 -- Session escalation state is derived from whether an open/processing
