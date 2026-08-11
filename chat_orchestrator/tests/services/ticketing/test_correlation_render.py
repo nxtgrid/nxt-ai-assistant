@@ -136,6 +136,157 @@ class TestRenderSummary:
         assert "8" in result  # total count still shown
 
 
+class TestRenderSummaryCascade:
+    """C5: affected_keys spanning more than one component kind is a
+    power-chain cascade merge -- render_summary must stay root-cause-led
+    instead of picking one dominant kind and silently dropping the other."""
+
+    @staticmethod
+    def _cascade_correlation(**overrides: Any) -> Dict[str, Any]:
+        defaults: Dict[str, Any] = dict(
+            summary_base="! Warning: BMS communication lost",
+            affected_keys=[
+                {
+                    "kind": "battery",
+                    "key": "BMS1",
+                    "label": "BMS1",
+                    "first_seen": "2026-08-08T10:27:00Z",
+                    "last_seen": "2026-08-08T10:27:00Z",
+                    "count": 1,
+                },
+                {
+                    "kind": "inverter",
+                    "key": "INV1",
+                    "label": "Inverter INV1",
+                    "first_seen": "2026-08-08T10:31:00Z",
+                    "last_seen": "2026-08-08T10:31:00Z",
+                    "count": 1,
+                },
+            ],
+            severity="warning",
+        )
+        defaults.update(overrides)
+        return _correlation(**defaults)
+
+    def test_headline_is_the_root_summary_base_not_the_llm_amended_summary(self):
+        correlation = self._cascade_correlation()
+        alert = AlertFacts(component_kind="inverter", severity="warning")
+
+        result = render_summary(
+            correlation, alert, llm_summary="ignored cascade text", grid_name="Ogbinbiri"
+        )
+
+        assert result.startswith("! Warning: BMS communication lost")
+        assert "ignored cascade text" not in result
+
+    def test_names_the_dependent_kind_and_count(self):
+        correlation = self._cascade_correlation()
+        alert = AlertFacts(component_kind="inverter", severity="warning")
+
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+
+        assert "+1 dependent alert (Inverter)" in result
+
+    def test_pluralizes_multiple_dependent_alerts_of_the_same_kind(self):
+        correlation = self._cascade_correlation(
+            affected_keys=[
+                {
+                    "kind": "battery", "key": "BMS1", "label": "BMS1",
+                    "first_seen": "2026-08-08T10:27:00Z", "last_seen": "2026-08-08T10:27:00Z", "count": 1,
+                },
+                {
+                    "kind": "inverter", "key": "INV1", "label": "Inverter INV1",
+                    "first_seen": "2026-08-08T10:31:00Z", "last_seen": "2026-08-08T10:40:00Z", "count": 3,
+                },
+                {
+                    "kind": "inverter", "key": "INV2", "label": "Inverter INV2",
+                    "first_seen": "2026-08-08T10:33:00Z", "last_seen": "2026-08-08T10:33:00Z", "count": 1,
+                },
+            ]
+        )
+        alert = AlertFacts(component_kind="inverter", severity="warning")
+
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+
+        assert "+2 dependent alerts (Inverter)" in result
+
+    def test_root_kind_is_whichever_arrived_first_not_alphabetical_order(self):
+        """Proves the tiebreak is first_seen, not kind-name order: 'inverter'
+        sorts after 'battery' alphabetically but arrived first here, so it
+        must still win as root -- and 'battery', despite recurring, stays
+        the dependent symptom."""
+        correlation = self._cascade_correlation(
+            summary_base="! Warning: Inverter cycling",
+            affected_keys=[
+                {
+                    "kind": "inverter", "key": "INV1", "label": "Inverter INV1",
+                    "first_seen": "2026-08-08T09:00:00Z", "last_seen": "2026-08-08T09:00:00Z", "count": 1,
+                },
+                {
+                    "kind": "battery", "key": "BMS1", "label": "BMS1",
+                    "first_seen": "2026-08-08T09:05:00Z", "last_seen": "2026-08-08T09:05:00Z", "count": 1,
+                },
+            ],
+        )
+        alert = AlertFacts(component_kind="battery", severity="warning")
+
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+
+        assert result.startswith("! Warning: Inverter cycling")
+        assert "+1 dependent alert (Battery)" in result
+
+    def test_stays_a_warning_when_nothing_is_urgent(self):
+        correlation = self._cascade_correlation()
+        alert = AlertFacts(component_kind="inverter", severity="warning")
+
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+
+        assert result.startswith("! Warning:")
+
+    def test_incoming_urgent_alert_upgrades_the_marker(self):
+        correlation = self._cascade_correlation()
+        alert = AlertFacts(component_kind="inverter", severity="urgent")
+
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+
+        assert result.startswith("! Urgent:")
+
+    def test_a_prior_urgent_symptom_keeps_the_marker_urgent_even_if_this_alert_is_not(self):
+        """The stored correlation severity already ratcheted to urgent from
+        an earlier fold (apply_amendment's effective_severity) --
+        summary_base itself never changes, so the stored severity is the
+        only way "any folded symptom is urgent" can still be seen here."""
+        correlation = self._cascade_correlation(severity="urgent")
+        alert = AlertFacts(component_kind="inverter", severity="warning")
+
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+
+        assert result.startswith("! Urgent:")
+
+    def test_lists_every_dependent_kind_label_when_three_kinds_are_present(self):
+        correlation = self._cascade_correlation(
+            affected_keys=[
+                {
+                    "kind": "battery", "key": "BMS1", "label": "BMS1",
+                    "first_seen": "2026-08-08T10:27:00Z", "last_seen": "2026-08-08T10:27:00Z", "count": 1,
+                },
+                {
+                    "kind": "inverter", "key": "INV1", "label": "Inverter INV1",
+                    "first_seen": "2026-08-08T10:31:00Z", "last_seen": "2026-08-08T10:31:00Z", "count": 1,
+                },
+                {
+                    "kind": "grid", "key": "", "label": "Grid outage",
+                    "first_seen": "2026-08-08T10:32:00Z", "last_seen": "2026-08-08T10:32:00Z", "count": 1,
+                },
+            ]
+        )
+        alert = AlertFacts(component_kind="grid", severity="warning")
+
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+
+        assert "+2 dependent alerts (Grid, Inverter)" in result
+
+
 class TestRenderDescription:
     def test_includes_marker_block_and_affected_keys(self):
         correlation = _correlation()
@@ -792,3 +943,75 @@ class TestApplyAmendmentDuplicate:
         assert store.merge_calls == []
         assert ticket_service.update_calls == []
         assert ticket_service.comment_calls == []
+
+
+class TestApplyAmendmentFoldedComment:
+    """C5: a power_chain amend's raw-alert comment is prefixed so the
+    folded-in repair stays legible on the shared ticket -- the mitigation
+    for the one real cost of merging a cascade over cross-linking it."""
+
+    @pytest.mark.asyncio
+    async def test_power_chain_amend_prefixes_the_comment(self):
+        correlation = _correlation(
+            affected_keys=[
+                {
+                    "kind": "battery", "key": "BMS1", "label": "BMS1",
+                    "first_seen": "t", "last_seen": "t", "count": 1,
+                }
+            ],
+        )
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(
+            component_kind="inverter", component_key="INV1", component_label="Inverter INV1",
+            severity="warning",
+        )
+
+        await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="OPS-3456",
+            ticket_id="ticket-1",
+            alert=alert,
+            decision=_amend_decision(
+                ticket_ref="OPS-3456",
+                affected_key={"kind": "inverter", "key": "INV1", "label": "Inverter INV1"},
+                root_cause_kind="power_chain",
+            ),
+            raw_text="RESTART FAILED - Inverter Off while battery Ok >52V",
+            grid_name="Ogbinbiri",
+        )
+
+        assert ticket_service.comment_calls == [
+            {
+                "ref": "OPS-3456",
+                "body": (
+                    "Folded in as a power_chain symptom:\n\n"
+                    "RESTART FAILED - Inverter Off while battery Ok >52V"
+                ),
+                "public": False,
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_ordinary_amend_comment_is_not_prefixed(self):
+        """Regression: only a power_chain decision gets the prefix -- an
+        everyday same-kind amend's comment must stay exactly the raw alert
+        text, as it always has."""
+        correlation = _correlation()
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !", component_kind="mppt")
+
+        await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            ticket_id="ticket-1",
+            alert=alert,
+            decision=_amend_decision(root_cause_kind=None),
+            raw_text="MPPT A7 low output",
+            grid_name="Kudi",
+        )
+
+        assert ticket_service.comment_calls[0]["body"] == "MPPT A7 low output"

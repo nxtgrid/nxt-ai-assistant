@@ -135,20 +135,22 @@ def _notify_body(**overrides: Any) -> NotifyRequest:
     return NotifyRequest(**defaults)
 
 
-def _live_context(output_kw: Optional[float]):
-    async def read_output(_grid_name: str) -> Optional[float]:
-        return output_kw
+def _live_context(output_kw: Optional[float], battery_voltage_v: Optional[float] = None):
+    async def read_telemetry(_grid_name: str) -> Dict[str, Optional[float]]:
+        return {"output_kw": output_kw, "battery_voltage_v": battery_voltage_v}
 
     return build_urgent_alert_context(
         subject="! Urgent: Grid down",
         incoming_severity="urgent",
         grid_name="Acme Grid",
-        read_output=read_output,
+        read_telemetry=read_telemetry,
     )
 
 
-async def _return_live_output(output_kw: float) -> float:
-    return output_kw
+async def _return_live_telemetry(
+    output_kw: Optional[float], battery_voltage_v: Optional[float] = None
+) -> Dict[str, Optional[float]]:
+    return {"output_kw": output_kw, "battery_voltage_v": battery_voltage_v}
 
 
 # ---------------------------------------------------------------------------
@@ -2160,7 +2162,7 @@ class TestDeliverNotificationDelivery:
                 subject="! Warning: Multiple MPPTs offline",
                 incoming_severity="warning",
                 grid_name="Acme Grid",
-                read_output=lambda _grid_name: _return_live_output(3.1),
+                read_telemetry=lambda _grid_name: _return_live_telemetry(3.1),
             ),
             ticket_summary="! Urgent: Acme Grid root cause (grid_off)",
         )
@@ -2702,6 +2704,186 @@ def test_amend_delivery_escalation_moves_the_edit_target_to_the_new_post():
     assert delivery.ticket == ticket
     assert delivery.ticket.ticket_id == "ticket-3353"
     assert delivery.text_override == "escalated to urgent — Escalated summary"
+
+
+def test_amend_delivery_cascade_fold_is_not_suppressed_without_a_component_add():
+    """C5: a power_chain fold must never be suppressed, even when it added
+    no new *keyed* component (e.g. a blank affected_key) -- linking the two
+    pings into one thread is the entire point of the rung."""
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3456",
+        confidence=0.92,
+        decided_by="llm",
+        reason="battery/BMS -> inverter power chain",
+        affected_key=None,
+        root_cause_kind="power_chain",
+        update_message="Inverter shut down after BMS comms loss",
+        amended_summary="",
+        candidate_refs=["OPS-3456"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3456",
+        ticket_id="ticket-3456",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=1,
+        occurrence_count=2,
+        component_added=False,
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3456", backend="jira"), reply_to_message_id=555
+    )
+
+    assert delivery.suppress is False
+    assert delivery.top_level is False
+    assert delivery.text_override == "Inverter shut down after BMS comms loss"
+    assert delivery.reply_to_message_id == 555
+    assert delivery.edit_message_id == 555
+
+
+def test_amend_delivery_cascade_prefers_llm_update_message_over_rendered_summary():
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3456",
+        confidence=0.92,
+        decided_by="llm",
+        reason="battery/BMS -> inverter power chain",
+        affected_key={"kind": "inverter", "key": "INV1", "label": "Inverter INV1"},
+        root_cause_kind="power_chain",
+        update_message="Inverter shut down after BMS comms loss",
+        amended_summary="",
+        candidate_refs=["OPS-3456"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3456",
+        ticket_id="ticket-3456",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=2,
+        occurrence_count=2,
+        component_added=True,
+        rendered_summary="! Warning: BMS communication lost — +1 dependent alert (Inverter)",
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3456", backend="jira"), reply_to_message_id=555
+    )
+
+    assert delivery.text_override == "Inverter shut down after BMS comms loss"
+
+
+def test_amend_delivery_cascade_falls_back_to_rendered_summary_when_no_update_message():
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3456",
+        confidence=0.92,
+        decided_by="llm",
+        reason="battery/BMS -> inverter power chain",
+        affected_key={"kind": "inverter", "key": "INV1", "label": "Inverter INV1"},
+        root_cause_kind="power_chain",
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3456"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3456",
+        ticket_id="ticket-3456",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=2,
+        occurrence_count=2,
+        component_added=True,
+        rendered_summary="! Warning: BMS communication lost — +1 dependent alert (Inverter)",
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3456", backend="jira"), reply_to_message_id=555
+    )
+
+    assert delivery.text_override == "! Warning: BMS communication lost — +1 dependent alert (Inverter)"
+
+
+def test_amend_delivery_cascade_falls_back_to_generic_phrasing_when_both_blank():
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3456",
+        confidence=0.92,
+        decided_by="llm",
+        reason="battery/BMS -> inverter power chain",
+        affected_key={"kind": "inverter", "key": "INV1", "label": "Inverter INV1"},
+        root_cause_kind="power_chain",
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3456"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3456",
+        ticket_id="ticket-3456",
+        decision="amend",
+        escalated=False,
+        affected_keys_count=2,
+        occurrence_count=2,
+        component_added=True,
+        rendered_summary="",
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3456", backend="jira"), reply_to_message_id=555
+    )
+
+    assert delivery.text_override == "Folded in as a power_chain symptom: Inverter INV1"
+
+
+def test_amend_delivery_escalated_cascade_still_posts_the_escalation_message():
+    """Precedence: an escalation always wins over the cascade-specific
+    phrasing -- B4's urgency handling must not regress just because this
+    particular amend also happens to be a power_chain fold."""
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3456",
+        confidence=0.92,
+        decided_by="llm",
+        reason="battery/BMS -> inverter power chain",
+        affected_key={"kind": "inverter", "key": "INV1", "label": "Inverter INV1"},
+        root_cause_kind="power_chain",
+        update_message="Inverter shut down after BMS comms loss",
+        amended_summary="",
+        candidate_refs=["OPS-3456"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3456",
+        ticket_id="ticket-3456",
+        decision="amend",
+        escalated=True,
+        affected_keys_count=2,
+        occurrence_count=2,
+        component_added=True,
+        rendered_summary="🔴 ! Urgent: BMS communication lost — +1 dependent alert (Inverter)",
+    )
+
+    delivery = _amend_delivery(decision, amendment, NotificationTicket(ref="OPS-3456", backend="jira"))
+
+    assert delivery.top_level is True
+    assert delivery.text_override == (
+        "escalated to urgent — ! Urgent: BMS communication lost — +1 dependent alert (Inverter)"
+    )
 
 
 def test_duplicate_delivery_is_silent():

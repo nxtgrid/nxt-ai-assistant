@@ -351,6 +351,48 @@ class TestAlertIssueTypeMetadata:
         assert "Original alert text" in prompt
         assert '"live_inverter_output_kw": 0.0' in prompt
 
+    @pytest.mark.asyncio
+    async def test_selector_includes_battery_voltage_when_urgent_alert_context_has_it(self):
+        """C1: UrgentAlertContext.llm_facts() adds battery_voltage_v
+        alongside the inverter output figure -- operational_context is
+        JSON-dumped as-is (see jira_issue_types.py), so the new key needs
+        no code change here, only this coverage confirming it actually
+        reaches the prompt the issue-type selector reasons over."""
+
+        class RecordingGateway:
+            def __init__(self):
+                self.messages = []
+
+            async def generate(self, messages, _options):
+                self.messages = messages
+
+                class Result:
+                    text = '{"issue_type_id":"1","reason":"battery ok"}'
+
+                return Result()
+
+        gateway = RecordingGateway()
+        selector = JiraIssueTypeSelector(
+            base_url="https://example.atlassian.net",
+            headers={},
+            project_key="OPS",
+            model="fake-model",
+            get_session=lambda: None,
+            gateway=gateway,
+        )
+        selector._cached_types = [JiraIssueType(id="1", name="Task")]
+        selector._cached_at = time.monotonic()
+
+        result = await selector.select(
+            summary="RESTART FAILED - Inverter Off while battery Ok >52V",
+            description="Original alert text",
+            operational_context={"live_inverter_output_kw": 0.0, "battery_voltage_v": 51.8},
+        )
+
+        assert result is not None
+        prompt = gateway.messages[0].text or ""
+        assert '"battery_voltage_v": 51.8' in prompt
+
 
 class TestIsAvailable:
     @pytest.mark.asyncio

@@ -254,9 +254,58 @@ def _apply_guardrails(
                 "confident same_issue relationship"
             )
 
+    if decision == "amend":
+        target_kinds = {
+            str(entry.get("kind") or "").strip()
+            for entry in by_ref[ticket_ref].affected_keys or []
+            if entry.get("kind")
+        }
+        incoming_kind = str((affected_key or {}).get("kind") or "").strip()
+        # A ticket the store has never recorded any kind for (e.g. a
+        # Jira-discovered candidate adopted with no affected_keys) can't be
+        # proven cross-kind either way -- only refuse when we positively
+        # know the incoming kind isn't among the ticket's own.
+        is_cross_kind = bool(target_kinds and incoming_kind and incoming_kind not in target_kinds)
+        if is_cross_kind:
+            cascade_allowed = (
+                root_cause_kind == "power_chain"
+                and fr.get("ALERT_CASCADE_MERGE_ENABLED")
+                and confidence >= min_confidence
+            )
+            if not cascade_allowed:
+                # Today's outcome, restored: a cross-kind amend this module
+                # has never been able to propose before Phase C must not
+                # silently start succeeding just because the model offered
+                # one -- it needs the topology reasoning (root_cause_kind),
+                # the operator's own kill switch, and the same confidence
+                # bar every other amend already clears.
+                return CorrelationDecision(
+                    decision="new",
+                    ticket_ref=None,
+                    confidence=confidence,
+                    decided_by="llm",
+                    reason=reason
+                    or (
+                        f"cross-kind amend ({incoming_kind!r} onto a ticket carrying "
+                        f"{sorted(target_kinds)!r}) rejected: not a permitted "
+                        "power-chain cascade"
+                    ),
+                    affected_key=affected_key,
+                    root_cause_kind=root_cause_kind,
+                    update_message=update_message,
+                    amended_summary="",
+                    candidate_refs=candidate_refs,
+                    llm_raw=llm_raw,
+                    needs_root_cause_ticket=False,
+                )
+
     needs_root_cause_ticket = False
     final_ticket_ref: Optional[str] = ticket_ref
     final_ticket_id: Optional[str] = by_ref[ticket_ref].ticket_id
+    # power_chain deliberately does not join this set (unlike grid_off/
+    # grid_isolated): a power_chain symptom's parent ticket already exists
+    # by construction (the cross-kind guard above only allows it to amend
+    # onto a real candidate) -- there is nothing to synthesize.
     if decision == "amend" and root_cause_kind in _ROOT_CAUSE_KINDS_REQUIRING_PARENT:
         any_root_cause_candidate = any(c.root_cause_kind == root_cause_kind for c in candidates)
         if not any_root_cause_candidate:
@@ -504,7 +553,7 @@ def _build_prompt(
         '"relationship": "same_issue"|"same_root_cause"|null, "confidence": <0.0-1.0>, '
         '"amended_summary": "<updated ticket summary, only for amend>", '
         '"affected_key": {"kind": "...", "key": "...", "label": "..."}, '
-        '"root_cause_kind": "grid_off"|"grid_isolated"|"component"|"other", '
+        '"root_cause_kind": "grid_off"|"grid_isolated"|"power_chain"|"component"|"other", '
         '"update_message": "<one line for the O&M Telegram topic>", '
         '"reason": "<short justification>"}'
     )

@@ -1694,34 +1694,39 @@ def _amend_delivery(
     An amend that merely re-listed a component already on the ticket changed
     nothing operationally -- the ticket still records the occurrence and the
     raw alert comment, but Telegram stays quiet. Only a component genuinely
-    joining the ticket, or an escalation, is worth a message.
+    joining the ticket, an escalation, or a power-chain cascade fold is
+    worth a message.
+
+    A cascade fold (``decision.root_cause_kind == "power_chain"``) is never
+    suppressed even when it happened to add no new *keyed* component (a
+    root-cause kind recurring under a blank affected_key still folds in) --
+    linking two pings that would otherwise look unrelated into one thread is
+    the entire point of that rung, so silence here would be worse than the
+    noise it replaces. Its message prefers the LLM's own ``update_message``
+    (written specifically for this Telegram topic) over the generic
+    rendered summary, which for a mixed-kind ticket just reads "root summary
+    -- +N dependent alert(s) (...)" and does not say what changed.
 
     ``reply_to_message_id`` is resolved by the caller via
     ``DeliveryRepository.latest_for_ticket`` (message_deliveries no longer
     lives on the correlation row post-0005b) -- unused when escalating,
-    which always posts fresh rather than replying. ``ticket_summary`` is the
-    ticket's current live summary (fetched by the caller only when this
+    which always posts fresh rather than replying. For a cascade fold this
+    anchor is the *root* ticket's own latest delivery, since ``amendment``
+    always describes the root ticket being amended. ``ticket_summary`` is
+    the ticket's current live summary (fetched by the caller only when this
     delivery will actually notify) -- the escalation branch's fallback when
     ``amendment.rendered_summary`` is blank.
     """
     escalated = bool(amendment is not None and amendment.escalated)
     component_added = bool(amendment is not None and amendment.component_added)
+    cascade_symptom = bool(
+        decision is not None and getattr(decision, "root_cause_kind", None) == "power_chain"
+    )
 
-    if not (component_added or escalated):
+    if not (component_added or escalated or cascade_symptom):
         return NotificationDelivery(suppress=True)
 
-    if component_added:
-        rendered_summary = (amendment.rendered_summary or "").strip() if amendment is not None else ""
-        if rendered_summary:
-            message = rendered_summary
-        else:
-            # Rendered summary is blank on paths that never compute a full
-            # ticket summary (e.g. the Jira-only-seed path) -- fall back to
-            # the older short phrasing rather than posting/editing to blank.
-            label = (decision.affected_key or {}).get("label") or "a new component"
-            count = amendment.affected_keys_count if amendment is not None else 1
-            message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
-    else:
+    if escalated:
         content = (amendment.rendered_summary or "").strip() if amendment is not None else ""
         if not content:
             content = ticket_summary.strip()
@@ -1732,6 +1737,25 @@ def _amend_delivery(
         # "🔴 OPS-3428 — 🔴 ! Urgent: ...".
         content = content.lstrip("🔴").strip()
         message = f"escalated to urgent — {content}" if content else "escalated to urgent"
+    elif cascade_symptom:
+        rendered_summary = (amendment.rendered_summary or "").strip() if amendment is not None else ""
+        label = (decision.affected_key or {}).get("label") or "a dependent alert"
+        message = (
+            (decision.update_message or "").strip()
+            or rendered_summary
+            or f"Folded in as a power_chain symptom: {label}"
+        )
+    else:
+        rendered_summary = (amendment.rendered_summary or "").strip() if amendment is not None else ""
+        if rendered_summary:
+            message = rendered_summary
+        else:
+            # Rendered summary is blank on paths that never compute a full
+            # ticket summary (e.g. the Jira-only-seed path) -- fall back to
+            # the older short phrasing rather than posting/editing to blank.
+            label = (decision.affected_key or {}).get("label") or "a new component"
+            count = amendment.affected_keys_count if amendment is not None else 1
+            message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
 
     if escalated:
         # A fresh top-level post, not an edit -- and it becomes the new edit

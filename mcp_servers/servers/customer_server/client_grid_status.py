@@ -36,13 +36,47 @@ from shared.auth.auth_service import MANAGED_GENERATION_COLUMN
 from shared.utils.geo import parse_location_geom
 
 
+def _fresh_inverter_output_kw(voltage: Any) -> Optional[float]:
+    """``InverterVoltage.data_timestamp`` (from the Status widget's OV1
+    secondsAgo) is the gateway's own report time -- the existing 30-minute
+    staleness rule applies directly to it."""
+    if isinstance(voltage, BaseException) or not voltage or getattr(voltage, "error", None):
+        return None
+    data_timestamp = getattr(voltage, "data_timestamp", None)
+    if not data_timestamp:
+        return None
+    now = datetime.now(data_timestamp.tzinfo) if data_timestamp.tzinfo else datetime.utcnow()
+    if now - data_timestamp > timedelta(minutes=30):
+        return None
+    output_kw = getattr(voltage, "total_power_kw", None)
+    return float(output_kw) if output_kw is not None else None
+
+
+def _current_battery_voltage_v(battery: Any) -> Optional[float]:
+    """``BatteryStatus.timestamp`` is this call's own wall-clock time, not a
+    gateway report time (unlike ``InverterVoltage.data_timestamp``), so there
+    is no equivalent staleness signal to gate this reading on -- it is
+    reported whenever the widget fetch itself succeeds, independently of
+    whatever ``_fresh_inverter_output_kw`` decides for the inverter reading
+    fetched in the same request."""
+    if isinstance(battery, BaseException) or not battery:
+        return None
+    voltage_v = getattr(battery, "voltage_v", None)
+    return float(voltage_v) if voltage_v is not None else None
+
+
 class ClientGridStatusMixin:
-    async def get_live_inverter_output(self, grid_name: str) -> Optional[float]:
-        """Return fresh VRM inverter output in kW, or ``None`` when unavailable.
+    async def get_live_telemetry(self, grid_name: str) -> Dict[str, Optional[float]]:
+        """Return fresh VRM inverter output (kW) and current battery voltage
+        (V) for one grid, resolving the site once and fetching both widgets
+        in parallel. Each field is ``None`` independently of the other when
+        its own reading is unavailable -- see ``_fresh_inverter_output_kw``/
+        ``_current_battery_voltage_v`` for why only the inverter field has a
+        staleness rule.
 
         This intentionally performs no fuzzy grid lookup and no full-status
-        enrichment: notification callers have already resolved a canonical grid
-        name and need a small, best-effort live observation only.
+        enrichment: notification callers have already resolved a canonical
+        grid name and need a small, best-effort live observation only.
         """
         try:
             auth_service = get_auth_service()
@@ -61,29 +95,37 @@ class ClientGridStatusMixin:
                 )
             if not grid_row or not grid_row["generation_external_site_id"]:
                 logger.info("No VRM site configured for urgent alert grid %r", grid_name)
-                return None
+                return {"output_kw": None, "battery_voltage_v": None}
 
+            site_id = str(grid_row["generation_external_site_id"])
             vrm_platform = VRMPlatform()
             await vrm_platform.initialize()
-            voltage = await vrm_platform.get_current_inverter_voltage(
-                str(grid_row["generation_external_site_id"])
+            voltage, battery = await asyncio.gather(
+                vrm_platform.get_current_inverter_voltage(site_id),
+                vrm_platform.get_current_battery_status(site_id),
+                return_exceptions=True,
             )
-            if not voltage or getattr(voltage, "error", None):
-                return None
 
-            data_timestamp = getattr(voltage, "data_timestamp", None)
-            if not data_timestamp:
-                return None
-            now = datetime.now(data_timestamp.tzinfo) if data_timestamp.tzinfo else datetime.utcnow()
-            if now - data_timestamp > timedelta(minutes=30):
-                logger.info("Stale VRM output for urgent alert grid %r", grid_name)
-                return None
+            output_kw = _fresh_inverter_output_kw(voltage)
+            if output_kw is None and not isinstance(voltage, BaseException):
+                logger.info("Stale or unavailable VRM output for urgent alert grid %r", grid_name)
 
-            output_kw = getattr(voltage, "total_power_kw", None)
-            return float(output_kw) if output_kw is not None else None
+            return {
+                "output_kw": output_kw,
+                "battery_voltage_v": _current_battery_voltage_v(battery),
+            }
         except Exception:
-            logger.warning("Live VRM output fetch failed for %s", grid_name, exc_info=True)
-            return None
+            logger.warning("Live VRM telemetry fetch failed for %s", grid_name, exc_info=True)
+            return {"output_kw": None, "battery_voltage_v": None}
+
+    async def get_live_inverter_output(self, grid_name: str) -> Optional[float]:
+        """Return fresh VRM inverter output in kW, or ``None`` when unavailable.
+
+        Thin wrapper around ``get_live_telemetry`` -- kept so existing callers
+        that only need the output figure are untouched.
+        """
+        telemetry = await self.get_live_telemetry(grid_name)
+        return telemetry["output_kw"]
 
     async def get_grid_status(
         self,
