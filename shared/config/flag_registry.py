@@ -598,6 +598,18 @@ _FLAGS: List[Flag] = [
         group="ticketing",
         label="Group related alerts onto one ticket",
     ),
+    _b(
+        "ALERT_CASCADE_MERGE_ENABLED",
+        False,
+        "Merge a cascading equipment failure (e.g. battery/BMS communication loss "
+        "causing an inverter protective shutdown) onto the root-cause ticket instead "
+        "of filing it separately. Off (default): a same-grid, different-equipment-kind "
+        "alert always files its own ticket, even when the correlation prompt's "
+        "failure-topology guidance says it is a likely symptom.",
+        group="ticketing",
+        label="Merge cascading equipment failures onto the root-cause ticket",
+        depends_on="ALERT_CORRELATION_ENABLED",
+    ),
     _i(
         "URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS",
         3,

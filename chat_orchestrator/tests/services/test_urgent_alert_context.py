@@ -32,14 +32,14 @@ def test_live_context_defers_the_default_mcp_import_until_lookup(monkeypatch):
 
 
 def test_subject_urgency_wins_over_a_lower_structured_severity():
-    async def read_output(_grid_name: str) -> float | None:
-        return 1.0
+    async def read_telemetry(_grid_name: str) -> dict:
+        return {"output_kw": 1.0, "battery_voltage_v": None}
 
     context = build_urgent_alert_context(
         subject="! Urgent: Grid down",
         incoming_severity="warning",
         grid_name="Acme Grid",
-        read_output=read_output,
+        read_telemetry=read_telemetry,
     )
 
     assert context.is_incoming_urgent() is True
@@ -49,17 +49,17 @@ def test_subject_urgency_wins_over_a_lower_structured_severity():
 async def test_live_context_preserves_zero_kw_and_reuses_the_single_lookup():
     calls = 0
 
-    async def read_output(grid_name: str) -> float | None:
+    async def read_telemetry(grid_name: str) -> dict:
         nonlocal calls
         calls += 1
         assert grid_name == "Acme Grid"
-        return 0.0
+        return {"output_kw": 0.0, "battery_voltage_v": None}
 
     context = build_urgent_alert_context(
         subject="! Urgent: Inverter off",
         incoming_severity="urgent",
         grid_name="Acme Grid",
-        read_output=read_output,
+        read_telemetry=read_telemetry,
     )
 
     output, line, facts = await asyncio.gather(
@@ -74,32 +74,33 @@ async def test_live_context_preserves_zero_kw_and_reuses_the_single_lookup():
 
 @pytest.mark.asyncio
 async def test_live_context_reports_unavailable_when_lookup_raises():
-    async def read_output(_grid_name: str) -> float | None:
+    async def read_telemetry(_grid_name: str) -> dict:
         raise RuntimeError("VRM unavailable")
 
     context = build_urgent_alert_context(
         subject="! Urgent: Inverter off",
         incoming_severity="urgent",
         grid_name="Acme Grid",
-        read_output=read_output,
+        read_telemetry=read_telemetry,
     )
 
     assert await context.output_kw() is None
+    assert await context.battery_voltage_v() is None
     assert await context.telegram_output_line() == "⚡ Live output: unavailable"
     assert await context.llm_facts() == {"live_inverter_output": "unavailable"}
 
 
 @pytest.mark.asyncio
 async def test_live_context_reports_unavailable_when_lookup_times_out():
-    async def read_output(_grid_name: str) -> float | None:
+    async def read_telemetry(_grid_name: str) -> dict:
         await asyncio.sleep(1)
-        return 2.4
+        return {"output_kw": 2.4, "battery_voltage_v": 51.8}
 
     context = build_urgent_alert_context(
         subject="! Urgent: Inverter off",
         incoming_severity="urgent",
         grid_name="Acme Grid",
-        read_output=read_output,
+        read_telemetry=read_telemetry,
         timeout_seconds=0.001,
     )
 
@@ -107,16 +108,88 @@ async def test_live_context_reports_unavailable_when_lookup_times_out():
 
 
 @pytest.mark.asyncio
-async def test_customer_live_output_rejects_stale_vrm_data(monkeypatch):
-    from datetime import datetime, timedelta, timezone
+async def test_telegram_line_appends_battery_voltage_when_available():
+    async def read_telemetry(_grid_name: str) -> dict:
+        return {"output_kw": 2.4, "battery_voltage_v": 51.8}
 
+    context = build_urgent_alert_context(
+        subject="! Urgent: Inverter off",
+        incoming_severity="urgent",
+        grid_name="Acme Grid",
+        read_telemetry=read_telemetry,
+    )
+
+    assert await context.telegram_output_line() == "⚡ Live output: 2.4 kW · 🔋 Battery: 51.8 V"
+    assert await context.llm_facts() == {"live_inverter_output_kw": 2.4, "battery_voltage_v": 51.8}
+
+
+@pytest.mark.asyncio
+async def test_telegram_line_omits_battery_clause_when_only_output_is_known():
+    """Each half degrades independently -- a known output with no battery
+    reading must not print a redundant 'unavailable' battery clause."""
+
+    async def read_telemetry(_grid_name: str) -> dict:
+        return {"output_kw": 2.4, "battery_voltage_v": None}
+
+    context = build_urgent_alert_context(
+        subject="! Urgent: Inverter off",
+        incoming_severity="urgent",
+        grid_name="Acme Grid",
+        read_telemetry=read_telemetry,
+    )
+
+    assert await context.telegram_output_line() == "⚡ Live output: 2.4 kW"
+    assert await context.llm_facts() == {"live_inverter_output_kw": 2.4}
+
+
+@pytest.mark.asyncio
+async def test_telegram_line_reports_battery_with_unavailable_output():
+    """The converse: output unknown but battery known -- output keeps its
+    own 'unavailable' wording, battery still appends."""
+
+    async def read_telemetry(_grid_name: str) -> dict:
+        return {"output_kw": None, "battery_voltage_v": 51.8}
+
+    context = build_urgent_alert_context(
+        subject="! Urgent: Inverter off",
+        incoming_severity="urgent",
+        grid_name="Acme Grid",
+        read_telemetry=read_telemetry,
+    )
+
+    assert (
+        await context.telegram_output_line() == "⚡ Live output: unavailable · 🔋 Battery: 51.8 V"
+    )
+    assert await context.llm_facts() == {
+        "live_inverter_output": "unavailable",
+        "battery_voltage_v": 51.8,
+    }
+
+
+def _fake_grid_lookup_env(monkeypatch, *, site_id: str = "123"):
+    """Shared plumbing for the get_live_telemetry tests below: a fake auth
+    pool that resolves one grid to one VRM site id. Returns the
+    (client_grid_status module, CustomerServiceClient class) pair so each
+    test only has to patch VRMPlatform.
+
+    Imported as ``servers.customer_server.*`` (relying on the ``sys.path``
+    insert below), matching exactly how ``client.py`` imports
+    ``ClientGridStatusMixin`` internally -- importing instead as
+    ``mcp_servers.servers.customer_server.*`` resolves to a second, distinct
+    module object under a different fully-qualified name, so patching *that*
+    copy's ``get_auth_service``/``VRMPlatform`` silently misses the mixin
+    ``CustomerServiceClient`` actually calls through, and every assertion
+    here would pass by accident (any unpatched failure degrades to the same
+    ``None``/empty-dict result a correctly-mocked stale/absent reading
+    would).
+    """
     sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "mcp_servers"))
-    from mcp_servers.servers.customer_server import client_grid_status
-    from mcp_servers.servers.customer_server.client import CustomerServiceClient
+    from servers.customer_server import client_grid_status
+    from servers.customer_server.client import CustomerServiceClient
 
     class FakeConnection:
         async def fetchrow(self, _query, _grid_name):
-            return {"generation_external_site_id": "123"}
+            return {"generation_external_site_id": site_id}
 
     class Acquire:
         async def __aenter__(self):
@@ -133,10 +206,23 @@ async def test_customer_live_output_rejects_stale_vrm_data(monkeypatch):
         async def _get_db_pool(self):
             return FakePool()
 
+    monkeypatch.setattr(client_grid_status, "get_auth_service", lambda: FakeAuthService())
+    return client_grid_status, CustomerServiceClient
+
+
+@pytest.mark.asyncio
+async def test_customer_live_output_rejects_stale_vrm_data(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    client_grid_status, CustomerServiceClient = _fake_grid_lookup_env(monkeypatch)
+
     class FakeVoltage:
         error = None
         total_power_kw = 2.4
         data_timestamp = datetime.now(timezone.utc) - timedelta(minutes=31)
+
+    class FakeBattery:
+        voltage_v = 51.2
 
     class FakeVRMPlatform:
         async def initialize(self):
@@ -146,7 +232,130 @@ async def test_customer_live_output_rejects_stale_vrm_data(monkeypatch):
             assert site_id == "123"
             return FakeVoltage()
 
-    monkeypatch.setattr(client_grid_status, "get_auth_service", lambda: FakeAuthService())
+        async def get_current_battery_status(self, site_id):
+            assert site_id == "123"
+            return FakeBattery()
+
     monkeypatch.setattr(client_grid_status, "VRMPlatform", FakeVRMPlatform)
 
     assert await CustomerServiceClient().get_live_inverter_output("Acme Grid") is None
+
+
+@pytest.mark.asyncio
+async def test_live_telemetry_returns_output_and_battery_voltage_together(monkeypatch):
+    from datetime import datetime, timezone
+
+    client_grid_status, CustomerServiceClient = _fake_grid_lookup_env(monkeypatch)
+
+    class FakeVoltage:
+        error = None
+        total_power_kw = 2.4
+        data_timestamp = datetime.now(timezone.utc)
+
+    class FakeBattery:
+        voltage_v = 51.8
+
+    class FakeVRMPlatform:
+        async def initialize(self):
+            return None
+
+        async def get_current_inverter_voltage(self, site_id):
+            return FakeVoltage()
+
+        async def get_current_battery_status(self, site_id):
+            return FakeBattery()
+
+    monkeypatch.setattr(client_grid_status, "VRMPlatform", FakeVRMPlatform)
+
+    telemetry = await CustomerServiceClient().get_live_telemetry("Acme Grid")
+    assert telemetry == {"output_kw": 2.4, "battery_voltage_v": 51.8}
+
+
+@pytest.mark.asyncio
+async def test_live_telemetry_battery_voltage_survives_a_stale_inverter_reading(monkeypatch):
+    """C1: each field is independently None -- a stale/errored inverter
+    reading must not blank out an otherwise-good battery reading."""
+    from datetime import datetime, timedelta, timezone
+
+    client_grid_status, CustomerServiceClient = _fake_grid_lookup_env(monkeypatch)
+
+    class FakeVoltage:
+        error = None
+        total_power_kw = 2.4
+        data_timestamp = datetime.now(timezone.utc) - timedelta(minutes=45)
+
+    class FakeBattery:
+        voltage_v = 51.8
+
+    class FakeVRMPlatform:
+        async def initialize(self):
+            return None
+
+        async def get_current_inverter_voltage(self, site_id):
+            return FakeVoltage()
+
+        async def get_current_battery_status(self, site_id):
+            return FakeBattery()
+
+    monkeypatch.setattr(client_grid_status, "VRMPlatform", FakeVRMPlatform)
+
+    telemetry = await CustomerServiceClient().get_live_telemetry("Acme Grid")
+    assert telemetry == {"output_kw": None, "battery_voltage_v": 51.8}
+
+
+@pytest.mark.asyncio
+async def test_live_telemetry_output_survives_a_failed_battery_fetch(monkeypatch):
+    from datetime import datetime, timezone
+
+    client_grid_status, CustomerServiceClient = _fake_grid_lookup_env(monkeypatch)
+
+    class FakeVoltage:
+        error = None
+        total_power_kw = 2.4
+        data_timestamp = datetime.now(timezone.utc)
+
+    class FakeVRMPlatform:
+        async def initialize(self):
+            return None
+
+        async def get_current_inverter_voltage(self, site_id):
+            return FakeVoltage()
+
+        async def get_current_battery_status(self, site_id):
+            raise RuntimeError("BatterySummary widget unavailable")
+
+    monkeypatch.setattr(client_grid_status, "VRMPlatform", FakeVRMPlatform)
+
+    telemetry = await CustomerServiceClient().get_live_telemetry("Acme Grid")
+    assert telemetry == {"output_kw": 2.4, "battery_voltage_v": None}
+
+
+@pytest.mark.asyncio
+async def test_live_telemetry_returns_both_none_when_grid_has_no_vrm_site(monkeypatch):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "mcp_servers"))
+    from servers.customer_server import client_grid_status
+    from servers.customer_server.client import CustomerServiceClient
+
+    class FakeConnection:
+        async def fetchrow(self, _query, _grid_name):
+            return {"generation_external_site_id": None}
+
+    class Acquire:
+        async def __aenter__(self):
+            return FakeConnection()
+
+        async def __aexit__(self, *_args):
+            return False
+
+    class FakePool:
+        def acquire(self):
+            return Acquire()
+
+    class FakeAuthService:
+        async def _get_db_pool(self):
+            return FakePool()
+
+    monkeypatch.setattr(client_grid_status, "get_auth_service", lambda: FakeAuthService())
+
+    telemetry = await CustomerServiceClient().get_live_telemetry("Off-grid Site")
+    assert telemetry == {"output_kw": None, "battery_voltage_v": None}

@@ -59,10 +59,57 @@ are "amend" (two affected components of one issue), never "duplicate".
   "grid_isolated"`, but say so explicitly in your `reason` -- a device that
   is not powered by this grid is a separate issue and should not be grouped
   just because it shares a grid name.
-- Absent one of the above signals, do not assume a shared root cause just
-  because two alerts are on the same grid -- an MPPT issue and an inverter
-  fault on the same grid are usually unrelated unless the grid facts say
+- Absent one of the above signals or a named chain in Failure Topology
+  below, do not assume a shared root cause just because two alerts are on
+  the same grid -- an MPPT issue and an inverter fault on the same grid are
+  usually unrelated unless the grid facts (or Failure Topology) say
   otherwise.
+
+# Failure Topology
+
+`grid_off`/`grid_isolated` above cover a *grid-wide state* causing symptoms
+elsewhere, and can still file the root-cause ticket first when none exists
+yet. The chains below instead cover **one specific piece of equipment
+failing, and a second, different kind of equipment failing as a direct
+consequence of it**, within roughly a 30-minute window on the same grid.
+Because the earlier event's ticket already exists by the time the second
+alert arrives, use `root_cause_kind: "power_chain"` and **amend onto that
+earlier ticket** -- never synthesize a new root-cause ticket for a
+`power_chain` symptom the way you would for `grid_off`/`grid_isolated`; if
+genuinely no open candidate represents the root cause, decide **new**
+instead.
+
+- **Battery/BMS communication loss -> inverter protective shutdown -> grid
+  outage.** A battery or BMS communication-loss alert, followed within
+  ~30 minutes by an inverter-off / restart-failed / grid-outage alert on the
+  same grid, is very likely one event: the inverter protectively shut itself
+  down (or the site went dark) *because* it lost battery visibility, not
+  because the inverter independently failed. Amend the later inverter/grid
+  alert onto the earlier battery/BMS ticket, `root_cause_kind: "power_chain"`.
+- **Grid off -> MPPT low production, DCU/base-station down, token-delivery
+  drop.** The same chain as the Root Cause Rules above, restated here for a
+  complete picture of what "causally related" means on this grid -- this one
+  stays `root_cause_kind: "grid_off"`/`"grid_isolated"`, not `power_chain`,
+  since Anansi may need to file the root-cause ticket first.
+- **Combiner or string fault -> MPPT underproduction.** A combiner-box or
+  string-fault alert, followed by an underproduction alert on the MPPT(s)
+  fed by that combiner/string, is one event. Amend the MPPT alert onto the
+  combiner/string ticket, `root_cause_kind: "power_chain"`.
+
+**Direction of causation:** the *earlier* ticket is always the parent, even
+when the later symptom reads as more severe or more urgent than the
+original alert. An urgent "Grid outage" arriving nine minutes after a
+warning-level "BMS communication lost" is still the BMS ticket's symptom,
+not a new, unrelated urgent issue -- amend onto the earlier ticket and
+report the alert accurately; Anansi's own escalation handling takes care of
+raising the ticket's priority from there.
+
+**Use the live facts.** When grid facts include `live_telemetry` with a
+`battery_voltage_v` reading and the incoming alert makes a claim about
+battery state (e.g. "battery Ok >52V"), check that claim against the live
+reading before accepting it at face value -- a stale or wrong claim in the
+alert text is not a reason to treat an inverter shutdown as unrelated to a
+battery/BMS root cause.
 
 # Component Taxonomy
 
@@ -102,9 +149,32 @@ An open ticket already lists MPPT A3 as an affected component (same grid,
 same signature). The exact same "! Warning: MPPT A3 ..." alert fires again
 30 minutes later. Decision: **duplicate**.
 
-**Example 4 -- unrelated issue, same grid (new):**
+**Example 4 -- unrelated issue, same grid, no named chain (new):**
 Grid "Kudi" has an open MPPT-performance ticket. A "! Urgent: Inverter Fault
 reported in Kudi, could be causing Grid outage !" alert arrives. Grid facts
-show `is_hps_on: true` (grid is currently on, so this isn't a root-cause
-cascade) and nothing in the open ticket's history relates to an inverter
-fault. Decision: **new**.
+show `is_hps_on: true` (grid is currently on, so this isn't a `grid_off`
+cascade), nothing in the open ticket's history relates to an inverter
+fault, and neither alert mentions a battery/BMS communication loss or a
+combiner/string fault -- no Failure Topology chain names this pair, so an
+MPPT issue and an inverter fault stay unrelated. Decision: **new**.
+
+**Example 5 -- battery/BMS -> inverter power chain (amend), and the wrong
+answer to avoid:**
+Grid "Ogbinbiri" has an open ticket OPS-3456, "! Warning: BMS communication
+lost", filed 4 minutes ago. A new alert arrives: "RESTART FAILED - Inverter
+Off while battery Ok >52V ... causing Grid outage". Grid facts'
+`live_telemetry.battery_voltage_v` gives the actual current reading, which
+you should check against the alert's own "battery Ok >52V" claim rather
+than trusting it blindly. This is the Battery/BMS -> inverter chain above,
+well within the ~30-minute window, with OPS-3456 as the earlier ticket.
+Decision: **amend** onto OPS-3456, `root_cause_kind: "power_chain"`.
+
+*This is a real historical case Anansi got wrong before this guidance
+existed: it decided* **new** *at 0.9 confidence, reasoning "The incoming
+alert describes a total grid outage due to an inverter failure, which is
+distinct from the existing BMS communication issue (OPS-3456) and the
+batt[ery]..." -- treating the inverter shutdown as independent of the BMS
+loss it immediately followed. That reasoning has the causation backwards:
+the inverter losing battery visibility and shutting itself down is the
+expected consequence of the BMS communication loss, not evidence against
+it. Do not repeat it.*
