@@ -162,7 +162,9 @@ def test_build_issue_payload_includes_caller_supplied_assignee_and_organisation_
 
     assert payload is not None
     assert payload["fields"]["assignee"] == {"accountId": "account-1"}
-    assert payload["fields"]["customfield_56"] == {"id": "organisation-2"}
+    # Organizations is a multi-value Jira field even for a single org --
+    # a bare object 400s against the real API (2026-08-11 Hardrock incident).
+    assert payload["fields"]["customfield_56"] == [{"id": "organisation-2"}]
 
 
 def test_incompatible_type_with_an_unknown_required_field_is_excluded():
