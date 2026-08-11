@@ -1,6 +1,13 @@
 """Tests for correlation_render.py: render_summary/render_description (pure
 functions) and apply_amendment (the amend/duplicate execution orchestration
 that runs after AlertCorrelator decides).
+
+``correlation`` dicts used throughout only carry the columns
+``ticket_correlations`` actually has post-0005b (see
+db/migrations/0005b_ticket_schema_validate_and_contract.sql) -- current
+ticket ref/backend/summary/status/grid live on ``tickets`` instead, and
+Telegram delivery coordinates live on ``message_deliveries``, neither of
+which this module reads or writes.
 """
 
 from __future__ import annotations
@@ -22,8 +29,7 @@ from orchestrator.services.ticketing.correlator import CorrelationDecision
 
 def _correlation(**overrides: Any) -> Dict[str, Any]:
     defaults: Dict[str, Any] = dict(
-        ticket_ref="TKT-1",
-        grid_name="Kudi",
+        ticket_id="ticket-1",
         summary_base="! Warning: MPPT A3 in Kudi seems to perform lower than other MPPTs !",
         description_base="Please check VRM.",
         affected_keys=[
@@ -39,9 +45,6 @@ def _correlation(**overrides: Any) -> Dict[str, Any]:
         occurrence_count=1,
         root_cause_kind=None,
         escalated_at=None,
-        telegram_chat_id="-100555",
-        telegram_topic_id="42",
-        telegram_message_id=999,
     )
     defaults.update(overrides)
     return defaults
@@ -52,7 +55,7 @@ class TestRenderSummary:
         correlation = _correlation()
         alert = AlertFacts(subject="! Warning: MPPT A3 in Kudi !")
 
-        result = render_summary(correlation, alert, llm_summary="! Warning: custom text !")
+        result = render_summary(correlation, alert, llm_summary="! Warning: custom text !", grid_name="Kudi")
 
         assert result == "! Warning: custom text !"
 
@@ -65,12 +68,32 @@ class TestRenderSummary:
         )
         alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !")
 
-        result = render_summary(correlation, alert, llm_summary="ignored for multi-key")
+        result = render_summary(correlation, alert, llm_summary="ignored for multi-key", grid_name="Kudi")
 
         assert "2" in result
         assert "A3" in result and "A7" in result
         assert "Kudi" in result
         assert result.startswith("! Warning:")
+
+    def test_grid_name_renders_without_a_blank_gap(self):
+        """Regression: ticket_correlations dropped its own grid_name column
+        (0005b) -- a caller that forgot to pass the real grid_name used to
+        silently render "N MPPTs in  affected" (a blank, double-spaced grid
+        name) because render_summary fell back to reading a now-nonexistent
+        correlation["grid_name"]. grid_name is now a required parameter, so
+        this asserts the happy path never regresses to that blank gap."""
+        correlation = _correlation(
+            affected_keys=[
+                {"kind": "mppt", "key": "0", "label": "MPPT 0", "first_seen": "t", "last_seen": "t", "count": 1},
+                {"kind": "mppt", "key": "5", "label": "MPPT 5", "first_seen": "t", "last_seen": "t", "count": 1},
+            ]
+        )
+        alert = AlertFacts(subject="! Urgent: MPPT 5 in Akinsolu !", severity="urgent")
+
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Akinsolu")
+
+        assert "in Akinsolu affected" in result
+        assert "in  affected" not in result
 
     def test_urgent_severity_marker_preserved(self):
         correlation = _correlation(
@@ -82,7 +105,7 @@ class TestRenderSummary:
         )
         alert = AlertFacts(subject="! Urgent: DCU 2 down !")
 
-        result = render_summary(correlation, alert, llm_summary="")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Kudi")
 
         assert result.startswith("! Urgent:")
 
@@ -95,7 +118,7 @@ class TestRenderSummary:
         )
         alert = AlertFacts(component_kind="mppt", severity="urgent")
 
-        result = render_summary(correlation, alert, llm_summary="")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Kudi")
 
         assert result.startswith("! Urgent:")
 
@@ -107,7 +130,7 @@ class TestRenderSummary:
         correlation = _correlation(affected_keys=keys)
         alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !")
 
-        result = render_summary(correlation, alert, llm_summary="")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="Kudi")
 
         assert "+2 more" in result
         assert "8" in result  # total count still shown
@@ -189,15 +212,18 @@ class _FakeStore:
         self.bump_occurrence_calls: List[str] = []
         self.merge_calls: List[Dict[str, Any]] = []
         self.record_amendment_calls: List[Dict[str, Any]] = []
+        self.upsert_calls: List[Dict[str, Any]] = []
 
-    async def bump_occurrence(self, ticket_ref: str, occurred_at=None) -> bool:
-        self.bump_occurrence_calls.append(ticket_ref)
+    async def bump_occurrence(self, ticket_id: str, occurred_at=None) -> bool:
+        self.bump_occurrence_calls.append(ticket_id)
+        if self.correlation is not None:
+            self.correlation["occurrence_count"] = int(self.correlation.get("occurrence_count") or 1) + 1
         return True
 
-    async def merge_affected_key(self, ticket_ref, *, kind, key, label, occurred_at=None, signature=None):
+    async def merge_affected_key(self, ticket_id, *, kind, key, label, occurred_at=None, signature=None):
         from orchestrator.services.ticketing.correlation_store import AffectedKeyMerge
 
-        self.merge_calls.append({"ticket_ref": ticket_ref, "kind": kind, "key": key, "label": label})
+        self.merge_calls.append({"ticket_id": ticket_id, "kind": kind, "key": key, "label": label})
         if self.correlation is None:
             return None
         affected = list(self.correlation.get("affected_keys") or [])
@@ -207,21 +233,56 @@ class _FakeStore:
             self.correlation["affected_keys"] = affected
         return AffectedKeyMerge(affected_keys=affected, added=added)
 
-    async def get_correlation(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
+    async def get_correlation(self, ticket_id: str) -> Optional[Dict[str, Any]]:
         return self.correlation
+
+    async def upsert_correlation(
+        self,
+        *,
+        ticket_id: str,
+        root_cause_kind,
+        primary_signature: str,
+        signatures,
+        affected_keys,
+        summary_base: str,
+        description_base: str,
+        severity: str,
+    ) -> bool:
+        self.upsert_calls.append(
+            {
+                "ticket_id": ticket_id,
+                "root_cause_kind": root_cause_kind,
+                "primary_signature": primary_signature,
+                "signatures": signatures,
+                "summary_base": summary_base,
+                "description_base": description_base,
+                "severity": severity,
+            }
+        )
+        self.correlation = {
+            "ticket_id": ticket_id,
+            "root_cause_kind": root_cause_kind,
+            "primary_signature": primary_signature,
+            "signatures": signatures,
+            "affected_keys": affected_keys,
+            "summary_base": summary_base,
+            "description_base": description_base,
+            "severity": severity,
+            "occurrence_count": 1,
+            "escalated_at": None,
+        }
+        return True
 
     async def record_amendment(
         self,
-        ticket_ref: str,
+        ticket_id: str,
         *,
-        summary_current: str,
         severity: Optional[str] = None,
         escalated: bool = False,
     ) -> bool:
         self.record_amendment_calls.append(
             {
-                "ticket_ref": ticket_ref,
-                "summary_current": summary_current,
+                "ticket_id": ticket_id,
                 "severity": severity,
                 "escalated": escalated,
             }
@@ -253,6 +314,7 @@ def _amend_decision(**overrides: Any) -> CorrelationDecision:
     defaults: Dict[str, Any] = dict(
         decision="amend",
         ticket_ref="TKT-1",
+        ticket_id="ticket-1",
         confidence=0.9,
         decided_by="llm",
         reason="same root cause",
@@ -293,9 +355,11 @@ class TestApplyAmendmentAmend:
             store=store,
             ticket_service=ticket_service,
             ticket_ref="TKT-1",
+            ticket_id="ticket-1",
             alert=alert,
             decision=_amend_decision(),
             raw_text="raw notify text",
+            grid_name="Kudi",
         )
 
         assert result is not None
@@ -308,8 +372,7 @@ class TestApplyAmendmentAmend:
         assert result.rendered_summary != ""
         assert store.record_amendment_calls == [
             {
-                "ticket_ref": "TKT-1",
-                "summary_current": ticket_service.update_calls[0]["summary"],
+                "ticket_id": "ticket-1",
                 "severity": "warning",
                 "escalated": False,
             }
@@ -326,15 +389,17 @@ class TestApplyAmendmentAmend:
             store=store,
             ticket_service=ticket_service,
             ticket_ref="TKT-1",
+            ticket_id="ticket-1",
             alert=alert,
             decision=_amend_decision(),
             raw_text="raw notify text",
+            grid_name="Kudi",
         )
 
         assert result is not None
         assert result.decision == "amend"
-        assert store.bump_occurrence_calls == ["TKT-1"]
-        assert store.merge_calls == [{"ticket_ref": "TKT-1", "kind": "mppt", "key": "A7", "label": "MPPT A7"}]
+        assert store.bump_occurrence_calls == ["ticket-1"]
+        assert store.merge_calls == [{"ticket_id": "ticket-1", "kind": "mppt", "key": "A7", "label": "MPPT A7"}]
         assert len(ticket_service.update_calls) == 1
         assert ticket_service.update_calls[0]["description"] is not None
         assert ticket_service.comment_calls == [
@@ -353,9 +418,11 @@ class TestApplyAmendmentAmend:
             store=store,
             ticket_service=ticket_service,
             ticket_ref="TKT-1",
+            ticket_id="ticket-1",
             alert=alert,
             decision=_amend_decision(ticket_severity="warning"),
             raw_text="raw text",
+            grid_name="Kudi",
         )
 
         assert result.escalated is True
@@ -384,9 +451,11 @@ class TestApplyAmendmentAmend:
             store=store,
             ticket_service=ticket_service,
             ticket_ref="TKT-1",
+            ticket_id="ticket-1",
             alert=alert,
             decision=_amend_decision(ticket_severity="urgent"),
             raw_text="raw text",
+            grid_name="Kudi",
         )
 
         assert result.escalated is False
@@ -407,12 +476,14 @@ class TestApplyAmendmentAmend:
             store=store,
             ticket_service=ticket_service,
             ticket_ref="TKT-1",
+            ticket_id="ticket-1",
             alert=alert,
             decision=_amend_decision(
                 decided_by="replay",
                 ticket_severity="urgent",
             ),
             raw_text="same retried alert",
+            grid_name="Kudi",
         )
 
         assert result is not None
@@ -437,52 +508,85 @@ class TestApplyAmendmentAmend:
             store=store,
             ticket_service=ticket_service,
             ticket_ref="TKT-1",
+            ticket_id="ticket-1",
             alert=alert,
             decision=_amend_decision(ticket_severity="warning"),
             raw_text="raw text",
+            grid_name="Kudi",
         )
 
         assert result.escalated is True
         assert ticket_service.update_calls[0]["priority_id"] == "highest"
 
     @pytest.mark.asyncio
-    async def test_returns_none_when_correlation_missing(self):
+    async def test_seeds_a_correlation_row_when_none_exists_yet(self):
+        """A ticket_id the correlator just resolved (e.g. via
+        TicketRepository.adopt_external for a candidate discovered only
+        through backend search) may never have had correlation state
+        written. apply_amendment now seeds one from this alert and proceeds
+        through the ordinary amend flow, rather than special-casing into an
+        unconditional escalation the way the deleted "correlation row
+        missing" branch used to."""
         store = _FakeStore(correlation=None)
         ticket_service = _FakeTicketService()
-        alert = AlertFacts(subject="x")
-
-        result = await apply_amendment(
-            store=store,
-            ticket_service=ticket_service,
-            ticket_ref="TKT-1",
-            alert=alert,
-            decision=_amend_decision(),
-            raw_text="raw text",
-        )
-
-        assert result is None
-        assert ticket_service.update_calls == []
-
-    @pytest.mark.asyncio
-    async def test_urgent_jira_only_candidate_updates_without_correlation_row(self):
-        store = _FakeStore(correlation=None)
-        ticket_service = _FakeTicketService()
-        alert = AlertFacts(
-            subject="Inverter outage in Kudi",
-            severity="urgent",
-        )
+        alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !", severity="warning")
 
         result = await apply_amendment(
             store=store,
             ticket_service=ticket_service,
             ticket_ref="OPS-42",
+            ticket_id="ticket-ops-42",
             alert=alert,
             decision=_amend_decision(
                 ticket_ref="OPS-42",
-                ticket_severity="warning",
+                ticket_id="ticket-ops-42",
+                ticket_severity="",
+                amended_summary="MPPT A7 in Kudi",
+            ),
+            raw_text="raw notify text",
+            grid_name="Kudi",
+        )
+
+        assert result is not None
+        assert result.decision == "amend"
+        # A non-urgent first alert on a freshly-adopted candidate must not
+        # force-escalate -- the deleted branch used to only ever reach this
+        # scenario via an urgent alert and always escalated unconditionally.
+        assert result.escalated is False
+        assert ticket_service.update_calls[0]["priority_id"] is None
+        assert not ticket_service.update_calls[0]["summary"].startswith("🔴")
+        assert store.upsert_calls == [
+            {
+                "ticket_id": "ticket-ops-42",
+                "root_cause_kind": None,
+                "primary_signature": "",
+                "signatures": [],
+                "summary_base": "MPPT A7 in Kudi",
+                "description_base": "raw notify text",
+                "severity": "warning",
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_urgent_first_alert_on_freshly_adopted_candidate_escalates(self):
+        store = _FakeStore(correlation=None)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(subject="Inverter outage in Kudi", severity="urgent")
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="OPS-42",
+            ticket_id="ticket-ops-42",
+            alert=alert,
+            decision=_amend_decision(
+                ticket_ref="OPS-42",
+                ticket_id="ticket-ops-42",
+                ticket_severity="",
                 amended_summary="Kudi inverter outage",
             ),
             raw_text="urgent raw text",
+            grid_name="Kudi",
         )
 
         assert result is not None
@@ -491,7 +595,7 @@ class TestApplyAmendmentAmend:
             {
                 "ref": "OPS-42",
                 "summary": "🔴 ! Urgent: Kudi inverter outage",
-                "description": None,
+                "description": ticket_service.update_calls[0]["description"],
                 "priority_id": "highest",
             }
         ]
@@ -499,6 +603,31 @@ class TestApplyAmendmentAmend:
             {"ref": "OPS-42", "body": "urgent raw text", "public": False}
         ]
         assert result.rendered_summary == "🔴 ! Urgent: Kudi inverter outage"
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_seeding_the_missing_row_fails(self):
+        class _FailingSeedStore(_FakeStore):
+            async def upsert_correlation(self, **_kwargs) -> bool:
+                self.upsert_calls.append(_kwargs)
+                return False
+
+        store = _FailingSeedStore(correlation=None)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(subject="x")
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            ticket_id="ticket-1",
+            alert=alert,
+            decision=_amend_decision(),
+            raw_text="raw text",
+            grid_name="Kudi",
+        )
+
+        assert result is None
+        assert ticket_service.update_calls == []
 
 
 class TestApplyAmendmentReportsNovelty:
@@ -509,9 +638,11 @@ class TestApplyAmendmentReportsNovelty:
             store=store,
             ticket_service=_FakeTicketService(),
             ticket_ref="TKT-1",
+            ticket_id="ticket-1",
             alert=AlertFacts(subject="! Warning: MPPT A7 in Kudi !", severity="warning"),
             decision=_amend_decision(),
             raw_text="raw notify text",
+            grid_name="Kudi",
         )
 
         assert result is not None
@@ -528,9 +659,11 @@ class TestApplyAmendmentReportsNovelty:
             store=store,
             ticket_service=_FakeTicketService(),
             ticket_ref="TKT-1",
+            ticket_id="ticket-1",
             alert=AlertFacts(subject="! Warning: MPPT A3 in Kudi !", severity="warning"),
             decision=decision,
             raw_text="raw notify text",
+            grid_name="Kudi",
         )
 
         assert result is not None
@@ -546,9 +679,11 @@ class TestApplyAmendmentReportsNovelty:
             store=store,
             ticket_service=_FakeTicketService(),
             ticket_ref="TKT-1",
+            ticket_id="ticket-1",
             alert=AlertFacts(subject="! Urgent: Grid outage in Kudi !", severity="warning"),
             decision=_amend_decision(affected_key=None),
             raw_text="raw notify text",
+            grid_name="Kudi",
         )
 
         assert result is not None
@@ -569,34 +704,16 @@ class TestApplyAmendmentDuplicate:
             store=store,
             ticket_service=ticket_service,
             ticket_ref="TKT-1",
+            ticket_id="ticket-1",
             alert=alert,
             decision=_amend_decision(decision="duplicate", affected_key=None),
             raw_text="raw text",
+            grid_name="Kudi",
         )
 
         assert result is not None
         assert result.decision == "duplicate"
-        assert store.bump_occurrence_calls == ["TKT-1"]
+        assert store.bump_occurrence_calls == ["ticket-1"]
         assert store.merge_calls == []
         assert ticket_service.update_calls == []
         assert ticket_service.comment_calls == []
-
-    @pytest.mark.asyncio
-    async def test_duplicate_returns_telegram_targets_for_rollup(self):
-        correlation = _correlation()
-        store = _FakeStore(correlation=correlation)
-        ticket_service = _FakeTicketService()
-        alert = AlertFacts(subject="! Warning: MPPT A3 in Kudi !")
-
-        result = await apply_amendment(
-            store=store,
-            ticket_service=ticket_service,
-            ticket_ref="TKT-1",
-            alert=alert,
-            decision=_amend_decision(decision="duplicate", affected_key=None),
-            raw_text="raw text",
-        )
-
-        assert result.telegram_chat_id == "-100555"
-        assert result.telegram_topic_id == "42"
-        assert result.telegram_message_id == 999

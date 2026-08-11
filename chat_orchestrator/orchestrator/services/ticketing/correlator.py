@@ -67,6 +67,7 @@ class CandidateSummary(BaseModel):
     pre-cutover tickets the correlation layer never recorded)."""
 
     ref: str
+    ticket_id: Optional[str] = None
     backend: str = ""
     summary: str = ""
     age_hours: Optional[float] = None
@@ -99,6 +100,7 @@ class CorrelationDecision:
     llm_raw: Optional[str]
     needs_root_cause_ticket: bool = False
     ticket_severity: str = ""
+    ticket_id: Optional[str] = None
 
 
 def _parse_llm_response(raw: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -225,15 +227,18 @@ def _apply_guardrails(
 
     needs_root_cause_ticket = False
     final_ticket_ref: Optional[str] = ticket_ref
+    final_ticket_id: Optional[str] = by_ref[ticket_ref].ticket_id
     if decision == "amend" and root_cause_kind in _ROOT_CAUSE_KINDS_REQUIRING_PARENT:
         any_root_cause_candidate = any(c.root_cause_kind == root_cause_kind for c in candidates)
         if not any_root_cause_candidate:
             needs_root_cause_ticket = True
             final_ticket_ref = None
+            final_ticket_id = None
 
     return CorrelationDecision(
         decision=decision,
         ticket_ref=final_ticket_ref,
+        ticket_id=final_ticket_id,
         confidence=confidence,
         decided_by="llm",
         reason=reason,
@@ -431,15 +436,17 @@ class AlertCorrelator:
         if dedup_key:
             prior = await self._store.get_by_dedup_key(dedup_key)
             if prior:
-                ticket_ref = prior.get("ticket_ref")
-                ticket_severity = prior.get("ticket_severity") or ""
-                if ticket_ref:
+                ticket_id = prior.get("ticket_id")
+                ticket_ref: Optional[str] = None
+                ticket_severity = ""
+                if ticket_id:
+                    ticket_ref = await self._ticket_service.get_ref_by_id(ticket_id)
                     try:
-                        correlation = await self._store.get_correlation(ticket_ref)
+                        correlation = await self._store.get_correlation(ticket_id)
                     except Exception:
                         LOGGER.warning(
                             "Failed to load durable severity for replayed ticket {!r}",
-                            ticket_ref,
+                            ticket_id,
                             exc_info=True,
                         )
                     else:
@@ -448,6 +455,7 @@ class AlertCorrelator:
                 return CorrelationDecision(
                     decision=prior.get("decision", "new"),
                     ticket_ref=ticket_ref,
+                    ticket_id=ticket_id,
                     confidence=prior.get("confidence"),
                     decided_by="replay",
                     reason=prior.get("reason") or "replayed prior decision (dedup_key match)",
@@ -512,6 +520,7 @@ class AlertCorrelator:
             decision = CorrelationDecision(
                 decision="amend" if severity_increased else "duplicate",
                 ticket_ref=duplicate.ref,
+                ticket_id=duplicate.ticket_id,
                 confidence=1.0,
                 decided_by="signature",
                 reason=reason,
@@ -572,7 +581,7 @@ class AlertCorrelator:
     ) -> CorrelationDecision:
         try:
             await self._store.record_event(
-                ticket_ref=decision.ticket_ref,
+                ticket_id=decision.ticket_id,
                 grid_name=grid_name,
                 source=alert.rule_id or None,
                 signature=alert.signature or None,
@@ -609,11 +618,22 @@ class AlertCorrelator:
         store_refs = set()
         for row in store_rows:
             ref = row.get("ticket_ref")
+            ticket_id = row.get("ticket_id")
             if not ref:
+                continue
+            if not ticket_id:
+                # Cannot happen given a healthy store (ticket_id is
+                # ticket_correlations' NOT NULL primary key post-0005b) --
+                # guarded anyway since a candidate with no id can't be
+                # amended safely.
+                LOGGER.warning(
+                    "Dropping candidate {!r}: correlation row missing ticket_id", ref
+                )
                 continue
             store_refs.add(ref)
             by_ref[ref] = CandidateSummary(
                 ref=ref,
+                ticket_id=ticket_id,
                 backend=row.get("ticket_backend") or "",
                 summary=row.get("summary_current") or row.get("summary_base") or "",
                 age_hours=_age_hours(row.get("created_at"), now),
@@ -628,8 +648,25 @@ class AlertCorrelator:
         for summary in backend_summaries:
             if summary.ref in by_ref:
                 continue
+            try:
+                adopted = await self._ticket_service.adopt_external(
+                    ref=summary.ref,
+                    backend=summary.backend,
+                    summary=summary.summary,
+                    grid_name=grid_name,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Dropping externally-discovered candidate {!r}: could not adopt "
+                    "into the canonical ticket table (cannot be amended without a "
+                    "ticket_id)",
+                    summary.ref,
+                    exc_info=True,
+                )
+                continue
             by_ref[summary.ref] = CandidateSummary(
                 ref=summary.ref,
+                ticket_id=adopted.id,
                 backend=summary.backend,
                 summary=summary.summary,
                 age_hours=_age_hours(getattr(summary, "created_at", None), now),
@@ -645,8 +682,10 @@ class AlertCorrelator:
         confirmed: List[CandidateSummary] = []
         for candidate, status in zip(ordered, statuses):
             if status is not None and status.is_done:
-                if candidate.ref in store_refs:
-                    await self._store.mark_closed(candidate.ref)
+                # No separate "mark closed" step needed here -- ticket
+                # status lives solely on `tickets` (TicketRepository's
+                # table) post-0005b, and open_candidates_for_grid already
+                # reads status from there on the next call.
                 continue
             if status is None and candidate.ref not in store_refs:
                 continue

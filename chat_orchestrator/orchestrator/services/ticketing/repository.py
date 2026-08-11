@@ -114,6 +114,49 @@ class TicketRepository:
     async def set_pending_backend(self, ticket_id: str, backend: str) -> None:
         self._raw_client().table("tickets").update({"backend": backend}).eq("id", ticket_id).execute()
 
+    async def adopt_external(
+        self,
+        *,
+        ref: str,
+        backend: Literal["jira", "internal"],
+        summary: str,
+        grid_name: Optional[str] = None,
+    ) -> TicketRecord:
+        """Adopt a ticket discovered only via backend search (a human-filed
+        Jira ticket, or one from before the correlation-store cutover) into
+        the canonical ``tickets`` table -- so alert correlation always has a
+        ``ticket_id`` to key mutable state by before any Anansi-side
+        mutation touches it (see ``AlertCorrelator._assemble_candidates``).
+
+        Idempotent: a ``ref`` already present returns the existing row
+        rather than inserting a duplicate. A concurrent adopt for the same
+        ref racing this one would violate ``tickets_ticket_ref_unique``
+        (db/migrations/0005a) -- benign, not a reason to fail this call, so
+        that case falls back to a re-read rather than raising.
+        """
+        existing = await self.get_by_ref(ref)
+        if existing is not None:
+            return existing
+        payload = {
+            "ticket_ref": ref,
+            "backend": backend,
+            "summary": summary,
+            "grid_name": grid_name,
+            "created_via": "adopted",
+            "provisioning_state": "active",
+            "status": "open",
+        }
+        try:
+            response = self._raw_client().table("tickets").insert(payload).execute()
+        except TicketRepositoryError:
+            raise
+        except Exception as exc:
+            retry = await self.get_by_ref(ref)
+            if retry is not None:
+                return retry
+            raise TicketRepositoryError(f"failed to adopt external ticket {ref!r}: {exc}") from exc
+        return self._record(response)
+
     async def get_by_ref(self, ref: str) -> TicketRecord | None:
         """Return canonical ticket identity for a backend reference, if known."""
         try:
