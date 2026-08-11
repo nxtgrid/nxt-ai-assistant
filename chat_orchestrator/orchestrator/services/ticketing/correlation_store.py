@@ -1,9 +1,22 @@
-"""CorrelationStore -- chat_db access for /notify alert correlation state.
+"""CorrelationStore -- chat_db access for /notify alert correlation *state*.
 
 Backs ``ticket_correlations`` / ``ticket_correlation_events``
-(db/migrations/0003_alert_correlation.sql). Same lazy-client pattern as
-``InternalTicketBackend``: accepts a ready-made raw postgrest client or a
-getter callable that lazily produces one.
+(db/migrations/0003_alert_correlation.sql, keyed by ``ticket_id`` since
+db/migrations/0005b_ticket_schema_validate_and_contract.sql). Same lazy-client
+pattern as ``InternalTicketBackend``: accepts a ready-made raw postgrest
+client or a getter callable that lazily produces one.
+
+Every method here owns only mutable correlation *state* -- root cause,
+signatures, affected components, occurrence count, escalation timestamp. It
+is keyed purely by ``ticket_id``: this store never resolves a ``ticket_ref``
+to an id itself. Callers that only have a ref (the correlator assembling
+candidates, the notify handler seeding a fresh ticket) resolve it through
+``TicketRepository`` first -- ``TicketRepository.adopt_external`` for a
+candidate discovered only via backend search, or the id returned by ticket
+creation for a freshly-filed one. Current ticket ref/backend/summary/status/
+grid come from ``tickets`` (``TicketRepository``'s table); Telegram delivery
+coordinates come from ``message_deliveries`` (``DeliveryRepository``) -- this
+store caches neither.
 
 Every method swallows and logs errors, returning a safe empty value (``None``
 / ``[]`` / ``False``) -- a correlation-store outage must degrade correlation
@@ -13,6 +26,8 @@ an unhandled exception reaching the /notify handler.
 
 from __future__ import annotations
 
+import time
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -22,6 +37,60 @@ from shared.utils.logging import get_logger
 from .alert_facts import same_component
 
 LOGGER = get_logger(__name__)
+
+#: Ticket states a correlation candidate can still be amended/duplicated
+#: onto. Anything else (done) has nowhere further to receive an alert.
+_OPEN_TICKET_STATUSES = ("open", "in_progress")
+
+
+# ---------------------------------------------------------------------------
+# Degradation visibility. The 2026-08-10 incident (0005b dropped columns this
+# store still wrote to) ran for ~12 hours emitting five WARNING lines per
+# alert -- easy to scroll past, and nothing outside the log noticed. Every
+# `except Exception` below now also feeds this counter, so /health and
+# /chat/notify's response can surface degradation without anyone having to
+# be watching the logs at the time.
+# ---------------------------------------------------------------------------
+
+#: How long a failure keeps counting toward "this hour", and the minimum gap
+#: between repeated WARNING lines for the same (method, error) shape.
+_FAILURE_WINDOW_SECONDS = 3600.0
+
+_failure_counts: Dict[str, int] = defaultdict(int)
+_failure_last_logged_at: Dict[str, float] = {}
+_failure_window_started_at: float = time.monotonic()
+
+
+def _record_failure(method: str, error: Exception) -> None:
+    """Count a correlation-store failure and log it at most once an hour
+    per (method, error shape) -- first occurrence always logs immediately."""
+    global _failure_window_started_at
+    now = time.monotonic()
+    if now - _failure_window_started_at > _FAILURE_WINDOW_SECONDS:
+        _failure_counts.clear()
+        _failure_last_logged_at.clear()
+        _failure_window_started_at = now
+
+    key = f"{method}:{type(error).__name__}"
+    _failure_counts[key] += 1
+    last_logged = _failure_last_logged_at.get(key)
+    if last_logged is None or now - last_logged >= _FAILURE_WINDOW_SECONDS:
+        suppressed = _failure_counts[key] - 1
+        suffix = f" ({suppressed} more suppressed this hour)" if suppressed else ""
+        LOGGER.warning("correlation store: {} failed: {}{}", method, error, suffix)
+        _failure_last_logged_at[key] = now
+
+
+def failures_last_hour() -> int:
+    """Total correlation-store failures in the current hourly window.
+
+    Used by ``/health`` (``correlation_store_failures_last_hour``) and
+    ``/chat/notify`` (``correlation_degraded``) so a degraded store is
+    visible without reading logs.
+    """
+    if time.monotonic() - _failure_window_started_at > _FAILURE_WINDOW_SECONDS:
+        return 0
+    return sum(_failure_counts.values())
 
 
 @dataclass(frozen=True)
@@ -52,13 +121,15 @@ class CorrelationStore:
         if self._get_client_fn is not None:
             try:
                 return self._get_client_fn()
-            except Exception:
-                LOGGER.warning("correlation store: get_client() raised", exc_info=True)
+            except Exception as e:
+                _record_failure("get_client", e)
                 return None
         return None
 
     # ------------------------------------------------------------------
-    # ticket_correlation_events
+    # ticket_correlation_events -- full audit trail, event-time evidence.
+    # grid_name/candidate snapshot/alert live here even though they are no
+    # longer cached on ticket_correlations (see db/schema/chat_db.sql).
     # ------------------------------------------------------------------
 
     async def get_by_dedup_key(self, dedup_key: str) -> Optional[Dict[str, Any]]:
@@ -76,7 +147,7 @@ class CorrelationStore:
                 .execute()
             )
         except Exception as e:
-            LOGGER.warning("correlation store: get_by_dedup_key({}) failed: {}", dedup_key, e)
+            _record_failure("get_by_dedup_key", e)
             return None
         rows = getattr(response, "data", None) or []
         return rows[0] if rows else None
@@ -84,7 +155,7 @@ class CorrelationStore:
     async def record_event(
         self,
         *,
-        ticket_ref: Optional[str],
+        ticket_id: Optional[str],
         grid_name: str,
         source: Optional[str],
         signature: Optional[str],
@@ -107,7 +178,7 @@ class CorrelationStore:
         try:
             client.table("ticket_correlation_events").insert(
                 {
-                    "ticket_ref": ticket_ref,
+                    "ticket_id": ticket_id,
                     "grid_name": grid_name,
                     "source": source,
                     "signature": signature,
@@ -123,17 +194,17 @@ class CorrelationStore:
             ).execute()
             return True
         except Exception as e:
-            LOGGER.warning("correlation store: record_event failed: {}", e)
+            _record_failure("record_event", e)
             return False
 
-    async def record_event_ticket_ref(self, dedup_key: str, ticket_ref: str) -> bool:
+    async def record_event_ticket_id(self, dedup_key: str, ticket_id: str) -> bool:
         """Backfill the ticket a "new"-decided event actually produced.
 
         ``record_event`` runs inside ``AlertCorrelator._finalize``, before the
         ticket is created -- a "new" decision's event row is written with
-        ``ticket_ref=None`` because there's nothing to reference yet. Without
+        ``ticket_id=None`` because there's nothing to reference yet. Without
         this backfill, a later replay of the same ``dedup_key`` finds a row
-        whose ``ticket_ref`` is still ``None``, fails the delivery-idempotency
+        whose ``ticket_id`` is still ``None``, fails the delivery-idempotency
         guard's truthiness check, and files a second duplicate ticket.
         """
         client = self._client()
@@ -141,123 +212,156 @@ class CorrelationStore:
             return False
         try:
             client.table("ticket_correlation_events").update(
-                {"ticket_ref": ticket_ref}
+                {"ticket_id": ticket_id}
             ).eq("dedup_key", dedup_key).execute()
             return True
         except Exception as e:
-            LOGGER.warning(
-                "correlation store: record_event_ticket_ref({}) failed: {}", dedup_key, e
-            )
+            _record_failure("record_event_ticket_id", e)
             return False
 
     # ------------------------------------------------------------------
-    # ticket_correlations
+    # ticket_correlations -- mutable state, keyed by ticket_id.
     # ------------------------------------------------------------------
 
-    async def _correlation_filter(self, client: Any, ticket_ref: str) -> tuple[str, Any]:
-        """Column/value to filter ``ticket_correlations`` by for a given
-        ``ticket_ref``.
-
-        Prefers ``ticket_id`` -- the eventual sole identity for this table
-        (see db/migrations/0005b, which drops ``ticket_ref`` as a column) --
-        resolved via a ``tickets`` lookup, matching ``upsert_correlation``'s
-        own resolution. Falls back to filtering by ``ticket_ref`` directly
-        if that lookup comes up empty, so a row somehow not yet linked to a
-        canonical ticket is still found.
-        """
-        try:
-            ticket_rows = (
-                client.table("tickets")
-                .select("id")
-                .eq("ticket_ref", ticket_ref)
-                .limit(1)
-                .execute()
-            )
-            rows = getattr(ticket_rows, "data", None) or []
-            if rows:
-                return ("ticket_id", rows[0]["id"])
-        except Exception as e:
-            LOGGER.warning(
-                "correlation store: could not resolve ticket_id for {}: {}", ticket_ref, e
-            )
-        return ("ticket_ref", ticket_ref)
-
-    async def get_correlation(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
-        """Fetch a single correlation row by ``ticket_ref`` -- used by the
+    async def get_correlation(self, ticket_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single correlation row by ``ticket_id`` -- used by the
         amend executor (``correlation_render.apply_amendment``) to read the
         post-merge state right before rendering."""
         client = self._client()
         if client is None:
             return None
         try:
-            col, val = await self._correlation_filter(client, ticket_ref)
             response = (
-                client.table("ticket_correlations").select("*").eq(col, val).limit(1).execute()
+                client.table("ticket_correlations")
+                .select("*")
+                .eq("ticket_id", ticket_id)
+                .limit(1)
+                .execute()
             )
         except Exception as e:
-            LOGGER.warning("correlation store: get_correlation({}) failed: {}", ticket_ref, e)
+            _record_failure("get_correlation", e)
             return None
         rows = getattr(response, "data", None) or []
         return rows[0] if rows else None
 
     async def record_amendment(
         self,
-        ticket_ref: str,
+        ticket_id: str,
         *,
-        summary_current: str,
         severity: Optional[str] = None,
         escalated: bool = False,
     ) -> bool:
-        """Persist rendered state after an amendment executes."""
+        """Persist rendered state (severity, escalation) after an amendment
+        executes. The rendered summary itself is no longer this store's
+        concern -- ``TicketService.update_ticket`` persists it to
+        ``tickets.summary`` (the canonical projection) directly.
+
+        Returns whether the update actually matched a row -- callers (see
+        ``correlation_render.apply_amendment``) gate whether to *announce*
+        an escalation on this, so a silent no-op here must not be reported
+        as success: state that didn't persist would otherwise be
+        re-announced on every subsequent alert.
+        """
         client = self._client()
         if client is None:
             return False
-        payload: Dict[str, Any] = {"summary_current": summary_current}
+        payload: Dict[str, Any] = {}
         if severity:
             payload["severity"] = severity
         if escalated:
             payload["escalated_at"] = datetime.now(timezone.utc).isoformat()
-        try:
-            col, val = await self._correlation_filter(client, ticket_ref)
-            client.table("ticket_correlations").update(payload).eq(col, val).execute()
+        if not payload:
             return True
+        try:
+            response = (
+                client.table("ticket_correlations")
+                .update(payload)
+                .eq("ticket_id", ticket_id)
+                .execute()
+            )
+            return bool(getattr(response, "data", None))
         except Exception as e:
-            LOGGER.warning("correlation store: record_amendment({}) failed: {}", ticket_ref, e)
+            _record_failure("record_amendment", e)
             return False
 
     async def open_candidates_for_grid(
         self, grid_name: str, since_iso: str, limit: int = 15
     ) -> List[Dict[str, Any]]:
         """Open correlation rows for a grid within the lookback window,
-        most-recent-first."""
+        most-recent-first.
+
+        Two explicit reads rather than a PostgREST embedded-resource join --
+        this raw client already uses ``.in_()`` elsewhere
+        (``work_packet_service.py``) and two plain queries degrade cleanly
+        (an empty first query short-circuits before the second ever runs).
+        ``tickets`` is queried first (current ref/backend/summary/status/grid
+        -- ``ticket_correlations`` no longer caches any of these), ordered by
+        ``updated_at`` and capped at ``limit * 2`` as a deliberate
+        approximation: a grid with more than ``limit * 2`` simultaneously
+        open, correlation-tracked tickets could have a genuinely-recent one
+        fall outside this first pass. Ordering by ``updated_at`` (which every
+        amend touches via ``TicketService.update_ticket`` ->
+        ``TicketRepository.update_by_ref``) keeps that approximation
+        reasonable in practice without a join.
+        """
         client = self._client()
         if client is None:
             return []
         try:
-            response = (
+            ticket_response = (
+                client.table("tickets")
+                .select("id, ticket_ref, backend, summary, status")
+                .eq("grid_name", grid_name)
+                .in_("status", list(_OPEN_TICKET_STATUSES))
+                .eq("provisioning_state", "active")
+                .order("updated_at", desc=True)
+                .limit(limit * 2)
+                .execute()
+            )
+        except Exception as e:
+            _record_failure("open_candidates_for_grid.tickets", e)
+            return []
+        ticket_rows = getattr(ticket_response, "data", None) or []
+        by_id = {row["id"]: row for row in ticket_rows if row.get("id")}
+        if not by_id:
+            return []
+
+        try:
+            correlation_response = (
                 client.table("ticket_correlations")
                 .select("*")
-                .eq("grid_name", grid_name)
-                .eq("status", "open")
+                .in_("ticket_id", list(by_id.keys()))
                 .gte("last_alert_at", since_iso)
                 .order("last_alert_at", desc=True)
                 .limit(limit)
                 .execute()
             )
         except Exception as e:
-            LOGGER.warning(
-                "correlation store: open_candidates_for_grid({}) failed: {}", grid_name, e
-            )
+            _record_failure("open_candidates_for_grid.correlations", e)
             return []
-        return getattr(response, "data", None) or []
+        correlation_rows = getattr(correlation_response, "data", None) or []
+
+        merged: List[Dict[str, Any]] = []
+        for row in correlation_rows:
+            ticket = by_id.get(row.get("ticket_id"))
+            if ticket is None:
+                continue
+            merged.append(
+                {
+                    **row,
+                    "ticket_ref": ticket.get("ticket_ref"),
+                    "ticket_backend": ticket.get("backend"),
+                    "summary_current": ticket.get("summary"),
+                    "status": ticket.get("status"),
+                    "grid_name": grid_name,
+                }
+            )
+        return merged
 
     async def upsert_correlation(
         self,
         *,
-        ticket_ref: str,
-        ticket_backend: str,
-        grid_name: str,
-        organization_id: Optional[int],
+        ticket_id: str,
         root_cause_kind: Optional[str],
         primary_signature: str,
         signatures: List[str],
@@ -265,72 +369,43 @@ class CorrelationStore:
         summary_base: str,
         description_base: str,
         severity: str,
-        telegram_chat_id: Optional[str],
-        telegram_topic_id: Optional[str],
-        ticket_id: Optional[str] = None,
     ) -> bool:
         """Create (or, on a retry, update) a ticket's correlation row.
 
-        This seeds both newly-filed tickets and externally discovered tickets
-        the first time correlation amends them. Upserting on ``ticket_ref``
-        makes either path idempotent at the UNIQUE constraint.
-
-        ``ticket_id`` is the canonical ``tickets.id`` this row belongs to --
-        the eventual replacement identity for ``ticket_ref`` (see
-        db/migrations/0005b). Pass it when the caller already has it (e.g.
-        fresh from ticket creation); otherwise it's resolved here by looking
-        up ``tickets`` via ``ticket_ref``/``ticket_backend``, so every write
-        path keeps the column populated going forward.
+        This seeds both newly-filed tickets and externally discovered
+        tickets the first time correlation amends them. ``ticket_id`` is the
+        canonical ``tickets.id`` this row belongs to -- always resolved by
+        the caller (fresh from ticket creation, or via
+        ``TicketRepository.adopt_external`` for a discovered candidate)
+        before calling in, so this store never needs its own ``tickets``
+        lookup. Upserting on ``ticket_id`` (the primary key since
+        db/migrations/0005b) makes either path idempotent.
         """
         client = self._client()
         if client is None:
             return False
-        resolved_ticket_id = ticket_id
-        if resolved_ticket_id is None:
-            try:
-                ticket_rows = (
-                    client.table("tickets")
-                    .select("id")
-                    .eq("ticket_ref", ticket_ref)
-                    .eq("backend", ticket_backend)
-                    .limit(1)
-                    .execute()
-                )
-                rows = getattr(ticket_rows, "data", None) or []
-                resolved_ticket_id = rows[0]["id"] if rows else None
-            except Exception as e:
-                LOGGER.warning(
-                    "correlation store: could not resolve ticket_id for {}: {}", ticket_ref, e
-                )
         try:
             client.table("ticket_correlations").upsert(
                 {
-                    "ticket_ref": ticket_ref,
-                    "ticket_backend": ticket_backend,
-                    "ticket_id": resolved_ticket_id,
-                    "grid_name": grid_name,
-                    "organization_id": organization_id,
+                    "ticket_id": ticket_id,
                     "root_cause_kind": root_cause_kind,
                     "primary_signature": primary_signature,
                     "signatures": signatures,
                     "affected_keys": affected_keys,
                     "summary_base": summary_base,
-                    "summary_current": summary_base,
                     "description_base": description_base,
                     "severity": severity,
-                    "telegram_chat_id": telegram_chat_id,
-                    "telegram_topic_id": telegram_topic_id,
                 },
-                on_conflict="ticket_ref",
+                on_conflict="ticket_id",
             ).execute()
             return True
         except Exception as e:
-            LOGGER.warning("correlation store: upsert_correlation({}) failed: {}", ticket_ref, e)
+            _record_failure("upsert_correlation", e)
             return False
 
     async def merge_affected_key(
         self,
-        ticket_ref: str,
+        ticket_id: str,
         *,
         kind: str,
         key: str,
@@ -343,7 +418,7 @@ class CorrelationStore:
 
         Returns an ``AffectedKeyMerge`` (the updated ``affected_keys`` list
         plus whether a genuinely new component was appended vs. an existing
-        entry's count merely bumped), or ``None`` if the ticket_ref isn't
+        entry's count merely bumped), or ``None`` if ``ticket_id`` isn't
         found or the store errors.
         """
         client = self._client()
@@ -351,9 +426,12 @@ class CorrelationStore:
             return None
         occurred_at = occurred_at or datetime.now(timezone.utc).isoformat()
         try:
-            col, val = await self._correlation_filter(client, ticket_ref)
             existing = (
-                client.table("ticket_correlations").select("*").eq(col, val).limit(1).execute()
+                client.table("ticket_correlations")
+                .select("*")
+                .eq("ticket_id", ticket_id)
+                .limit(1)
+                .execute()
             )
             rows = getattr(existing, "data", None) or []
             if not rows:
@@ -387,14 +465,16 @@ class CorrelationStore:
                     signatures.append(signature)
                     update_payload["signatures"] = signatures
 
-            client.table("ticket_correlations").update(update_payload).eq(col, val).execute()
+            client.table("ticket_correlations").update(update_payload).eq(
+                "ticket_id", ticket_id
+            ).execute()
             return AffectedKeyMerge(affected_keys=affected_keys, added=added)
         except Exception as e:
-            LOGGER.warning("correlation store: merge_affected_key({}) failed: {}", ticket_ref, e)
+            _record_failure("merge_affected_key", e)
             return None
 
     async def bump_occurrence(
-        self, ticket_ref: str, occurred_at: Optional[str] = None
+        self, ticket_id: str, occurred_at: Optional[str] = None
     ) -> bool:
         """Increment ``occurrence_count`` and refresh ``last_alert_at`` --
         called on every decision (new/amend/duplicate alike) so a
@@ -405,11 +485,10 @@ class CorrelationStore:
             return False
         occurred_at = occurred_at or datetime.now(timezone.utc).isoformat()
         try:
-            col, val = await self._correlation_filter(client, ticket_ref)
             existing = (
                 client.table("ticket_correlations")
                 .select("occurrence_count")
-                .eq(col, val)
+                .eq("ticket_id", ticket_id)
                 .limit(1)
                 .execute()
             )
@@ -419,41 +498,8 @@ class CorrelationStore:
             current = int(rows[0].get("occurrence_count") or 0)
             client.table("ticket_correlations").update(
                 {"occurrence_count": current + 1, "last_alert_at": occurred_at}
-            ).eq(col, val).execute()
+            ).eq("ticket_id", ticket_id).execute()
             return True
         except Exception as e:
-            LOGGER.warning("correlation store: bump_occurrence({}) failed: {}", ticket_ref, e)
-            return False
-
-    async def record_message_id(self, ticket_ref: str, message_id: int) -> bool:
-        """Stamp the Telegram message id of a ticket's first post, so a
-        later amend can reply to it."""
-        client = self._client()
-        if client is None:
-            return False
-        try:
-            col, val = await self._correlation_filter(client, ticket_ref)
-            client.table("ticket_correlations").update(
-                {"telegram_message_id": message_id}
-            ).eq(col, val).execute()
-            return True
-        except Exception as e:
-            LOGGER.warning("correlation store: record_message_id({}) failed: {}", ticket_ref, e)
-            return False
-
-    async def mark_closed(self, ticket_ref: str) -> bool:
-        """Mark a correlation row's cached ``status`` as done -- used when
-        candidate assembly discovers (via the backend's own ``get_status``)
-        that a ticket has actually closed, so it stops surfacing as an open
-        candidate. The ticket backend remains the authoritative source of
-        truth; this is only the correlation layer's cached mirror."""
-        client = self._client()
-        if client is None:
-            return False
-        try:
-            col, val = await self._correlation_filter(client, ticket_ref)
-            client.table("ticket_correlations").update({"status": "done"}).eq(col, val).execute()
-            return True
-        except Exception as e:
-            LOGGER.warning("correlation store: mark_closed({}) failed: {}", ticket_ref, e)
+            _record_failure("bump_occurrence", e)
             return False

@@ -7,6 +7,15 @@ unparseable JSON -> new, timeout -> new, a "duplicate" without signature
 overlap at confidence 0.8 downgraded to amend, and a grid_off amend with no
 root-cause candidate -> parent-first. No network -- the LLM gateway is a
 fake throughout.
+
+Correlation state is keyed by ``ticket_id`` (db/migrations/0005b) -- fixture
+rows in ``_FakeStore.correlations`` carry both ``ticket_id`` (what the store
+itself is keyed by) and ``ticket_ref`` (what ``_assemble_candidates`` merges
+in from a joined ``tickets`` row, mirroring the real
+``CorrelationStore.open_candidates_for_grid``). A row missing ``ticket_id``
+is dropped by the correlator as unusable -- see
+``TestBackendOnlyCandidates``/``TestVersionedPolicy`` for why every fixture
+below sets one.
 """
 
 from __future__ import annotations
@@ -30,6 +39,7 @@ from orchestrator.services.ticketing.correlator import (
     CandidateSummary,
     _apply_guardrails,
     _parse_llm_response,
+    effective_candidate_severity,
 )
 
 # ---------------------------------------------------------------------------
@@ -53,9 +63,42 @@ class TestParseLlmResponse:
         assert _parse_llm_response("") is None
 
 
+class TestEffectiveCandidateSeverity:
+    """B4: a blank stored severity (most commonly a Jira-discovered candidate
+    just adopted via TicketRepository.adopt_external, which never sets one)
+    must not read as "not urgent" when the ticket plainly already is one --
+    that's exactly what let a stale candidate masquerade as a fresh
+    warning->urgent transition on every subsequent alert."""
+
+    def test_stored_severity_wins_when_present(self):
+        candidate = _candidate(severity="warning", summary="! Urgent: ignored !")
+        assert effective_candidate_severity(candidate) == "warning"
+
+    def test_falls_back_to_deriving_from_the_summary_marker(self):
+        candidate = _candidate(severity="", summary="! Urgent: Inverter Fault !")
+        assert effective_candidate_severity(candidate) == "urgent"
+
+    def test_falls_back_to_the_escalated_emoji_when_no_marker(self):
+        """render_summary/apply_amendment prefix an escalated ticket's
+        summary with "🔴 " without necessarily also carrying a "! Urgent:"
+        marker (e.g. a freshly-adopted candidate's summary_base has no
+        marker at all) -- this must still read as urgent."""
+        candidate = _candidate(severity="", summary="🔴 3 MPPTs in Kudi affected (A3, A7)")
+        assert effective_candidate_severity(candidate) == "urgent"
+
+    def test_blank_when_nothing_signals_severity(self):
+        candidate = _candidate(severity="", summary="MPPT issue, no marker at all")
+        assert effective_candidate_severity(candidate) == ""
+
+    def test_warning_marker_derives_to_warning(self):
+        candidate = _candidate(severity="", summary="! Warning: FS delivery low !")
+        assert effective_candidate_severity(candidate) == "warning"
+
+
 def _candidate(ref="TKT-1", **overrides) -> CandidateSummary:
     defaults = dict(
         ref=ref,
+        ticket_id=f"tid-{ref}",
         backend="internal",
         summary="MPPT issue",
         age_hours=1.0,
@@ -85,6 +128,7 @@ class TestApplyGuardrails:
 
         assert decision.decision == "amend"
         assert decision.ticket_ref == "TKT-1"
+        assert decision.ticket_id == "tid-TKT-1"
         assert decision.decided_by == "llm"
         assert decision.confidence == 0.9
         assert decision.amended_summary == "4 MPPTs affected"
@@ -211,6 +255,7 @@ class TestApplyGuardrails:
         assert decision.decision == "amend"
         assert decision.needs_root_cause_ticket is True
         assert decision.ticket_ref is None
+        assert decision.ticket_id is None
 
     def test_no_root_cause_first_when_candidate_already_is_root_cause_ticket(self):
         parsed = {
@@ -225,6 +270,7 @@ class TestApplyGuardrails:
 
         assert decision.needs_root_cause_ticket is False
         assert decision.ticket_ref == "TKT-1"
+        assert decision.ticket_id == "tid-TKT-1"
 
     def test_new_decision_never_triggers_root_cause_first(self):
         parsed = {"decision": "new", "confidence": 0.9, "root_cause_kind": "grid_off"}
@@ -242,14 +288,13 @@ class _FakeStore:
     def __init__(self) -> None:
         self.correlations: List[Dict[str, Any]] = []
         self.events: Dict[str, Dict[str, Any]] = {}
-        self.mark_closed_calls: List[str] = []
 
     async def get_by_dedup_key(self, dedup_key: str) -> Optional[Dict[str, Any]]:
         return self.events.get(dedup_key)
 
-    async def get_correlation(self, ticket_ref: str) -> Optional[Dict[str, Any]]:
+    async def get_correlation(self, ticket_id: str) -> Optional[Dict[str, Any]]:
         return next(
-            (row for row in self.correlations if row["ticket_ref"] == ticket_ref),
+            (row for row in self.correlations if row["ticket_id"] == ticket_id),
             None,
         )
 
@@ -260,24 +305,20 @@ class _FakeStore:
             if row["grid_name"] == grid_name and row.get("status", "open") == "open"
         ][:limit]
 
-    async def mark_closed(self, ticket_ref: str) -> bool:
-        self.mark_closed_calls.append(ticket_ref)
-        return True
-
     async def record_event(self, **kwargs):
         if kwargs.get("dedup_key"):
             self.events[kwargs["dedup_key"]] = {
                 "decision": kwargs["decision"],
-                "ticket_ref": kwargs.get("ticket_ref"),
+                "ticket_id": kwargs.get("ticket_id"),
                 "decided_by": kwargs["decided_by"],
                 "confidence": kwargs.get("confidence"),
                 "reason": kwargs.get("reason"),
             }
         return True
 
-    async def record_event_ticket_ref(self, dedup_key: str, ticket_ref: str) -> bool:
+    async def record_event_ticket_id(self, dedup_key: str, ticket_id: str) -> bool:
         if dedup_key in self.events:
-            self.events[dedup_key]["ticket_ref"] = ticket_ref
+            self.events[dedup_key]["ticket_id"] = ticket_id
             return True
         return False
 
@@ -286,12 +327,27 @@ class _FakeTicketService:
     def __init__(self) -> None:
         self.open_by_grid: List[TicketSummary] = []
         self.statuses: Dict[str, TicketStatus] = {}
+        self.ref_by_id: Dict[str, str] = {}
+        self.adopted_calls: List[Dict[str, Any]] = []
 
     async def find_open_by_grid(self, grid_name, limit=20, backend_override=None):
         return self.open_by_grid
 
     async def get_status(self, ref: str) -> Optional[TicketStatus]:
         return self.statuses.get(ref)
+
+    async def get_ref_by_id(self, ticket_id: str) -> Optional[str]:
+        return self.ref_by_id.get(ticket_id)
+
+    async def adopt_external(self, *, ref, backend, summary, grid_name=None):
+        self.adopted_calls.append(
+            {"ref": ref, "backend": backend, "summary": summary, "grid_name": grid_name}
+        )
+
+        class _Adopted:
+            id = f"adopted-{ref}"
+
+        return _Adopted()
 
 
 class _FakeGateway:
@@ -359,6 +415,7 @@ class TestVersionedPolicy:
         for ref in ("TKT-1", "TKT-2"):
             store.correlations.append(
                 {
+                    "ticket_id": f"tid-{ref}",
                     "ticket_ref": ref,
                     "grid_name": "Kudi",
                     "status": "open",
@@ -417,6 +474,7 @@ class TestVersionedPolicy:
         )
         store.correlations.append(
             {
+                "ticket_id": "tid-TKT-1",
                 "ticket_ref": "TKT-1",
                 "grid_name": "Kudi",
                 "status": "open",
@@ -436,18 +494,20 @@ class TestVersionedPolicy:
 class TestDedupReplay:
     @pytest.mark.asyncio
     async def test_replays_prior_decision_without_new_io(self):
-        correlator, store, _ts, gateway = _make_correlator()
+        correlator, store, ts, gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-TKT-1",
                 "ticket_ref": "TKT-1",
                 "grid_name": "Kudi",
                 "status": "open",
                 "severity": "urgent",
             }
         )
+        ts.ref_by_id["tid-TKT-1"] = "TKT-1"
         store.events["dk-1"] = {
             "decision": "amend",
-            "ticket_ref": "TKT-1",
+            "ticket_id": "tid-TKT-1",
             "decided_by": "llm",
             "confidence": 0.9,
             "reason": "prior decision",
@@ -457,37 +517,42 @@ class TestDedupReplay:
 
         assert decision.decision == "amend"
         assert decision.ticket_ref == "TKT-1"
+        assert decision.ticket_id == "tid-TKT-1"
         assert decision.decided_by == "replay"
         assert decision.ticket_severity == "urgent"
         assert gateway.calls == []  # no LLM call for a replay
 
     @pytest.mark.asyncio
-    async def test_backfilled_ticket_ref_is_returned_on_replay(self):
+    async def test_backfilled_ticket_id_resolves_to_a_ref_on_replay(self):
         """End-to-end regression test for the delivery-idempotency gap: a
-        "new" decision's event row is recorded with ticket_ref=None (there's
+        "new" decision's event row is recorded with ticket_id=None (there's
         nothing to reference until the ticket is actually created by
         app.py), the post-creation backfill lands via
-        ``record_event_ticket_ref`` (simulating what
+        ``record_event_ticket_id`` (simulating what
         ``_resolve_notify_ticket_auto`` now does right after
         ``_create_notify_ticket``), and a later replay of the same
-        dedup_key must come back with the backfilled ``ticket_ref`` --
-        that's what lets the /notify replay guard's ``decision.ticket_ref``
-        truthiness check actually suppress the duplicate-ticket case instead
-        of silently falling through to file a second ticket."""
-        correlator, store, _ts, gateway = _make_correlator()
+        dedup_key must come back with the backfilled id resolved to a ref
+        (via ``TicketService.get_ref_by_id``) -- that's what lets the
+        /notify replay guard's ``decision.ticket_ref`` truthiness check
+        actually suppress the duplicate-ticket case instead of silently
+        falling through to file a second ticket."""
+        correlator, store, ts, gateway = _make_correlator()
 
         first = await correlator.decide("Kudi", _mppt_alert(), dedup_key="dk-2")
         assert first.decision == "new"
         assert first.ticket_ref is None
-        assert store.events["dk-2"]["ticket_ref"] is None
+        assert first.ticket_id is None
+        assert store.events["dk-2"]["ticket_id"] is None
 
-        backfilled = await store.record_event_ticket_ref("dk-2", "TKT-99")
+        backfilled = await store.record_event_ticket_id("dk-2", "tid-99")
         assert backfilled is True
+        ts.ref_by_id["tid-99"] = "TKT-99"
 
         replay = await correlator.decide("Kudi", _mppt_alert(), dedup_key="dk-2")
 
         assert replay.decided_by == "replay"
         assert replay.decision == "new"
+        assert replay.ticket_id == "tid-99"
         assert replay.ticket_ref == "TKT-99"
 
 
@@ -497,7 +562,14 @@ class TestFlagOff:
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "false")
         correlator, store, ts, gateway = _make_correlator()
         store.correlations.append(
-            {"ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": [], "affected_keys": []}
+            {
+                "ticket_id": "tid-TKT-1",
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "signatures": [],
+                "affected_keys": [],
+            }
         )
 
         decision = await correlator.decide("Kudi", _mppt_alert())
@@ -528,6 +600,7 @@ class TestSignatureDuplicate:
         correlator, store, ts, gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-TKT-1",
                 "ticket_ref": "TKT-1",
                 "grid_name": "Kudi",
                 "status": "open",
@@ -542,6 +615,7 @@ class TestSignatureDuplicate:
 
         assert decision.decision == "duplicate"
         assert decision.ticket_ref == "TKT-1"
+        assert decision.ticket_id == "tid-TKT-1"
         assert decision.decided_by == "signature"
         assert gateway.calls == []  # deterministic rung -- never reaches the LLM
 
@@ -555,6 +629,7 @@ class TestSignatureDuplicate:
         correlator, store, ticket_service, gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-TKT-1",
                 "ticket_ref": "TKT-1",
                 "grid_name": "Kudi",
                 "status": "open",
@@ -584,6 +659,7 @@ class TestSignatureDuplicate:
         correlator, store, ticket_service, gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-TKT-1",
                 "ticket_ref": "TKT-1",
                 "grid_name": "Kudi",
                 "status": "open",
@@ -603,26 +679,58 @@ class TestSignatureDuplicate:
         assert gateway.calls == []
 
     @pytest.mark.asyncio
-    async def test_same_signature_different_key_is_not_a_signature_duplicate(self, monkeypatch):
-        """Same normalized subject, different MPPT key -- must fall through
-        to the LLM rung as an amend candidate, not a deterministic duplicate."""
+    async def test_urgent_refire_of_blank_severity_but_escalated_summary_is_silent_duplicate(
+        self, monkeypatch
+    ):
+        """B4: a candidate whose correlation row never recorded a severity
+        (e.g. adopted mid-flight) but whose summary already carries the "🔴 "
+        escalated marker must resolve via effective_candidate_severity, not
+        the raw blank field -- otherwise every subsequent urgent re-fire
+        reads as a fresh warning->urgent transition and re-announces."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert(
+            subject="! Urgent: MPPT A3 in Kudi seems to perform lower !",
+            severity="urgent",
+        )
+        correlator, store, ticket_service, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_id": "tid-TKT-1",
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "severity": "",  # never recorded -- e.g. an adopted candidate
+                "summary_current": "🔴 3 MPPTs in Kudi affected (A3, A7)",
+                "signatures": [alert.signature],
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ticket_service.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "duplicate"
+        assert decision.decided_by == "signature"
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_same_signature_different_key_is_a_deterministic_signature_amend(
+        self, monkeypatch
+    ):
+        """B3: same normalized subject, different MPPT key on an open ticket
+        is exactly what a multi-device storm looks like (plan finding 1) --
+        this must resolve via the deterministic signature-amend rung, never
+        touching the LLM, so a burst of N devices collapses onto one ticket
+        instead of scattering across an LLM call each."""
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
         alert = _mppt_alert(
             subject="! Warning: MPPT A7 in Kudi seems to perform lower !", details="mppt A7 [Kudi]"
         )
-        gateway = _FakeGateway(
-            text=json.dumps(
-                {
-                    "decision": "amend",
-                    "ticket_ref": "TKT-1",
-                    "confidence": 0.9,
-                    "affected_key": {"kind": "mppt", "key": "A7", "label": "MPPT A7"},
-                }
-            )
-        )
-        correlator, store, ts, _gw = _make_correlator(gateway=gateway)
+        correlator, store, ts, gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-TKT-1",
                 "ticket_ref": "TKT-1",
                 "grid_name": "Kudi",
                 "status": "open",
@@ -636,6 +744,80 @@ class TestSignatureDuplicate:
         decision = await correlator.decide("Kudi", alert)
 
         assert decision.decision == "amend"
+        assert decision.decided_by == "signature"
+        assert decision.ticket_ref == "TKT-1"
+        assert decision.ticket_id == "tid-TKT-1"
+        assert decision.affected_key == {"kind": "mppt", "key": "A7", "label": "MPPT A7"}
+        assert decision.amended_summary == ""  # renderer recomputes, not the correlator
+        assert decision.confidence == 1.0
+        assert gateway.calls == []  # deterministic rung -- never reaches the LLM
+
+    @pytest.mark.asyncio
+    async def test_third_device_on_the_same_signature_also_amends_deterministically(
+        self, monkeypatch
+    ):
+        """The storm isn't just two devices -- a third (or Nth) new component
+        on the same fault shape must keep resolving deterministically too,
+        as long as its own key isn't already in affected_keys."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert(
+            subject="! Warning: MPPT B9 in Kudi seems to perform lower !", details="mppt B9 [Kudi]"
+        )
+        correlator, store, ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_id": "tid-TKT-1",
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "signatures": [alert.signature],
+                "affected_keys": [
+                    {"kind": "mppt", "key": "A3", "label": "MPPT A3"},
+                    {"kind": "mppt", "key": "A7", "label": "MPPT A7"},
+                ],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ts.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "amend"
+        assert decision.decided_by == "signature"
+        assert decision.affected_key == {"kind": "mppt", "key": "B9", "label": "MPPT B9"}
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_amend_rung_never_fires_for_a_keyless_alert(self, monkeypatch):
+        """A keyless (grid-level) alert can only ever be a duplicate (rung
+        4) -- there's no component key that would make it a distinct
+        affected component, so the amend rung must not claim it either."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = enrich_alert_facts(
+            AlertFacts(subject="! Urgent: Grid outage in Kudi !", severity="urgent"),
+            grid_name="Kudi",
+        )
+        gateway = _FakeGateway(text=json.dumps({"decision": "new", "confidence": 0.9}))
+        correlator, store, ts, _gw = _make_correlator(gateway=gateway)
+        store.correlations.append(
+            {
+                "ticket_id": "tid-TKT-1",
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "severity": "urgent",
+                "signatures": [],  # deliberately does NOT contain alert.signature
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ts.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
+
+        decision = await correlator.decide("Kudi", alert)
+
+        # No deterministic rung matches (no signature overlap at all) --
+        # falls through to the LLM's "new", confirming the amend rung didn't
+        # short-circuit on a keyless alert by mistake.
         assert decision.decided_by == "llm"
         assert len(gateway.calls) == 1
 
@@ -646,6 +828,7 @@ class TestSignatureDuplicate:
         correlator, store, ts, _gw = _make_correlator(gateway=gateway)
         store.correlations.append(
             {
+                "ticket_id": "tid-TKT-1",
                 "ticket_ref": "TKT-1",
                 "grid_name": "Kudi",
                 "status": "open",
@@ -676,6 +859,7 @@ class TestSignatureDuplicate:
         correlator, store, ts, _gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-TKT-1",
                 "ticket_ref": "TKT-1",
                 "grid_name": "Kudi",
                 "status": "open",
@@ -700,6 +884,7 @@ class TestSignatureDuplicate:
         correlator, store, _ts, gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-OPS-42",
                 "ticket_ref": "OPS-42",
                 "grid_name": "Kudi",
                 "status": "open",
@@ -733,6 +918,7 @@ class TestKeylessSignatureDuplicate:
         correlator, store, _ts, gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-OPS-3363",
                 "ticket_ref": "OPS-3363",
                 "grid_name": "Okpokunou",
                 "status": "open",
@@ -763,6 +949,7 @@ class TestKeylessSignatureDuplicate:
         correlator, store, _ts, _gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-OPS-3363",
                 "ticket_ref": "OPS-3363",
                 "grid_name": "Okpokunou",
                 "status": "open",
@@ -781,11 +968,17 @@ class TestKeylessSignatureDuplicate:
 
 class TestLiveStatusConfirmation:
     @pytest.mark.asyncio
-    async def test_done_candidate_dropped_and_store_corrected(self, monkeypatch):
+    async def test_done_candidate_dropped(self, monkeypatch):
+        """A candidate the backend now reports as done is excluded from the
+        decision set. Post-0005b there is no separate "mark closed" step for
+        the correlator to perform -- ticket status lives solely on
+        `tickets` (TicketRepository's table), so there is nothing left for
+        the correlation layer to write back here."""
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
         correlator, store, ts, gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-TKT-1",
                 "ticket_ref": "TKT-1",
                 "grid_name": "Kudi",
                 "status": "open",
@@ -800,7 +993,6 @@ class TestLiveStatusConfirmation:
 
         assert decision.decision == "new"
         assert decision.decided_by == "no_candidates"
-        assert store.mark_closed_calls == ["TKT-1"]
 
     @pytest.mark.asyncio
     async def test_unavailable_status_preserves_stored_exact_duplicate(self, monkeypatch):
@@ -809,6 +1001,7 @@ class TestLiveStatusConfirmation:
         correlator, store, _ts, gateway = _make_correlator()
         store.correlations.append(
             {
+                "ticket_id": "tid-OPS-42",
                 "ticket_ref": "OPS-42",
                 "grid_name": "Kudi",
                 "status": "open",
@@ -822,7 +1015,6 @@ class TestLiveStatusConfirmation:
 
         assert decision.decision == "duplicate"
         assert decision.ticket_ref == "OPS-42"
-        assert store.mark_closed_calls == []
         assert gateway.calls == []
 
 
@@ -834,6 +1026,7 @@ class TestCandidateStatusConcurrency:
         for index in range(8):
             store.correlations.append(
                 {
+                    "ticket_id": f"tid-OPS-{index}",
                     "ticket_ref": f"OPS-{index}",
                     "grid_name": "Kudi",
                     "status": "open",
@@ -869,7 +1062,9 @@ class TestBackendOnlyCandidates:
         """A ticket filed by a human directly in Jira (or by n8n before
         cutover) -- tracked by TicketService.find_open_by_grid but absent
         from ticket_correlations -- must still be offered as an LLM
-        candidate."""
+        candidate. Since it has no correlation row, it must first be
+        adopted into the canonical `tickets` table (so it has a ticket_id
+        to be amended by) via TicketService.adopt_external."""
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
         gateway = _FakeGateway(
             text=json.dumps({"decision": "new", "confidence": 0.9})
@@ -885,6 +1080,31 @@ class TestBackendOnlyCandidates:
         prompt_messages, _options = gateway.calls[0]
         prompt_text = "\n".join(m.text or "" for m in prompt_messages)
         assert "OPS-1" in prompt_text
+        assert ts.adopted_calls == [
+            {"ref": "OPS-1", "backend": "jira", "summary": "Pre-existing human ticket", "grid_name": "Kudi"}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_candidate_dropped_when_adoption_fails(self, monkeypatch):
+        """A backend-discovered candidate that cannot be adopted (store
+        outage mid-decision) is dropped rather than offered without a
+        ticket_id -- it could never be amended safely."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        correlator, _store, ts, gateway = _make_correlator()
+        ts.open_by_grid = [
+            TicketSummary(ref="OPS-1", backend="jira", summary="Pre-existing human ticket", status="Open")
+        ]
+
+        async def _failing_adopt(**_kwargs):
+            raise RuntimeError("db down")
+
+        ts.adopt_external = _failing_adopt
+
+        decision = await correlator.decide("Kudi", _mppt_alert())
+
+        assert decision.decision == "new"
+        assert decision.decided_by == "no_candidates"
+        assert gateway.calls == []
 
 
 class TestLlmFailureModes:
@@ -894,7 +1114,7 @@ class TestLlmFailureModes:
         gateway = _FakeGateway(text=json.dumps({"decision": "amend"}), delay=1.0)
         correlator, store, ts, _gw = _make_correlator(gateway=gateway, timeout_seconds=0.05)
         store.correlations.append(
-            {"ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": [], "affected_keys": [], "created_at": datetime.now(timezone.utc).isoformat()}
+            {"ticket_id": "tid-TKT-1", "ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": [], "affected_keys": [], "created_at": datetime.now(timezone.utc).isoformat()}
         )
         ts.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
 
@@ -909,7 +1129,7 @@ class TestLlmFailureModes:
         gateway = _FakeGateway(raise_exc=RuntimeError("network down"))
         correlator, store, ts, _gw = _make_correlator(gateway=gateway)
         store.correlations.append(
-            {"ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": [], "affected_keys": [], "created_at": datetime.now(timezone.utc).isoformat()}
+            {"ticket_id": "tid-TKT-1", "ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": [], "affected_keys": [], "created_at": datetime.now(timezone.utc).isoformat()}
         )
         ts.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
 
@@ -924,7 +1144,7 @@ class TestLlmFailureModes:
         gateway = _FakeGateway(text="not json at all")
         correlator, store, ts, _gw = _make_correlator(gateway=gateway)
         store.correlations.append(
-            {"ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": [], "affected_keys": [], "created_at": datetime.now(timezone.utc).isoformat()}
+            {"ticket_id": "tid-TKT-1", "ticket_ref": "TKT-1", "grid_name": "Kudi", "status": "open", "signatures": [], "affected_keys": [], "created_at": datetime.now(timezone.utc).isoformat()}
         )
         ts.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
 
@@ -944,3 +1164,4 @@ class TestRecordEventIsCalled:
 
         assert "dk-99" in store.events
         assert store.events["dk-99"]["decision"] == "new"
+        assert store.events["dk-99"]["ticket_id"] is None

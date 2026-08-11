@@ -21,7 +21,11 @@ Decision pipeline (cheapest/safest first -- most alerts never reach the LLM):
    carrying this alert's exact ``signature`` -> deterministic "duplicate",
    never touches the LLM (there is no component key that could make it a
    distinct affected component).
-5. Otherwise, ask the LLM, then run its response through
+5. An open candidate already carries this alert's exact ``signature`` but
+   not yet this ``component_key`` -> deterministic "amend", never touches
+   the LLM. This is what collapses an N-device storm (one fault, many
+   MPPTs) onto a single ticket -- see ``_find_signature_amend``.
+6. Otherwise, ask the LLM, then run its response through
    ``_apply_guardrails`` -- which can force "new" (unknown ref, low
    confidence, unparseable response), downgrade "duplicate" to "amend" (no
    signature overlap and not a confident "same_issue"), or flag
@@ -50,7 +54,7 @@ from shared.llm import GenerationOptions, LLMMessage
 from shared.utils.logging import get_logger
 
 from . import correlation_rules
-from .alert_facts import AlertFacts, same_component
+from .alert_facts import AlertFacts, derive_severity, same_component
 
 if TYPE_CHECKING:
     from .backend import TicketStatus
@@ -60,6 +64,31 @@ LOGGER = get_logger(__name__)
 _ROOT_CAUSE_KINDS_REQUIRING_PARENT = ("grid_off", "grid_isolated")
 
 
+def effective_candidate_severity(candidate: CandidateSummary) -> str:
+    """The candidate's severity for guardrail/signature-rung comparison,
+    with fallbacks for a candidate whose correlation row has never recorded
+    one -- most commonly a Jira-discovered ticket just adopted via
+    ``TicketRepository.adopt_external``, which carries no stored severity at
+    all. A blank severity must never read as "not urgent" when the ticket
+    plainly already is one (an escalated "🔴 " summary, or a summary whose
+    own "! Urgent:"/"! Warning:" marker says so) -- that's exactly what
+    would let a stale candidate masquerade as a fresh warning->urgent
+    transition on every subsequent alert.
+
+    Order: stored ``severity`` field, else derived from the summary's
+    "! Urgent:"/"! Warning:" marker, else "urgent" when the summary starts
+    with the escalated-ticket "🔴 " marker, else "" (genuinely unknown).
+    """
+    if candidate.severity:
+        return candidate.severity
+    derived = derive_severity(candidate.summary)
+    if derived:
+        return derived
+    if candidate.summary.strip().startswith("🔴"):
+        return "urgent"
+    return ""
+
+
 class CandidateSummary(BaseModel):
     """A candidate ticket offered to the correlator, merged from
     ``CorrelationStore`` (backend-agnostic, has signatures/affected_keys)
@@ -67,6 +96,7 @@ class CandidateSummary(BaseModel):
     pre-cutover tickets the correlation layer never recorded)."""
 
     ref: str
+    ticket_id: Optional[str] = None
     backend: str = ""
     summary: str = ""
     age_hours: Optional[float] = None
@@ -99,6 +129,7 @@ class CorrelationDecision:
     llm_raw: Optional[str]
     needs_root_cause_ticket: bool = False
     ticket_severity: str = ""
+    ticket_id: Optional[str] = None
 
 
 def _parse_llm_response(raw: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -206,7 +237,7 @@ def _apply_guardrails(
         )
 
     if decision == "duplicate" and _is_urgent_severity_increase(
-        alert_severity, by_ref[ticket_ref].severity
+        alert_severity, effective_candidate_severity(by_ref[ticket_ref])
     ):
         decision = "amend"
         reason = reason or "urgent severity increase makes this alert a material amendment"
@@ -225,15 +256,18 @@ def _apply_guardrails(
 
     needs_root_cause_ticket = False
     final_ticket_ref: Optional[str] = ticket_ref
+    final_ticket_id: Optional[str] = by_ref[ticket_ref].ticket_id
     if decision == "amend" and root_cause_kind in _ROOT_CAUSE_KINDS_REQUIRING_PARENT:
         any_root_cause_candidate = any(c.root_cause_kind == root_cause_kind for c in candidates)
         if not any_root_cause_candidate:
             needs_root_cause_ticket = True
             final_ticket_ref = None
+            final_ticket_id = None
 
     return CorrelationDecision(
         decision=decision,
         ticket_ref=final_ticket_ref,
+        ticket_id=final_ticket_id,
         confidence=confidence,
         decided_by="llm",
         reason=reason,
@@ -244,7 +278,7 @@ def _apply_guardrails(
         candidate_refs=candidate_refs,
         llm_raw=llm_raw,
         needs_root_cause_ticket=needs_root_cause_ticket,
-        ticket_severity=by_ref[ticket_ref].severity,
+        ticket_severity=effective_candidate_severity(by_ref[ticket_ref]),
     )
 
 
@@ -278,6 +312,127 @@ def _find_signature_only_duplicate(
     for candidate in candidates:
         if alert.signature in (candidate.signatures or []):
             return candidate
+    return None
+
+
+def _find_signature_amend(
+    candidates: List[CandidateSummary], alert: AlertFacts
+) -> Optional[CandidateSummary]:
+    """Rung 5: an open candidate already carries this alert's exact
+    signature (same fault shape) but not yet this alert's component key --
+    a new device hit by an already-known fault. With B1's normalization fix
+    this is what actually collapses an N-device storm onto one ticket (plan
+    finding 1): each subsequent device matches the first one's signature and
+    amends in, deterministically, instead of reaching the LLM.
+
+    Requires a component -- a keyless alert can only ever be a duplicate
+    (rung 4, above), never an amend by this rung, since there's no key that
+    could make it "a distinct affected component."
+    """
+    if not alert.signature or not alert.component_kind:
+        return None
+    for candidate in candidates:
+        if alert.signature not in (candidate.signatures or []):
+            continue
+        already_present = any(
+            same_component(entry, alert.component_kind, alert.component_key)
+            for entry in candidate.affected_keys or []
+        )
+        if not already_present:
+            return candidate
+    return None
+
+
+def find_deterministic_decision(
+    candidates: List[CandidateSummary],
+    alert: AlertFacts,
+    *,
+    decided_by: str = "signature",
+    reason_suffix: str = "",
+) -> Optional[CorrelationDecision]:
+    """The three deterministic, LLM-free rungs, in order: exact
+    signature+component duplicate, keyless signature-only duplicate, then
+    signature-amend. Returns ``None`` when nothing matches -- the caller
+    falls through to the LLM (``AlertCorrelator.decide()``) or to filing a
+    plain new ticket (app.py's lock-free grid-lock-timeout fallback).
+
+    Shared between ``AlertCorrelator.decide()`` and
+    ``_attempt_lock_free_signature_correlation`` (app.py) so a grid-lock
+    timeout still groups a storm instead of reverting to one-LLM-call per
+    alert. ``decided_by``/``reason_suffix`` let the lock-free caller record
+    that it matched without holding the lock -- see
+    ``CorrelationDecision.decided_by``'s docstring for the
+    "signature"/"fallback_signature" distinction.
+    """
+    duplicate = _find_signature_duplicate(candidates, alert) or _find_signature_only_duplicate(
+        candidates, alert
+    )
+    if duplicate is not None:
+        duplicate_severity = effective_candidate_severity(duplicate)
+        severity_increased = _is_urgent_severity_increase(alert.severity, duplicate_severity)
+        # alert.component_kind is truthy only for matches found via
+        # _find_signature_duplicate (component-keyed); a keyless match can
+        # only have come from _find_signature_only_duplicate, which requires
+        # component_kind to be empty.
+        keyed_match = bool(alert.component_kind)
+        if keyed_match:
+            reason = (
+                "urgent severity increase on an exact signature+component match"
+                if severity_increased
+                else "exact signature+component match against an open ticket"
+            )
+        else:
+            reason = (
+                "urgent severity increase on an exact signature match "
+                "(grid-level alert, no equipment key)"
+                if severity_increased
+                else "exact signature match against an open ticket "
+                "(grid-level alert, no equipment key)"
+            )
+        return CorrelationDecision(
+            decision="amend" if severity_increased else "duplicate",
+            ticket_ref=duplicate.ref,
+            ticket_id=duplicate.ticket_id,
+            confidence=1.0,
+            decided_by=decided_by,
+            reason=f"{reason}{reason_suffix}",
+            affected_key={
+                "kind": alert.component_kind,
+                "key": alert.component_key,
+                "label": alert.component_label,
+            },
+            root_cause_kind=duplicate.root_cause_kind,
+            update_message="",
+            amended_summary=alert.subject if severity_increased else "",
+            candidate_refs=[c.ref for c in candidates],
+            llm_raw=None,
+            needs_root_cause_ticket=False,
+            ticket_severity=duplicate_severity,
+        )
+
+    amend_candidate = _find_signature_amend(candidates, alert)
+    if amend_candidate is not None:
+        return CorrelationDecision(
+            decision="amend",
+            ticket_ref=amend_candidate.ref,
+            ticket_id=amend_candidate.ticket_id,
+            confidence=1.0,
+            decided_by=decided_by,
+            reason=f"same fault signature, new affected component{reason_suffix}",
+            affected_key={
+                "kind": alert.component_kind,
+                "key": alert.component_key,
+                "label": alert.component_label,
+            },
+            root_cause_kind=amend_candidate.root_cause_kind,
+            update_message="",
+            amended_summary="",  # the renderer recomputes from state
+            candidate_refs=[c.ref for c in candidates],
+            llm_raw=None,
+            needs_root_cause_ticket=False,
+            ticket_severity=effective_candidate_severity(amend_candidate),
+        )
+
     return None
 
 
@@ -431,15 +586,17 @@ class AlertCorrelator:
         if dedup_key:
             prior = await self._store.get_by_dedup_key(dedup_key)
             if prior:
-                ticket_ref = prior.get("ticket_ref")
-                ticket_severity = prior.get("ticket_severity") or ""
-                if ticket_ref:
+                ticket_id = prior.get("ticket_id")
+                ticket_ref: Optional[str] = None
+                ticket_severity = ""
+                if ticket_id:
+                    ticket_ref = await self._ticket_service.get_ref_by_id(ticket_id)
                     try:
-                        correlation = await self._store.get_correlation(ticket_ref)
+                        correlation = await self._store.get_correlation(ticket_id)
                     except Exception:
                         LOGGER.warning(
                             "Failed to load durable severity for replayed ticket {!r}",
-                            ticket_ref,
+                            ticket_id,
                             exc_info=True,
                         )
                     else:
@@ -448,6 +605,7 @@ class AlertCorrelator:
                 return CorrelationDecision(
                     decision=prior.get("decision", "new"),
                     ticket_ref=ticket_ref,
+                    ticket_id=ticket_id,
                     confidence=prior.get("confidence"),
                     decided_by="replay",
                     reason=prior.get("reason") or "replayed prior decision (dedup_key match)",
@@ -483,52 +641,9 @@ class AlertCorrelator:
                 _fallback_decision("no open candidates for grid", [], decided_by="no_candidates"),
             )
 
-        duplicate = _find_signature_duplicate(candidates, alert) or (
-            _find_signature_only_duplicate(candidates, alert)
-        )
-        if duplicate is not None:
-            severity_increased = _is_urgent_severity_increase(
-                alert.severity, duplicate.severity
-            )
-            # alert.component_kind is truthy only for matches found via
-            # _find_signature_duplicate (component-keyed); a keyless match can
-            # only have come from _find_signature_only_duplicate, which
-            # requires component_kind to be empty.
-            keyed_match = bool(alert.component_kind)
-            if keyed_match:
-                reason = (
-                    "urgent severity increase on an exact signature+component match"
-                    if severity_increased
-                    else "exact signature+component match against an open ticket"
-                )
-            else:
-                reason = (
-                    "urgent severity increase on an exact signature match "
-                    "(grid-level alert, no equipment key)"
-                    if severity_increased
-                    else "exact signature match against an open ticket "
-                    "(grid-level alert, no equipment key)"
-                )
-            decision = CorrelationDecision(
-                decision="amend" if severity_increased else "duplicate",
-                ticket_ref=duplicate.ref,
-                confidence=1.0,
-                decided_by="signature",
-                reason=reason,
-                affected_key={
-                    "kind": alert.component_kind,
-                    "key": alert.component_key,
-                    "label": alert.component_label,
-                },
-                root_cause_kind=duplicate.root_cause_kind,
-                update_message="",
-                amended_summary=alert.subject if severity_increased else "",
-                candidate_refs=[c.ref for c in candidates],
-                llm_raw=None,
-                needs_root_cause_ticket=False,
-                ticket_severity=duplicate.severity,
-            )
-            return await self._finalize(grid_name, alert, dedup_key, decision)
+        deterministic_decision = find_deterministic_decision(candidates, alert)
+        if deterministic_decision is not None:
+            return await self._finalize(grid_name, alert, dedup_key, deterministic_decision)
 
         candidate_refs = [c.ref for c in candidates]
         try:
@@ -572,7 +687,7 @@ class AlertCorrelator:
     ) -> CorrelationDecision:
         try:
             await self._store.record_event(
-                ticket_ref=decision.ticket_ref,
+                ticket_id=decision.ticket_id,
                 grid_name=grid_name,
                 source=alert.rule_id or None,
                 signature=alert.signature or None,
@@ -609,11 +724,22 @@ class AlertCorrelator:
         store_refs = set()
         for row in store_rows:
             ref = row.get("ticket_ref")
+            ticket_id = row.get("ticket_id")
             if not ref:
+                continue
+            if not ticket_id:
+                # Cannot happen given a healthy store (ticket_id is
+                # ticket_correlations' NOT NULL primary key post-0005b) --
+                # guarded anyway since a candidate with no id can't be
+                # amended safely.
+                LOGGER.warning(
+                    "Dropping candidate {!r}: correlation row missing ticket_id", ref
+                )
                 continue
             store_refs.add(ref)
             by_ref[ref] = CandidateSummary(
                 ref=ref,
+                ticket_id=ticket_id,
                 backend=row.get("ticket_backend") or "",
                 summary=row.get("summary_current") or row.get("summary_base") or "",
                 age_hours=_age_hours(row.get("created_at"), now),
@@ -628,8 +754,25 @@ class AlertCorrelator:
         for summary in backend_summaries:
             if summary.ref in by_ref:
                 continue
+            try:
+                adopted = await self._ticket_service.adopt_external(
+                    ref=summary.ref,
+                    backend=summary.backend,
+                    summary=summary.summary,
+                    grid_name=grid_name,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Dropping externally-discovered candidate {!r}: could not adopt "
+                    "into the canonical ticket table (cannot be amended without a "
+                    "ticket_id)",
+                    summary.ref,
+                    exc_info=True,
+                )
+                continue
             by_ref[summary.ref] = CandidateSummary(
                 ref=summary.ref,
+                ticket_id=adopted.id,
                 backend=summary.backend,
                 summary=summary.summary,
                 age_hours=_age_hours(getattr(summary, "created_at", None), now),
@@ -645,8 +788,10 @@ class AlertCorrelator:
         confirmed: List[CandidateSummary] = []
         for candidate, status in zip(ordered, statuses):
             if status is not None and status.is_done:
-                if candidate.ref in store_refs:
-                    await self._store.mark_closed(candidate.ref)
+                # No separate "mark closed" step needed here -- ticket
+                # status lives solely on `tickets` (TicketRepository's
+                # table) post-0005b, and open_candidates_for_grid already
+                # reads status from there on the next call.
                 continue
             if status is None and candidate.ref not in store_refs:
                 continue

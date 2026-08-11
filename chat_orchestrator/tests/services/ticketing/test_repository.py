@@ -430,3 +430,48 @@ async def test_find_open_internal_by_grid_reads_active_canonical_tickets():
             ("status", "neq:done"),
         ],
     )
+
+
+@pytest.mark.asyncio
+async def test_adopt_external_inserts_a_new_row_when_the_ref_is_unknown():
+    client = _Client()  # select_rows defaults to [] -- get_by_ref finds nothing
+
+    record = await TicketRepository(client=client).adopt_external(
+        ref="OPS-9001", backend="jira", summary="Legacy grid issue", grid_name="Kudi"
+    )
+
+    assert record.id == "ticket-1"
+    assert record.ticket_ref == "OPS-9001"
+    assert record.created_via == "adopted"
+    assert record.provisioning_state == "active"
+    inserts = [c for c in client.calls if c[1] == "insert"]
+    assert len(inserts) == 1
+    _table, _mode, payload, _filters = inserts[0]
+    assert payload == {
+        "ticket_ref": "OPS-9001",
+        "backend": "jira",
+        "summary": "Legacy grid issue",
+        "grid_name": "Kudi",
+        "created_via": "adopted",
+        "provisioning_state": "active",
+        "status": "open",
+    }
+
+
+@pytest.mark.asyncio
+async def test_adopt_external_returns_the_existing_row_without_inserting():
+    client = _Client()
+    client.select_rows_by_table = {
+        "tickets": [{
+            "id": "ticket-existing", "ticket_ref": "OPS-9001", "backend": "jira",
+            "summary": "Legacy grid issue", "status": "open",
+            "created_via": "adopted", "provisioning_state": "active",
+        }],
+    }
+
+    record = await TicketRepository(client=client).adopt_external(
+        ref="OPS-9001", backend="jira", summary="Legacy grid issue", grid_name="Kudi"
+    )
+
+    assert record.id == "ticket-existing"
+    assert not any(c[1] == "insert" for c in client.calls)

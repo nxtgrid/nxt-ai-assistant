@@ -12,9 +12,20 @@ Read-only, and derived from tables Anansi already writes:
 * ``message_deliveries.external_message_id`` -- the bot's own ticket posts
 
 Both reads are bounded by a recency window. ``chat_messages`` has no index on
-``group_id``, but ``chat_messages_created_at_idx`` makes a short window
-selective, and an anchor older than the window is stale by definition -- for
-which "post a fresh message" is the right answer regardless.
+``group_id`` alone, but ``chat_messages_group_topic_msg_idx``
+(0016_chat_messages_topic.sql) covers ``(group_id, telegram_topic_id,
+telegram_message_id DESC)``, and an anchor older than the window is stale by
+definition -- for which "post a fresh message" is the right answer regardless.
+
+Counted **per topic**, not chat-wide, when a caller supplies one: every grid
+resolves to one shared Telegram group with a *topic per grid* (see
+``shared/auth/auth_service.py``'s grid->target resolution), so a chat-wide
+count reads a burst in an unrelated topic as "scrolled past" within seconds
+even while the ticket's own topic sat silent -- production ids ran
+65876->65882 in 40 seconds across five grids sharing one group. Passing
+``topic_id=None`` keeps the original chat-wide behavior exactly (a caller
+that doesn't know the topic, or a delivery anchor recorded before topics were
+tracked).
 
 The approximation runs slightly low: ``_save_passive_group_message`` skips
 messages with no text or caption, so bare photos do not advance the head.
@@ -70,8 +81,12 @@ class ChatWatermarkRepository:
     def _since() -> str:
         return (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).isoformat()
 
-    async def head(self, chat_id: str) -> Optional[int]:
-        """Newest message id on record for ``chat_id``, or None if unknown."""
+    async def head(self, chat_id: str, topic_id: Optional[str] = None) -> Optional[int]:
+        """Newest message id on record for ``chat_id``, or None if unknown.
+
+        ``topic_id`` scopes both reads to that forum topic when given;
+        ``None`` keeps the original chat-wide behavior.
+        """
         client = self._raw_client()
         if client is None or not chat_id:
             return None
@@ -80,11 +95,15 @@ class ChatWatermarkRepository:
         candidates: List[int] = []
 
         try:
-            response = (
+            query = (
                 client.table("chat_messages")
                 .select("telegram_message_id")
                 .eq("group_id", str(chat_id))
-                .gte("created_at", since)
+            )
+            if topic_id is not None:
+                query = query.eq("telegram_topic_id", str(topic_id))
+            response = (
+                query.gte("created_at", since)
                 .order("telegram_message_id", desc=True)
                 .limit(1)
                 .execute()
@@ -96,11 +115,15 @@ class ChatWatermarkRepository:
             LOGGER.debug("chat watermark: chat_messages read failed for {}", chat_id, exc_info=True)
 
         try:
-            response = (
+            query = (
                 client.table("message_deliveries")
                 .select("external_message_id")
                 .eq("external_chat_id", str(chat_id))
-                .gte("sent_at", since)
+            )
+            if topic_id is not None:
+                query = query.eq("external_topic_id", str(topic_id))
+            response = (
+                query.gte("sent_at", since)
                 .order("external_message_id", desc=True)
                 .limit(1)
                 .execute()
@@ -115,13 +138,16 @@ class ChatWatermarkRepository:
 
         return max(candidates) if candidates else None
 
-    async def messages_since(self, chat_id: str, anchor_message_id: int) -> int:
+    async def messages_since(
+        self, chat_id: str, anchor_message_id: int, topic_id: Optional[str] = None
+    ) -> int:
         """Approximate message count posted in ``chat_id`` after ``anchor_message_id``.
 
         Returns 0 when unknown, which the notifier reads as "still on screen"
         -- matching how ticket messages behaved before this existed.
+        ``topic_id`` scopes the count to that forum topic when given.
         """
-        head = await self.head(chat_id)
+        head = await self.head(chat_id, topic_id=topic_id)
         if head is None or head <= anchor_message_id:
             return 0
         return head - anchor_message_id
