@@ -94,6 +94,12 @@ def render_summary(
     summary reads as "N components affected" rather than describing only the
     single component that happened to trigger the last amend.
 
+    Two or more keys spanning *more than one* component kind is a
+    power-chain cascade merge (only ``_apply_guardrails``'s cross-kind guard
+    can produce this) -- picking one dominant kind and silently dropping the
+    other, the way the single-kind path does, would hide exactly the causal
+    link an operator most needs to see. See ``_render_cascade_summary``.
+
     ``grid_name`` is an explicit parameter rather than read from
     ``correlation`` -- ``ticket_correlations`` no longer carries a
     ``grid_name`` column post-0005b (grid comes from ``tickets`` instead),
@@ -103,13 +109,20 @@ def render_summary(
     affected_keys = correlation.get("affected_keys") or []
     total_keys = len(affected_keys)
 
+    entries_by_kind: Dict[str, List[Dict[str, Any]]] = {}
+    for entry in affected_keys:
+        entries_by_kind.setdefault(entry.get("kind", ""), []).append(entry)
+    distinct_kinds = [kind for kind in entries_by_kind if kind]
+    if len(distinct_kinds) > 1:
+        return _render_cascade_summary(correlation, alert, entries_by_kind)
+
     if total_keys < 2:
         summary = (llm_summary or correlation.get("summary_base") or "").strip()
         return _apply_incoming_severity(summary, alert.severity)
 
-    kind_groups: Dict[str, List[str]] = {}
-    for entry in affected_keys:
-        kind_groups.setdefault(entry.get("kind", ""), []).append(entry.get("key", ""))
+    kind_groups: Dict[str, List[str]] = {
+        kind: [entry.get("key", "") for entry in entries] for kind, entries in entries_by_kind.items()
+    }
 
     dominant_kind = alert.component_kind or max(kind_groups, key=lambda k: len(kind_groups[k]))
     keys = sorted({k for k in kind_groups.get(dominant_kind, []) if k})
@@ -129,6 +142,63 @@ def render_summary(
         key_list += f", +{len(keys) - _MAX_KEYS_SHOWN} more"
 
     return f"{severity}{len(keys)} {label} in {grid_name} affected ({key_list}) !"
+
+
+def _render_cascade_summary(
+    correlation: Dict[str, Any],
+    alert: AlertFacts,
+    entries_by_kind: Dict[str, List[Dict[str, Any]]],
+) -> str:
+    """Root-cause-led rendering for a ticket whose ``affected_keys`` span
+    more than one component kind: the ticket's own ``summary_base`` (the
+    root cause's original alert text, never overwritten -- see
+    ``render_description``'s docstring for the same idempotency guarantee)
+    stays the headline, with the folded symptom kind(s) named alongside it
+    rather than absorbed into an aggregate count that would only describe
+    one of them.
+
+    The "root" kind is whichever kind's earliest entry has the earliest
+    ``first_seen`` (ties broken alphabetically for determinism) -- entry
+    *count* is deliberately not the signal: the cascaded-in symptom often
+    recurs more often than the original fault (an inverter can cycle
+    on/off repeatedly while the BMS communication loss that caused it fires
+    only once), so "most entries" would misidentify the dependent kind as
+    the root. "Arrived first" is what the prompt's own causal-direction
+    rule ("the *earlier* ticket is always the parent") means at the
+    component level too.
+    """
+
+    def _earliest_first_seen(entries: List[Dict[str, Any]]) -> str:
+        seen = [str(entry.get("first_seen") or "") for entry in entries]
+        # A blank first_seen sorts first lexicographically, which would
+        # wrongly win a tie against a real timestamp -- push it last instead.
+        return min((value for value in seen if value), default="9999")
+
+    root_kind = min(
+        entries_by_kind, key=lambda k: (_earliest_first_seen(entries_by_kind[k]), k)
+    )
+    dependent_entries = [
+        entry for kind, entries in entries_by_kind.items() if kind != root_kind for entry in entries
+    ]
+    dependent_kinds = sorted({entry.get("kind", "") for entry in dependent_entries})
+
+    # "Any folded symptom is urgent" = this alert is urgent, or the ticket's
+    # durable stored severity already ratcheted to urgent from an earlier
+    # one (see apply_amendment's effective_severity) -- summary_base itself
+    # is immutable, so a later escalation never reaches its own marker.
+    cascade_severity = (
+        "urgent"
+        if alert.severity.strip().casefold() == "urgent"
+        or str(correlation.get("severity") or "").strip().casefold() == "urgent"
+        else ""
+    )
+    headline = _apply_incoming_severity((correlation.get("summary_base") or "").strip(), cascade_severity)
+
+    kind_labels = ", ".join(
+        _KIND_LABELS.get(kind) or kind.replace("_", " ").title() for kind in dependent_kinds
+    )
+    noun = "alert" if len(dependent_entries) == 1 else "alerts"
+    return f"{headline} — +{len(dependent_entries)} dependent {noun} ({kind_labels})"
 
 
 def render_description(correlation: Dict[str, Any]) -> str:
@@ -345,7 +415,15 @@ async def apply_amendment(
         priority_id="highest" if escalate_now else None,
     )
     if raw_text:
-        await ticket_service.add_comment(ticket_ref, raw_text, public=False)
+        comment_text = raw_text
+        if decision.root_cause_kind == "power_chain":
+            # The one real cost of merging a cascade over cross-linking it:
+            # the second failure's own text is no longer the ticket's
+            # headline. Prefixing the comment is the mitigation -- the
+            # repair for *this* symptom stays legible on the one ticket
+            # instead of looking like commentary on the root cause.
+            comment_text = f"Folded in as a power_chain symptom:\n\n{raw_text}"
+        await ticket_service.add_comment(ticket_ref, comment_text, public=False)
 
     persisted = await store.record_amendment(
         ticket_id,

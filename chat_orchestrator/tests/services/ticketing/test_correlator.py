@@ -279,6 +279,148 @@ class TestApplyGuardrails:
         assert decision.needs_root_cause_ticket is False
 
 
+class TestCrossKindAmendGuard:
+    """C4: a power-chain cascade is the only way an amend may join a ticket
+    whose affected_keys carry a different component kind than the incoming
+    alert's own. Everything else about the guardrails above (ref validity,
+    confidence floor, root-cause-first) is unchanged and still applies."""
+
+    @staticmethod
+    def _cross_kind_parsed(**overrides) -> Dict[str, Any]:
+        parsed = {
+            "decision": "amend",
+            "ticket_ref": "OPS-3456",
+            "confidence": 0.9,
+            "affected_key": {"kind": "inverter", "key": "INV1", "label": "Inverter INV1"},
+            "root_cause_kind": "power_chain",
+            "update_message": "Inverter shut down after BMS comms loss",
+            "reason": "battery/BMS -> inverter power chain",
+        }
+        parsed.update(overrides)
+        return parsed
+
+    @staticmethod
+    def _bms_candidate(**overrides) -> CandidateSummary:
+        defaults = dict(
+            ref="OPS-3456",
+            affected_keys=[{"kind": "battery", "key": "BMS1", "label": "BMS1"}],
+        )
+        defaults.update(overrides)
+        return _candidate(**defaults)
+
+    def test_forced_new_when_flag_off(self, monkeypatch):
+        monkeypatch.delenv("ALERT_CASCADE_MERGE_ENABLED", raising=False)
+        decision = _apply_guardrails(
+            self._cross_kind_parsed(), [self._bms_candidate()], min_confidence=0.75, llm_raw="{}"
+        )
+        assert decision.decision == "new"
+        assert decision.ticket_ref is None
+
+    def test_forced_new_without_a_power_chain_root_cause(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CASCADE_MERGE_ENABLED", "true")
+        decision = _apply_guardrails(
+            self._cross_kind_parsed(root_cause_kind="component"),
+            [self._bms_candidate()],
+            min_confidence=0.75,
+            llm_raw="{}",
+        )
+        assert decision.decision == "new"
+
+    def test_independent_mppt_and_inverter_fault_with_no_topology_claim_stays_new(self, monkeypatch):
+        """The plan's own Example 4: an MPPT-performance ticket and an
+        unrelated inverter fault on a grid that's currently on -- the model
+        is expected to say "new" (root_cause_kind anything but
+        power_chain), and the guard must agree even with the flag on."""
+        monkeypatch.setenv("ALERT_CASCADE_MERGE_ENABLED", "true")
+        candidate = _candidate(
+            ref="TKT-1", affected_keys=[{"kind": "mppt", "key": "A3", "label": "MPPT A3"}]
+        )
+        parsed = self._cross_kind_parsed(
+            ticket_ref="TKT-1",
+            affected_key={"kind": "inverter", "key": "", "label": "Inverter Fault"},
+            root_cause_kind=None,
+            reason="unrelated issue, same grid",
+        )
+        decision = _apply_guardrails(parsed, [candidate], min_confidence=0.75, llm_raw="{}")
+        assert decision.decision == "new"
+
+    def test_accepted_when_flag_on_and_power_chain_and_confident(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CASCADE_MERGE_ENABLED", "true")
+        decision = _apply_guardrails(
+            self._cross_kind_parsed(), [self._bms_candidate()], min_confidence=0.75, llm_raw="{}"
+        )
+        assert decision.decision == "amend"
+        assert decision.ticket_ref == "OPS-3456"
+        assert decision.ticket_id == "tid-OPS-3456"
+        assert decision.root_cause_kind == "power_chain"
+
+    def test_low_confidence_forces_new_even_with_flag_on(self, monkeypatch):
+        """Plan C6: a cross-kind amend at confidence 0.6 (below the 0.75
+        floor) must still fail closed -- the power-chain allowance never
+        bypasses the ordinary confidence bar."""
+        monkeypatch.setenv("ALERT_CASCADE_MERGE_ENABLED", "true")
+        decision = _apply_guardrails(
+            self._cross_kind_parsed(confidence=0.6),
+            [self._bms_candidate()],
+            min_confidence=0.75,
+            llm_raw="{}",
+        )
+        assert decision.decision == "new"
+
+    def test_same_kind_amend_is_unaffected_by_the_guard(self, monkeypatch):
+        """A same-kind amend (e.g. a second BMS alert onto the same
+        battery/BMS ticket) never needed power_chain before Phase C and
+        still doesn't -- the guard only fires on a genuine kind mismatch."""
+        monkeypatch.delenv("ALERT_CASCADE_MERGE_ENABLED", raising=False)
+        parsed = self._cross_kind_parsed(
+            affected_key={"kind": "battery", "key": "BMS2", "label": "BMS2"},
+            root_cause_kind="component",
+        )
+        decision = _apply_guardrails(
+            parsed, [self._bms_candidate()], min_confidence=0.75, llm_raw="{}"
+        )
+        assert decision.decision == "amend"
+
+    def test_blank_affected_key_is_not_treated_as_cross_kind(self, monkeypatch):
+        """A grid-level alert (no component at all) folding onto a
+        component-specific ticket isn't provably cross-kind -- there is no
+        incoming kind to compare, so the ordinary pre-Phase-C guardrails
+        apply rather than the power-chain gate."""
+        monkeypatch.delenv("ALERT_CASCADE_MERGE_ENABLED", raising=False)
+        parsed = self._cross_kind_parsed(affected_key=None, root_cause_kind="component")
+        decision = _apply_guardrails(
+            parsed, [self._bms_candidate()], min_confidence=0.75, llm_raw="{}"
+        )
+        assert decision.decision == "amend"
+
+    def test_candidate_with_no_recorded_kind_is_not_treated_as_cross_kind(self, monkeypatch):
+        """A Jira-discovered candidate adopted with no affected_keys at all
+        (the correlator's adopt_external path) can't be proven cross-kind
+        either way -- refusing it outright would regress ordinary LLM-amend
+        behaviour onto tickets the correlation store never recorded."""
+        monkeypatch.delenv("ALERT_CASCADE_MERGE_ENABLED", raising=False)
+        decision = _apply_guardrails(
+            self._cross_kind_parsed(root_cause_kind="component"),
+            [self._bms_candidate(affected_keys=[])],
+            min_confidence=0.75,
+            llm_raw="{}",
+        )
+        assert decision.decision == "amend"
+
+    def test_power_chain_never_requires_a_root_cause_parent_ticket(self, monkeypatch):
+        """C4: power_chain deliberately does not join
+        _ROOT_CAUSE_KINDS_REQUIRING_PARENT -- the parent already exists as a
+        real ticket by construction of the cross-kind guard above, so this
+        must never set needs_root_cause_ticket."""
+        monkeypatch.setenv("ALERT_CASCADE_MERGE_ENABLED", "true")
+        candidates = [self._bms_candidate(root_cause_kind=None)]
+        decision = _apply_guardrails(
+            self._cross_kind_parsed(), candidates, min_confidence=0.75, llm_raw="{}"
+        )
+        assert decision.needs_root_cause_ticket is False
+        assert decision.ticket_ref == "OPS-3456"
+
+
 # ---------------------------------------------------------------------------
 # AlertCorrelator.decide() integration tests (fakes only, no network)
 # ---------------------------------------------------------------------------
@@ -1165,3 +1307,91 @@ class TestRecordEventIsCalled:
         assert "dk-99" in store.events
         assert store.events["dk-99"]["decision"] == "new"
         assert store.events["dk-99"]["ticket_id"] is None
+
+
+class TestPowerChainCascadeDecision:
+    """C6: the real 2026-08-08 Ogbinbiri case (plan Example 5) end to end
+    through AlertCorrelator.decide() -- a battery/BMS ticket already open,
+    an inverter-off alert arriving minutes later. The historical model got
+    this wrong (new, 0.9 confidence); this fixture is what right looks
+    like."""
+
+    @staticmethod
+    def _bms_ticket_row() -> Dict[str, Any]:
+        return {
+            "ticket_id": "tid-OPS-3456",
+            "ticket_ref": "OPS-3456",
+            "grid_name": "Ogbinbiri",
+            "status": "open",
+            "signatures": ["bms-sig"],
+            "affected_keys": [{"kind": "battery", "key": "BMS1", "label": "BMS1"}],
+            "root_cause_kind": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    @staticmethod
+    def _inverter_off_alert() -> AlertFacts:
+        alert = AlertFacts(
+            subject="RESTART FAILED - Inverter Off while battery Ok >52V ... causing Grid outage",
+            details="",
+            component_kind="inverter",
+            component_key="INV1",
+            component_label="Inverter INV1",
+        )
+        return enrich_alert_facts(alert, grid_name="Ogbinbiri")
+
+    @pytest.mark.asyncio
+    async def test_amends_onto_the_earlier_bms_ticket_when_the_flag_is_on(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        monkeypatch.setenv("ALERT_CASCADE_MERGE_ENABLED", "true")
+        gateway = _FakeGateway(
+            text=json.dumps(
+                {
+                    "decision": "amend",
+                    "ticket_ref": "OPS-3456",
+                    "confidence": 0.92,
+                    "affected_key": {"kind": "inverter", "key": "INV1", "label": "Inverter INV1"},
+                    "root_cause_kind": "power_chain",
+                    "update_message": "Inverter shut down after BMS comms loss (OPS-3456)",
+                    "reason": "battery/BMS -> inverter power chain, within 30 minutes",
+                }
+            )
+        )
+        correlator, store, ts, _gw = _make_correlator(gateway=gateway)
+        store.correlations.append(self._bms_ticket_row())
+        ts.statuses["OPS-3456"] = TicketStatus(summary="BMS comms lost", is_done=False)
+
+        decision = await correlator.decide("Ogbinbiri", self._inverter_off_alert())
+
+        assert decision.decision == "amend"
+        assert decision.ticket_ref == "OPS-3456"
+        assert decision.ticket_id == "tid-OPS-3456"
+        assert decision.root_cause_kind == "power_chain"
+
+    @pytest.mark.asyncio
+    async def test_stays_new_when_the_flag_is_off(self, monkeypatch):
+        """The historical incident's actual production configuration --
+        cascade merging must default to today's behaviour until an operator
+        opts in."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        monkeypatch.delenv("ALERT_CASCADE_MERGE_ENABLED", raising=False)
+        gateway = _FakeGateway(
+            text=json.dumps(
+                {
+                    "decision": "amend",
+                    "ticket_ref": "OPS-3456",
+                    "confidence": 0.92,
+                    "affected_key": {"kind": "inverter", "key": "INV1", "label": "Inverter INV1"},
+                    "root_cause_kind": "power_chain",
+                    "update_message": "Inverter shut down after BMS comms loss (OPS-3456)",
+                    "reason": "battery/BMS -> inverter power chain, within 30 minutes",
+                }
+            )
+        )
+        correlator, store, ts, _gw = _make_correlator(gateway=gateway)
+        store.correlations.append(self._bms_ticket_row())
+        ts.statuses["OPS-3456"] = TicketStatus(summary="BMS comms lost", is_done=False)
+
+        decision = await correlator.decide("Ogbinbiri", self._inverter_off_alert())
+
+        assert decision.decision == "new"
