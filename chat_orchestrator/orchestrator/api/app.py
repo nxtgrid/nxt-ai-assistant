@@ -1049,6 +1049,11 @@ async def _log_notification_to_chat_db(
     the saved message is also tagged via ``tag_message_as_ticket_comment`` so it
     can be associated with the canonical ticket timeline, mirroring how
     forwarded escalation replies are tagged.
+
+    ``group_id`` must be passed to ``save_messages`` -- without it the bot's
+    own alert posts are invisible to ``chat_messages`` reads keyed by
+    ``group_id`` (notably ``ChatWatermarkRepository``'s topic-scoped scroll
+    count, plan B6), even though this is exactly a group notification.
     """
     try:
         from orchestrator.models.schemas import ConversationMessage
@@ -1075,7 +1080,9 @@ async def _log_notification_to_chat_db(
                 **({"dedup_key": body.dedup_key} if body.dedup_key else {}),
             },
         )
-        saved = await client.save_messages(session.id, [message], from_chat_id=str(chat_id))
+        saved = await client.save_messages(
+            session.id, [message], from_chat_id=str(chat_id), group_id=str(chat_id)
+        )
         if ticket_ref and saved:
             await client.tag_message_as_ticket_comment(saved[0].id, ticket_ref)
     except Exception as e:
@@ -1375,6 +1382,52 @@ def _notify_ticket_subject(body: "NotifyRequest") -> str:
     return next((line.strip() for line in body.text.splitlines() if line.strip()), "Notification")[:120]
 
 
+def _single_affected_key(alert: "AlertFacts") -> List[Dict[str, Any]]:
+    """The one affected-component entry for a freshly-filed ticket's seed
+    state, or ``[]`` for a grid-level alert with no identifiable component.
+
+    Shared between ``_seed_description`` (the initial rendered ticket
+    description) and ``_record_new_correlation`` (the correlation row seeded
+    right after) so both agree on the ticket's affected-equipment state from
+    the very first alert.
+    """
+    if not (alert.component_kind and alert.component_key):
+        return []
+    return [
+        {
+            "kind": alert.component_kind,
+            "key": alert.component_key,
+            "label": alert.component_label,
+            "first_seen": alert.fired_at,
+            "last_seen": alert.fired_at,
+            "count": 1,
+        }
+    ]
+
+
+def _seed_description(
+    alert: "AlertFacts", raw_text: str, root_cause_kind: Optional[str] = None
+) -> str:
+    """Render a freshly-filed ticket's initial description the same way
+    ``apply_amendment`` will re-render it on the ticket's next alert
+    (``render_description``), so the description's shape -- affected-
+    equipment block or bare text -- doesn't change between a ticket's first
+    and second alert (plan B5). A grid-level alert with no identifiable
+    component still renders bare -- ``render_description`` omits the marker
+    block entirely when there's nothing to list.
+    """
+    from orchestrator.services.ticketing.correlation_render import render_description
+
+    return render_description(
+        {
+            "description_base": raw_text,
+            "affected_keys": _single_affected_key(alert),
+            "occurrence_count": 1,
+            "root_cause_kind": root_cause_kind,
+        }
+    )
+
+
 async def _record_new_correlation(
     store: Any,
     alert: "AlertFacts",
@@ -1404,18 +1457,7 @@ async def _record_new_correlation(
         return
     try:
         signatures = [alert.signature] if alert.signature else []
-        affected_keys: List[Dict[str, Any]] = []
-        if alert.component_kind and alert.component_key:
-            affected_keys = [
-                {
-                    "kind": alert.component_kind,
-                    "key": alert.component_key,
-                    "label": alert.component_label,
-                    "first_seen": alert.fired_at,
-                    "last_seen": alert.fired_at,
-                    "count": 1,
-                }
-            ]
+        affected_keys = _single_affected_key(alert)
         await store.upsert_correlation(
             ticket_id=ticket_id,
             root_cause_kind=root_cause_kind,
@@ -1454,7 +1496,11 @@ async def _file_uncorrelated_ticket(
     """
     summary = _notify_ticket_subject(body)
     result, error = await _create_notify_ticket(
-        body, target, backend_override, alert_context=alert_context
+        body,
+        target,
+        backend_override,
+        description=_seed_description(alert, body.text),
+        alert_context=alert_context,
     )
     if error is not None:
         return None, None, {"ticket_error": error}, _ticket_failure_delivery(alert_context)
@@ -1641,6 +1687,7 @@ def _amend_delivery(
     amendment: Any,
     ticket: NotificationTicket,
     reply_to_message_id: Optional[int] = None,
+    ticket_summary: str = "",
 ) -> NotificationDelivery:
     """Post only what an operator needs to act on.
 
@@ -1652,7 +1699,10 @@ def _amend_delivery(
     ``reply_to_message_id`` is resolved by the caller via
     ``DeliveryRepository.latest_for_ticket`` (message_deliveries no longer
     lives on the correlation row post-0005b) -- unused when escalating,
-    which always posts fresh rather than replying.
+    which always posts fresh rather than replying. ``ticket_summary`` is the
+    ticket's current live summary (fetched by the caller only when this
+    delivery will actually notify) -- the escalation branch's fallback when
+    ``amendment.rendered_summary`` is blank.
     """
     escalated = bool(amendment is not None and amendment.escalated)
     component_added = bool(amendment is not None and amendment.component_added)
@@ -1672,7 +1722,16 @@ def _amend_delivery(
             count = amendment.affected_keys_count if amendment is not None else 1
             message = f"Added {label} ({count} affected component{'s' if count != 1 else ''})"
     else:
-        message = "Escalated to urgent"
+        content = (amendment.rendered_summary or "").strip() if amendment is not None else ""
+        if not content:
+            content = ticket_summary.strip()
+        # _format_ticket_update_notification (in _deliver_notification) adds
+        # its own leading emoji for a top-level/urgent post -- an escalated
+        # rendered/live summary already starts with "🔴 " (apply_amendment
+        # prefixes it), so strip ours first or the pair doubles up into
+        # "🔴 OPS-3428 — 🔴 ! Urgent: ...".
+        content = content.lstrip("🔴").strip()
+        message = f"escalated to urgent — {content}" if content else "escalated to urgent"
 
     if escalated:
         # A fresh top-level post, not an edit -- and it becomes the new edit
@@ -1800,17 +1859,28 @@ async def _finalize_correlation_decision(
                 anchor = None
             if anchor:
                 reply_to_message_id = anchor.get("external_message_id")
-        delivery = (
-            _amend_delivery(decision, amendment, ticket, reply_to_message_id)
-            if amendment.decision == "amend"
-            else _duplicate_delivery(amendment, ticket)
-        )
+        if amendment.decision == "amend":
+            # Fetched here (rather than after _amend_delivery, as before)
+            # because the escalation branch needs it as a fallback when
+            # amendment.rendered_summary is blank -- same "only when this
+            # will actually notify" gate _amend_delivery itself applies
+            # (component_added or escalated), just hoisted one level up so
+            # the value can be threaded into that call.
+            ticket_summary = (
+                await _ticket_summary(ticket_service, ref)
+                if (amendment.component_added or amendment.escalated)
+                else ""
+            )
+            delivery = _amend_delivery(
+                decision, amendment, ticket, reply_to_message_id, ticket_summary
+            )
+        else:
+            ticket_summary = ""
+            delivery = _duplicate_delivery(amendment, ticket)
         delivery = dataclasses.replace(
             delivery,
             alert_context=alert_context,
-            ticket_summary=(
-                "" if delivery.suppress else await _ticket_summary(ticket_service, ref)
-            ),
+            ticket_summary=ticket_summary,
             stored_ticket_severity=decision.ticket_severity,
         )
     return (
@@ -1841,9 +1911,9 @@ async def _attempt_lock_free_signature_correlation(
     ticket -- on a busy grid, a burst of alerts queued behind the lock could
     each exceed the wait budget and each duplicate a ticket a decide() call
     earlier in the same burst had already correctly correlated. This runs
-    only the deterministic, LLM-free rungs (``_find_signature_duplicate`` /
-    ``_find_signature_only_duplicate``) against a fresh, unlocked read of
-    open candidates -- cheap enough to stay inline on the timeout path,
+    only the deterministic, LLM-free rungs (``find_deterministic_decision``,
+    shared with ``AlertCorrelator.decide()``) against a fresh, unlocked read
+    of open candidates -- cheap enough to stay inline on the timeout path,
     unlike the full lock-held ``AlertCorrelator.decide()`` (candidate
     assembly + live status confirmation + LLM call).
 
@@ -1857,12 +1927,7 @@ async def _attempt_lock_free_signature_correlation(
     it did before this existed.
     """
     from orchestrator.services.ticketing.correlation_rules import DEFAULT_CORRELATION_POLICY
-    from orchestrator.services.ticketing.correlator import (
-        CorrelationDecision,
-        _find_signature_duplicate,
-        _find_signature_only_duplicate,
-        _is_urgent_severity_increase,
-    )
+    from orchestrator.services.ticketing.correlator import find_deterministic_decision
 
     try:
         since_iso = (
@@ -1876,55 +1941,18 @@ async def _attempt_lock_free_signature_correlation(
         )
         candidates = _candidate_summaries_from_store_rows(rows)
 
-        duplicate = _find_signature_duplicate(candidates, alert) or _find_signature_only_duplicate(
-            candidates, alert
-        )
-        if duplicate is None:
-            return None
-
-        severity_increased = _is_urgent_severity_increase(alert.severity, duplicate.severity)
-        # Mirrors AlertCorrelator.decide()'s own signature-rung branch
-        # (correlator.py) -- see that function's comment for why
-        # alert.component_kind alone tells keyed apart from keyless matches.
-        keyed_match = bool(alert.component_kind)
-        if keyed_match:
-            reason = (
-                "urgent severity increase on an exact signature+component match "
-                "(grid-lock timed out; matched without the lock)"
-                if severity_increased
-                else "exact signature+component match against an open ticket "
-                "(grid-lock timed out; matched without the lock)"
-            )
-        else:
-            reason = (
-                "urgent severity increase on an exact signature match "
-                "(grid-level alert, no equipment key; grid-lock timed out; "
-                "matched without the lock)"
-                if severity_increased
-                else "exact signature match against an open ticket "
-                "(grid-level alert, no equipment key; grid-lock timed out; "
-                "matched without the lock)"
-            )
-        decision = CorrelationDecision(
-            decision="amend" if severity_increased else "duplicate",
-            ticket_ref=duplicate.ref,
-            ticket_id=duplicate.ticket_id,
-            confidence=1.0,
+        # Mirrors AlertCorrelator.decide()'s own three deterministic rungs
+        # (correlator.py) -- decided_by="fallback_signature" (rather than
+        # "signature") and the reason suffix are the only difference,
+        # recording that this matched without holding the per-grid lock.
+        decision = find_deterministic_decision(
+            candidates,
+            alert,
             decided_by="fallback_signature",
-            reason=reason,
-            affected_key={
-                "kind": alert.component_kind,
-                "key": alert.component_key,
-                "label": alert.component_label,
-            },
-            root_cause_kind=duplicate.root_cause_kind,
-            update_message="",
-            amended_summary=alert.subject if severity_increased else "",
-            candidate_refs=[c.ref for c in candidates],
-            llm_raw=None,
-            needs_root_cause_ticket=False,
-            ticket_severity=duplicate.severity,
+            reason_suffix=" (grid-lock timed out; matched without the lock)",
         )
+        if decision is None:
+            return None
 
         try:
             await store.record_event(
@@ -2106,7 +2134,9 @@ async def _resolve_notify_ticket_auto(
                         target,
                         backend_override,
                         summary=root_summary,
-                        description=root_description,
+                        description=_seed_description(
+                            alert, root_description, decision.root_cause_kind
+                        ),
                         alert_context=alert_context,
                     )
                     if error is not None:
@@ -2150,7 +2180,7 @@ async def _resolve_notify_ticket_auto(
                     target,
                     backend_override,
                     summary=summary,
-                    description=body.text,
+                    description=_seed_description(alert, body.text, decision.root_cause_kind),
                     alert_context=alert_context,
                 )
                 if error is not None:

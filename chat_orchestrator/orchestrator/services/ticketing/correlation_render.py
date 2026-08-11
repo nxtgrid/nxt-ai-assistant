@@ -132,16 +132,31 @@ def render_summary(
 
 
 def render_description(correlation: Dict[str, Any]) -> str:
-    """Recompute a ticket's description: ``description_base`` (the
-    description as first filed, never overwritten) plus a freshly-rendered
-    "Affected components" block. Idempotent by construction -- this always
-    recomputes the whole block from ``affected_keys``/``occurrence_count``/
-    ``root_cause_kind`` rather than editing whatever text currently exists
-    on the ticket, so calling it twice on the same correlation state
-    produces byte-identical output (never two marker blocks).
+    """Recompute a ticket's description: a freshly-rendered "Affected
+    components" block leading, then ``description_base`` (the description as
+    first filed, never overwritten). Idempotent by construction -- this
+    always recomputes the whole block from ``affected_keys``/
+    ``occurrence_count``/``root_cause_kind`` rather than editing whatever
+    text currently exists on the ticket, so calling it twice on the same
+    correlation state produces byte-identical output (never two marker
+    blocks).
+
+    The block leads (not trails) so the affected-equipment list is the first
+    thing an operator reads, not buried after the original alert text.
+
+    No block at all -- a bare ``description_base`` -- when there are no
+    affected keys: a grid-level alert with no identifiable component has
+    nothing to list, and an empty "Affected components (0):" would be noise,
+    not information. This also means a ticket's description keeps the same
+    shape from its first alert to its second (see ``_seed_description`` in
+    app.py, which renders the same way at first filing) -- it never
+    suddenly grows a marker block it didn't have before.
     """
     base = (correlation.get("description_base") or "").rstrip()
     affected_keys = correlation.get("affected_keys") or []
+    if not affected_keys:
+        return base
+
     occurrence_count = correlation.get("occurrence_count") or 1
     root_cause_kind = correlation.get("root_cause_kind")
 
@@ -160,7 +175,7 @@ def render_description(correlation: Dict[str, Any]) -> str:
     lines.append(MARKER_END)
 
     managed_block = "\n".join(lines)
-    return f"{base}\n\n{managed_block}" if base else managed_block
+    return f"{managed_block}\n\n{base}" if base else managed_block
 
 
 @dataclass(frozen=True)
@@ -201,7 +216,13 @@ async def apply_amendment(
     key, re-renders summary/description from the post-merge state, pushes
     that to the ticket backend, appends the raw alert as a comment, and
     escalates (Highest priority + a "🔴 " summary prefix) the first time an
-    incoming urgent alert raises the stored ticket's severity.
+    incoming urgent alert raises the stored ticket's severity. The returned
+    ``AmendmentResult.escalated`` (what drives the Telegram notification) is
+    narrower than the backend priority push: it additionally requires that
+    ``record_amendment`` actually persisted (state we couldn't durably
+    record must not be announced -- it retries on the next alert instead)
+    and that the row wasn't already escalated before this call (never
+    announce an escalation twice).
 
     ``ticket_id`` always names a real canonical ticket by the time this is
     called -- the correlator resolves one for every candidate (creating it
@@ -326,17 +347,35 @@ async def apply_amendment(
     if raw_text:
         await ticket_service.add_comment(ticket_ref, raw_text, public=False)
 
-    await store.record_amendment(
+    persisted = await store.record_amendment(
         ticket_id,
         severity=effective_severity,
         escalated=escalate_now,
     )
+    if escalate_now and not persisted:
+        LOGGER.warning(
+            "apply_amendment: escalation for {!r} did not persist -- suppressing "
+            "the escalation notification (it will be re-attempted on the next "
+            "alert, since severity/escalated_at were not durably updated)",
+            ticket_ref,
+        )
+    # The notification signal is gated two ways beyond escalate_now itself:
+    # (1) persisted -- state we could not durably record must not be
+    # announced, or it repeats on every subsequent alert (see the warning
+    # above); (2) not remains_escalated -- a row already carrying
+    # escalated_at from a prior call must never announce again, even if
+    # escalate_now somehow re-triggers (e.g. a drifted/legacy severity
+    # field). The Highest-priority backend push above stays unconditional on
+    # escalate_now alone -- idempotent and harmless to repeat. A deliberate
+    # de-escalate-then-re-escalate is accepted as silent under this same
+    # rule -- see the plan's Known Limitations.
+    notify_escalation = escalate_now and persisted and not remains_escalated
 
     return AmendmentResult(
         ticket_ref=ticket_ref,
         ticket_id=ticket_id,
         decision="amend",
-        escalated=escalate_now,
+        escalated=notify_escalation,
         affected_keys_count=affected_count,
         occurrence_count=int(correlation.get("occurrence_count") or 1),
         component_added=component_added,

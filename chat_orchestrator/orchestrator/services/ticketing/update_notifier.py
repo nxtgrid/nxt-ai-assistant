@@ -261,7 +261,7 @@ class TicketUpdateNotifier:
         if not chat_id or not anchor_message_id:
             return False
 
-        gap = await self._watermark.messages_since(chat_id, anchor_message_id)
+        gap = await self._watermark.messages_since(chat_id, anchor_message_id, topic_id=topic_id)
         if gap <= SCROLL_THRESHOLD:
             if await self._edit(chat_id, anchor_message_id, text):
                 LOGGER.info(

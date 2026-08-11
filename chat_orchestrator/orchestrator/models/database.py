@@ -53,6 +53,7 @@ class ChatMessageModel(BaseModel):
     message_index: int
     from_chat_id: Optional[str] = None  # Telegram chat ID where message originated
     group_id: Optional[str] = None  # Telegram group ID if from group, null for 1-on-1
+    telegram_topic_id: Optional[str] = None  # forum topic within group_id, stamped from the session
     # Thread disentanglement fields
     telegram_message_id: Optional[int] = None
     reply_to_telegram_message_id: Optional[int] = None

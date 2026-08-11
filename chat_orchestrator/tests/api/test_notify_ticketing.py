@@ -18,6 +18,7 @@ from orchestrator.api.app import (
     NotificationDelivery,
     NotificationTicket,
     NotifyRequest,
+    _log_notification_to_chat_db,
     _resolve_notify_ticket,
     _resolve_notify_ticket_full,
     handle_notify,
@@ -870,6 +871,50 @@ class TestResolveNotifyTicketAutoNew:
         assert delivery.suppress is False
         assert delivery.reply_to_message_id is None
 
+    async def test_new_ticket_with_a_component_seeds_the_equipment_list_at_creation(
+        self, monkeypatch
+    ):
+        """B5: a ticket's description must not change shape between its
+        first and second alert -- so a fresh ticket whose alert already
+        names a component is created WITH the affected-equipment block
+        leading the description, not with bare raw text that only grows a
+        marker block on the next (amend) alert."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="new", decided_by="no_candidates", confidence=None
+        )
+        subject = "! Warning: MPPT A3 in Acme Grid seems to perform lower !"
+        body = _notify_body(
+            ticket_id="auto", text=subject, alert={"subject": subject, "details": "mppt A3 [Acme Grid]"}
+        )
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        svc = _FakeTicketService.instances[-1]
+        req, _backend_override = svc.create_ticket_calls[0]
+        assert req.description.startswith("[anansi:affected-start]")
+        assert "MPPT A3" in req.description
+        assert subject in req.description  # the raw alert text still appears, trailing
+
+    async def test_new_ticket_without_a_component_keeps_a_bare_description(self, monkeypatch):
+        """The bare-description counterpart of the test above -- a
+        grid-level alert with no identifiable component must not grow an
+        empty "Affected components (0):" block."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _FakeCorrelator.decision_to_return = _decision(
+            decision="new", decided_by="no_candidates", confidence=None
+        )
+        body = _notify_body(ticket_id="auto", text="Meter offline\n\ndetails")
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        svc = _FakeTicketService.instances[-1]
+        req, _backend_override = svc.create_ticket_calls[0]
+        assert req.description == "Meter offline\n\ndetails"
+        assert "[anansi:affected-start]" not in req.description
+
 
 class TestResolveNotifyTicketAutoAmend:
     async def test_amend_decision_calls_apply_amendment(
@@ -1100,19 +1145,16 @@ class TestResolveNotifyTicketAutoAmend:
         assert _TwoPassCorrelator.calls == ["jira-urgent-1", "jira-urgent-1"]
         # Unlike the old special-cased "correlation row missing" branch
         # (which left the Jira description untouched, posting description=None),
-        # the unified seed-then-amend flow always renders a full description
-        # -- consistent with every other amend, even a freshly-seeded one.
+        # the unified seed-then-amend flow always renders a description --
+        # consistent with every other amend, even a freshly-seeded one. This
+        # fixture's affected_keys stays [] throughout (merge_affected_key is
+        # faked to always return None, i.e. a no-op merge), so B5's
+        # bare-description rule applies: no marker block, just the raw text.
         assert update_calls == [
             {
                 "ref": "OPS-42",
                 "summary": "🔴 ! Urgent: Kudi inverter outage",
-                "description": (
-                    "urgent raw text\n\n"
-                    "[anansi:affected-start]\n"
-                    "Affected components (0):\n"
-                    "Occurrences: 1 · Grouped by Anansi alert correlation\n"
-                    "[anansi:affected-end]"
-                ),
+                "description": "urgent raw text",
                 "priority_id": "highest",
             }
         ]
@@ -1597,6 +1639,85 @@ class TestResolveNotifyTicketAutoFailureModes:
         assert delivery is not None
         assert delivery.suppress is True
 
+    async def test_lock_timeout_with_new_component_on_matching_signature_amends(
+        self, monkeypatch, fake_apply_amendment
+    ):
+        """B3 regression: the lock-free path must run the signature-amend
+        rung too, not just the two duplicate rungs -- otherwise a storm that
+        happens to hit a lock timeout mid-burst reverts to filing a fresh
+        ticket per device instead of collapsing onto the one already found
+        by find_deterministic_decision under the lock."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        _RecordingCorrelationStore.instances = []
+        _patch_recording_store(monkeypatch)
+
+        from contextlib import asynccontextmanager
+
+        import orchestrator.api.app as app_module
+        from orchestrator.services.ticketing.alert_facts import AlertFacts, enrich_alert_facts
+
+        @asynccontextmanager
+        async def _never_available(grid_name, timeout_seconds):
+            yield False
+
+        monkeypatch.setattr(app_module, "_acquire_grid_correlation_lock", _never_available)
+
+        subject = "! Warning: MPPT B9 in Acme Grid seems to perform lower !"
+        base_alert = AlertFacts(subject=subject, details="mppt B9 [Acme Grid]")
+        computed_alert = enrich_alert_facts(base_alert, grid_name="Acme Grid")
+        assert computed_alert.component_kind == "mppt"
+        assert computed_alert.component_key == "B9"
+
+        _RecordingCorrelationStore.open_candidates_to_return = [
+            {
+                "ticket_id": "existing-1-tid",
+                "ticket_ref": "TKT-EXISTING-1",
+                "grid_name": "Acme Grid",
+                "status": "open",
+                "severity": "warning",
+                "signatures": [computed_alert.signature],
+                # A3 already recorded; B9 (this alert) is a *new* component
+                # on the same fault signature -- amend, not duplicate.
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+                "created_at": "2026-07-20T00:00:00+00:00",
+            }
+        ]
+
+        calls, result_holder = fake_apply_amendment
+        result_holder["result"] = AmendmentResult(
+            ticket_ref="TKT-EXISTING-1",
+            ticket_id="existing-1-tid",
+            decision="amend",
+            escalated=False,
+            affected_keys_count=2,
+            occurrence_count=2,
+        )
+
+        body = _notify_body(ticket_id="auto", text=subject, alert=base_alert.model_dump())
+
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+
+        assert error is None
+        assert ref == "TKT-EXISTING-1"
+        assert extra["decided_by"] == "fallback_signature"
+        assert extra["decision"] == "amend"
+        assert extra["correlated_with"] == "TKT-EXISTING-1"
+
+        assert all(
+            not svc.create_ticket_calls for svc in _FakeTicketService.instances
+        )
+        assert len(calls) == 1
+        assert calls[0]["ticket_ref"] == "TKT-EXISTING-1"
+        assert calls[0]["decision"] == "amend"
+
+        recorded = [
+            e for s in _RecordingCorrelationStore.instances for e in s.record_event_calls
+        ]
+        assert len(recorded) == 1
+        assert recorded[0]["ticket_id"] == "existing-1-tid"
+        assert recorded[0]["decided_by"] == "fallback_signature"
+        assert recorded[0]["decision"] == "amend"
+
     async def test_lock_timeout_with_no_matching_candidate_still_falls_back_to_plain_create(
         self, monkeypatch
     ):
@@ -1792,6 +1913,54 @@ def fake_telegram_send(monkeypatch):
         "shared.utils.telegram_send.send_telegram_message_with_fallback", _send
     )
     return fake
+
+
+class TestLogNotificationToChatDb:
+    """Direct tests of _log_notification_to_chat_db, called via the
+    module-level reference imported at the top of this file (captured before
+    any test runs) -- called without going through _deliver_notification, so
+    the file's autouse _stub_chat_db_logging fixture (below, which patches
+    app_module's *attribute*, not this captured function object) doesn't
+    apply here."""
+
+    async def test_passes_group_id_to_save_messages(self, monkeypatch):
+        """B6: without group_id, the bot's own alert posts are invisible to
+        chat_messages reads keyed by group_id -- notably
+        ChatWatermarkRepository's topic-scoped scroll count."""
+        import orchestrator.services.supabase_client as supabase_client_module
+
+        class _Session:
+            id = "session-uuid-1"
+
+        class _SavedMessage:
+            id = "msg-uuid-1"
+
+        class _FakeClient:
+            def __init__(self) -> None:
+                self.save_messages_calls: list[dict[str, Any]] = []
+
+            async def get_session_by_chat_id(self, *, source, chat_id, topic_id=None):
+                return _Session()
+
+            async def save_messages(self, session_id, messages, **kwargs):
+                self.save_messages_calls.append({"session_id": session_id, **kwargs})
+                return [_SavedMessage()]
+
+            async def tag_message_as_ticket_comment(self, message_id, ticket_ref):
+                return None
+
+        fake_client = _FakeClient()
+        monkeypatch.setattr(
+            supabase_client_module, "get_supabase_client", lambda: fake_client
+        )
+
+        body = _notify_body(text="! Urgent: MPPT A3 down !")
+        await _log_notification_to_chat_db(body, "-100555", "42", 999, ticket_ref="OPS-1")
+
+        assert len(fake_client.save_messages_calls) == 1
+        call = fake_client.save_messages_calls[0]
+        assert call["group_id"] == "-100555"
+        assert call["from_chat_id"] == "-100555"
 
 
 @pytest.fixture(autouse=True)
@@ -2374,6 +2543,9 @@ def test_amend_delivery_never_announces_a_nameless_component():
 
 
 def test_amend_delivery_posts_escalation_without_a_component_add():
+    """B4: the old contentless "Escalated to urgent" branch is gone -- with
+    no rendered_summary and no live ticket_summary fallback available, the
+    message degrades to the bare phrase (still non-empty, still posted)."""
     from orchestrator.api.app import _amend_delivery
 
     decision = CorrelationDecision(
@@ -2405,7 +2577,88 @@ def test_amend_delivery_posts_escalation_without_a_component_add():
 
     assert delivery.suppress is False
     assert delivery.top_level is True
-    assert delivery.text_override == "Escalated to urgent"
+    assert delivery.text_override == "escalated to urgent"
+
+
+def test_amend_delivery_escalation_includes_summary_with_no_doubled_emoji():
+    """B4: rendered_summary already carries its own leading "🔴 " (apply_amendment
+    prefixes an escalated summary) -- _format_ticket_update_notification adds
+    its own for an urgent/top-level post downstream, so _amend_delivery must
+    strip its copy or the pair doubles up into "🔴 OPS-3428 — 🔴 ! Urgent: …"."""
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3428",
+        confidence=0.9,
+        decided_by="llm",
+        reason="urgent now",
+        affected_key=None,
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3428"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3428",
+        ticket_id="ticket-3428",
+        decision="amend",
+        escalated=True,
+        affected_keys_count=3,
+        occurrence_count=6,
+        component_added=False,
+        rendered_summary="🔴 ! Urgent: 3 MPPTs in Akinsolu affected (A3, A7, B1) !",
+    )
+
+    delivery = _amend_delivery(
+        decision, amendment, NotificationTicket(ref="OPS-3428", backend="jira")
+    )
+
+    assert delivery.text_override == (
+        "escalated to urgent — ! Urgent: 3 MPPTs in Akinsolu affected (A3, A7, B1) !"
+    )
+    assert delivery.text_override.count("🔴") == 0
+
+
+def test_amend_delivery_escalation_falls_back_to_live_ticket_summary():
+    """B4: when rendered_summary is blank (e.g. a degenerate render), fall
+    back to the ticket's live summary passed in by the caller, still
+    stripped of any leading escalated-marker emoji."""
+    from orchestrator.api.app import _amend_delivery
+
+    decision = CorrelationDecision(
+        decision="amend",
+        ticket_ref="OPS-3353",
+        confidence=0.9,
+        decided_by="llm",
+        reason="urgent now",
+        affected_key=None,
+        root_cause_kind=None,
+        update_message="",
+        amended_summary="",
+        candidate_refs=["OPS-3353"],
+        llm_raw="{}",
+    )
+    amendment = AmendmentResult(
+        ticket_ref="OPS-3353",
+        ticket_id="ticket-3353",
+        decision="amend",
+        escalated=True,
+        affected_keys_count=0,
+        occurrence_count=9,
+        component_added=False,
+        rendered_summary="",
+    )
+
+    delivery = _amend_delivery(
+        decision,
+        amendment,
+        NotificationTicket(ref="OPS-3353", backend="jira"),
+        ticket_summary="🔴 Existing live ticket summary",
+    )
+
+    assert delivery.text_override == "escalated to urgent — Existing live ticket summary"
 
 
 def test_amend_delivery_escalation_moves_the_edit_target_to_the_new_post():
@@ -2448,6 +2701,7 @@ def test_amend_delivery_escalation_moves_the_edit_target_to_the_new_post():
     assert delivery.top_level is True
     assert delivery.ticket == ticket
     assert delivery.ticket.ticket_id == "ticket-3353"
+    assert delivery.text_override == "escalated to urgent — Escalated summary"
 
 
 def test_duplicate_delivery_is_silent():

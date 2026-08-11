@@ -510,6 +510,15 @@ class EnhancedSupabaseClient:
             if max_index_response.data and len(max_index_response.data) > 0:
                 start_index = max_index_response.data[0]["message_index"] + 1
 
+            # Stamp every row with the session's Telegram topic (single choke
+            # point -- every save_messages caller benefits without passing a
+            # new parameter). Best-effort: get_session_by_id already
+            # swallows its own exceptions and returns None on failure, which
+            # this treats the same as "no topic" (chat-wide watermark
+            # behavior) rather than blocking the save.
+            session = await self.get_session_by_id(str(session_uuid))
+            topic_id = session.telegram_topic_id if session is not None else None
+
             # Build message rows with correct indices
             message_rows = []
             for idx, message in enumerate(messages):
@@ -535,6 +544,8 @@ class EnhancedSupabaseClient:
                     message_data["from_chat_id"] = from_chat_id
                 if group_id:
                     message_data["group_id"] = group_id
+                if topic_id:
+                    message_data["telegram_topic_id"] = topic_id
                 # Thread disentanglement fields
                 if message.telegram_message_id:
                     message_data["telegram_message_id"] = message.telegram_message_id

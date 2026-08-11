@@ -39,6 +39,7 @@ from orchestrator.services.ticketing.correlator import (
     CandidateSummary,
     _apply_guardrails,
     _parse_llm_response,
+    effective_candidate_severity,
 )
 
 # ---------------------------------------------------------------------------
@@ -60,6 +61,38 @@ class TestParseLlmResponse:
 
     def test_none_on_empty(self):
         assert _parse_llm_response("") is None
+
+
+class TestEffectiveCandidateSeverity:
+    """B4: a blank stored severity (most commonly a Jira-discovered candidate
+    just adopted via TicketRepository.adopt_external, which never sets one)
+    must not read as "not urgent" when the ticket plainly already is one --
+    that's exactly what let a stale candidate masquerade as a fresh
+    warning->urgent transition on every subsequent alert."""
+
+    def test_stored_severity_wins_when_present(self):
+        candidate = _candidate(severity="warning", summary="! Urgent: ignored !")
+        assert effective_candidate_severity(candidate) == "warning"
+
+    def test_falls_back_to_deriving_from_the_summary_marker(self):
+        candidate = _candidate(severity="", summary="! Urgent: Inverter Fault !")
+        assert effective_candidate_severity(candidate) == "urgent"
+
+    def test_falls_back_to_the_escalated_emoji_when_no_marker(self):
+        """render_summary/apply_amendment prefix an escalated ticket's
+        summary with "🔴 " without necessarily also carrying a "! Urgent:"
+        marker (e.g. a freshly-adopted candidate's summary_base has no
+        marker at all) -- this must still read as urgent."""
+        candidate = _candidate(severity="", summary="🔴 3 MPPTs in Kudi affected (A3, A7)")
+        assert effective_candidate_severity(candidate) == "urgent"
+
+    def test_blank_when_nothing_signals_severity(self):
+        candidate = _candidate(severity="", summary="MPPT issue, no marker at all")
+        assert effective_candidate_severity(candidate) == ""
+
+    def test_warning_marker_derives_to_warning(self):
+        candidate = _candidate(severity="", summary="! Warning: FS delivery low !")
+        assert effective_candidate_severity(candidate) == "warning"
 
 
 def _candidate(ref="TKT-1", **overrides) -> CandidateSummary:
@@ -646,24 +679,55 @@ class TestSignatureDuplicate:
         assert gateway.calls == []
 
     @pytest.mark.asyncio
-    async def test_same_signature_different_key_is_not_a_signature_duplicate(self, monkeypatch):
-        """Same normalized subject, different MPPT key -- must fall through
-        to the LLM rung as an amend candidate, not a deterministic duplicate."""
+    async def test_urgent_refire_of_blank_severity_but_escalated_summary_is_silent_duplicate(
+        self, monkeypatch
+    ):
+        """B4: a candidate whose correlation row never recorded a severity
+        (e.g. adopted mid-flight) but whose summary already carries the "🔴 "
+        escalated marker must resolve via effective_candidate_severity, not
+        the raw blank field -- otherwise every subsequent urgent re-fire
+        reads as a fresh warning->urgent transition and re-announces."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert(
+            subject="! Urgent: MPPT A3 in Kudi seems to perform lower !",
+            severity="urgent",
+        )
+        correlator, store, ticket_service, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_id": "tid-TKT-1",
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "severity": "",  # never recorded -- e.g. an adopted candidate
+                "summary_current": "🔴 3 MPPTs in Kudi affected (A3, A7)",
+                "signatures": [alert.signature],
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ticket_service.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "duplicate"
+        assert decision.decided_by == "signature"
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_same_signature_different_key_is_a_deterministic_signature_amend(
+        self, monkeypatch
+    ):
+        """B3: same normalized subject, different MPPT key on an open ticket
+        is exactly what a multi-device storm looks like (plan finding 1) --
+        this must resolve via the deterministic signature-amend rung, never
+        touching the LLM, so a burst of N devices collapses onto one ticket
+        instead of scattering across an LLM call each."""
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
         alert = _mppt_alert(
             subject="! Warning: MPPT A7 in Kudi seems to perform lower !", details="mppt A7 [Kudi]"
         )
-        gateway = _FakeGateway(
-            text=json.dumps(
-                {
-                    "decision": "amend",
-                    "ticket_ref": "TKT-1",
-                    "confidence": 0.9,
-                    "affected_key": {"kind": "mppt", "key": "A7", "label": "MPPT A7"},
-                }
-            )
-        )
-        correlator, store, ts, _gw = _make_correlator(gateway=gateway)
+        correlator, store, ts, gateway = _make_correlator()
         store.correlations.append(
             {
                 "ticket_id": "tid-TKT-1",
@@ -680,6 +744,80 @@ class TestSignatureDuplicate:
         decision = await correlator.decide("Kudi", alert)
 
         assert decision.decision == "amend"
+        assert decision.decided_by == "signature"
+        assert decision.ticket_ref == "TKT-1"
+        assert decision.ticket_id == "tid-TKT-1"
+        assert decision.affected_key == {"kind": "mppt", "key": "A7", "label": "MPPT A7"}
+        assert decision.amended_summary == ""  # renderer recomputes, not the correlator
+        assert decision.confidence == 1.0
+        assert gateway.calls == []  # deterministic rung -- never reaches the LLM
+
+    @pytest.mark.asyncio
+    async def test_third_device_on_the_same_signature_also_amends_deterministically(
+        self, monkeypatch
+    ):
+        """The storm isn't just two devices -- a third (or Nth) new component
+        on the same fault shape must keep resolving deterministically too,
+        as long as its own key isn't already in affected_keys."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert(
+            subject="! Warning: MPPT B9 in Kudi seems to perform lower !", details="mppt B9 [Kudi]"
+        )
+        correlator, store, ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_id": "tid-TKT-1",
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "signatures": [alert.signature],
+                "affected_keys": [
+                    {"kind": "mppt", "key": "A3", "label": "MPPT A3"},
+                    {"kind": "mppt", "key": "A7", "label": "MPPT A7"},
+                ],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ts.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "amend"
+        assert decision.decided_by == "signature"
+        assert decision.affected_key == {"kind": "mppt", "key": "B9", "label": "MPPT B9"}
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_amend_rung_never_fires_for_a_keyless_alert(self, monkeypatch):
+        """A keyless (grid-level) alert can only ever be a duplicate (rung
+        4) -- there's no component key that would make it a distinct
+        affected component, so the amend rung must not claim it either."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = enrich_alert_facts(
+            AlertFacts(subject="! Urgent: Grid outage in Kudi !", severity="urgent"),
+            grid_name="Kudi",
+        )
+        gateway = _FakeGateway(text=json.dumps({"decision": "new", "confidence": 0.9}))
+        correlator, store, ts, _gw = _make_correlator(gateway=gateway)
+        store.correlations.append(
+            {
+                "ticket_id": "tid-TKT-1",
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "open",
+                "severity": "urgent",
+                "signatures": [],  # deliberately does NOT contain alert.signature
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ts.statuses["TKT-1"] = TicketStatus(summary="s", is_done=False)
+
+        decision = await correlator.decide("Kudi", alert)
+
+        # No deterministic rung matches (no signature overlap at all) --
+        # falls through to the LLM's "new", confirming the amend rung didn't
+        # short-circuit on a keyless alert by mistake.
         assert decision.decided_by == "llm"
         assert len(gateway.calls) == 1
 

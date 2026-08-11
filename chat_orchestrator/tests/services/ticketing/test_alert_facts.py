@@ -131,6 +131,43 @@ class TestDeriveComponent:
         kind, key, label = derive_component("! Warning: MPPT performance drop detected !", "")
         assert (kind, key, label) == ("", "", "")
 
+    def test_solar_charger_bracket_only_is_an_mppt(self):
+        """finding 2: 'Solar Charger [278]' has no MPPT word at all and
+        previously parsed as component-less."""
+        kind, key, label = derive_component("Solar Charger [278]", "")
+        assert kind == "mppt"
+        assert key == "278"
+        assert label == "MPPT 278"
+
+    def test_solar_charger_with_token_and_model_is_an_mppt(self):
+        kind, key, label = derive_component(
+            "Solar Charger - VT6Y ARTN4.4/-141/32 House 4 [8]", ""
+        )
+        assert kind == "mppt"
+        assert key == "VT6Y#8"
+        assert label == "MPPT VT6Y#8"
+
+    def test_solar_charger_bracket_instance_differs_by_id(self):
+        first = derive_component("Solar Charger [278]", "")
+        second = derive_component("Solar Charger [279]", "")
+        assert first[1] == "278"
+        assert second[1] == "279"
+
+    def test_solar_charger_without_bracket_or_mppt_word_returns_blank(self):
+        kind, key, label = derive_component("Solar Charger needs servicing", "")
+        assert (kind, key, label) == ("", "", "")
+
+    def test_literal_mppt_word_still_wins_over_solar_charger_pattern(self):
+        """A subject naming both 'Solar Charger' and 'MPPT' (the common VRM
+        shape) must still resolve through _MPPT_PATTERN so its key stays
+        TOKEN#instance -- unchanged behavior, just confirming the new
+        Solar Charger check (tried after MPPT) does not shadow it."""
+        kind, key, label = derive_component(
+            "Solar Charger - MPPT PNXG ARTN4.50/100/10 [27]", ""
+        )
+        assert kind == "mppt"
+        assert key == "PNXG#27"
+
 
 class TestNormalizeSubject:
     def test_strips_marker_and_trailing_bang(self):
@@ -167,6 +204,49 @@ class TestNormalizeSubject:
     def test_collapses_whitespace(self):
         result = normalize_subject("! Warning:   too   many   spaces  !")
         assert "  " not in result
+
+    def test_masks_vrm_device_clause_structurally(self):
+        """finding 1: component_key is synthesized (TOKEN#instance) and never
+        appears literally in the subject, so the old literal-removal did
+        nothing and the device token + location word leaked into the hash."""
+        a = normalize_subject(
+            "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+            "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !"
+        )
+        b = normalize_subject(
+            "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+            "'Solar Charger - MPPT 65SQ ARTN4.4/-141/32 House [0]' !"
+        )
+        assert a == b
+        assert "kbua" not in a
+        assert "65sq" not in b
+        assert "cabin" not in a
+        assert "house" not in b
+
+    def test_device_clause_masking_preserves_a_differing_fault(self):
+        no_bms = normalize_subject(
+            "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+            "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !"
+        )
+        low_voltage = normalize_subject(
+            "! Urgent: ALERT - 'Akinsolu': '#68 - Low voltage' on "
+            "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !"
+        )
+        assert no_bms != low_voltage
+
+    def test_bracketless_mppt_mention_still_masked_without_a_provided_key(self):
+        """The guarded MPPT mask must fire even when the caller doesn't pass
+        component_key -- e.g. the correlator's replay/duplicate paths that
+        normalize a raw subject before a component is known."""
+        a = normalize_subject(
+            "! Warning: MPPT A3 in Kudi seems to perform lower than other MPPTs !"
+        )
+        b = normalize_subject(
+            "! Warning: MPPT A7 in Kudi seems to perform lower than other MPPTs !"
+        )
+        assert a == b
+        assert "a3" not in a
+        assert "a7" not in b
 
 
 class TestDeriveSignature:
@@ -223,6 +303,71 @@ class TestDeriveSignature:
         sig = derive_signature(grid_name="Kudi", component_kind="mppt", subject="low")
         assert len(sig) == 16
         int(sig, 16)  # raises ValueError if not hex
+
+
+class TestRealProductionStormSignatures:
+    """Regression coverage for the plan's findings 1 and 2 (the 2026-08-08
+    Akinsolu 'No BMS' storm and the Ogbinbiri 'Solar Charger' pair). Drives
+    derive_component + derive_signature together, the same way
+    enrich_alert_facts does, so this exercises the real pipeline rather than
+    normalize_subject/derive_component in isolation."""
+
+    _AKINSOLU_NO_BMS_SUBJECTS = [
+        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !",
+        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "'Solar Charger - MPPT 65SQ ARTN4.4/-141/32 House [0]' !",
+        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "'Solar Charger - MPPT JD65 ARTN4.4/-176/5 Cabin [3]' !",
+        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "'Solar Charger - MPPT RH2W ARTN4.4/-176/5 Cabin [6]' !",
+        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "'Solar Charger - MPPT QI11 ARTN4.4/+27/24 Church [2]' !",
+        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "'Solar Charger - MPPT LQLA ARTN4.4/27/24 Church [1]' !",
+    ]
+
+    _OGBINBIRI_NO_BMS_SUBJECTS = [
+        "! Urgent: ALERT - 'Ogbinbiri': '#67 - No BMS' on 'Solar Charger [278]' !",
+        "! Urgent: ALERT - 'Ogbinbiri': '#67 - No BMS' on 'Solar Charger [279]' !",
+    ]
+
+    def _signature_for(self, subject: str, grid_name: str) -> str:
+        kind, key, _ = derive_component(subject)
+        return derive_signature(
+            grid_name=grid_name, component_kind=kind, subject=subject, component_key=key
+        )
+
+    def test_six_akinsolu_no_bms_mppt_alerts_share_one_signature(self):
+        signatures = {
+            self._signature_for(subject, "Akinsolu")
+            for subject in self._AKINSOLU_NO_BMS_SUBJECTS
+        }
+        assert len(signatures) == 1
+
+    def test_akinsolu_no_bms_alerts_keep_six_distinct_component_keys(self):
+        keys = {derive_component(subject)[1] for subject in self._AKINSOLU_NO_BMS_SUBJECTS}
+        assert len(keys) == len(self._AKINSOLU_NO_BMS_SUBJECTS)
+
+    def test_two_ogbinbiri_solar_charger_alerts_share_one_signature(self):
+        signatures = {
+            self._signature_for(subject, "Ogbinbiri")
+            for subject in self._OGBINBIRI_NO_BMS_SUBJECTS
+        }
+        assert len(signatures) == 1
+
+    def test_ogbinbiri_solar_chargers_keep_distinct_component_keys(self):
+        keys = {derive_component(subject)[1] for subject in self._OGBINBIRI_NO_BMS_SUBJECTS}
+        assert keys == {"278", "279"}
+
+    def test_a_different_fault_on_the_same_device_still_differs(self):
+        no_bms = self._signature_for(self._AKINSOLU_NO_BMS_SUBJECTS[0], "Akinsolu")
+        low_voltage = self._signature_for(
+            "! Urgent: ALERT - 'Akinsolu': '#68 - Low voltage' on "
+            "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !",
+            "Akinsolu",
+        )
+        assert no_bms != low_voltage
 
 
 class TestEnrichAlertFacts:

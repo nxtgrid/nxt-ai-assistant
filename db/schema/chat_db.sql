@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     reply_to_telegram_message_id    bigint,
     sender_telegram_id              text,
     thread_id                       text,
-    archived_at                     timestamptz
+    archived_at                     timestamptz,
+    telegram_topic_id               text  -- added by 0016_chat_messages_topic.sql
 );
 
 CREATE INDEX IF NOT EXISTS chat_messages_session_id_idx ON chat_messages (session_id);
@@ -74,6 +75,9 @@ CREATE INDEX IF NOT EXISTS chat_messages_created_at_idx ON chat_messages (create
 -- on it (see 0012_message_archive.sql).
 CREATE INDEX IF NOT EXISTS chat_messages_archived_idx ON chat_messages (session_id)
     WHERE archived_at IS NULL;
+-- ChatWatermarkRepository filters by topic within a group (0016_chat_messages_topic.sql).
+CREATE INDEX IF NOT EXISTS chat_messages_group_topic_msg_idx
+    ON chat_messages (group_id, telegram_topic_id, telegram_message_id DESC);
 
 -- ── Conversation Summaries ────────────────────────────────────────────────────
 

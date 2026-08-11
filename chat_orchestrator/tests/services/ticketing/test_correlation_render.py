@@ -142,11 +142,20 @@ class TestRenderDescription:
 
         result = render_description(correlation)
 
-        assert result.startswith("Please check VRM.")
         assert MARKER_START in result
         assert MARKER_END in result
         assert "MPPT A3" in result
         assert "Affected components (1):" in result
+
+    def test_marker_block_leads_the_description(self):
+        """B5: the affected-equipment list is the first thing an operator
+        reads, not buried after the original alert text."""
+        correlation = _correlation()
+
+        result = render_description(correlation)
+
+        assert result.startswith(MARKER_START)
+        assert result.index(MARKER_END) < result.index("Please check VRM.")
 
     def test_idempotent_same_input_same_output(self):
         correlation = _correlation()
@@ -199,6 +208,25 @@ class TestRenderDescription:
         result = render_description(correlation)
 
         assert result.startswith(MARKER_START)
+
+    def test_no_affected_keys_keeps_a_bare_description(self):
+        """B5: a grid-level alert with no identifiable component keeps a
+        bare description -- an empty "Affected components (0):" block with
+        nothing listed under it is noise, not information."""
+        correlation = _correlation(affected_keys=[])
+
+        result = render_description(correlation)
+
+        assert result == "Please check VRM."
+        assert MARKER_START not in result
+        assert MARKER_END not in result
+
+    def test_no_affected_keys_and_no_base_is_empty(self):
+        correlation = _correlation(affected_keys=[], description_base="")
+
+        result = render_description(correlation)
+
+        assert result == ""
 
 
 # ---------------------------------------------------------------------------
@@ -495,7 +523,16 @@ class TestApplyAmendmentAmend:
         assert ticket_service.comment_calls == []
 
     @pytest.mark.asyncio
-    async def test_urgent_increase_promotes_despite_legacy_count_escalation_marker(self):
+    async def test_urgent_increase_is_silent_when_escalated_at_already_set(self):
+        """B4: a row already carrying ``escalated_at`` (a prior escalation --
+        here a "legacy" one whose severity field lagged behind, but the
+        current design applies this uniformly) must never fire *another*
+        escalation notification, even when this alert's own severity
+        comparison would otherwise call it a fresh warning->urgent increase.
+        The Highest-priority backend push still happens (idempotent,
+        harmless) -- only the Telegram announcement is suppressed. A
+        deliberate de-escalate-then-re-escalate is accepted as silent by
+        this same rule -- see the plan's Known Limitations."""
         correlation = _correlation(
             severity="warning",
             escalated_at="2026-01-01T00:00:00Z",
@@ -515,8 +552,46 @@ class TestApplyAmendmentAmend:
             grid_name="Kudi",
         )
 
-        assert result.escalated is True
+        assert result.escalated is False
+        # The backend write is unaffected -- still idempotently promoted.
         assert ticket_service.update_calls[0]["priority_id"] == "highest"
+
+    @pytest.mark.asyncio
+    async def test_escalation_notification_suppressed_when_persist_fails(self):
+        """B4: state we could not persist must not be announced -- or it
+        will be announced again on the next alert. The backend ticket update
+        still happens (best-effort, independent of our own store's health);
+        only the returned ``escalated`` flag (what drives the Telegram
+        notification) is gated on ``record_amendment``'s real return value."""
+
+        class _PersistFailingStore(_FakeStore):
+            async def record_amendment(self, ticket_id: str, *, severity=None, escalated=False) -> bool:
+                self.record_amendment_calls.append(
+                    {"ticket_id": ticket_id, "severity": severity, "escalated": escalated}
+                )
+                return False
+
+        correlation = _correlation()
+        store = _PersistFailingStore(correlation=correlation)
+        ticket_service = _FakeTicketService()
+        alert = AlertFacts(subject="! Urgent: MPPT A7 in Kudi !", severity="urgent")
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            ticket_id="ticket-1",
+            alert=alert,
+            decision=_amend_decision(ticket_severity="warning"),
+            raw_text="raw text",
+            grid_name="Kudi",
+        )
+
+        assert result.escalated is False
+        # The backend priority push and comment still happened -- only the
+        # notification signal is suppressed.
+        assert ticket_service.update_calls[0]["priority_id"] == "highest"
+        assert store.record_amendment_calls[0]["escalated"] is True
 
     @pytest.mark.asyncio
     async def test_seeds_a_correlation_row_when_none_exists_yet(self):
