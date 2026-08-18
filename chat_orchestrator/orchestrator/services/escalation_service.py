@@ -2119,6 +2119,7 @@ class EscalationService:
             # chat_messages stores the UUID primary key (chat_sessions.id) — look it up first.
             supabase_client = self._get_supabase_client()
             raw_messages: list = []
+            session_obj = None
             if supabase_client:
                 try:
                     session_obj = await supabase_client.get_session(session_id)
@@ -2180,6 +2181,28 @@ class EscalationService:
                             grid_name = grid_row["name"]
             except Exception as e:
                 LOGGER.debug(f"Could not resolve grid for JIRA ticket: {e}")
+
+            # 4b. No exact chat/topic registration (e.g. a DM, or a group not
+            # using Telegram's forum/topics feature) -- fall back to the
+            # customer's organization: use its only grid if it has just one,
+            # or search their own recent messages for a mention of one of
+            # several. Genuinely ambiguous cases (2+ grids, no text match)
+            # are flagged on the ticket after creation instead of staying
+            # silently blank -- see grid_flag_candidates below.
+            grid_flag_candidates: List[str] = []
+            if grid_name is None:
+                from orchestrator.services.ticketing.grid_resolution import resolve_grid_name
+
+                # getattr, not direct attribute access: session_obj is a real
+                # ChatSessionModel in production (always has this field), but
+                # some tests substitute a bare SimpleNamespace(id=...) that
+                # doesn't -- this must degrade to None, not raise, either way.
+                grid_resolution = await resolve_grid_name(
+                    organization_id=getattr(session_obj, "organization_id", None),
+                    messages=messages,
+                )
+                grid_name = grid_resolution.grid_name
+                grid_flag_candidates = grid_resolution.candidates
 
             # Dedup guard: a canonical escalation owns at most one canonical
             # ticket.  Its persisted backend is authoritative; reference
@@ -2268,6 +2291,34 @@ class EscalationService:
                     ticket_ref,
                     exc_info=True,
                 )
+
+            # Grid stayed unset and the org had 2+ candidates (see 4b above)
+            # -- flag it on the ticket instead of leaving today's silent
+            # blank. Best-effort: never turn an already-created ticket into
+            # a reported failure over a missing internal comment.
+            if grid_flag_candidates:
+                candidates_text = ", ".join(grid_flag_candidates)
+                LOGGER.warning(
+                    "Ticket {} created with no Grid set -- organization has {} "
+                    "candidate grids: {}",
+                    ticket_ref,
+                    len(grid_flag_candidates),
+                    candidates_text,
+                )
+                try:
+                    await self._tickets.add_comment(
+                        ticket_ref,
+                        "⚠️ Grid could not be auto-resolved for this ticket. "
+                        f"This organization has {len(grid_flag_candidates)} grids: "
+                        f"{candidates_text}. Please set the Grid field manually.",
+                        public=False,
+                    )
+                except Exception:
+                    LOGGER.warning(
+                        "Could not post grid-ambiguity flag comment on {}",
+                        ticket_ref,
+                        exc_info=True,
+                    )
 
             # escalations.state is now "tracked" (set by attach_ticket above),
             # which excludes it from has_blocking_escalation's "open"/"processing"

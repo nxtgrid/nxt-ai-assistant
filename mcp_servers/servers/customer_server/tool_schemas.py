@@ -410,10 +410,13 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'meter_information',
                   'required': []},
   'visible_to_customer': True},
  {'name': 'get_my_open_issues',
-  'description': "[READ-ONLY] List this organisation's open support escalations, optionally "
-                 'filtered by issue type. Returns a summary count by type plus individual issue '
-                 'details (summary, reason, when raised). Issue types: token, hps, meter, '
-                 'transaction, commissioning, other.',
+  'description': "[READ-ONLY] List this organisation's OPEN support escalations only. "
+                 'Resolved or closed issues are excluded and will not appear here, even if '
+                 'referenced by ticket number -- if a lookup comes back empty, say it may '
+                 'already be resolved rather than implying it never existed. Optionally '
+                 'filtered by issue type. Returns a summary count by type plus individual '
+                 'issue details (summary, reason, when raised). Issue types: token, hps, '
+                 'meter, transaction, commissioning, other.',
   'inputSchema': {'type': 'object',
                   'properties': {'issue_type': {'type': 'string',
                                                 'description': 'Filter by issue type: token, hps, '
