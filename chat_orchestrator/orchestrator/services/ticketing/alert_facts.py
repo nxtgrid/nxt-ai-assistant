@@ -51,10 +51,28 @@ _MPPT_PATTERN = re.compile(
     r"\bmppt\b[\s:\-]+([A-Za-z0-9]+)((?:(?!mppt)[^\[\]]){0,40}\[(\d{1,4})\])?",
     re.IGNORECASE,
 )
+# Victron's VRM alerts sometimes name the charger without the word "MPPT" at
+# all ("Solar Charger [278]"), or with a token but no "MPPT" ("Solar Charger
+# - VT6Y ARTN4.4/-141/32 House 4 [8]"). Both are still MPPT-kind components --
+# the bracketed instance id is what n8n's own regex keys off of. Require the
+# bracket (unlike _MPPT_PATTERN, whose bracket is optional) since without one
+# there's nothing to disambiguate "Solar Charger" prose from a real device
+# mention.
+_SOLAR_CHARGER_PATTERN = re.compile(
+    r"solar\s+charger(?:\s*-\s*([A-Za-z0-9]+))?(?:(?!solar\s+charger)[^\[\]]){0,60}\[(\d{1,4})\]",
+    re.IGNORECASE,
+)
 # Mirrors n8n's Build Alert Actions1 regexes exactly (see the plan's
 # "Current architecture (n8n side)" section) -- a 16-hex id is a base
 # station, a 9-digit id is a DCU.
 _DCU_PATTERN = re.compile(r"dcu\s+(\d{9}|[a-fA-F0-9]{16})", re.IGNORECASE)
+
+# The VRM alert shape is `ALERT - '<grid>': '<fault>' on '<device>'` -- the
+# quoted device clause is exactly the part that must be masked structurally
+# (see normalize_subject): the synthesized TOKEN#instance component_key never
+# appears literally in it, so literal removal alone leaves the device token
+# and its location word in the hashed text.
+_ON_DEVICE_CLAUSE = re.compile(r"\bon\s+'[^']*'", re.IGNORECASE)
 
 
 def _looks_like_component_id(token: str) -> bool:
@@ -115,6 +133,14 @@ def derive_component(subject: str, text: str = "") -> Tuple[str, str, str]:
             key = f"{token}#{instance}" if instance else token
             return "mppt", key, f"MPPT {key}"
 
+        solar_charger_match = _SOLAR_CHARGER_PATTERN.search(haystack)
+        if solar_charger_match:
+            token = solar_charger_match.group(1)
+            if not token or _looks_like_component_id(token):
+                instance = solar_charger_match.group(2)
+                key = f"{token}#{instance}" if token else instance
+                return "mppt", key, f"MPPT {key}"
+
         dcu_match = _DCU_PATTERN.search(haystack)
         if dcu_match:
             key = dcu_match.group(1)
@@ -125,19 +151,58 @@ def derive_component(subject: str, text: str = "") -> Tuple[str, str, str]:
     return "", "", ""
 
 
+def _mask_mppt_mentions(text: str) -> str:
+    """Replace each valid MPPT id-mention with a fixed placeholder.
+
+    A plain ``_MPPT_PATTERN.sub("mppt #", text)`` would also blank out a
+    prose mention like "MPPT performance issue" (group(1) captures
+    "performance"), so this re-checks ``_looks_like_component_id`` per match
+    the same way ``derive_component`` does, and leaves a match alone when it
+    fails that check.
+    """
+
+    def _replace(match: re.Match) -> str:
+        if not _looks_like_component_id(match.group(1)):
+            return match.group(0)
+        return "mppt #"
+
+    return _MPPT_PATTERN.sub(_replace, text)
+
+
 def normalize_subject(subject: str, component_key: str = "") -> str:
     """Canonicalize a subject line for signature comparison.
 
     Strips the leading "! Warning:"/"! Urgent:" marker and a trailing "!",
-    lowercases, removes the component key (if given) so different components
-    of the same issue shape normalize identically, masks numbers/percentages/
-    voltages/ISO timestamps to "#", and collapses whitespace.
+    lowercases, then masks device identity so different components of the
+    same issue shape normalize identically:
+
+    - the VRM ``on '<device>'`` clause (``ALERT - '<grid>': '<fault>' on
+      '<device>'``) is replaced wholesale with ``on '#'`` -- the synthesized
+      ``component_key`` (``TOKEN#instance``) never appears literally in this
+      shape, so removing it by substring match (below) does nothing;
+    - any remaining ``_MPPT_PATTERN`` / ``_DCU_PATTERN`` mention is replaced
+      with a fixed placeholder for subject shapes that don't wrap the device
+      in quotes (e.g. "MPPT A3 in Kudi ...").
+
+    The literal ``component_key`` removal that used to be the only mechanism
+    stays as a fallback, for any subject shape neither of the above catches.
+    Finally masks numbers/percentages/voltages/ISO timestamps to "#", and
+    collapses whitespace.
+
+    Deploy note: this changed the hashed material for every existing
+    signature. The first alert of each family after deploy won't match its
+    own ticket's previously-stored signature -- it takes the LLM path once,
+    then converges as merge_affected_key folds the new signature in.
     """
     text = subject or ""
     text = _LEADING_MARKER.sub("", text)
     text = _LEADING_BANG.sub("", text)
     text = text.rstrip("!").strip()
     text = text.lower()
+
+    text = _ON_DEVICE_CLAUSE.sub("on '#'", text)
+    text = _mask_mppt_mentions(text)
+    text = _DCU_PATTERN.sub("dcu #", text)
 
     if component_key:
         text = re.sub(rf"\b{re.escape(component_key.lower())}\b", "", text)

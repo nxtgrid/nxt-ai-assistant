@@ -64,7 +64,10 @@ def _resolve_field_value(field: JiraFieldDefinition, context: JiraCreateContext)
     if field.id == "priority" and context.priority_id:
         return {"id": context.priority_id}
     if _field_name(field) in _ORGANIZATION_FIELD_NAMES and context.organization_id:
-        return {"id": context.organization_id}
+        # Jira's Organizations field is multi-value even for a single org --
+        # the create API rejects a bare object with "Specify the value for
+        # Organizations in an array" (2026-08-11 Hardrock incident).
+        return [{"id": context.organization_id}]
     if _field_name(field) == "grid":
         return _grid_option(field, context.grid_name)
     return None

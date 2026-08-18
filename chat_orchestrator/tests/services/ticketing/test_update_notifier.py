@@ -48,8 +48,14 @@ class _FakeDeliveries:
 class _FakeWatermark:
     def __init__(self, gap: int = 0) -> None:
         self._gap = gap
+        self.calls: List[Dict[str, Any]] = []
 
-    async def messages_since(self, chat_id: str, anchor_message_id: int) -> int:
+    async def messages_since(
+        self, chat_id: str, anchor_message_id: int, topic_id: Optional[str] = None
+    ) -> int:
+        self.calls.append(
+            {"chat_id": chat_id, "anchor_message_id": anchor_message_id, "topic_id": topic_id}
+        )
         return self._gap
 
 
@@ -94,6 +100,35 @@ _ANCHOR = {
     "external_topic_id": "77",
     "external_message_id": 500,
 }
+
+
+@pytest.mark.asyncio
+async def test_threads_the_anchors_topic_id_into_the_watermark_call():
+    """B6: the anchor already carries external_topic_id (the _ANCHOR fixture
+    below, also used for the send/reply itself) -- it must also reach
+    messages_since, so the scroll decision is scoped to the ticket's own
+    topic instead of the whole shared group."""
+
+    async def _edit(bot_token, chat_id, message_id, text, parse_mode=None) -> bool:
+        return True
+
+    watermark = _FakeWatermark(gap=0)
+    notifier = TicketUpdateNotifier(
+        tickets=_FakeTickets(record=_Record()),
+        deliveries=_FakeDeliveries(anchor=_ANCHOR),
+        watermark=watermark,
+        bot_token="tok",
+        gateway=None,
+        model="fake-model",
+        edit_fn=_edit,
+    )
+
+    await notifier.notify(TicketEvent(ticket_ref="ANS-42", kind="transition", to_status="done"))
+
+    assert len(watermark.calls) == 1
+    assert watermark.calls[0]["chat_id"] == "-100123"
+    assert watermark.calls[0]["anchor_message_id"] == 500
+    assert watermark.calls[0]["topic_id"] == "77"
 
 
 @pytest.mark.asyncio

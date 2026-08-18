@@ -351,6 +351,48 @@ class TestAlertIssueTypeMetadata:
         assert "Original alert text" in prompt
         assert '"live_inverter_output_kw": 0.0' in prompt
 
+    @pytest.mark.asyncio
+    async def test_selector_includes_battery_voltage_when_urgent_alert_context_has_it(self):
+        """C1: UrgentAlertContext.llm_facts() adds battery_voltage_v
+        alongside the inverter output figure -- operational_context is
+        JSON-dumped as-is (see jira_issue_types.py), so the new key needs
+        no code change here, only this coverage confirming it actually
+        reaches the prompt the issue-type selector reasons over."""
+
+        class RecordingGateway:
+            def __init__(self):
+                self.messages = []
+
+            async def generate(self, messages, _options):
+                self.messages = messages
+
+                class Result:
+                    text = '{"issue_type_id":"1","reason":"battery ok"}'
+
+                return Result()
+
+        gateway = RecordingGateway()
+        selector = JiraIssueTypeSelector(
+            base_url="https://example.atlassian.net",
+            headers={},
+            project_key="OPS",
+            model="fake-model",
+            get_session=lambda: None,
+            gateway=gateway,
+        )
+        selector._cached_types = [JiraIssueType(id="1", name="Task")]
+        selector._cached_at = time.monotonic()
+
+        result = await selector.select(
+            summary="RESTART FAILED - Inverter Off while battery Ok >52V",
+            description="Original alert text",
+            operational_context={"live_inverter_output_kw": 0.0, "battery_voltage_v": 51.8},
+        )
+
+        assert result is not None
+        prompt = gateway.messages[0].text or ""
+        assert '"battery_voltage_v": 51.8' in prompt
+
 
 class TestIsAvailable:
     @pytest.mark.asyncio
@@ -1164,14 +1206,16 @@ class TestAdfRoundTrip:
         assert jira_backend_module._adf_to_text(adf) == text
 
     def test_multi_block_paragraph_bulletlist_paragraph_round_trips_exactly(self):
+        # Mirrors render_description's real (post-B5) field order: the
+        # marker block leads, the original alert text trails.
         text = (
-            "desc\n\n"
             "[anansi:affected-start]\n"
             "Affected components (2):\n"
             "- MPPT A3 — first seen t1, last t2 (2x)\n"
             "- MPPT A7 — first seen t3, last t3 (1x)\n"
             "Occurrences: 3 · Grouped by Anansi alert correlation\n"
-            "[anansi:affected-end]"
+            "[anansi:affected-end]\n\n"
+            "desc"
         )
 
         adf = jira_backend_module._text_to_adf(text)
@@ -1186,6 +1230,43 @@ class TestAdfRoundTrip:
     def test_empty_text_produces_valid_empty_doc(self):
         adf = jira_backend_module._text_to_adf("")
         assert jira_backend_module._adf_to_text(adf) == ""
+
+    def test_render_descriptions_real_output_round_trips(self):
+        """B5: render_description's actual output (not a hand-copied
+        approximation) -- a leading [anansi:affected-start] paragraph line
+        and bullet lines -- must convert and round-trip cleanly, never
+        misread as a code fence (_text_to_adf has no fence handling to begin
+        with, but this is the integration point that would surface it)."""
+        from orchestrator.services.ticketing.correlation_render import render_description
+
+        text = render_description(
+            {
+                "description_base": "Please check VRM.",
+                "affected_keys": [
+                    {
+                        "kind": "mppt",
+                        "key": "A3",
+                        "label": "MPPT A3",
+                        "first_seen": "t1",
+                        "last_seen": "t2",
+                        "count": 2,
+                    }
+                ],
+                "occurrence_count": 2,
+                "root_cause_kind": None,
+            }
+        )
+
+        adf = jira_backend_module._text_to_adf(text)
+
+        assert adf["content"][0]["type"] == "paragraph"
+        first_paragraph_text = "".join(
+            part.get("text", "")
+            for part in adf["content"][0]["content"]
+            if part["type"] == "text"
+        )
+        assert "[anansi:affected-start]" in first_paragraph_text
+        assert jira_backend_module._adf_to_text(adf) == text
 
 
 class _FakeStorageBucket:

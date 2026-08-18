@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     reply_to_telegram_message_id    bigint,
     sender_telegram_id              text,
     thread_id                       text,
-    archived_at                     timestamptz
+    archived_at                     timestamptz,
+    telegram_topic_id               text  -- added by 0016_chat_messages_topic.sql
 );
 
 CREATE INDEX IF NOT EXISTS chat_messages_session_id_idx ON chat_messages (session_id);
@@ -74,6 +75,9 @@ CREATE INDEX IF NOT EXISTS chat_messages_created_at_idx ON chat_messages (create
 -- on it (see 0012_message_archive.sql).
 CREATE INDEX IF NOT EXISTS chat_messages_archived_idx ON chat_messages (session_id)
     WHERE archived_at IS NULL;
+-- ChatWatermarkRepository filters by topic within a group (0016_chat_messages_topic.sql).
+CREATE INDEX IF NOT EXISTS chat_messages_group_topic_msg_idx
+    ON chat_messages (group_id, telegram_topic_id, telegram_message_id DESC);
 
 -- ── Conversation Summaries ────────────────────────────────────────────────────
 
@@ -202,44 +206,52 @@ RETURNS text LANGUAGE sql AS $$
 $$;
 
 -- ── Alert Correlation (smart /notify ticketing) ──────────────────────────────
--- Backend-agnostic state for grouping incoming alerts (n8n/VRM/Grafana via
+-- Mutable *state* for grouping incoming alerts (n8n/VRM/Grafana via
 -- /chat/notify) against a grid's already-open tickets, on either backend.
--- No FK to internal_tickets: ticket_ref may be an internal ref or a Jira key.
--- See db/migrations/0003_alert_correlation.sql and
+-- Keyed by ticket_id (db/migrations/0005b) -- current ticket ref, backend,
+-- summary, status, organization, and grid are read by joining `tickets`;
+-- reply/delivery coordinates are read from `message_deliveries`. One ticket
+-- has at most one correlation row (ticket_id is the primary key).
+-- See db/migrations/0003_alert_correlation.sql,
+-- db/migrations/0005b_ticket_schema_validate_and_contract.sql, and
 -- docs/superpowers/plans/2026-07-27-smart-alert-correlation-notify.md.
+--
+-- NOTE: this file is not yet a full regeneration of the live post-0005b
+-- schema (that is a separate, still-outstanding task) -- only these two
+-- correlation tables have been brought current here. In particular, this
+-- file predates the 0005a/0005b consolidation and does not define `tickets`
+-- (or `escalations`/`ticket_comments`/`message_deliveries`), so ticket_id
+-- below is left as a bare uuid rather than a dangling REFERENCES tickets(id)
+-- -- that FK does exist in production (added by 0005a).
 
 CREATE TABLE IF NOT EXISTS ticket_correlations (
-    id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    ticket_ref           text UNIQUE NOT NULL,
-    ticket_backend       text CHECK (ticket_backend IN ('jira', 'internal')),
-    grid_name            text NOT NULL,
-    organization_id      integer,
+    ticket_id            uuid PRIMARY KEY,
     root_cause_kind      text,
     primary_signature    text,
     signatures           jsonb NOT NULL DEFAULT '[]',
     affected_keys        jsonb NOT NULL DEFAULT '[]',
     summary_base         text,
-    summary_current      text,
     description_base     text,
     severity             text,
     occurrence_count     integer NOT NULL DEFAULT 1,
     escalated_at         timestamptz,
-    status               text NOT NULL DEFAULT 'open',
-    telegram_chat_id     text,
-    telegram_topic_id    text,
-    telegram_message_id  bigint,
     last_alert_at        timestamptz DEFAULT now(),
     created_at           timestamptz DEFAULT now(),
     updated_at           timestamptz DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS ticket_correlations_grid_idx
-    ON ticket_correlations (grid_name, status, last_alert_at DESC);
+CREATE INDEX IF NOT EXISTS ticket_correlations_last_alert_idx
+    ON ticket_correlations (last_alert_at DESC);
 CREATE INDEX IF NOT EXISTS ticket_correlations_sig_idx
     ON ticket_correlations USING gin (signatures jsonb_path_ops);
 
+-- Full audit trail of every correlation decision -- event-time evidence, so
+-- grid_name and the candidate/alert snapshot are preserved here even though
+-- they are no longer cached on ticket_correlations. ticket_id is nullable:
+-- an event that never resolved to a ticket (a hard failure) still needs to
+-- exist as a record of the decision.
 CREATE TABLE IF NOT EXISTS ticket_correlation_events (
     id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    ticket_ref      text,
+    ticket_id       uuid,
     grid_name       text NOT NULL,
     source          text,
     signature       text,

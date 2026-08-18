@@ -1,0 +1,418 @@
+"""B7 (plan docs/superpowers/plans/2026-08-11-ticketing-noise-and-correlation-cutover.md):
+burst regression test, built from the real 2026-08-08 Akinsolu "No BMS" storm
+(finding 1) plus the component-less Ogbinbiri/Akinsolu Solar Charger miss
+(finding 2). Six MPPT devices and one bracket-only Solar Charger device, same
+fault, same grid, arriving back-to-back -- must collapse onto one ticket with
+one edited-in-place Telegram message, not seven tickets/seven posts.
+
+This drives the *real* AlertCorrelator, alert_facts normalization, and
+apply_amendment end to end through the /notify HTTP-level entry points
+(_resolve_notify_ticket_full + _deliver_notification) -- only the storage
+layer (CorrelationStore, TicketService, DeliveryRepository) and the Telegram
+transport are faked, and the LLM gateway is wired to explode if ever called,
+so a regression that makes B1-B3's deterministic ladder fall through to the
+LLM fails loudly rather than silently passing via a fake LLM decision.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+import pytest
+
+from orchestrator.api.app import NotifyRequest, _resolve_notify_ticket_full
+from orchestrator.services.ticketing.backend import (
+    TicketCreateOutcome,
+    TicketResult,
+    TicketStatus,
+)
+from orchestrator.services.ticketing.correlation_store import AffectedKeyMerge
+from shared.auth.auth_service import GridNotificationTarget
+
+GRID = "Akinsolu"
+
+# The real 2026-08-08 storm subjects (plan finding 1's table), reconstructed
+# in the full VRM alert shape ("ALERT - '<grid>': '<fault>' on '<device>'")
+# that finding 1 traces the signature bug through, plus finding 2's
+# component-less Solar Charger device on the same fault.
+_SUBJECTS = [
+    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !",
+    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "'Solar Charger - MPPT 65SQ ARTN4.4/-141/32 House [0]' !",
+    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "'Solar Charger - MPPT JD65 ARTN4.4/-176/5 Cabin [3]' !",
+    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "'Solar Charger - MPPT RH2W ARTN4.4/-176/5 Cabin [6]' !",
+    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "'Solar Charger - MPPT QI11 ARTN4.4/+27/24 Church [2]' !",
+    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "'Solar Charger - MPPT LQLA ARTN4.4/27/24 Church [1]' !",
+    # finding 2: no "MPPT" word at all -- component-less before B2.
+    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "'Solar Charger - VT6Y ARTN4.4/-141/32 House 4 [8]' !",
+]
+
+_EXPECTED_KEYS = {"KBUA#5", "65SQ#0", "JD65#3", "RH2W#6", "QI11#2", "LQLA#1", "VT6Y#8"}
+
+
+class _ExplodingGateway:
+    """Any call means the deterministic ladder (B1-B3) failed to group this
+    storm and fell through to the LLM -- fail loudly, not silently."""
+
+    async def generate(self, *args: Any, **kwargs: Any) -> Any:
+        raise AssertionError(
+            "LLM must not be called -- this storm is fully deterministic "
+            "once B1 (signature normalization) and B2 (Solar Charger "
+            "detection) are in place"
+        )
+
+
+class _FakeTicketService:
+    """Combines the correlator-facing lookups (find_open_by_grid,
+    get_ref_by_id, get_backend_name, get_status) with ticket creation
+    (create_ticket_with_internal_fallback) and update (update_ticket,
+    add_comment). Shares ``tickets`` with the store fake so
+    open_candidates_for_grid can join on grid_name the way the real
+    two-step query does.
+    """
+
+    def __init__(self, tickets: Dict[str, Dict[str, Any]]) -> None:
+        self._tickets = tickets
+        self._next_id = 1
+        self.create_ticket_calls: List[Any] = []
+        self.update_ticket_calls: List[Dict[str, Any]] = []
+        self.add_comment_calls: List[tuple] = []
+
+    async def resolve_backend(self, override: Optional[str] = None) -> Any:
+        class _Backend:
+            name = "internal"
+
+        return _Backend()
+
+    async def create_ticket_with_internal_fallback(
+        self, req: Any, backend_override: Optional[str] = None
+    ) -> TicketCreateOutcome:
+        self.create_ticket_calls.append(req)
+        ticket_id = f"tid-{self._next_id}"
+        self._next_id += 1
+        ref = f"OPS-{ticket_id}"
+        self._tickets[ticket_id] = {
+            "id": ticket_id,
+            "ref": ref,
+            "backend": "internal",
+            "grid_name": req.grid_name,
+            "status": "open",
+            "summary": req.summary,
+        }
+        result = TicketResult(ref=ref, backend="internal", url=None, ticket_id=ticket_id)
+        return TicketCreateOutcome(result=result, error=None, fallback_used=False)
+
+    async def find_open_by_grid(
+        self, grid_name: str, limit: int = 20, backend_override: Optional[str] = None
+    ) -> List[Any]:
+        # Every candidate in this storm is already tracked by the store --
+        # nothing to discover via backend search.
+        return []
+
+    async def get_status(self, ref: str) -> Optional[TicketStatus]:
+        for ticket in self._tickets.values():
+            if ticket["ref"] == ref:
+                return TicketStatus(summary=ticket["summary"], is_done=ticket["status"] == "done")
+        return None
+
+    async def get_ref_by_id(self, ticket_id: str) -> Optional[str]:
+        ticket = self._tickets.get(ticket_id)
+        return ticket["ref"] if ticket else None
+
+    async def get_backend_name(self, ref: str) -> str:
+        return "internal"
+
+    async def update_ticket(
+        self, ref: str, summary=None, description=None, priority_id=None
+    ) -> bool:
+        self.update_ticket_calls.append(
+            {"ref": ref, "summary": summary, "description": description, "priority_id": priority_id}
+        )
+        for ticket in self._tickets.values():
+            if ticket["ref"] == ref:
+                ticket["summary"] = summary
+        return True
+
+    async def add_comment(self, ref: str, body: str, public: bool = False) -> bool:
+        self.add_comment_calls.append((ref, body, public))
+        return True
+
+
+class _FakeStore:
+    """Minimal in-memory CorrelationStore, stateful across the whole storm
+    (not reset between /notify calls) -- shares ``tickets`` with the ticket
+    service fake so open_candidates_for_grid can merge ticket fields the way
+    the real two-step query does (see correlation_store.py's docstring)."""
+
+    def __init__(self, tickets: Dict[str, Dict[str, Any]]) -> None:
+        self._tickets = tickets
+        self.rows: Dict[str, Dict[str, Any]] = {}
+        self.events_by_dedup: Dict[str, Dict[str, Any]] = {}
+        self.record_event_calls: List[Dict[str, Any]] = []
+
+    async def get_by_dedup_key(self, dedup_key: str) -> Optional[Dict[str, Any]]:
+        return self.events_by_dedup.get(dedup_key)
+
+    async def get_correlation(self, ticket_id: str) -> Optional[Dict[str, Any]]:
+        return self.rows.get(ticket_id)
+
+    async def open_candidates_for_grid(
+        self, grid_name: str, since_iso: str, limit: int = 15
+    ) -> List[Dict[str, Any]]:
+        results = []
+        for ticket_id, ticket in self._tickets.items():
+            if ticket.get("grid_name") != grid_name or ticket.get("status") != "open":
+                continue
+            row = self.rows.get(ticket_id)
+            if row is None:
+                continue
+            results.append(
+                {
+                    **row,
+                    "ticket_ref": ticket["ref"],
+                    "ticket_backend": ticket["backend"],
+                    "summary_current": ticket["summary"],
+                    "status": ticket["status"],
+                    "grid_name": grid_name,
+                }
+            )
+        return results[:limit]
+
+    async def upsert_correlation(
+        self,
+        *,
+        ticket_id: str,
+        root_cause_kind,
+        primary_signature: str,
+        signatures,
+        affected_keys,
+        summary_base: str,
+        description_base: str,
+        severity: str,
+    ) -> bool:
+        self.rows[ticket_id] = {
+            "ticket_id": ticket_id,
+            "root_cause_kind": root_cause_kind,
+            "primary_signature": primary_signature,
+            "signatures": list(signatures),
+            "affected_keys": list(affected_keys),
+            "summary_base": summary_base,
+            "description_base": description_base,
+            "severity": severity,
+            "occurrence_count": 1,
+            "escalated_at": None,
+        }
+        return True
+
+    async def merge_affected_key(
+        self, ticket_id: str, *, kind: str, key: str, label: str, occurred_at=None, signature=None
+    ) -> Optional[AffectedKeyMerge]:
+        row = self.rows.get(ticket_id)
+        if row is None:
+            return None
+        existing = list(row.get("affected_keys") or [])
+        already = any(
+            e.get("kind") == kind and str(e.get("key", "")).casefold() == key.casefold()
+            for e in existing
+        )
+        if not already:
+            existing.append(
+                {"kind": kind, "key": key, "label": label, "first_seen": "t", "last_seen": "t", "count": 1}
+            )
+            row["affected_keys"] = existing
+        if signature and signature not in (row.get("signatures") or []):
+            row["signatures"] = list(row.get("signatures") or []) + [signature]
+        return AffectedKeyMerge(affected_keys=existing, added=not already)
+
+    async def bump_occurrence(self, ticket_id: str, occurred_at=None) -> bool:
+        row = self.rows.get(ticket_id)
+        if row is None:
+            return False
+        row["occurrence_count"] = int(row.get("occurrence_count") or 1) + 1
+        return True
+
+    async def record_amendment(self, ticket_id: str, *, severity=None, escalated: bool = False) -> bool:
+        row = self.rows.get(ticket_id)
+        if row is None:
+            return False
+        if severity:
+            row["severity"] = severity
+        if escalated:
+            row["escalated_at"] = "now"
+        return True
+
+    async def record_event(self, **kwargs: Any) -> bool:
+        self.record_event_calls.append(kwargs)
+        dedup_key = kwargs.get("dedup_key")
+        if dedup_key:
+            self.events_by_dedup[dedup_key] = {
+                "decision": kwargs["decision"],
+                "ticket_id": kwargs.get("ticket_id"),
+                "decided_by": kwargs["decided_by"],
+                "confidence": kwargs.get("confidence"),
+                "reason": kwargs.get("reason"),
+            }
+        return True
+
+    async def record_event_ticket_id(self, dedup_key: str, ticket_id: str) -> bool:
+        if dedup_key in self.events_by_dedup:
+            self.events_by_dedup[dedup_key]["ticket_id"] = ticket_id
+            return True
+        return False
+
+
+class _FakeDeliveryRepository:
+    """Shared instance across the whole storm (not reset per-call) -- record()
+    updates exactly what latest_for_ticket() reads, so the anchor set by the
+    first alert's real send is what every subsequent amend's edit targets."""
+
+    def __init__(self, get_client=None) -> None:
+        pass
+
+    anchors: Dict[str, Dict[str, Any]] = {}
+
+    async def latest_for_ticket(self, ticket_id: str) -> Optional[Dict[str, Any]]:
+        return _FakeDeliveryRepository.anchors.get(ticket_id)
+
+    async def record(self, **kwargs: Any) -> None:
+        _FakeDeliveryRepository.anchors[kwargs["ticket_id"]] = {
+            "external_chat_id": kwargs["external_chat_id"],
+            "external_topic_id": kwargs["external_topic_id"],
+            "external_message_id": kwargs["external_message_id"],
+        }
+
+
+class _FakeTelegramTransport:
+    def __init__(self) -> None:
+        self.send_calls: List[Dict[str, Any]] = []
+        self.edit_calls: List[Dict[str, Any]] = []
+        self._next_message_id = 1000
+
+    async def send(
+        self,
+        bot_token,
+        chat_id,
+        text,
+        reply_markup=None,
+        parse_mode=None,
+        topic_id=None,
+        reply_to_message_id=None,
+    ) -> int:
+        self._next_message_id += 1
+        self.send_calls.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "topic_id": topic_id,
+                "reply_to_message_id": reply_to_message_id,
+                "message_id": self._next_message_id,
+            }
+        )
+        return self._next_message_id
+
+    async def edit(self, bot_token, chat_id, message_id, text, parse_mode=None) -> bool:
+        self.edit_calls.append({"chat_id": chat_id, "message_id": message_id, "text": text})
+        return True
+
+
+def _target() -> GridNotificationTarget:
+    return GridNotificationTarget(grid_name=GRID, chat_id="-100555", topic_id="42", was_fuzzy=False)
+
+
+def _body(subject: str) -> NotifyRequest:
+    return NotifyRequest(
+        source="grafana",
+        grid_name=GRID,
+        text=subject,
+        ticket_id="auto",
+        dedup_key=f"dedup-{hash(subject)}",
+        alert={"subject": subject},
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_delivery_anchors():
+    _FakeDeliveryRepository.anchors = {}
+    yield
+    _FakeDeliveryRepository.anchors = {}
+
+
+@pytest.mark.asyncio
+async def test_seven_alerts_on_seven_devices_collapse_onto_one_ticket_one_message(monkeypatch):
+    monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+
+    tickets: Dict[str, Dict[str, Any]] = {}
+    store = _FakeStore(tickets)
+    ticket_service = _FakeTicketService(tickets)
+    transport = _FakeTelegramTransport()
+
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+        lambda get_client=None: store,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.service.TicketService",
+        lambda get_supabase_client=None: ticket_service,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.delivery_repository.DeliveryRepository",
+        _FakeDeliveryRepository,
+    )
+    monkeypatch.setattr(
+        "shared.llm.get_default_generation_gateway",
+        lambda default_model=None: _ExplodingGateway(),
+    )
+    monkeypatch.setattr("shared.utils.telegram_send.send_telegram_message_with_fallback", transport.send)
+    monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", transport.edit)
+
+    async def _noop_chat_db_log(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("orchestrator.api.app._log_notification_to_chat_db", _noop_chat_db_log)
+
+    import orchestrator.api.app as app_module
+
+    refs: List[Optional[str]] = []
+    for subject in _SUBJECTS:
+        body = _body(subject)
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+        assert error is None, f"unexpected error for {subject!r}: {error}"
+        refs.append(ref)
+        await app_module._deliver_notification(body, _target(), ref, delivery)
+
+    # One ticket, referenced by every alert.
+    assert len(set(refs)) == 1
+    assert len(ticket_service.create_ticket_calls) == 1
+    (ticket_id,) = tickets.keys()
+
+    # Seven occurrences, all seven components present (VT6Y included -- B2).
+    row = store.rows[ticket_id]
+    assert row["occurrence_count"] == 7
+    assert {entry["key"] for entry in row["affected_keys"]} == _EXPECTED_KEYS
+    assert len(row["affected_keys"]) == 7
+
+    # One real Telegram post (the new ticket) and six in-place edits of that
+    # same message -- never a second top-level/escalation post, i.e. no
+    # repeated escalation noise (operator problem 1) and no storm splitting
+    # across tickets (operator problem 2).
+    assert len(transport.send_calls) == 1
+    assert len(transport.edit_calls) == 6
+    original_message_id = transport.send_calls[0]["message_id"]
+    assert all(call["message_id"] == original_message_id for call in transport.edit_calls)
+
+    # The equipment list leads the description (B5).
+    final_description = ticket_service.update_ticket_calls[-1]["description"]
+    assert final_description.startswith("[anansi:affected-start]")
+    for key in _EXPECTED_KEYS:
+        assert key in final_description
+
+    # Zero LLM calls -- fully deterministic (B1 signature fix + B2 detection
+    # + B3 signature-amend rung). _ExplodingGateway raising would have
+    # already failed this test with an AssertionError if this weren't true.

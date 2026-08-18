@@ -270,6 +270,22 @@ class TicketService:
         ticket = await self._tickets.get_by_ref(ref)
         return ticket.id if ticket else None
 
+    async def adopt_external(
+        self,
+        *,
+        ref: str,
+        backend: str,
+        summary: str,
+        grid_name: Optional[str] = None,
+    ) -> Any:
+        """Thin passthrough to ``TicketRepository.adopt_external`` -- lets
+        callers that only hold a ``TicketService`` (e.g. ``AlertCorrelator``)
+        adopt a backend-discovered ticket into the canonical ``tickets``
+        table without a separate repository dependency."""
+        return await self._tickets.adopt_external(
+            ref=ref, backend=backend, summary=summary, grid_name=grid_name
+        )
+
     @property
     def _notifier(self) -> Any:
         """Built on first use so constructing a TicketService stays cheap --
@@ -436,12 +452,29 @@ class TicketService:
 
         Routes by the ref's *persisted* backend (like ``add_comment``/
         ``get_status``), used by alert correlation to re-render a ticket
-        after an amend (see ``correlation_render.py``).
+        after an amend (see ``correlation_render.py``). The backend call is
+        authoritative for the return value; on success, summary/description
+        are also written through to the canonical ``tickets`` projection --
+        ``tickets.summary`` is what candidate assembly and severity
+        inference read post-0005b, so letting it go stale after every amend
+        would silently break correlation again. ``priority_id`` has no
+        canonical column and stays backend-only.
         """
         backend = await self._backend_for_ref(ref)
-        return await backend.update_ticket(
+        ok = await backend.update_ticket(
             ref, summary=summary, description=description, priority_id=priority_id
         )
+        if ok and (summary is not None or description is not None):
+            try:
+                await self._tickets.update_by_ref(ref, summary=summary, description=description)
+            except Exception:
+                LOGGER.warning(
+                    "update_ticket: backend update for {} succeeded but canonical "
+                    "projection write failed -- tickets.summary/description may be stale",
+                    ref,
+                    exc_info=True,
+                )
+        return ok
 
     async def sync_jira_ticket_statuses(self, limit: int = 200) -> Dict[str, int]:
         """Pull live Jira status for open Jira-backed canonical tickets and close done ones.
