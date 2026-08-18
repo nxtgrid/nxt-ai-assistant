@@ -22,6 +22,11 @@ LOGGER = get_logger(__name__)
 # Minimum similarity score (0-100) for a fuzzy match to be accepted
 DEFAULT_FUZZY_THRESHOLD = 80
 
+# find_grid_mention searches free text (a whole chat message, not a single
+# extracted value), which carries far more incidental partial-match risk
+# than find_best_grid_match's structured-field use case -- hence a higher bar.
+TEXT_MENTION_FUZZY_THRESHOLD = 90
+
 
 def find_best_grid_match(
     input_name: str,
@@ -106,6 +111,70 @@ def find_best_grid_match(
     except ImportError:
         LOGGER.warning("rapidfuzz not installed - fuzzy matching unavailable")
         return (None, False, 0)
+
+
+def find_grid_mention(
+    text: str,
+    valid_names: List[str],
+    threshold: int = TEXT_MENTION_FUZZY_THRESHOLD,
+) -> Optional[str]:
+    """
+    Search free-form text for a mention of one of the given grid names.
+
+    ``find_best_grid_match`` uses ``token_sort_ratio``, built for comparing
+    two short, comparable-length strings (e.g. correcting a provided grid
+    name against a list of options) -- not for finding a name's approximate
+    presence inside a much longer block of text. This uses
+    ``fuzz.partial_ratio`` instead, which scores the best-matching substring
+    of the longer text against each candidate name.
+
+    Args:
+        text: Free-form text to search (e.g. a customer's chat message).
+        valid_names: Grid names to search for.
+        threshold: Minimum similarity score (0-100) to accept a match.
+
+    Returns:
+        The matched name, or None if no candidate reaches the threshold, or
+        if the top two candidates are too close to call (ambiguous).
+    """
+    if not text or not valid_names:
+        return None
+
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:
+        LOGGER.warning("rapidfuzz not installed - grid mention search unavailable")
+        return None
+
+    text_lower = text.lower()
+    scored = sorted(
+        (
+            (name, fuzz.partial_ratio(name.lower(), text_lower))
+            for name in valid_names
+            if name
+        ),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )
+    if not scored:
+        return None
+
+    best_name, best_score = scored[0]
+    if best_score < threshold:
+        return None
+
+    if len(scored) >= 2:
+        _, second_score = scored[1]
+        if best_score - second_score < 10:
+            LOGGER.warning(
+                f"Ambiguous grid mention in text: top candidates "
+                f"{[name for name, _ in scored[:2]]} scored "
+                f"{best_score:.0f}%, {second_score:.0f}%. Rejecting."
+            )
+            return None
+
+    LOGGER.info(f"Found grid mention '{best_name}' in text (score={best_score:.0f}%)")
+    return best_name
 
 
 def parse_multi_site_args(raw_args: str) -> List[str]:
