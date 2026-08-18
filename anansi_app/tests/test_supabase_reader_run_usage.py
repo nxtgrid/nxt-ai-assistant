@@ -7,6 +7,7 @@ table/select/gte/execute are needed for this reader method.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -50,7 +51,11 @@ def _reader(rows: list[dict]) -> SupabaseReader:
 def _row(
     packet_type: str = "kpi_report",
     packet_status: str = "completed",
-    created_at: str = "2026-08-05T10:00:00",
+    # Relative to whenever the test runs, not a hardcoded date -- a fixed
+    # absolute timestamp ages out of get_run_usage_by_skill's default 7-day
+    # window (evaluated once at import time, which is always close enough to
+    # test-execution time for "well inside a 7-day window" to hold).
+    created_at: str = (datetime.utcnow() - timedelta(hours=2)).isoformat(),
     token_usage: dict | None = None,
 ) -> dict:
     return {
