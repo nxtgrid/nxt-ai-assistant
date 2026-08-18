@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
+from unittest.mock import AsyncMock
 
 from orchestrator.services.escalation_service import EscalationService
 from orchestrator.services.ticketing.backend import (
@@ -232,6 +233,10 @@ class _FakeSupabase:
         self.active_tracked: List[Dict[str, Any]] = []
         self.claim_returns: Dict[str, Optional[Dict[str, Any]]] = {}
         self.reactivate_calls: List[str] = []
+        # Grid-fallback fixtures (org id returned by get_session, and the
+        # messages get_messages returns) -- configure per-test.
+        self.session_organization_id: Optional[int] = None
+        self.get_messages_return: List[Dict[str, Any]] = []
 
     def _get_client(self) -> _FakeRaw:
         return self._raw
@@ -259,7 +264,7 @@ class _FakeSupabase:
         return None
 
     async def get_session(self, _sid):
-        return SimpleNamespace(id=uuid.uuid4())
+        return SimpleNamespace(id=uuid.uuid4(), organization_id=self.session_organization_id)
 
     async def get_session_by_chat_id(self, **_k):
         return SimpleNamespace(id=uuid.uuid4())
@@ -270,7 +275,7 @@ class _FakeSupabase:
         return self.session_by_id_result
 
     async def get_messages(self, **_k):
-        return []
+        return self.get_messages_return
 
     async def get_internal_ticket(self, ref: str):
         self.internal_ticket_lookup_calls.append(ref)
@@ -323,15 +328,19 @@ class _FakeBackend:
         self._url = url
         self._dedup = dedup
         self.create_calls = 0
+        self.create_requests: List[Any] = []
+        self.add_comment_calls: List[tuple] = []
 
     async def is_available(self) -> bool:
         return self._available
 
     async def create_ticket(self, req) -> TicketResult:
         self.create_calls += 1
+        self.create_requests.append(req)
         return TicketResult(ref=self._ref, backend=self.name, url=self._url)
 
     async def add_comment(self, ref, body, public: bool = False) -> bool:
+        self.add_comment_calls.append((ref, body, public))
         return True
 
     async def get_status(self, ref):
@@ -740,6 +749,112 @@ async def _run_auto_create(svc: EscalationService):
         organization_short_name="acme",
     )
     return edits
+
+
+# ---------------------------------------------------------------------------
+# track_as_ticket — grid org/text-mention fallback (customer_topic_id is
+# None in _base_mapping, so the exact chat/topic match is always skipped
+# here and every one of these exercises the new fallback tiers).
+# ---------------------------------------------------------------------------
+
+
+def _multi_grid_mapping(**overrides) -> Dict[str, Any]:
+    mapping = _base_mapping()
+    mapping.update(overrides)
+    return mapping
+
+
+async def test_track_as_ticket_uses_org_single_grid_fallback_when_topic_id_missing(
+    monkeypatch,
+):
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "mapping-abcd1234", "state": "processing"}]
+    supa = _FakeSupabase(raw)
+    supa.session_organization_id = 42
+    svc = _make_service(supa)
+    jira = _FakeBackend("jira", available=True, ref="OPS-200")
+    internal = _FakeBackend("internal", ref="TKT-000002")
+    _install_ticket_service(svc, jira, internal)
+    svc._send_telegram_message = AsyncMock(return_value={"ok": True, "result": {"message_id": 1}})
+    fake_auth = SimpleNamespace(get_grid_names_for_organization=AsyncMock(return_value=["Kudi"]))
+    monkeypatch.setattr("shared.auth.get_auth_service", lambda: fake_auth)
+
+    result = await svc.track_as_ticket(escalation_mapping=_multi_grid_mapping())
+
+    assert result["success"] is True
+    assert jira.create_requests[0].grid_name == "Kudi"
+    assert jira.add_comment_calls == []
+    fake_auth.get_grid_names_for_organization.assert_awaited_once_with("42")
+
+
+async def test_track_as_ticket_matches_grid_mentioned_in_chat_history_when_org_has_multiple(
+    monkeypatch,
+):
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "mapping-abcd1234", "state": "processing"}]
+    supa = _FakeSupabase(raw)
+    supa.session_organization_id = 42
+    supa.get_messages_return = [{"role": "user", "content": "the grid in kudi is down"}]
+    svc = _make_service(supa)
+    jira = _FakeBackend("jira", available=True, ref="OPS-201")
+    internal = _FakeBackend("internal", ref="TKT-000003")
+    _install_ticket_service(svc, jira, internal)
+    svc._send_telegram_message = AsyncMock(return_value={"ok": True, "result": {"message_id": 1}})
+    fake_auth = SimpleNamespace(
+        get_grid_names_for_organization=AsyncMock(return_value=["Kudi", "Site Alpha"])
+    )
+    monkeypatch.setattr("shared.auth.get_auth_service", lambda: fake_auth)
+
+    result = await svc.track_as_ticket(escalation_mapping=_multi_grid_mapping())
+
+    assert result["success"] is True
+    assert jira.create_requests[0].grid_name == "Kudi"
+    assert jira.add_comment_calls == []
+
+
+async def test_track_as_ticket_flags_ticket_for_staff_when_grid_is_still_ambiguous(monkeypatch):
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "mapping-abcd1234", "state": "processing"}]
+    supa = _FakeSupabase(raw)
+    supa.session_organization_id = 42
+    supa.get_messages_return = [{"role": "user", "content": "my meter is broken"}]
+    svc = _make_service(supa)
+    jira = _FakeBackend("jira", available=True, ref="OPS-202")
+    internal = _FakeBackend("internal", ref="TKT-000004")
+    _install_ticket_service(svc, jira, internal)
+    svc._send_telegram_message = AsyncMock(return_value={"ok": True, "result": {"message_id": 1}})
+    fake_auth = SimpleNamespace(
+        get_grid_names_for_organization=AsyncMock(return_value=["Kudi", "Site Alpha"])
+    )
+    monkeypatch.setattr("shared.auth.get_auth_service", lambda: fake_auth)
+
+    result = await svc.track_as_ticket(escalation_mapping=_multi_grid_mapping())
+
+    assert result["success"] is True
+    assert jira.create_requests[0].grid_name is None
+    assert len(jira.add_comment_calls) == 1
+    ref, body, public = jira.add_comment_calls[0]
+    assert ref == "OPS-202"
+    assert public is False
+    assert "Kudi" in body and "Site Alpha" in body
+
+
+async def test_track_as_ticket_leaves_grid_unset_with_no_flag_when_org_unresolvable():
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [{"id": "mapping-abcd1234", "state": "processing"}]
+    supa = _FakeSupabase(raw)
+    supa.session_organization_id = None  # org itself never resolved
+    svc = _make_service(supa)
+    jira = _FakeBackend("jira", available=True, ref="OPS-203")
+    internal = _FakeBackend("internal", ref="TKT-000005")
+    _install_ticket_service(svc, jira, internal)
+    svc._send_telegram_message = AsyncMock(return_value={"ok": True, "result": {"message_id": 1}})
+
+    result = await svc.track_as_ticket(escalation_mapping=_multi_grid_mapping())
+
+    assert result["success"] is True
+    assert jira.create_requests[0].grid_name is None
+    assert jira.add_comment_calls == []
 
 
 async def test_auto_create_jira_renders_link():
