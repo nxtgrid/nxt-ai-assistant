@@ -25,47 +25,84 @@ LOGGER = get_logger(__name__)
 # The exact parameter names search_chunks_with_permissions declares. Pinned
 # and tested (tests/test_rag_provider_rpc_contract.py) because a mismatch
 # here does not fail loudly: PostgREST rejects the call, the except swallows
-# it, and retrieval silently returns nothing on every request. That is
-# exactly what happened between the function's last signature change and
-# 2026-08-19.
+# it, and retrieval silently returns nothing on every request.
+#
+# HOTFIX 2026-08-19: the first version of this fix (PR #107) got this set
+# from db/schema/chat_db.sql:709, which turned out to be stale/aspirational
+# -- NOT what production actually runs. Confirmed against the live function
+# via `pg_get_function_identity_arguments`:
+#
+#     search_chunks_with_permissions(query_embedding vector,
+#         match_threshold double precision, match_count integer,
+#         user_role_ids integer[], user_org_ids integer[])
+#
+# These are, name-for-name, what the *original* (pre-Phase-0) caller already
+# sent. The schema file was wrong, not the caller's argument names -- so
+# whatever was actually causing retrieve() to return [] before Phase 0 was
+# not a name mismatch. That is still unconfirmed; see the Phase 0 PR/commit
+# history rather than assuming this comment is the last word.
 SEARCH_RPC_ARGUMENTS = {
     "query_embedding",
-    "p_organization_id",
+    "match_threshold",
     "match_count",
-    "similarity_threshold",
+    "user_role_ids",
+    "user_org_ids",
 }
 
 # Over-fetch so the caller can trim to `limit` after ranking.
 OVERFETCH_FACTOR = 2
 
-# Low floor, not a filter. The previous 0.7 was high enough to discard
-# legitimate matches on a 768-dim cosine space -- had any been returned.
-DEFAULT_SIMILARITY_THRESHOLD = 0.3
+# The long-standing production value (also what the original caller used).
+# Not re-derived here -- the previous "0.3, a low floor" reasoning was based
+# on a parameter (`similarity_threshold`) that does not exist on the real
+# function, so there is no evidence backing a different number. Revisit with
+# Task 4's baseline measurement in hand, not by guessing again.
+DEFAULT_MATCH_THRESHOLD = 0.7
 
 
 def build_search_arguments(
     embedding: List[float],
     organization_ids: List[str],
     limit: int,
-    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    threshold: float = DEFAULT_MATCH_THRESHOLD,
     is_staff: bool = False,
 ) -> Dict[str, Any]:
     """Arguments for search_chunks_with_permissions.
 
-    NULL p_organization_id means unrestricted and is reserved for staff. A
-    non-staff caller with no organizations is an error, never a widening:
-    passing NULL there would hand a customer the entire corpus.
+    user_role_ids is always empty: UserPermissions.roles carries role
+    *names* (e.g. "ops"), not the numeric role IDs this integer[] parameter
+    expects, and there is no client-side mapping from one to the other.
+    Role-based filtering inside the function, if any, is not something this
+    caller can drive today -- sending [] is honest about that, not a
+    regression from before (the pre-Phase-0 code's role extraction only
+    matched objects with a numeric `.id` or plain ints; given string role
+    names it also always produced []).
+
+    A non-staff caller with no organizations is refused before the RPC is
+    even called. This function's own semantics for an empty user_org_ids
+    array are not confirmed (unrestricted vs. no-match) -- this refusal is a
+    client-side floor, not a claim about what the database does with [].
+    Staff with no organizations pass an empty array through unchanged, the
+    same as the pre-Phase-0 code did for anyone with no organizations; this
+    hotfix does not invent new "unrestricted" behavior it cannot verify.
     """
     if not is_staff and not organization_ids:
         raise ValueError(
             "cannot build a permission-filtered search for a non-staff caller "
             "with no organizations"
         )
+    try:
+        org_ids = [int(o) for o in organization_ids]
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"organization_ids must be integer-valued for this RPC: {organization_ids!r}"
+        ) from e
     return {
         "query_embedding": embedding,
-        "p_organization_id": None if is_staff else organization_ids[0],
+        "match_threshold": threshold,
         "match_count": limit * OVERFETCH_FACTOR,
-        "similarity_threshold": threshold,
+        "user_role_ids": [],
+        "user_org_ids": org_ids,
     }
 
 
