@@ -191,6 +191,23 @@ async def test_on_demand_jit_module_renders_a_catalog_line_not_a_body():
     assert used == ["graph-overview"]
 
 
+def test_default_registry_includes_the_directory_provider(monkeypatch):
+    # DirectoryProvider() with no args builds a real AuthService() (a live
+    # postgres connection needing AUTH_DB_*) -- stub the source
+    # build_default_registry's local `from shared.auth import
+    # get_auth_service` resolves against, so registration succeeds without
+    # one. build_default_registry itself must already tolerate a
+    # DirectoryProvider that can't construct (that's the whole point of its
+    # try/except) -- this test is about wiring, not auth.
+    import shared.auth
+
+    monkeypatch.setattr(shared.auth, "get_auth_service", lambda: object())
+
+    from orchestrator.services.jit_context_resolver import build_default_registry
+
+    assert "directory" in build_default_registry().sources()
+
+
 @pytest.mark.asyncio
 async def test_fetch_jit_context_returns_empty_when_nothing_registered():
     from orchestrator.graphs.nodes.prepare_context import _fetch_jit_context

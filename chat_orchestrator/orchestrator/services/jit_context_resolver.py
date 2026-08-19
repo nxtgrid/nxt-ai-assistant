@@ -119,6 +119,23 @@ class JitContextResolver:
         )
 
 
+def build_default_registry() -> ProviderRegistry:
+    """Every provider that can be constructed in this process.
+
+    A provider whose dependencies are missing is omitted rather than
+    registered-and-broken: a module naming it then logs one clear "no
+    registered provider" warning per request instead of a stack trace.
+    """
+    registry = ProviderRegistry()
+    try:
+        from orchestrator.services.providers.directory_provider import DirectoryProvider
+
+        registry.register(DirectoryProvider())
+    except Exception:
+        LOGGER.warning("DirectoryProvider unavailable", exc_info=True)
+    return registry
+
+
 _RESOLVER: Optional[JitContextResolver] = None
 
 
@@ -131,8 +148,8 @@ def get_jit_resolver() -> JitContextResolver:
     """
     global _RESOLVER
     if _RESOLVER is None:
-        _RESOLVER = JitContextResolver()
+        _RESOLVER = JitContextResolver(registry=build_default_registry())
     return _RESOLVER
 
 
-__all__ = ["JitContextResolver", "get_jit_resolver"]
+__all__ = ["JitContextResolver", "build_default_registry", "get_jit_resolver"]
