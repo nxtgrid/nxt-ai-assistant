@@ -224,7 +224,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['grid_name', 'design_name', 'max_connections']},
   'visible_to_customer': False},
  {'name': 'find_grid',
-  'description': '[READ-ONLY] Find an existing grid by name (fuzzy-matched).',
+  'description': '[READ-ONLY] Find an existing grid by name (fuzzy-matched) and return its '
+                 'record, including its id. Use to confirm a grid exists before creating a '
+                 'design on it, or to resolve a grid name to the id some gd_* tools require. '
+                 'Most design tools take grid_name directly and resolve it themselves — call '
+                 'this first only when you need the id or record itself.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid to find'}},
@@ -502,7 +506,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['source_design_id', 'new_design_name']},
   'visible_to_customer': False},
  {'name': 'list_design_subassemblies',
-  'description': '[READ-ONLY] List the active subassembly instances on an existing design.',
+  'description': '[READ-ONLY] List the active subassembly instances on an existing design, '
+                 'each with its own row id (the design_subassembly_row_id that '
+                 'remove_subassembly/set_subassembly_qty require — not the design id), '
+                 'quantity, and computed kWp/kWh/kVA. Call before either of those two tools to '
+                 'get the row id to act on.',
   'inputSchema': {'type': 'object',
                   'properties': {'design_id': {'type': 'string',
                                                'description': 'UNIQUEID of the design'}},

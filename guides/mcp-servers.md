@@ -22,7 +22,7 @@ from typing import Any, Dict, List
 TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "get_forecast",
-        "description": "Get a weather forecast for a location.",
+        "description": "[READ-ONLY] Get a weather forecast for a location.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -147,6 +147,86 @@ Confirm code and JSON agree:
 ```bash
 python -m shared.config.flag_registry | diff - shared/config/flags.env.example  # should be empty
 ```
+
+### Writing the tool description
+
+The `description` field is what the model reads to decide whether, when, and
+how to call your tool — it competes for attention with ~100 other tools'
+descriptions in the same system prompt (the full manifest runs ~20k tokens;
+see `mcp_servers/tests/test_tool_manifest_sync.py`'s
+`test_tool_descriptions_follow_house_style` for the enforced part of this).
+Write it in five slots, in order. Slots 1–2 are mandatory; 3–5 only when they
+carry real information.
+
+```
+[SIDE-EFFECT] <What it does, one sentence.> <When to use / when not to.>
+Returns: <shape of the result.>
+Takes ~<latency>. <Prerequisites and hard caveats.>
+```
+
+1. **Side-effect tag — every tool, no exceptions.** Exactly one of:
+   - `[READ-ONLY]` — no state change anywhere.
+   - `[ACTION - <VERB PHRASE>]` — mutates state; name the effect
+     (`[ACTION - TURNS METER OFF]`, not just `[ACTION]`, whenever the effect
+     isn't obvious from the tool name).
+   - `[ACTION - GLOBAL CATALOGUE EDIT]` — mutates shared reference data that
+     affects every caller of it, not just the current request (see
+     `grid_design`'s catalogue tools for the pattern).
+
+   Nothing in code reads these tags — they exist purely so the model can
+   tell a safe read from a consequential write at a glance. That also means
+   nothing *enforces* them beyond the test above, which only catches an
+   obviously-mutating tool name (`create_*`, `set_*`, `delete_*`, …) claiming
+   `[READ-ONLY]`. Get the tag right by hand.
+
+2. **What + when.** Present tense, concrete domain nouns. If a sibling tool
+   could plausibly answer the same question, say which one and why (e.g.
+   `get_equipment_status` vs. `get_site_info` vs. `get_equipment_details` —
+   three similarly-named reads that return different things).
+
+3. **Returns**, only when the shape isn't obvious — an image instead of
+   text, an id the caller needs for a follow-up call, or a
+   paginated/truncated list.
+
+4. **Latency**, only when it's not sub-2-second local/DB work (the default
+   assumption, so don't state it). Use one of these fixed phrases so it's
+   cheap and skimmable:
+
+   | Real latency | Phrase |
+   |---|---|
+   | 2–10s | `Takes a few seconds.` |
+   | 10–30s | `Takes ~15-30s.` |
+   | 30s+ | `Slow: takes up to ~2 min — tell the user before calling.` |
+   | fire-and-forget | `Returns immediately; the physical effect takes ~10 min.` |
+
+   Get the number from the code (a timeout, a `sleep`, a poll loop), not a
+   guess — and check which code path is actually live. `design_and_bom` was
+   nearly "fixed" to add polling to a 110-second sleep that turned out to be
+   dead code behind a legacy rollback flag the default backend never touches
+   (`docs/superpowers/plans/2026-08-19-mcp-tool-description-audit.md`
+   section 1.6 has the full story). Trace the dispatch, not just the
+   description you're trying to correct.
+
+5. **Prerequisites and caveats** — ordering dependencies ("call X first"),
+   destructive-write warnings, confirmation requirements. Defaults and enums
+   belong on the **parameter**'s own `description`, not here — restating
+   them in the tool description is how the two copies drift (jira's
+   `get_ticket_statistics` does this right: the tool description says "use
+   for executive summaries," the `days` parameter alone says "Default: 30").
+
+**Don't:**
+- Restate the parameter list in prose — the schema already carries it.
+- Add `This tool ONLY does X, it does NOT do Y` once `[READ-ONLY]` already
+  says it.
+- Reach for `IMPORTANT:`/`CRITICAL:` for anything short of a genuine safety
+  gate. If the same warning sentence belongs on many tools verbatim (e.g. a
+  standing "only call this if explicitly requested" policy), that's a signal
+  it belongs in the system prompt or a shared constant, not copy-pasted
+  across every tool's description.
+- Claim a number you haven't verified in the code — a stale or optimistic
+  latency/behavior claim is worse than none, because the model acts on it
+  with full confidence. Verify against the actual dispatch path, not just
+  the first sleep/timeout you find (see the `design_and_bom` example above).
 
 ### Gemini inputSchema constraints (critical)
 

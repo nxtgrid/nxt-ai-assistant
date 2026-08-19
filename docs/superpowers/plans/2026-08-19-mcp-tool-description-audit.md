@@ -1,7 +1,13 @@
 # MCP Tool Description Audit & Rewrite — Review and Plan
 
-> **Status:** APPROVED 2026-08-19 — decisions recorded in "Decisions" below.
-> **Branch:** to be created off `main` @ `76fb6eb1`.
+> **Status:** DONE 2026-08-19 — Phases 0-3 implemented on `fix/mcp-tool-descriptions`
+> (3 commits, one per phase, off `main` @ `76fb6eb1`). Not yet merged — one
+> Grafana rollout step (§ Appendix A) needs live credentials this session
+> doesn't have; everything else is committed and test-verified. See the
+> phase sections below for exactly what happened vs. what was planned —
+> several findings changed the plan mid-flight (§1.6's corrected
+> `design_and_bom` diagnosis, the real `guides/mcp-servers.md` location).
+> **Branch:** `fix/mcp-tool-descriptions`, off `main` @ `76fb6eb1`.
 
 **Goal:** Make all ~105 MCP tool descriptions accurate against their implementations,
 consistent in structure, and carry the operational metadata (side effects, latency,
@@ -277,11 +283,11 @@ copies drifting.
 
 ## Part 3 — Implementation plan
 
-### Phase 0 — Close the pipeline holes *(do first; these are bugs)*
+### Phase 0 — Close the pipeline holes *(do first; these are bugs)* — done 2026-08-19
 
-- [ ] Add `test_code_manifest_is_subset_of_json` to `mcp_servers/tests/test_tool_manifest_sync.py` — every code-registered tool must appear in `tool_definitions.json`. Confirm it fails on `get_knowledge_module` today.
-- [ ] Add `test_manifest_descriptions_match_code` — description strings must be byte-identical between `tool_schemas.py` and the manifest. Confirm it fails on `jira.change_status` today.
-- [ ] Regenerate via `python mcp_servers/scripts/export_tools.py`; both tests go green. `get_knowledge_module` becomes reachable in prod.
+- [x] Add `test_code_manifest_is_subset_of_json` to `mcp_servers/tests/test_tool_manifest_sync.py` — every code-registered tool must appear in `tool_definitions.json`. Confirmed it failed on `get_knowledge_module` before the regen.
+- [x] Add `test_manifest_descriptions_match_code` — description strings must be byte-identical between `tool_schemas.py` and the manifest. Confirmed it failed on `jira.change_status` before the regen.
+- [x] Regenerate via `python mcp_servers/scripts/export_tools.py`; both tests go green. `get_knowledge_module` is reachable in prod. (The repo-root `.venv` was missing `paho-mqtt`/`vl-convert-python`/`rasterio` — installed first; the export script silently drops a server's tools if its module fails to import, so this needed catching before trusting the export.)
 
 **Value even if you stop here:** one dead tool revived, one stale description
 fixed, and the regeneration step becomes self-enforcing so this class of drift
@@ -369,10 +375,18 @@ the end of the phase.
 
 ### Phase 3 — Make the standard enforceable
 
-- [ ] Write `mcp_servers/guides/tool-descriptions.md` with the 5-slot standard and worked before/after examples. (Note: `README.md:177` links `guides/mcp-servers.md`, but `mcp_servers/guides/` **does not exist at all** — that link is dead today. Flagging separately.)
-- [ ] Update `mcp_servers/README.md:191` — its example still shows `"description": "Description of my tool"`.
-- [ ] Add `test_tool_descriptions_follow_house_style`: every description starts with a recognised tag; length ≥120 chars; no tool named with a mutating verb carries `[READ-ONLY]`.
-- [ ] Re-measure the manifest token budget and record it in the guide (currently ~18k; expect ~+1.5k from latency bands and expanded stubs).
+- [ ] ~~Write `mcp_servers/guides/tool-descriptions.md`~~ **Correction (implementation
+  pass): the link isn't dead.** I checked `mcp_servers/guides/` — the wrong
+  directory. `README.md:177`'s `../guides/mcp-servers.md` resolves relative
+  to `mcp_servers/README.md`, i.e. the **repo-root** `guides/mcp-servers.md`,
+  which exists and is a thorough, well-maintained walkthrough of the
+  mechanics (registration, gating, testing, the injected-argument security
+  model). It just never covered description *writing style* — its own
+  example is the same placeholder text the README uses. Added a style
+  section there instead of creating a second, competing guide file.
+- [x] Update `mcp_servers/README.md:191` — was `"description": "Description of my tool"`; now demonstrates the tag + what/when shape, and links the new guide section. Fixed the same placeholder in `guides/mcp-servers.md`'s own Step 1 example too (`"Get a weather forecast for a location."` → tagged).
+- [x] Add `test_tool_descriptions_follow_house_style`: every description starts with a recognised tag; length ≥120 chars; no tool named with a mutating verb carries `[READ-ONLY]` (with a documented, evidence-backed exemption list — `schedule_equipment_check` is the one entry today, per its Phase 2 finding). Verified it actually catches violations by injecting a bad entry and confirming the failure message, then regenerating a clean manifest. Running it surfaced 3 tools still under the 120-char floor (`find_grid`, `list_design_subassemblies`, `customer_get_all_grids_status`) that Phase 2's fast batch-tagging pass had tagged but never actually expanded — fixed all 3 with real content instead of loosening the threshold to fit them.
+- [x] Re-measure the manifest token budget and record it in the guide. **Measured:** 102 tools, ~9.7k description tokens + ~10.4k schema tokens ≈ **20.1k total** (was ~18.0k before Phase 2 — the standard cost ~2.1k tokens, close to the ~1.5k estimate; the meters reading-type matrix and the 5-tool jira issue_key fix account for most of the gap over the estimate). Recorded in `guides/mcp-servers.md`'s new style section.
 
 ---
 
@@ -502,13 +516,31 @@ Return the fragment alone — no preamble, no quotes, no trailing whitespace.
 
 ### Rollout
 
-- [ ] Confirm the double-period against one live `panels` row before/after.
-- [ ] Update `chat_orchestrator/tests/prompt_checksums.json`
-      (`grafana.panel_description` → new sha256).
+- [x] ~~Confirm the double-period against one live `panels` row~~ **Fixed
+  without needing DB access**: this session has no live Grafana/DB
+  credentials, so instead of confirming against a real row, fixed it
+  deterministically in the wrapper (`base_description.rstrip(". ")` before
+  every join) — correct regardless of what any given stored row's trailing
+  punctuation happens to be. The README's own sample value (no trailing
+  period) already proved the inconsistency was real without needing a live
+  row.
+- [x] Update `chat_orchestrator/tests/prompt_checksums.json`
+      (`grafana.panel_description` → new sha256). Done via the file's own
+      documented workflow (delete, rerun to regenerate, rerun again to
+      verify); diffed against a backup first to confirm the change was
+      scoped to exactly this one entry.
 - [ ] Re-run `grafana_indexer_v2.py` against a single dashboard first; diff old
-      vs. new `tool_description` values before a full regen. Note the script
-      already tracks `system_prompt_hash` per panel (`:635`) and re-generates on
-      change, so a full run will rewrite every panel — do it deliberately.
-- [ ] Trim the overlapping instructions in the *user* prompt
-      (`grafana_indexer_v2.py:445-449`) in the same change, or they will fight
-      the system prompt.
+      vs. new `tool_description` values before a full regen. **Not done —
+      needs live `GRAFANA_URL`/`GRAFANA_USERNAME`/`GRAFANA_PASSWORD`/
+      `GOOGLE_API_KEY` credentials this session doesn't have.** Note the
+      script already tracks `system_prompt_hash` per panel (`:635`) and
+      re-generates on change, so a full run will rewrite every panel — do
+      it deliberately, and only once someone with those credentials can run
+      the single-dashboard check first.
+- [x] Trim the overlapping instructions in the *user* prompt
+      (`grafana_indexer_v2.py:445-449`) in the same change — done; dropped
+      the whole TIME RANGE block (wrapper territory now) and the
+      numbered "should" list, and reframed `variables_text` in the prompt
+      as context-only, not something to enumerate. `panel_description`
+      (the panel's own stored description) is still passed — that's real
+      input, not overlap.

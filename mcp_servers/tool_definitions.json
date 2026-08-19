@@ -1,7 +1,7 @@
 {
   "$schema": "tool_definitions_schema.json",
   "version": "1.0.0",
-  "exported_at": "2026-08-19T11:44:49.278449Z",
+  "exported_at": "2026-08-19T11:51:07.263047Z",
   "tools": {
     "equipment_diagnostics": [
       {
@@ -854,7 +854,7 @@
       },
       {
         "name": "customer_get_all_grids_status",
-        "description": "[READ-ONLY] Status dashboard for all accessible grids, including service status icons and weather.",
+        "description": "[READ-ONLY] Status dashboard for every grid the caller can access, including service status icons and weather — the multi-grid overview. For one grid in full detail (power status, capacity, DCU connectivity, per-phase inverter output), use customer_get_grid_status instead.",
         "inputSchema": {
           "type": "object",
           "properties": {}
@@ -1656,7 +1656,7 @@
       },
       {
         "name": "find_grid",
-        "description": "[READ-ONLY] Find an existing grid by name (fuzzy-matched).",
+        "description": "[READ-ONLY] Find an existing grid by name (fuzzy-matched) and return its record, including its id. Use to confirm a grid exists before creating a design on it, or to resolve a grid name to the id some gd_* tools require. Most design tools take grid_name directly and resolve it themselves — call this first only when you need the id or record itself.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1971,7 +1971,7 @@
       },
       {
         "name": "list_design_subassemblies",
-        "description": "[READ-ONLY] List the active subassembly instances on an existing design.",
+        "description": "[READ-ONLY] List the active subassembly instances on an existing design, each with its own row id (the design_subassembly_row_id that remove_subassembly/set_subassembly_qty require — not the design id), quantity, and computed kWp/kWh/kVA. Call before either of those two tools to get the row id to act on.",
         "inputSchema": {
           "type": "object",
           "properties": {

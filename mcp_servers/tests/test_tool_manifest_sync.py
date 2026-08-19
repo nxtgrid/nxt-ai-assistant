@@ -33,6 +33,16 @@ that make the export safe:
   dashboard metadata in the DB) must never be frozen into the JSON, because
   the JSON entry would permanently override the live list.
 
+A fourth test, ``test_tool_descriptions_follow_house_style``, checks a
+different kind of drift: not staleness, but format. See
+``guides/mcp-servers.md``'s "Writing the tool description" section for the
+standard itself (a `[TAG]`, what+when, and — since nothing else enforces the
+tag's accuracy — a human check that the tag matches what the tool actually
+does). This test only catches the mechanical part: every description starts
+with a recognised tag, is long enough to carry real content, and no
+obviously-mutating tool name is tagged ``[READ-ONLY]`` — except the
+deliberate, documented exceptions in ``_KNOWN_MISLEADING_NAMES`` below.
+
 Extraction is static (AST) so the tests run without the servers' runtime
 dependencies. Tool names must therefore be string literals — which they are,
 and should stay: a dynamically-computed tool name in a schema or dispatch
@@ -332,3 +342,93 @@ def test_every_registered_server_advertises_something():
         and not json_manifest.get(s)
     ]
     assert not empty, f"servers advertising no tools at all: {empty}"
+
+
+# Recognised side-effect tags — see guides/mcp-servers.md's "Writing the tool
+# description" section for what each means and when to use it.
+_RECOGNIZED_TAGS = ("[READ-ONLY]", "[ACTION")  # "[ACTION" catches every "[ACTION - ...]" variant
+
+# A tool name starting with one of these verbs is presumed to mutate state,
+# so it should not be tagged [READ-ONLY]. Heuristic, not a hard rule — a verb
+# match is a prompt to look closer, not proof of a mutation.
+_MUTATING_NAME_PREFIXES = (
+    "add_",
+    "create_",
+    "update_",
+    "edit_",
+    "delete_",
+    "remove_",
+    "set_",
+    "change_",
+    "schedule_",
+    "cancel_",
+    "pause_",
+    "resume_",
+    "duplicate_",
+    "trigger_",
+    "run_",
+    "upsert_",
+)
+
+# Deliberate, verified exceptions to the naming heuristic above — a tool
+# whose name reads as a write but whose code genuinely never mutates state.
+# Each entry needs the same evidence a code reviewer would ask for: point at
+# the handler and show there's no write.
+_KNOWN_MISLEADING_NAMES = {
+    # equipment_diagnostics.schedule_equipment_check: despite the verb, this
+    # tool makes no database write and calls no external API that mutates
+    # anything — it only validates the grid and computes/returns the
+    # command + timing to schedule. Nothing is actually scheduled until the
+    # caller separately invokes schedule_user_command (schedule server) with
+    # that output. See the tool's own description and
+    # equipment_diagnostics_mcp_server.py's _handle_schedule_equipment_check.
+    "equipment_diagnostics.schedule_equipment_check",
+}
+
+# Below this, a description can't realistically carry a [TAG], a concrete
+# what+when, and a disambiguator from any similarly-named sibling. Not a
+# precise number — see the three tools this caught during the 2026-08-19
+# audit (find_grid, list_design_subassemblies,
+# customer_get_all_grids_status), all previously under 100 chars.
+_MIN_DESCRIPTION_LENGTH = 120
+
+
+def test_tool_descriptions_follow_house_style():
+    """Enforces the mechanical part of guides/mcp-servers.md's "Writing the
+    tool description" standard against what's actually served
+    (tool_definitions.json) — not the accuracy of the tag (that needs a human
+    who's read the handler), just that every tool has picked one, said
+    enough to be useful, and hasn't obviously mistagged an ordinary write as
+    [READ-ONLY]."""
+    problems = []
+    for server_name, tools in _json_manifest().items():
+        if server_name in DYNAMIC_MANIFEST_SERVERS:
+            continue
+        for t in tools:
+            name = t["name"]
+            desc = t["description"]
+            full_name = f"{server_name}.{name}"
+
+            if not desc.startswith(_RECOGNIZED_TAGS):
+                problems.append(f"{full_name}: description has no recognised [TAG] prefix")
+
+            if len(desc) < _MIN_DESCRIPTION_LENGTH:
+                problems.append(
+                    f"{full_name}: description is only {len(desc)} chars "
+                    f"(< {_MIN_DESCRIPTION_LENGTH}) — say more: what it does, when to use it, "
+                    "and how it differs from any similarly-named tool"
+                )
+
+            looks_mutating = name.startswith(_MUTATING_NAME_PREFIXES)
+            if (
+                looks_mutating
+                and desc.startswith("[READ-ONLY]")
+                and full_name not in _KNOWN_MISLEADING_NAMES
+            ):
+                problems.append(
+                    f"{full_name}: name reads as a write but is tagged [READ-ONLY] — "
+                    "fix the tag, or if this is deliberate (the code genuinely never "
+                    "mutates state despite the name), add it to _KNOWN_MISLEADING_NAMES "
+                    "with a comment pointing at the evidence"
+                )
+    assert not problems, "House-style violations:\n  " + "\n  ".join(problems)

@@ -174,7 +174,7 @@ tail -f logs/servers.log
 
 ### Creating a New MCP Server
 
-Tools are declared with `shared_code.tool_registry.ToolRegistry` — one `@registry.tool(name, schema)` site per tool, not a hand-written `handle_list_tools`/`handle_call_tool` pair. See [`guides/mcp-servers.md`](../guides/mcp-servers.md) for the full walkthrough (schema file, registration, registry wiring in `server_registry.py`/`handler.py`/`flag_registry.py`, regenerating `tool_definitions.json`, and the test-enforced checklist). Short version:
+Tools are declared with `shared_code.tool_registry.ToolRegistry` — one `@registry.tool(name, schema)` site per tool, not a hand-written `handle_list_tools`/`handle_call_tool` pair. See [`guides/mcp-servers.md`](../guides/mcp-servers.md) for the full walkthrough (schema file, registration, registry wiring in `server_registry.py`/`handler.py`/`flag_registry.py`, regenerating `tool_definitions.json`, [writing the description](../guides/mcp-servers.md#writing-the-tool-description), and the test-enforced checklist). Short version:
 
 ```bash
 mkdir -p servers/my_server
@@ -188,10 +188,10 @@ from typing import Any, Dict, List
 TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "my_tool",
-        "description": "Description of my tool",
+        "description": "[READ-ONLY] What my tool does, and when to use it.",
         "inputSchema": {
             "type": "object",
-            "properties": {"param": {"type": "string", "description": "Parameter description"}},
+            "properties": {"param": {"type": "string", "description": "What this parameter means, with an example if the format isn't obvious"}},
             "required": ["param"],
         },
         "visible_to_customer": False,
