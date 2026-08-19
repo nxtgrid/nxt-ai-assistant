@@ -1,7 +1,7 @@
 {
   "$schema": "tool_definitions_schema.json",
   "version": "1.0.0",
-  "exported_at": "2026-07-22T14:47:03.495659Z",
+  "exported_at": "2026-08-19T11:15:00.120352Z",
   "tools": {
     "equipment_diagnostics": [
       {
@@ -364,7 +364,7 @@
           "properties": {
             "issue_key": {
               "type": "string",
-              "description": "Ticket reference (Jira key or internal TKT reference)"
+              "description": "Jira issue key"
             }
           },
           "required": [
@@ -436,7 +436,7 @@
           "properties": {
             "issue_key": {
               "type": "string",
-              "description": "Ticket reference (Jira key or internal TKT reference)"
+              "description": "Jira issue key (e.g., PROJ-123)"
             }
           },
           "required": [
@@ -447,13 +447,13 @@
       },
       {
         "name": "change_status",
-        "description": "[ACTION] Change the status of a ticket (e.g., close, start progress, reopen). Internal tickets support Done only.",
+        "description": "[ACTION] Change the status of a ticket (e.g., close, start progress, reopen). Use transition names like 'Done', 'In Progress', 'To Do'. If the ticket is unassigned, it will be auto-assigned to the requesting user. Internal tickets support Done only.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "issue_key": {
               "type": "string",
-              "description": "Ticket reference (Jira key or internal TKT reference)"
+              "description": "Jira issue key (e.g., OPS-2148)"
             },
             "transition": {
               "type": "string",
@@ -2340,6 +2340,23 @@
           },
           "required": [
             "topic"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
+        "name": "get_knowledge_module",
+        "description": "[READ-ONLY] Fetch the full body of a technical knowledge module by slug. System prompts pin a catalog of on-demand modules (slug and one-line summary only) under a '# Available Knowledge' section when relevant -- call this to retrieve a module's full content once you've decided it's relevant to the current question.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string",
+              "description": "Module slug from the Available Knowledge catalog."
+            }
+          },
+          "required": [
+            "slug"
           ]
         },
         "visible_to_customer": false

@@ -15,8 +15,20 @@ that make the export safe:
 
 - every JSON tool exists, under the same name, in the code manifest
   (export can only add tools, never drop them);
+- every tool declared in the code manifest also exists in the JSON — the
+  inverse drift, and just as bad: server_registry.list_tools() serves the
+  JSON *wholesale* for any server present there (no per-tool merge back to
+  code, see server_registry.py), so a tool added only in tool_schemas.py and
+  never exported is invisible in production even though it dispatches fine.
+  Caught get_knowledge_module missing this way on 2026-08-19: registered and
+  dispatchable in code, absent from the JSON, unreachable by the LLM;
 - every advertised tool (JSON or code) has a dispatch branch, so nothing is
   offered to the LLM that would fail with "Unknown tool";
+- the JSON's description text matches the code's, per tool — the JSON is what
+  the LLM actually reads, so an edit to tool_schemas.py that never got
+  exported is as invisible as a missing tool. Caught jira.change_status
+  drifted this way on 2026-08-19: the manifest was missing the auto-assign
+  behaviour the code described;
 - servers with runtime-computed manifests (grafana builds its tool list from
   dashboard metadata in the DB) must never be frozen into the JSON, because
   the JSON entry would permanently override the live list.
@@ -60,11 +72,15 @@ def _server_file(server_name: str) -> Path:
     return _MCP_ROOT / (module_path.replace(".", "/") + ".py")
 
 
-def _advertised_names(server_name: str) -> set:
-    """Tool names in the code manifest: Tool(name=...) calls plus schema dicts
+def _advertised_entries(server_name: str) -> dict:
+    """Tool name -> description (str, or None if not a string literal) in the
+    code manifest: Tool(name=..., description=...) calls plus schema dicts
     (with both 'name' and 'inputSchema' keys) in the server module and its
-    tool_schemas sibling."""
-    names = set()
+    tool_schemas sibling. A None description means the code side isn't a
+    plain string literal (e.g. built with an f-string or concatenation) —
+    such tools are excluded from the description-parity check since there's
+    nothing static to compare."""
+    entries: dict = {}
     server_path = _server_file(server_name)
     paths = [server_path]
     schemas_path = server_path.parent / "tool_schemas.py"
@@ -78,20 +94,35 @@ def _advertised_names(server_name: str) -> set:
                 func = node.func
                 fname = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
                 if fname == "Tool":
+                    name = None
+                    description = None
                     for kw in node.keywords:
                         if kw.arg == "name" and isinstance(kw.value, ast.Constant):
-                            names.add(kw.value.value)
+                            name = kw.value.value
+                        if kw.arg == "description" and isinstance(kw.value, ast.Constant):
+                            description = kw.value.value
+                    if name is not None:
+                        entries[name] = description
             if isinstance(node, ast.Dict):
                 keys = {k.value for k in node.keys if isinstance(k, ast.Constant)}
                 if "name" in keys and "inputSchema" in keys:
+                    name = None
+                    description = None
                     for k, v in zip(node.keys, node.values):
-                        if (
-                            isinstance(k, ast.Constant)
-                            and k.value == "name"
-                            and isinstance(v, ast.Constant)
-                        ):
-                            names.add(v.value)
-    return names
+                        if not isinstance(k, ast.Constant):
+                            continue
+                        if k.value == "name" and isinstance(v, ast.Constant):
+                            name = v.value
+                        if k.value == "description" and isinstance(v, ast.Constant):
+                            description = v.value
+                    if name is not None:
+                        entries[name] = description
+    return entries
+
+
+def _advertised_names(server_name: str) -> set:
+    """Tool names in the code manifest (see _advertised_entries)."""
+    return set(_advertised_entries(server_name))
 
 
 def _dispatched_names_from_if_elif(tree: ast.AST) -> set:
@@ -184,6 +215,67 @@ def test_json_manifest_is_subset_of_code_manifest():
         "tool_definitions.json advertises tools absent from the code manifest "
         "(handle_list_tools / tool_schemas) — export_tools.py would delete them:\n  "
         + "\n  ".join(problems)
+    )
+
+
+def test_code_manifest_is_subset_of_json():
+    """Inverse of test_json_manifest_is_subset_of_code_manifest: a tool added
+    in tool_schemas.py but never exported to tool_definitions.json is
+    invisible in production, because server_registry.list_tools() returns the
+    JSON list wholesale for any server present there rather than merging it
+    with code (see server_registry.py's list_tools()). Only checked for
+    servers that *have* a JSON entry — a server entirely absent from the JSON
+    falls back to the full code manifest, so nothing can drift there."""
+    problems = []
+    json_manifest = _json_manifest()
+    for server_name in SERVER_METADATA:
+        if server_name in DYNAMIC_MANIFEST_SERVERS:
+            continue
+        json_tools = json_manifest.get(server_name)
+        if json_tools is None:
+            continue  # absent entirely -> full code fallback, nothing to drift
+        json_names = {t["name"] for t in json_tools}
+        missing = sorted(_advertised_names(server_name) - json_names)
+        if missing:
+            problems.append(f"{server_name}: {missing}")
+    assert not problems, (
+        "tool_schemas.py declares tools absent from tool_definitions.json — "
+        "server_registry.list_tools() serves the JSON wholesale, so these "
+        "tools are registered and dispatchable but invisible to the LLM in "
+        "production. Run scripts/export_tools.py:\n  " + "\n  ".join(problems)
+    )
+
+
+def test_manifest_descriptions_match_code():
+    """The JSON is what prod actually serves to the LLM (server_registry
+    prefers it wholesale over code-based definitions), so a description
+    edited in tool_schemas.py but never exported is invisible — the model
+    keeps reading the stale JSON text. Every tool present in both, with a
+    plain string-literal description on the code side, must carry the
+    identical description in both places."""
+    problems = []
+    json_manifest = _json_manifest()
+    for server_name, tools in json_manifest.items():
+        if server_name in DYNAMIC_MANIFEST_SERVERS:
+            continue
+        code_descriptions = _advertised_entries(server_name)
+        for t in tools:
+            name = t["name"]
+            code_desc = code_descriptions.get(name)
+            if code_desc is None:
+                continue  # not in code, or not a string literal there —
+                # the subset test above already catches the former
+            json_desc = t.get("description") or ""
+            if code_desc.strip() != json_desc.strip():
+                problems.append(
+                    f"{server_name}.{name}:\n"
+                    f"    code:     {code_desc[:150]!r}\n"
+                    f"    manifest: {json_desc[:150]!r}"
+                )
+    assert not problems, (
+        "tool_definitions.json description text no longer matches "
+        "tool_schemas.py — regenerate with scripts/export_tools.py:\n\n  "
+        + "\n\n  ".join(problems)
     )
 
 
