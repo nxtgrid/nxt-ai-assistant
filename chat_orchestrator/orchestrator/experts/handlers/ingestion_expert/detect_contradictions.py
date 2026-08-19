@@ -25,6 +25,7 @@ from typing import Optional
 
 from orchestrator.experts.step_context import StepContext, StepResult
 from orchestrator.experts.step_registry import register_step
+from orchestrator.services.rag_provider import build_search_arguments
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
 from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
@@ -205,18 +206,23 @@ async def detect_contradictions(context: StepContext) -> StepResult:
     supabase = create_client(url, key)
 
     org_id = context.organization_id
+    # Ingestion is a staff-run workflow checking a new document against the
+    # whole existing corpus, not a customer-facing retrieval -- a contradiction
+    # in another org's content is still worth flagging. Scope to the
+    # document's own org when known; otherwise search unrestricted rather
+    # than silently narrowing to nothing. 0.75 (not the general-retrieval
+    # default) intentionally keeps this to close matches, to avoid flooding
+    # the LLM contradiction check with loosely-related chunks.
+    arguments = build_search_arguments(
+        embedding=query_embedding,
+        organization_ids=[org_id] if org_id else [],
+        limit=5,
+        threshold=0.75,
+        is_staff=not org_id,
+    )
     try:
         similar_result = await asyncio.to_thread(
-            lambda: supabase.rpc(
-                "search_chunks_with_permissions",
-                {
-                    "query_embedding": query_embedding,
-                    "match_threshold": 0.75,
-                    "match_count": 10,
-                    "user_role_ids": [],
-                    "user_org_ids": [org_id] if org_id else [],
-                },
-            ).execute()
+            lambda: supabase.rpc("search_chunks_with_permissions", arguments).execute()
         )
         similar_chunks = similar_result.data or []
     except Exception as e:

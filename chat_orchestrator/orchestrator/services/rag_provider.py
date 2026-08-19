@@ -22,6 +22,52 @@ from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
+# The exact parameter names search_chunks_with_permissions declares. Pinned
+# and tested (tests/test_rag_provider_rpc_contract.py) because a mismatch
+# here does not fail loudly: PostgREST rejects the call, the except swallows
+# it, and retrieval silently returns nothing on every request. That is
+# exactly what happened between the function's last signature change and
+# 2026-08-19.
+SEARCH_RPC_ARGUMENTS = {
+    "query_embedding",
+    "p_organization_id",
+    "match_count",
+    "similarity_threshold",
+}
+
+# Over-fetch so the caller can trim to `limit` after ranking.
+OVERFETCH_FACTOR = 2
+
+# Low floor, not a filter. The previous 0.7 was high enough to discard
+# legitimate matches on a 768-dim cosine space -- had any been returned.
+DEFAULT_SIMILARITY_THRESHOLD = 0.3
+
+
+def build_search_arguments(
+    embedding: List[float],
+    organization_ids: List[str],
+    limit: int,
+    threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    is_staff: bool = False,
+) -> Dict[str, Any]:
+    """Arguments for search_chunks_with_permissions.
+
+    NULL p_organization_id means unrestricted and is reserved for staff. A
+    non-staff caller with no organizations is an error, never a widening:
+    passing NULL there would hand a customer the entire corpus.
+    """
+    if not is_staff and not organization_ids:
+        raise ValueError(
+            "cannot build a permission-filtered search for a non-staff caller "
+            "with no organizations"
+        )
+    return {
+        "query_embedding": embedding,
+        "p_organization_id": None if is_staff else organization_ids[0],
+        "match_count": limit * OVERFETCH_FACTOR,
+        "similarity_threshold": threshold,
+    }
+
 
 class RAGDocument(BaseModel):
     """Represents a retrieved RAG document."""
@@ -141,44 +187,39 @@ class RAGProvider:
                 LOGGER.warning("Failed to generate embedding, falling back to keyword search")
                 return []
 
-            # Step 3: Build permission arrays for database function
-            # Get role IDs from permissions (roles are Role objects with id attribute)
-            user_role_ids = []
-            if permissions.roles:
-                for role in permissions.roles:
-                    if hasattr(role, "id"):
-                        user_role_ids.append(role.id)
-                    elif isinstance(role, int):
-                        user_role_ids.append(role)
-
+            # Step 3: Build permission arrays for the database function.
+            # search_chunks_with_permissions filters by organization only --
+            # it has no role-based parameter.
             user_org_ids = (
                 list(permissions.organization_ids) if permissions.organization_ids else []
             )
 
-            # Step 4: Search with permission-aware vector similarity
-            # Uses the search_chunks_with_permissions database function
+            # Step 4: Search with permission-aware vector similarity.
+            # Uses the search_chunks_with_permissions database function.
             try:
-                results = client.rpc(
-                    "search_chunks_with_permissions",
-                    {
-                        "query_embedding": embedding,
-                        "match_threshold": 0.7,
-                        "match_count": limit * 2,  # Get more for re-ranking
-                        "user_role_ids": user_role_ids,
-                        "user_org_ids": user_org_ids,
-                    },
-                ).execute()
+                arguments = build_search_arguments(
+                    embedding=embedding,
+                    organization_ids=user_org_ids,
+                    limit=limit,
+                    is_staff=bool(getattr(permissions, "is_staff", False)),
+                )
+            except ValueError as e:
+                LOGGER.warning(f"RAG retrieval refused for {user_email}: {e}")
+                return []
+
+            try:
+                results = client.rpc("search_chunks_with_permissions", arguments).execute()
             except Exception as e:
-                # Fall back to legacy function if new one not available
-                LOGGER.warning(f"search_chunks_with_permissions failed: {e}, trying legacy")
-                results = client.rpc(
-                    "match_rag_documents",
-                    {
-                        "query_embedding": embedding,
-                        "match_threshold": 0.7,
-                        "match_count": limit * 2,
-                    },
-                ).execute()
+                # Deliberately no fallback. The previous code fell back to
+                # match_rag_documents, which applies no permission filter at
+                # all -- a bypass waiting to start working the moment
+                # somebody defined it. Failing closed is correct here.
+                LOGGER.error(
+                    f"Permission-filtered RAG search failed for {user_email}; "
+                    f"returning no results rather than falling back to an "
+                    f"unfiltered search: {e}"
+                )
+                return []
 
             if not results.data:
                 LOGGER.info("No RAG documents found")
