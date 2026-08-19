@@ -390,7 +390,7 @@ class GeminiDescriptionGenerator:
         panel_description: str,
         panel_query: str,
         dashboard_variables: List[Dict[str, Any]],
-    ) -> str:
+    ) -> tuple[str, bool]:
         """
         Generate tool description for a panel.
 
@@ -401,7 +401,17 @@ class GeminiDescriptionGenerator:
             dashboard_variables: List of dashboard variable definitions with metadata
 
         Returns:
-            Generated tool description
+            (description, generated) -- generated is False when the LLM call
+            failed or returned empty text and `description` is the generic
+            "Tool for viewing X panel" fallback instead of real content.
+            Callers MUST check this: the previous version returned only the
+            string, so a 100% failure rate (every panel falling back) was
+            indistinguishable from success at every layer above this method
+            -- the 2026-08-19 grafana panel_description indexer incident
+            reported "Grafana sync complete" in the UI while silently
+            overwriting all 16 enabled panels' descriptions with this
+            fallback text, and there was no way to tell without querying the
+            database directly and recognizing the literal fallback string.
         """
         # Format variables for prompt with rich metadata
         var_descriptions = []
@@ -470,7 +480,7 @@ The tool description should:
             )
             text = result.text.strip()
             if text:
-                return text
+                return text, True
             warning = f"⚠️ Warning: Gemini returned empty text for '{panel_title}'"
             logger.warning(warning)
             print(warning, file=sys.stderr)
@@ -484,7 +494,7 @@ The tool description should:
             print(error_line, file=sys.stderr)
             print(error_line)
 
-        return f"Tool for viewing {panel_title} panel"
+        return f"Tool for viewing {panel_title} panel", False
 
 
 def index_grafana_panels(
@@ -497,7 +507,7 @@ def index_grafana_panels(
     enabled_panel_keys: Optional[List[str]] = None,
     existing_metadata: Optional[Dict[str, Any]] = None,
     force_reindex: bool = False,
-) -> tuple[Dict[str, Any], Dict[str, str], Dict[str, List[Dict[str, Any]]]]:
+) -> tuple[Dict[str, Any], Dict[str, str], Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
     """
     Index Grafana panels and generate metadata.
 
@@ -518,10 +528,15 @@ def index_grafana_panels(
         force_reindex: If True, regenerate all descriptions even if unchanged
 
     Returns:
-        Tuple of (panel_metadata_dict, available_dashboards_dict, dashboard_variables_dict)
+        Tuple of (panel_metadata_dict, available_dashboards_dict, dashboard_variables_dict, stats)
         - panel_metadata_dict: Dictionary of panel metadata keyed by panel key (dashboard_uid:panel_id)
         - available_dashboards_dict: Dictionary of {dashboard_uid: dashboard_title} for all dashboards
         - dashboard_variables_dict: Dictionary of {dashboard_uid: [variable_definitions]} - variables stored once per dashboard
+        - stats: run counters, including "generation_failed" -- the number of
+          panels whose LLM call failed and fell back to a generic
+          description. Callers MUST check this and surface it as an error/
+          warning, not silently report success -- see
+          GeminiDescriptionGenerator.generate_description's docstring.
     """
     print("=" * 70)
     print("GRAFANA PANEL INDEXING START")
@@ -554,6 +569,12 @@ def index_grafana_panels(
         "dashboard_version_changed": 0,
         "prompt_changed": 0,
         "variables_changed": 0,
+        # A panel counted in "regenerated" whose LLM call actually failed
+        # (see GeminiDescriptionGenerator.generate_description's `generated`
+        # return value) -- these got the generic fallback description, not
+        # real content, and the run must not report success without saying
+        # so. See the 2026-08-19 incident referenced there.
+        "generation_failed": 0,
     }
 
     # Search for folder
@@ -659,13 +680,15 @@ def index_grafana_panels(
                 msg = f"    Panel {panel_id}: {panel_title} [CALLING GEMINI: {reason}]"
                 logger.info(msg)
                 print(msg)
-                tool_description = gemini.generate_description(
+                tool_description, generated = gemini.generate_description(
                     panel_title=panel_title,
                     panel_description=panel["description"],
                     panel_query=panel["query"],
                     dashboard_variables=panel["variables"],
                 )
                 stats["regenerated"] += 1
+                if not generated:
+                    stats["generation_failed"] += 1
             elif panel_is_enabled and panel_key in existing_metadata:
                 # Reuse existing tool_description if it exists
                 if "tool_description" in existing_metadata[panel_key]:
@@ -679,13 +702,15 @@ def index_grafana_panels(
                     msg = f"    Panel {panel_id}: {panel_title} [CALLING GEMINI: newly enabled]"
                     logger.info(msg)
                     print(msg)
-                    tool_description = gemini.generate_description(
+                    tool_description, generated = gemini.generate_description(
                         panel_title=panel_title,
                         panel_description=panel["description"],
                         panel_query=panel["query"],
                         dashboard_variables=panel["variables"],
                     )
                     stats["regenerated"] += 1
+                    if not generated:
+                        stats["generation_failed"] += 1
             else:
                 # Panel not enabled - don't store tool_description at all
                 print(f"    Panel {panel_id}: {panel_title} [NOT ENABLED: metadata only]")
@@ -746,9 +771,16 @@ def index_grafana_panels(
     print(f"  Total Gemini API calls: {stats['regenerated']}")
     print(f"  API calls saved: {stats['skipped']}")
     print(f"  Dashboard variables stored: {len(dashboard_variables)}")
+    if stats["generation_failed"]:
+        print(
+            f"  ⚠️  Generation FAILED for {stats['generation_failed']}/{stats['regenerated']} "
+            f"panels -- those got a generic fallback description, not real content. "
+            f"Check GOOGLE_API_KEY / the active LLM_PROVIDER's credential and quota. "
+            f"See the per-panel ⚠️/❌ lines above for the actual error."
+        )
     print(f"{'=' * 70}")
 
-    return all_panels_metadata, available_dashboards, dashboard_variables
+    return all_panels_metadata, available_dashboards, dashboard_variables, stats
 
 
 def main():
@@ -801,7 +833,7 @@ def main():
 
     # Run indexing
     try:
-        panels_metadata, available_dashboards, dashboard_variables = index_grafana_panels(
+        panels_metadata, available_dashboards, dashboard_variables, stats = index_grafana_panels(
             grafana_url=grafana_url,
             grafana_username=grafana_username,
             grafana_password=grafana_password,
@@ -833,6 +865,12 @@ def main():
         for uid, title in available_dashboards.items():
             print(f"  {uid}: {title}")
 
+        if stats["generation_failed"]:
+            print(
+                f"\n⚠️  Indexing completed but description generation failed for "
+                f"{stats['generation_failed']} panel(s) -- see the ⚠️/❌ lines above."
+            )
+            sys.exit(1)
         print("\n✅ Indexing completed successfully")
         sys.exit(0)
 
