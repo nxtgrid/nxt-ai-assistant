@@ -1005,7 +1005,7 @@ CREATE TABLE IF NOT EXISTS skills (
     created_by     text NOT NULL,
     created_at     timestamptz NOT NULL DEFAULT now(),
     updated_at     timestamptz NOT NULL DEFAULT now(),
-    CONSTRAINT skills_status_chk CHECK (status IN ('active', 'disabled', 'unusable'))
+    CONSTRAINT skills_status_chk CHECK (status IN ('draft', 'active', 'disabled', 'unusable'))
 );
 
 -- ── Auto-update triggers ──────────────────────────────────────────────────────

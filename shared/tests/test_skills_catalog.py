@@ -192,3 +192,66 @@ class _FakeClient:
 
 def _fake_supabase_client(rows):
     return _FakeClient(rows)
+
+
+def test_catalog_query_filters_to_active_only():
+    """A draft must never reach a model's context. This is the only gate."""
+    captured = {}
+
+    class _Table:
+        def select(self, _cols):
+            return self
+
+        def eq(self, key, value):
+            captured[key] = value
+            return self
+
+        def execute(self):
+            class _R:
+                data = []
+            return _R()
+
+    class _Client:
+        def table(self, _name):
+            return _Table()
+
+    SkillCatalogStore(client=_Client()).all_skills()
+
+    assert captured == {"status": "active"}
+
+
+def test_a_draft_row_is_not_returned_by_the_catalog():
+    class _Table:
+        def __init__(self):
+            self._status = None
+
+        def select(self, _cols):
+            return self
+
+        def eq(self, key, value):
+            if key == "status":
+                self._status = value
+            return self
+
+        def execute(self):
+            rows = [
+                {"id": "1", "slug": "a", "title": "A", "summary": "s", "staff_only": True,
+                 "status": "active"},
+                {"id": "2", "slug": "b", "title": "B", "summary": "s", "staff_only": True,
+                 "status": "draft"},
+            ]
+            class _R:
+                data = [
+                    {k: v for k, v in r.items() if k != "status"}
+                    for r in rows
+                    if r["status"] == self._status
+                ]
+            return _R()
+
+    class _Client:
+        def table(self, _name):
+            return _Table()
+
+    skills = SkillCatalogStore(client=_Client()).all_skills()
+
+    assert [s.slug for s in skills] == ["a"]
