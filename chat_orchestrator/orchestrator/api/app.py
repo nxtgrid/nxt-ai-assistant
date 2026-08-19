@@ -329,97 +329,55 @@ async def startup_event():
     # Run startup recovery scan: finds packets orphaned by previous deployment crashes
     asyncio.create_task(_run_startup_recovery())
 
-    # Check if any scheduled services are enabled
+    # Check if the metrics scheduled service is enabled.
+    #
+    # Grafana's nightly indexing used to be scheduled here too (a
+    # run_grafana_indexer job gated on GRAFANA_ACTIONS_ENABLED), but it could
+    # never actually succeed: it imported grafana_indexer_incremental from a
+    # `rag_pipeline/ingestion` path that has only ever contained README.md
+    # and __init__.py -- the real module has always lived in
+    # anansi_app/scripts/, which this service's own Dockerfile never copies
+    # into the image at all. Every nightly attempt raised ImportError,
+    # silently caught by the job's own `except Exception`, so it failed once
+    # a night, indefinitely, with nothing surfacing the failure. That job now
+    # lives in anansi_app itself (scripts/grafana_scheduler.py, started
+    # alongside broadcast_scheduler.py in start.sh) -- the process that
+    # actually has the indexer script, its dependencies, and Supabase write
+    # access, and that the "Sync Now" button already runs it from
+    # successfully.
     metrics_enabled = os.getenv("METRICS_ENABLED", "true").lower() == "true"
-    grafana_enabled = os.getenv("GRAFANA_ACTIONS_ENABLED", "false").lower() == "true"
 
-    if not metrics_enabled and not grafana_enabled:
-        logger.info(
-            "All scheduled services disabled (METRICS_ENABLED and GRAFANA_ACTIONS_ENABLED are false)"
-        )
+    if not metrics_enabled:
+        logger.info("All scheduled services disabled (METRICS_ENABLED is false)")
 
-    if metrics_enabled or grafana_enabled:
+    if metrics_enabled:
         # Initialize scheduler
         scheduler = AsyncIOScheduler()
 
         # Get schedule configuration
         schedule_timezone = os.getenv("METRICS_TIMEZONE", "UTC")
 
-        # Schedule metrics job if enabled
-        if metrics_enabled:
-            metrics_hour = int(os.getenv("METRICS_SCHEDULE_HOUR", "9"))
-            logger.info(
-                f"Setting up metrics scheduler to run weekly on Monday at {metrics_hour:02d}:00 {schedule_timezone}"
-            )
+        metrics_hour = int(os.getenv("METRICS_SCHEDULE_HOUR", "9"))
+        logger.info(
+            f"Setting up metrics scheduler to run weekly on Monday at {metrics_hour:02d}:00 {schedule_timezone}"
+        )
 
-            # Import metrics service (lazy import to avoid circular dependencies)
-            from orchestrator.services.metrics_service import MetricsService
+        # Import metrics service (lazy import to avoid circular dependencies)
+        from orchestrator.services.metrics_service import MetricsService
 
-            metrics_service = MetricsService()
+        metrics_service = MetricsService()
 
-            # Schedule weekly metrics job (runs every Monday)
-            scheduler.add_job(
-                metrics_service.send_weekly_metrics,
-                trigger=CronTrigger(
-                    day_of_week="mon", hour=metrics_hour, minute=0, timezone=schedule_timezone
-                ),
-                id="weekly_metrics",
-                name="Send Weekly Metrics to Telegram",
-                replace_existing=True,
-            )
-            logger.info("Metrics scheduler configured")
-
-        # Schedule Grafana indexing job if enabled
-        if grafana_enabled:
-            grafana_hour = int(os.getenv("GRAFANA_SYNC_HOUR", "2"))
-            logger.info(
-                f"Setting up Grafana indexer to run daily at {grafana_hour:02d}:00 {schedule_timezone}"
-            )
-
-            # Define async wrapper for Grafana indexer
-            async def run_grafana_indexer():
-                """Run Grafana panel indexing."""
-                try:
-                    logger.info("Starting scheduled Grafana panel indexing...")
-                    # Run indexer in thread pool since it's CPU-bound
-                    import asyncio
-                    import os
-                    import sys
-
-                    # Add rag_pipeline to path
-                    rag_pipeline_path = os.path.join(
-                        os.path.dirname(__file__), "../../../rag_pipeline/ingestion"
-                    )
-                    if rag_pipeline_path not in sys.path:
-                        sys.path.insert(0, rag_pipeline_path)
-
-                    from grafana_indexer_incremental import index_all_grafana_panels
-
-                    result = await asyncio.get_event_loop().run_in_executor(
-                        None, index_all_grafana_panels, False
-                    )
-
-                    if result.get("status") == "completed":
-                        logger.info(
-                            f"Grafana indexing completed: {result.get('panels_indexed', 0)} panels indexed"
-                        )
-                    else:
-                        logger.error(
-                            f"Grafana indexing failed: {result.get('message', 'Unknown error')}"
-                        )
-
-                except Exception as e:
-                    logger.error(f"Error during scheduled Grafana indexing: {e}", exc_info=True)
-
-            # Schedule nightly Grafana indexing job
-            scheduler.add_job(
-                run_grafana_indexer,
-                trigger=CronTrigger(hour=grafana_hour, minute=0, timezone=schedule_timezone),
-                id="grafana_indexer",
-                name="Index Grafana Dashboard Panels",
-                replace_existing=True,
-            )
-            logger.info("Grafana indexer scheduler configured")
+        # Schedule weekly metrics job (runs every Monday)
+        scheduler.add_job(
+            metrics_service.send_weekly_metrics,
+            trigger=CronTrigger(
+                day_of_week="mon", hour=metrics_hour, minute=0, timezone=schedule_timezone
+            ),
+            id="weekly_metrics",
+            name="Send Weekly Metrics to Telegram",
+            replace_existing=True,
+        )
+        logger.info("Metrics scheduler configured")
 
         scheduler.start()
         logger.info("Scheduler started successfully")
@@ -427,7 +385,7 @@ async def startup_event():
     # -------------------------------------------------------------------------
     # Escalation Jira sweep — runs daily at 9am WAT (08:00 UTC, WAT is UTC+1,
     # no DST).  Registered unconditionally so it fires even when METRICS_ENABLED
-    # and GRAFANA_ACTIONS_ENABLED are both false.
+    # is false.
     # -------------------------------------------------------------------------
     from orchestrator.services.escalation_service import EscalationService
 
