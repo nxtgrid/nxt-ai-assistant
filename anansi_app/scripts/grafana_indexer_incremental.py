@@ -247,8 +247,27 @@ if __name__ == "__main__":
         # NiceGUI "Sync Now" button's subprocess wrapper (settings.py's
         # _sync_now/_run_grafana_indexer) shows the real message instead of
         # "Grafana sync complete" papering over silently-fallback-text panels.
-        print(f"\n⚠️  Grafana indexing completed with warnings: {result.get('message', '')}")
+        #
+        # Print to stderr too, not just stdout: _sync_now()'s toast reads
+        # `result.stderr or result.stdout`, preferring stderr -- but the
+        # logging.basicConfig above duplicates every logger.info() call
+        # (dashboard-save confirmations, HTTP 200s, etc.) into stderr as well,
+        # so without an explicit stderr write here, the toast's "last 3
+        # lines" grabbed that benign noise instead of this message. Confirmed
+        # live on 2026-08-19: the toast showed "...200 OK / Saved 5
+        # dashboards, 0 failed" under a "sync failed" banner -- true but
+        # useless, since it hid the actual N/M generation-failure count this
+        # branch exists to surface. Writing here explicitly makes this the
+        # true last line of stderr regardless of what the logger already
+        # wrote, since nothing else runs after it.
+        warning_msg = f"\n⚠️  Grafana indexing completed with warnings: {result.get('message', '')}"
+        print(warning_msg)
+        print(warning_msg, file=sys.stderr)
         sys.exit(1)
     else:
-        print(f"\n❌ Grafana indexing failed: {result.get('message', 'Unknown error')}")
+        # Same reasoning as above -- make sure the real message, not
+        # incidental log noise, is what ends up in stderr's tail.
+        error_msg = f"\n❌ Grafana indexing failed: {result.get('message', 'Unknown error')}"
+        print(error_msg)
+        print(error_msg, file=sys.stderr)
         sys.exit(1)
