@@ -139,6 +139,12 @@ def build_default_registry() -> ProviderRegistry:
         registry.register(GraphProvider())
     except Exception:
         LOGGER.warning("GraphProvider unavailable", exc_info=True)
+    try:
+        from orchestrator.services.providers.episodic_provider import EpisodicProvider
+
+        registry.register(EpisodicProvider())
+    except Exception:
+        LOGGER.warning("EpisodicProvider unavailable", exc_info=True)
     return registry
 
 
