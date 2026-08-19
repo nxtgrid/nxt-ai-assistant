@@ -173,9 +173,9 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'get_equipment_status',
                   'required': ['grid_name', 'chart_type']},
   'visible_to_customer': False},
  {'name': 'get_batch_downtime_summary',
-  'description': 'Get 24-hour downtime summary for multiple grids in parallel. Efficient batch '
-                 'operation with concurrency control. Returns total downtime minutes, outage '
-                 'count, and status icon per grid.',
+  'description': 'Get a downtime summary (default 24h window, see hours) for multiple grids in '
+                 'parallel. Efficient batch operation with concurrency control. Returns total '
+                 'downtime minutes, outage count, and status icon per grid.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_names': {'type': 'array',
                                                 'items': {'type': 'string'},
@@ -192,15 +192,17 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'get_equipment_status',
   'visible_to_customer': False},
  {'name': 'schedule_equipment_check',
   'description': 'Schedule a follow-up check of equipment status. Useful after control actions '
-                 '(restart inverter, reboot comms) to verify success. Default: 5 min for '
-                 'inverter, 12 min for comms.',
+                 "(restart inverter, reboot comms) to verify success. If delay_minutes is "
+                 "omitted, defaults to 12 min for check_type='site_online' (past "
+                 "restart_comms_chain's ~10 min reconnect window) and 5 min otherwise.",
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid site'},
                                  'delay_minutes': {'type': 'integer',
                                                    'description': 'Minutes to wait before '
-                                                                  'check',
-                                                   'default': 5},
+                                                                  "check. Omit to use the "
+                                                                  "check_type-based default "
+                                                                  "(see tool description)."},
                                  'check_type': {'type': 'string',
                                                 'enum': ['grid_consumption',
                                                          'site_online',

@@ -442,7 +442,10 @@ async def _handle_web_search(arguments: dict) -> list[types.TextContent]:
             "include_answer": True,
         }
 
-        country = arguments.get("country", "")
+        # Default to Nigeria — this deployment is Nigeria-focused (see the
+        # reference_server's Nigeria-only tariff/standards tools). Pass an
+        # explicit empty string to search with no country bias.
+        country = arguments.get("country", "ng")
         if country and topic != "news":
             search_params["country"] = COUNTRY_MAP.get(country.lower(), country)
         elif country:

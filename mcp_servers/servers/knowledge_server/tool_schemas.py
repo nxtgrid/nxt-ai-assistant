@@ -70,7 +70,9 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                                  'country': {'type': 'string',
                                              'description': 'Two-letter country code to bias '
                                                             "results (e.g., 'ng' for Nigeria, 'cd' "
-                                                            'for DRC). Optional.'},
+                                                            "for DRC). Defaults to 'ng'. Pass an "
+                                                            'empty string for no country bias.',
+                                             'default': 'ng'},
                                  'topic': {'type': 'string',
                                            'description': "'general' (default) or 'news' for "
                                                           'recent news articles',

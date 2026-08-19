@@ -98,14 +98,22 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
             "operation: (1) sends downlink command to meter, (2) waits 15 seconds, (3) checks "
             "uplink response from meter. Total time: approximately 15-20 seconds. IMPORTANT: "
             "Only call this tool ONCE per conversation response - do NOT batch multiple meter "
-            "readings in a single response. Supports reading types: 'voltage' (line voltage), "
-            "'current' (current draw), 'power' (active power), 'energy' (accumulated energy), "
-            "'current_credit' (remaining prepaid credit), 'power_limit' (maximum power threshold "
-            "setting), 'relay_status' (meter relay on/off state), 'power_down_count' (number of "
-            "power outages), 'special_status' (meter error/tamper flags), 'meter_version' "
-            "(firmware version). For Calin V2, you can also use numeric protocol IDs (e.g., 5 "
-            "for voltage, 39 for current credit). Returns complete reading result with meter "
-            "data."
+            "readings in a single response. "
+            "Reading-type support DIFFERS by meter type (auto-detected from Supabase, not "
+            "knowable in advance from this tool) — an unsupported combination fails immediately "
+            "with a generic error, not a helpful one, so picking a supported type up front "
+            "matters. Calin V2 supports: 'voltage', 'power', 'current_credit', 'relay_status', "
+            "'power_down_count', 'maximum_power_threshold' (the meter's configured max-power "
+            "cutoff — NOT the same as 'power_limit', which V2 does not support), "
+            "'special_status', 'meter_version' — or a numeric protocol ID (e.g. 5 for voltage, "
+            "39 for current_credit). LoRaWAN supports: 'voltage', 'current', 'power', 'energy', "
+            "'current_credit', 'relay_status'. 'voltage', 'power', 'current_credit', and "
+            "'relay_status' are the only four types that work on both. 'power_limit' is not "
+            "supported on EITHER V2 or LoRaWAN — do not use it unless the meter is confirmed "
+            "Calin V1. Calin V1 accepts any reading_type string as-is; validity is enforced by "
+            "the V1 API itself, not checked here. If the meter's type is unknown, prefer one of "
+            "the four cross-supported types, or check with the user first. Returns complete "
+            "reading result with meter data."
         ),
         "inputSchema": {
             "type": "object",
@@ -116,7 +124,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
                 },
                 "reading_type": {
                     "type": "string",
-                    "description": "Type of reading to request. Common types: 'voltage', 'current', 'power', 'energy', 'current_credit', 'power_limit', 'relay_status', 'power_down_count', 'special_status', 'meter_version'. For Calin V2, can also use numeric protocol ID (e.g., 5, 11, 39).",
+                    "description": "Type of reading to request — support differs by meter type, see the tool description. 'voltage', 'power', 'current_credit', 'relay_status' work everywhere except unconfirmed V1 meters. For Calin V2, can also use a numeric protocol ID (e.g., 5, 11, 39, 46).",
                     "enum": [
                         "voltage",
                         "current",

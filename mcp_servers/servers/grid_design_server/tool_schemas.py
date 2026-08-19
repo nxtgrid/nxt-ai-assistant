@@ -17,14 +17,13 @@ from typing import Any, Dict, List
 
 TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
   'description': 'Create a grid design and generate Bill of Materials (BOM). This tool: 1) '
-                 "Creates a grid if it doesn't exist by name, 2) Creates a new design with "
-                 'specified parameters (every parameter the old AppSheet design form offered '
-                 'is accepted — technology choices, connection split, Wp/connection override, '
-                 'regulation constraint, 3-phase enforcement, SPD type, distances, tariff), 3) '
-                 'Runs auto-design sizing and BOM generation, 4) Returns energy specs, BOM '
-                 'items and cost summary. Call list_design_options first to see valid '
-                 'technology choices. Use this when users ask to create a new solar grid '
-                 'design or generate a BOM.',
+                 "Creates a grid if it doesn't exist by name, 2) Creates a new design "
+                 '(accepts the full parameter set — technology choices, connection split, '
+                 'Wp/connection override, regulation constraint, 3-phase enforcement, SPD '
+                 'type, distances, tariff), 3) Runs auto-design sizing and BOM generation, '
+                 '4) Returns energy specs, BOM items and cost summary. Takes ~10s. Call '
+                 'list_design_options first to see valid technology choices. Use this when '
+                 'users ask to create a new solar grid design or generate a BOM.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid (will be '
@@ -101,14 +100,14 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                                                   'default': False},
                                  'target_kwp': {'type': 'number',
                                                 'description': 'Target kWp to constrain the '
-                                                               'design (optional, AppSheet '
-                                                               'calculates freely if not '
-                                                               'provided)'},
+                                                               'design (optional — the '
+                                                               'auto-design engine sizes it '
+                                                               'freely if not provided)'},
                                  'target_kwh': {'type': 'number',
                                                 'description': 'Target kWh to constrain the '
-                                                               'design (optional, AppSheet '
-                                                               'calculates freely if not '
-                                                               'provided)'},
+                                                               'design (optional — the '
+                                                               'auto-design engine sizes it '
+                                                               'freely if not provided)'},
                                  'avg_service_drop_length_m': {'type': 'number',
                                                                'description': 'Average service '
                                                                               'drop cable '
