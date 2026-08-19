@@ -362,19 +362,27 @@ class GrafanaClient:
 class GeminiDescriptionGenerator:
     """Generate tool descriptions using Gemini LLM"""
 
-    def __init__(self, api_key: str, system_prompt: str):
+    def __init__(self, system_prompt: str):
         """
-        Initialize Gemini client.
+        Initialize the generation gateway.
 
         Args:
-            api_key: Google API key
             system_prompt: System instructions for description generation
         """
-        self.api_key = api_key
         self.system_prompt = system_prompt
         # Use the "fast" tier for consistency across the app
         self.model = resolve_model("fast")
-        self.gateway = get_default_generation_gateway(api_key=api_key, default_model=self.model)
+        # No explicit api_key= override -- get_default_generation_gateway()
+        # resolves the correct credential for whichever LLM_PROVIDER is
+        # configured (Gemini by default). A hardcoded GOOGLE_API_KEY passed
+        # through here unconditionally broke every call under
+        # LLM_PROVIDER=openrouter: an explicit api_key always wins over the
+        # active provider's own env var, so a Google key got used as-is for
+        # OpenRouter and every generation failed instantly. See the
+        # 2026-08-19 grafana panel_description indexer incident -- caller
+        # should use shared.llm.is_generation_configured() as a pre-flight
+        # check instead of reading GOOGLE_API_KEY directly.
+        self.gateway = get_default_generation_gateway(default_model=self.model)
 
     def generate_description(
         self,
@@ -481,7 +489,6 @@ def index_grafana_panels(
     grafana_username: str,
     grafana_password: str,
     folder_name: str,
-    gemini_api_key: str,
     system_prompt: str,
     enabled_dashboard_uids: Optional[List[str]] = None,
     enabled_panel_keys: Optional[List[str]] = None,
@@ -496,8 +503,12 @@ def index_grafana_panels(
         grafana_username: Grafana username
         grafana_password: Grafana password
         folder_name: Folder name to search for
-        gemini_api_key: Google API key for Gemini
-        system_prompt: System instructions for description generation
+        system_prompt: System instructions for description generation. LLM
+            credentials are NOT passed here -- GeminiDescriptionGenerator
+            resolves them from LLM_PROVIDER/GOOGLE_API_KEY/OPENROUTER_API_KEY
+            via get_default_generation_gateway(). Callers should check
+            shared.llm.is_generation_configured() before calling this if they
+            want to skip/report rather than let generation fail per panel.
         enabled_dashboard_uids: Optional list of dashboard UIDs to index. If None, indexes all.
         enabled_panel_keys: Optional list of panel keys (uid:id) to generate descriptions for. If None, generates for all.
         existing_metadata: Optional existing panel metadata for incremental updates
@@ -520,7 +531,7 @@ def index_grafana_panels(
 
     # Initialize clients
     grafana = GrafanaClient(grafana_url, grafana_username, grafana_password)
-    gemini = GeminiDescriptionGenerator(gemini_api_key, system_prompt)
+    gemini = GeminiDescriptionGenerator(system_prompt)
 
     # Compute system prompt hash for change detection
     import hashlib
@@ -758,13 +769,18 @@ def main():
     grafana_username = os.getenv("GRAFANA_USERNAME")
     grafana_password = os.getenv("GRAFANA_PASSWORD")
     folder_name = args.folder_name or os.getenv("GRAFANA_FOLDER_NAME", "")
-    gemini_api_key = os.getenv("GOOGLE_API_KEY")
+    from shared.llm import is_generation_configured
     from shared.prompts import PROMPTS
 
     system_prompt = PROMPTS.text("grafana.panel_description")
 
-    # Validate configuration
-    if not all([grafana_url, grafana_username, grafana_password, gemini_api_key]):
+    # Validate configuration. is_generation_configured() checks whichever
+    # LLM_PROVIDER is actually active (GOOGLE_API_KEY for gemini,
+    # OPENROUTER_API_KEY for openrouter) -- do not read GOOGLE_API_KEY
+    # directly here, that silently passed under LLM_PROVIDER=openrouter with
+    # a leftover Google key and every panel's generation failed instantly.
+    # See the 2026-08-19 grafana panel_description indexer incident.
+    if not all([grafana_url, grafana_username, grafana_password]) or not is_generation_configured():
         print("❌ Missing required environment variables:", file=sys.stderr)
         if not grafana_url:
             print("  - GRAFANA_URL", file=sys.stderr)
@@ -772,8 +788,12 @@ def main():
             print("  - GRAFANA_USERNAME", file=sys.stderr)
         if not grafana_password:
             print("  - GRAFANA_PASSWORD", file=sys.stderr)
-        if not gemini_api_key:
-            print("  - GOOGLE_API_KEY", file=sys.stderr)
+        if not is_generation_configured():
+            print(
+                "  - LLM generation not configured for the active LLM_PROVIDER "
+                "(GOOGLE_API_KEY for gemini, OPENROUTER_API_KEY for openrouter)",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
     # Run indexing
@@ -783,7 +803,6 @@ def main():
             grafana_username=grafana_username,
             grafana_password=grafana_password,
             folder_name=folder_name,
-            gemini_api_key=gemini_api_key,
             system_prompt=system_prompt,
         )
 

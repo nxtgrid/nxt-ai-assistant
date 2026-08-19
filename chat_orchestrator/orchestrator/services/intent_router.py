@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
-import os
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from orchestrator.services.command_registry import get_expert_command_mapping
-from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm import (
+    GenerationOptions,
+    LLMMessage,
+    get_default_generation_gateway,
+    is_generation_configured,
+)
 from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
@@ -99,10 +103,16 @@ async def route_expert_intent(user_input: str) -> Optional[Dict[str, str]]:
     or unsupported commands all return None so normal chat handling can continue.
     """
     model = _intent_router_model()
-    api_key = os.getenv("GOOGLE_API_KEY")
+    # is_generation_configured() checks whichever LLM_PROVIDER is actually
+    # active, not GOOGLE_API_KEY specifically -- see shared/llm/factory.py's
+    # docstring for why reading that env var directly here would silently
+    # break under LLM_PROVIDER=openrouter (this is fail-open, so the failure
+    # mode is "intent routing quietly never fires," not a crash -- but still
+    # wrong, and worth fixing at the source rather than relying on the
+    # fail-open catch to mask it).
     if (
         not model
-        or not api_key
+        or not is_generation_configured()
         or not user_input.strip()
         or not should_try_intent_router(user_input)
     ):
@@ -116,7 +126,7 @@ async def route_expert_intent(user_input: str) -> Optional[Dict[str, str]]:
     )
 
     try:
-        gateway = get_default_generation_gateway(api_key=api_key, default_model=model)
+        gateway = get_default_generation_gateway(default_model=model)
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],
             GenerationOptions(

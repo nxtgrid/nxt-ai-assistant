@@ -26,7 +26,12 @@ from mcp.types import ServerCapabilities
 from rapidfuzz import fuzz
 from shared_code.tool_registry import ToolRegistry
 
-from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+from shared.llm import (
+    GenerationOptions,
+    LLMMessage,
+    get_default_generation_gateway,
+    is_generation_configured,
+)
 from shared.llm.model_tiers import resolve_model
 from shared.utils.response_formatters import compose_json_response
 
@@ -189,8 +194,14 @@ async def _translate_tariff_query(query: str) -> str:
     E.g. "solar inverter" → "static converter" (CET 8504), "solar panel" → "photovoltaic module".
     Falls back to the original query on any error (fast fail, non-blocking).
     """
-    api_key = os.getenv("GOOGLE_API_KEY", "")
-    if not api_key:
+    # is_generation_configured() checks whichever LLM_PROVIDER is actually
+    # active, not GOOGLE_API_KEY specifically -- reading that env var
+    # directly here would silently degrade this feature to a no-op under
+    # LLM_PROVIDER=openrouter even when generation IS properly configured
+    # (or, if a leftover GOOGLE_API_KEY happened to be set too, pass the
+    # check and then fail every real call -- see shared/llm/factory.py's
+    # docstring for the 2026-08-19 incident this pattern caused elsewhere).
+    if not is_generation_configured():
         return query
 
     prompt = (
@@ -201,7 +212,7 @@ async def _translate_tariff_query(query: str) -> str:
     )
     try:
         model = resolve_model("fast")
-        gateway = get_default_generation_gateway(api_key=api_key, default_model=model)
+        gateway = get_default_generation_gateway(default_model=model)
         response = await gateway.generate(
             [LLMMessage(role="user", text=prompt)],
             GenerationOptions(

@@ -53,17 +53,31 @@ def index_all_grafana_panels(since_last_run: bool = False) -> Dict[str, Any]:
         grafana_username = os.getenv("GRAFANA_USERNAME")
         grafana_password = os.getenv("GRAFANA_PASSWORD")
         folder_name = os.getenv("GRAFANA_FOLDER_NAME", "")
-        gemini_api_key = os.getenv("GOOGLE_API_KEY")
 
-        logger.info(
-            f"Configuration loaded: folder_name={folder_name}, has_api_key={bool(gemini_api_key)}"
-        )
+        from shared.llm import is_generation_configured
         from shared.prompts import PROMPTS
+
+        generation_configured = is_generation_configured()
+        logger.info(
+            f"Configuration loaded: folder_name={folder_name}, "
+            f"generation_configured={generation_configured}"
+        )
 
         system_prompt = PROMPTS.text("grafana.panel_description")
 
-        # Validate configuration
-        if not all([grafana_url, grafana_username, grafana_password, gemini_api_key]):
+        # Validate configuration. is_generation_configured() checks whichever
+        # LLM_PROVIDER is actually active (GOOGLE_API_KEY for gemini,
+        # OPENROUTER_API_KEY for openrouter) instead of assuming Gemini --
+        # reading GOOGLE_API_KEY directly here previously meant this check
+        # silently passed under LLM_PROVIDER=openrouter with a leftover
+        # Google key, and every single panel's generation then failed
+        # instantly with no error surfaced anywhere (the per-panel try/except
+        # in grafana_indexer_v2.py swallows it into a placeholder
+        # "Tool for viewing X panel" description, so the run still reports
+        # "completed"). See the 2026-08-19 grafana panel_description indexer
+        # incident: all 16 enabled panels got that placeholder text, in a
+        # fraction of a second, with the UI showing "Grafana sync complete."
+        if not all([grafana_url, grafana_username, grafana_password]) or not generation_configured:
             missing = []
             if not grafana_url:
                 missing.append("GRAFANA_URL")
@@ -71,8 +85,11 @@ def index_all_grafana_panels(since_last_run: bool = False) -> Dict[str, Any]:
                 missing.append("GRAFANA_USERNAME")
             if not grafana_password:
                 missing.append("GRAFANA_PASSWORD")
-            if not gemini_api_key:
-                missing.append("GOOGLE_API_KEY")
+            if not generation_configured:
+                missing.append(
+                    "LLM generation not configured for the active LLM_PROVIDER "
+                    "(GOOGLE_API_KEY for gemini, OPENROUTER_API_KEY for openrouter)"
+                )
 
             return {
                 "status": "error",
@@ -134,7 +151,6 @@ def index_all_grafana_panels(since_last_run: bool = False) -> Dict[str, Any]:
             grafana_username=grafana_username,
             grafana_password=grafana_password,
             folder_name=folder_name,
-            gemini_api_key=gemini_api_key,
             system_prompt=system_prompt,
             enabled_dashboard_uids=enabled_dashboard_uids,
             enabled_panel_keys=enabled_panel_keys,

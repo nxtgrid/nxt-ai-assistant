@@ -1,6 +1,10 @@
 """Provider-neutral LLM gateway interfaces and data types."""
 
-from shared.llm.factory import get_default_embedding_gateway, get_default_generation_gateway
+from shared.llm.factory import (
+    get_default_embedding_gateway,
+    get_default_generation_gateway,
+    is_generation_configured,
+)
 from shared.llm.gateway import EmbeddingGateway, GenerationGateway
 from shared.llm.gemini import GeminiGateway
 from shared.llm.openai import OpenAIEmbeddingGateway
@@ -36,4 +40,5 @@ __all__ = [
     "Usage",
     "get_default_embedding_gateway",
     "get_default_generation_gateway",
+    "is_generation_configured",
 ]
