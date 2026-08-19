@@ -153,6 +153,21 @@ async def skill_builder_route() -> None:
         await skill_builder.render(user)
 
 
+@ui.page("/skills")
+async def skills_route() -> None:
+    user = auth.current_user()
+    if not user:
+        ui.navigate.to("/login")
+        return
+    with layout.frame(user, "/skills"):
+        if not perms.can_view_bot_admin(user["email"]):
+            layout.access_denied()
+            return
+        from nicegui_app.pages import skills
+
+        await skills.render(user)
+
+
 @ui.page("/settings")
 async def settings_route() -> None:
     user = auth.current_user()
