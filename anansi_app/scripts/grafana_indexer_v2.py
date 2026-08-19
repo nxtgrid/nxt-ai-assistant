@@ -383,6 +383,14 @@ class GeminiDescriptionGenerator:
         # should use shared.llm.is_generation_configured() as a pre-flight
         # check instead of reading GOOGLE_API_KEY directly.
         self.gateway = get_default_generation_gateway(default_model=self.model)
+        # Set on every failed call (exception or empty text) to the exact
+        # ⚠️/❌ line generate_description() already builds and logs -- lets a
+        # caller surface *why* generation failed, not just that it did. Before
+        # this, that detail only existed as one line among the per-panel
+        # ⚠️/❌ output; with 16 panels each producing a few lines, it was
+        # always pushed out of "last N lines of output" windows (the Sync Now
+        # toast, a truncated log tail) by the run's own closing summary.
+        self.last_error: Optional[str] = None
 
     def generate_description(
         self,
@@ -413,6 +421,14 @@ class GeminiDescriptionGenerator:
             fallback text, and there was no way to tell without querying the
             database directly and recognizing the literal fallback string.
         """
+        # Reset at the top of every call, not just on success: last_error
+        # describes the immediately preceding call, so a caller that reads it
+        # after a run of successes shouldn't see a stale failure from calls
+        # ago. (Today's only reader checks it right after a failing call, so
+        # this doesn't change current behavior -- it's here so that stays
+        # true for whoever reads it next.)
+        self.last_error = None
+
         # Format variables for prompt with rich metadata
         var_descriptions = []
         for var in dashboard_variables:
@@ -479,6 +495,7 @@ Dashboard Variables (context only — do not enumerate these in your output):
             if text:
                 return text, True
             warning = f"⚠️ Warning: Gemini returned empty text for '{panel_title}'"
+            self.last_error = warning
             logger.warning(warning)
             print(warning, file=sys.stderr)
             print(warning)
@@ -487,6 +504,7 @@ Dashboard Variables (context only — do not enumerate these in your output):
                 f"❌ Unexpected error generating description for '{panel_title}': "
                 f"{type(e).__name__}: {e}"
             )
+            self.last_error = error_line
             logger.error(error_line)
             print(error_line, file=sys.stderr)
             print(error_line)
@@ -534,6 +552,10 @@ def index_grafana_panels(
           description. Callers MUST check this and surface it as an error/
           warning, not silently report success -- see
           GeminiDescriptionGenerator.generate_description's docstring.
+          "first_generation_error" carries the first failure's actual ⚠️/❌
+          line (or None if nothing failed), so a caller can show *why*
+          without the reader needing to find per-panel output that a
+          last-N-lines view would have already scrolled past.
     """
     print("=" * 70)
     print("GRAFANA PANEL INDEXING START")
@@ -572,6 +594,13 @@ def index_grafana_panels(
         # real content, and the run must not report success without saying
         # so. See the 2026-08-19 incident referenced there.
         "generation_failed": 0,
+        # The first failure's own ⚠️/❌ line (GeminiDescriptionGenerator.
+        # last_error), captured once so a caller with only a "last few lines
+        # of output" window (a toast, a truncated log tail) can still show
+        # the real cause instead of just a failure count. Later failures are
+        # usually the same root cause repeated per panel, so only the first
+        # is kept.
+        "first_generation_error": None,
     }
 
     # Search for folder
@@ -686,6 +715,8 @@ def index_grafana_panels(
                 stats["regenerated"] += 1
                 if not generated:
                     stats["generation_failed"] += 1
+                    if stats["first_generation_error"] is None:
+                        stats["first_generation_error"] = gemini.last_error
             elif panel_is_enabled and panel_key in existing_metadata:
                 # Reuse existing tool_description if it exists
                 if "tool_description" in existing_metadata[panel_key]:
@@ -708,6 +739,8 @@ def index_grafana_panels(
                     stats["regenerated"] += 1
                     if not generated:
                         stats["generation_failed"] += 1
+                        if stats["first_generation_error"] is None:
+                            stats["first_generation_error"] = gemini.last_error
             else:
                 # Panel not enabled - don't store tool_description at all
                 print(f"    Panel {panel_id}: {panel_title} [NOT ENABLED: metadata only]")
@@ -771,10 +804,15 @@ def index_grafana_panels(
     if stats["generation_failed"]:
         print(
             f"  ⚠️  Generation FAILED for {stats['generation_failed']}/{stats['regenerated']} "
-            f"panels -- those got a generic fallback description, not real content. "
-            f"Check GOOGLE_API_KEY / the active LLM_PROVIDER's credential and quota. "
-            f"See the per-panel ⚠️/❌ lines above for the actual error."
+            f"panels -- those got a generic fallback description, not real content."
         )
+        if stats["first_generation_error"]:
+            print(f"  First failure: {stats['first_generation_error']}")
+        else:
+            print(
+                "  Check GOOGLE_API_KEY / the active LLM_PROVIDER's credential and quota. "
+                "See the per-panel ⚠️/❌ lines above for the actual error."
+            )
     print(f"{'=' * 70}")
 
     return all_panels_metadata, available_dashboards, dashboard_variables, stats
