@@ -16,6 +16,17 @@ python scripts/broadcast_scheduler.py --daemon --interval 60 &
 SCHEDULER_PID=$!
 echo "Broadcast scheduler started (PID: $SCHEDULER_PID)"
 
+# Start the Grafana indexer scheduler daemon (nightly sync at GRAFANA_SYNC_HOUR).
+# This is the real home for the job that used to be registered in
+# chat_orchestrator's APScheduler instance and could never run there --
+# see grafana_scheduler.py's module docstring for why. It no-ops on its own
+# when GRAFANA_ENABLED/GRAFANA_ACTIONS_ENABLED is false, so it's safe to
+# always start.
+echo "Starting Grafana indexer scheduler daemon..."
+python scripts/grafana_scheduler.py --daemon --interval 60 &
+GRAFANA_SCHEDULER_PID=$!
+echo "Grafana indexer scheduler started (PID: $GRAFANA_SCHEDULER_PID)"
+
 # Start the NiceGUI app (foreground - main process). Binds 0.0.0.0:8501 and
 # serves /healthz for the platform health check.
 export PORT="${PORT:-8501}"
