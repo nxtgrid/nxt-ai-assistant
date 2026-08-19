@@ -60,13 +60,104 @@ class SkillBuilderService:
     SupabaseReader or behind a new chat_orchestrator endpoint.
     """
 
-    def __init__(self) -> None:
-        url = chat_db_url()
-        key = chat_db_service_key()
-        self.client: Optional[Client] = create_client(url, key) if url and key else None
+    def __init__(self, client: Optional[Client] = None) -> None:
+        if client is not None:
+            self.client: Optional[Client] = client
+        else:
+            url = chat_db_url()
+            key = chat_db_service_key()
+            self.client = create_client(url, key) if url and key else None
 
     def is_configured(self) -> bool:
         return self.client is not None
+
+    VALID_STATUSES = ("draft", "active", "disabled", "unusable")
+
+    def list_skills(self) -> List[Dict[str, Any]]:
+        """Every skill, whatever its status -- this is the admin list.
+
+        Deliberately not SkillCatalogStore.all_skills(), which filters to
+        active because it feeds model context. An operator must see drafts
+        and disabled skills; a model must not.
+        """
+        if not self.client:
+            return []
+        try:
+            response = (
+                self.client.table("skills")
+                .select(
+                    "id, slug, title, summary, steps, staff_only, status, "
+                    "created_by, created_at, updated_at"
+                )
+                .order("updated_at", desc=True)
+                .execute()
+            )
+        except Exception as e:
+            logger.warning("Skill list fetch failed: %s", e)
+            return []
+
+        skills = []
+        for row in response.data or []:
+            row = dict(row)
+            row["step_count"] = len(row.get("steps") or [])
+            skills.append(row)
+        return skills
+
+    def update_skill_status(self, skill_id: str, status: str, actor: str) -> Dict[str, Any]:
+        """Move a skill between draft/active/disabled/unusable.
+
+        Promotion to 'active' is gated on validation by the caller (the
+        modal's Save), not here -- this method is also how a scheduled run
+        marks a skill 'unusable', which must never be blocked.
+        """
+        if status not in self.VALID_STATUSES:
+            return {
+                "success": False,
+                "error": f"'{status}' is not a valid status; expected one of "
+                         f"{', '.join(self.VALID_STATUSES)}",
+            }
+        if not self.client:
+            return {"success": False, "error": "Chat DB not configured"}
+        try:
+            response = (
+                self.client.table("skills")
+                .update({"status": status})
+                .eq("id", skill_id)
+                .execute()
+            )
+            if not response.data:
+                return {"success": False, "error": "Update returned no row"}
+            logger.info("Skill %s status -> %s (by %s)", skill_id, status, actor)
+            return {"success": True, "skill": response.data[0]}
+        except Exception as e:
+            logger.exception("Error updating skill %s status", skill_id)
+            return {"success": False, "error": str(e)}
+
+    def schedule_summaries(self) -> Dict[str, Dict[str, Any]]:
+        """skill_id -> its schedule row, for the list page's Schedule column.
+
+        Reads user_schedules rather than a skills column: 0013 deliberately
+        reused the existing scheduler rather than adding a fifth one, so a
+        skill's schedule lives there.
+        """
+        if not self.client:
+            return {}
+        try:
+            response = (
+                self.client.table("user_schedules")
+                .select(
+                    "skill_id, cron_expression, schedule_type, anchor_entity_type, "
+                    "timezone, is_active"
+                )
+                .not_.is_("skill_id", "null")
+                .execute()
+            )
+        except Exception as e:
+            logger.warning("Skill schedule fetch failed: %s", e)
+            return {}
+        return {
+            row["skill_id"]: row for row in (response.data or []) if row.get("skill_id")
+        }
 
     def get_session_uuid(self, session_id: str) -> Optional[str]:
         """Resolve chat_sessions' text session_id to its UUID primary key.

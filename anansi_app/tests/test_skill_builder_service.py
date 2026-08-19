@@ -311,3 +311,150 @@ class TestSaveSkill:
         )
 
         assert result["skill"]["slug"] == "weekly-kpi-digest"
+
+
+def test_list_skills_returns_every_status():
+    """The admin list shows drafts and disabled skills; the catalog does not."""
+    rows = [
+        {"id": "1", "slug": "a", "title": "A", "summary": "s", "steps": [{}, {}],
+         "staff_only": True, "status": "active", "created_by": "x", "updated_at": "t"},
+        {"id": "2", "slug": "b", "title": "B", "summary": "s", "steps": [],
+         "staff_only": False, "status": "draft", "created_by": "x", "updated_at": "t"},
+    ]
+
+    class _Table:
+        def select(self, _cols):
+            return self
+
+        def order(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            class _R:
+                data = rows
+            return _R()
+
+    class _Client:
+        def table(self, _n):
+            return _Table()
+
+    service = SkillBuilderService(client=_Client())
+    skills = service.list_skills()
+
+    assert {s["slug"] for s in skills} == {"a", "b"}
+    assert skills[0]["step_count"] == 2
+    assert skills[1]["step_count"] == 0
+
+
+def test_list_skills_returns_empty_without_a_client():
+    assert SkillBuilderService(client=None).list_skills() == []
+
+
+def test_update_skill_status_rejects_an_unknown_value():
+    service = SkillBuilderService(client=None)
+    result = service.update_skill_status("1", "published", actor="x")
+    assert result["success"] is False
+    assert "published" in result["error"]
+
+
+def test_update_skill_status_accepts_the_four_valid_values():
+    captured = {}
+
+    class _Table:
+        def update(self, payload):
+            captured.update(payload)
+            return self
+
+        def eq(self, *_a):
+            return self
+
+        def execute(self):
+            class _R:
+                data = [{"id": "1", "status": captured.get("status")}]
+            return _R()
+
+    class _Client:
+        def table(self, _n):
+            return _Table()
+
+    for status in ("draft", "active", "disabled", "unusable"):
+        result = SkillBuilderService(client=_Client()).update_skill_status(
+            "1", status, actor="ops@example.com"
+        )
+        assert result["success"] is True, status
+
+
+def test_schedule_summary_reports_cron_and_anchor():
+    rows = [
+        {"skill_id": "1", "cron_expression": "0 8 * * 1", "schedule_type": "recurring",
+         "anchor_entity_type": "grid", "is_active": True},
+    ]
+
+    class _Table:
+        def select(self, _cols):
+            return self
+
+        @property
+        def not_(self):
+            # The real postgrest client's `not_` is a property (verified
+            # against the installed postgrest 2.31.0), chained as
+            # `.not_.is_(...)` with no call on `not_` itself -- a plain
+            # method here would make that chain raise AttributeError
+            # ('function' object has no attribute 'is_'), which it did
+            # before this fix.
+            return self
+
+        def is_(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            class _R:
+                data = rows
+            return _R()
+
+    class _Client:
+        def table(self, _n):
+            return _Table()
+
+    summaries = SkillBuilderService(client=_Client()).schedule_summaries()
+
+    assert summaries["1"]["cron_expression"] == "0 8 * * 1"
+    assert summaries["1"]["anchor_entity_type"] == "grid"
+
+
+def test_schedule_summary_is_empty_when_nothing_is_scheduled():
+    class _Table:
+        def select(self, _cols):
+            return self
+
+        @property
+        def not_(self):
+            # The real postgrest client's `not_` is a property (verified
+            # against the installed postgrest 2.31.0), chained as
+            # `.not_.is_(...)` with no call on `not_` itself -- a plain
+            # method here would make that chain raise AttributeError
+            # ('function' object has no attribute 'is_'), which it did
+            # before this fix.
+            return self
+
+        def is_(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            class _R:
+                data = []
+            return _R()
+
+    class _Client:
+        def table(self, _n):
+            return _Table()
+
+    assert SkillBuilderService(client=_Client()).schedule_summaries() == {}
+
+
+def test_schedule_summary_survives_a_query_failure():
+    class _Client:
+        def table(self, _n):
+            raise RuntimeError("db down")
+
+    assert SkillBuilderService(client=_Client()).schedule_summaries() == {}
