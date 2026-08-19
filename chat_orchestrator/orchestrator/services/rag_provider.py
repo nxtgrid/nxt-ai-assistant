@@ -106,6 +106,60 @@ def build_search_arguments(
     }
 
 
+# search_chunks_hybrid's declared parameters (db/migrations/0022_search_chunks_hybrid.sql).
+# p_org_ids is integer[], matching every other org id in this system -- not
+# uuid[]: documents.allowed_organization_ids (uuid[]) is dead schema the real
+# permission model never reads. See the
+# real-permission-model-is-chunk-metadata-not-documents-column memory.
+HYBRID_RPC_ARGUMENTS = {
+    "query_embedding",
+    "query_text",
+    "p_org_ids",
+    "match_count",
+    "rrf_k",
+}
+
+DEFAULT_RRF_K = 60
+
+
+def build_hybrid_arguments(
+    embedding: List[float],
+    query: str,
+    organization_ids: List[str],
+    limit: int,
+    is_staff: bool = False,
+    rrf_k: int = DEFAULT_RRF_K,
+) -> Dict[str, Any]:
+    """Arguments for search_chunks_hybrid.
+
+    `query_text` is the user's raw text, deliberately unprocessed: the sparse
+    ranker's entire value is matching literal tokens like 'E-402' or
+    'QH611A' that the dense ranker cannot.
+
+    Unlike the single-org legacy RPC, this takes an array -- a caller with
+    several organizations searches across all of them. Same refusal and
+    int-cast rules as build_search_arguments, for the same reasons.
+    """
+    if not is_staff and not organization_ids:
+        raise ValueError(
+            "cannot build a permission-filtered search for a non-staff caller "
+            "with no organizations"
+        )
+    try:
+        org_ids = [int(o) for o in organization_ids]
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"organization_ids must be integer-valued for this RPC: {organization_ids!r}"
+        ) from e
+    return {
+        "query_embedding": embedding,
+        "query_text": query,
+        "p_org_ids": None if is_staff else org_ids,
+        "match_count": limit * OVERFETCH_FACTOR,
+        "rrf_k": rrf_k,
+    }
+
+
 class RAGDocument(BaseModel):
     """Represents a retrieved RAG document."""
 
@@ -183,8 +237,8 @@ class RAGProvider:
         """
         Retrieve relevant documents filtered by user permissions.
 
-        Uses vector similarity search with permission-aware filtering via
-        the search_chunks_with_permissions database function.
+        Uses hybrid dense+sparse search with permission-aware filtering via
+        the search_chunks_hybrid database function.
 
         Args:
             query: Search query
@@ -231,11 +285,15 @@ class RAGProvider:
                 list(permissions.organization_ids) if permissions.organization_ids else []
             )
 
-            # Step 4: Search with permission-aware vector similarity.
-            # Uses the search_chunks_with_permissions database function.
+            # Step 4: Hybrid dense+sparse search, permission-filtered.
+            # Uses the search_chunks_hybrid database function -- dense
+            # (pgvector) alone misses literal tokens like part numbers and
+            # error codes; the sparse ranker catches those. See
+            # db/migrations/0022_search_chunks_hybrid.sql.
             try:
-                arguments = build_search_arguments(
+                arguments = build_hybrid_arguments(
                     embedding=embedding,
+                    query=query,
                     organization_ids=user_org_ids,
                     limit=limit,
                     is_staff=bool(getattr(permissions, "is_staff", False)),
@@ -245,16 +303,15 @@ class RAGProvider:
                 return []
 
             try:
-                results = client.rpc("search_chunks_with_permissions", arguments).execute()
+                results = client.rpc("search_chunks_hybrid", arguments).execute()
             except Exception as e:
                 # Deliberately no fallback. The previous code fell back to
                 # match_rag_documents, which applies no permission filter at
                 # all -- a bypass waiting to start working the moment
                 # somebody defined it. Failing closed is correct here.
                 LOGGER.error(
-                    f"Permission-filtered RAG search failed for {user_email}; "
-                    f"returning no results rather than falling back to an "
-                    f"unfiltered search: {e}"
+                    f"Hybrid RAG search failed for {user_email}; returning no "
+                    f"results rather than falling back to an unfiltered search: {e}"
                 )
                 return []
 
@@ -281,7 +338,7 @@ class RAGProvider:
                         source_type=metadata.get("source_type", row.get("source_type", "unknown")),
                         url=metadata.get("url"),
                         metadata=metadata,
-                        score=row.get("similarity", 0.0),
+                        score=row.get("score", 0.0),
                     )
                 )
 

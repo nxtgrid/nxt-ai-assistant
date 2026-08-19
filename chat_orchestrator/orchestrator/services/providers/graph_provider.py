@@ -2,14 +2,14 @@
 
 Renders what P4's agentic graph tools need the model to already know: which
 entity types exist, which relationship types connect them, and a few real
-entity names so the model can pattern-match its own queries. Built here and
-reused there -- do not render a second primer in the MCP layer.
+entity names so the model can pattern-match its own queries.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
+from shared.graph_primer import render_primer
 from shared.prompts.knowledge import KnowledgeModule
 from shared.prompts.providers import ResolutionContext
 from shared.utils.logging import get_logger
@@ -19,28 +19,12 @@ LOGGER = get_logger(__name__)
 MAX_TYPES = 20
 EXAMPLES_PER_TYPE = 3
 
-
-def render_primer(rows: List[Dict[str, Any]]) -> Optional[str]:
-    """Format summarize_entity_graph rows as a compact ontology primer."""
-    entities = [r for r in rows if r.get("kind") == "entity"]
-    relationships = [r for r in rows if r.get("kind") == "relationship"]
-    if not entities and not relationships:
-        return None
-
-    lines: List[str] = []
-    if entities:
-        lines.append("Entity types in the knowledge graph:")
-        for row in entities:
-            examples = ", ".join(row.get("examples") or [])
-            suffix = f" — e.g. {examples}" if examples else ""
-            lines.append(f"- {row['type_name']} ({row['item_count']}){suffix}")
-    if relationships:
-        if lines:
-            lines.append("")
-        lines.append("Relationship types:")
-        for row in relationships:
-            lines.append(f"- {row['type_name']} ({row['item_count']})")
-    return "\n".join(lines)
+# render_primer moved to shared/graph_primer.py so mcp_servers' knowledge
+# server (get_graph_schema, P4 Phase 3) can call the identical formatter --
+# chat_orchestrator and mcp_servers are separate deployables with no shared
+# Python path, so it couldn't stay here and be reused there. Re-exported
+# under this name so existing imports (including this module's own tests)
+# keep working unchanged.
 
 
 class GraphProvider:
@@ -60,11 +44,20 @@ class GraphProvider:
 
         # Staff see everything; everyone else is scoped to their orgs. A
         # caller with no orgs gets nothing -- never NULL, which the RPC
-        # reads as unrestricted.
+        # reads as unrestricted. summarize_entity_graph's p_org_ids is
+        # integer[] (0020 corrected this from an unworkable uuid[] -- see
+        # the real-permission-model memory), so cast explicitly rather than
+        # relying on PostgREST to coerce a numeric-looking string; a
+        # genuinely non-numeric organization id is a data problem worth
+        # surfacing, not silently swallowing into an empty/unrestricted query.
         if ctx.is_staff:
             org_ids = None
         elif ctx.organization_ids:
-            org_ids = list(ctx.organization_ids)
+            try:
+                org_ids = [int(o) for o in ctx.organization_ids]
+            except (TypeError, ValueError) as e:
+                LOGGER.warning(f"Non-integer organization id in {ctx.organization_ids}: {e}")
+                return None
         else:
             return None
 

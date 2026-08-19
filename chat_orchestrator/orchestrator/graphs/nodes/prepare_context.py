@@ -352,8 +352,13 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
     rag_context: Optional[List[str]] = None
     if rag_docs:
         rag_context = rag_docs
-        rag_formatted = "# Relevant Knowledge Base Context\n\n"
-        rag_formatted += "The following information from the knowledge base may be relevant:\n\n"
+        rag_formatted = "# Knowledge Base — First-Pass Results\n\n"
+        rag_formatted += (
+            "An automatic search returned the passages below. They may be "
+            "incomplete or off-target. When they do not answer the question, "
+            "search again with your knowledge and graph tools rather than "
+            "concluding the information is unavailable.\n\n"
+        )
         rag_formatted += "\n---\n".join(rag_docs)
 
         if context_message:
