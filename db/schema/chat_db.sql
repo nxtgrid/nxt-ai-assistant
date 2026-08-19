@@ -881,8 +881,10 @@ BEGIN
     ),
     fused AS (
         SELECT COALESCE(d.id, s.id) AS id,
-               COALESCE(1.0 / (rrf_k + d.rank), 0.0)
-             + COALESCE(1.0 / (rrf_k + s.rank), 0.0) AS score
+               (
+                   COALESCE(1.0 / (rrf_k + d.rank), 0.0)
+                 + COALESCE(1.0 / (rrf_k + s.rank), 0.0)
+               )::float AS score
         FROM dense d
         FULL OUTER JOIN sparse s ON s.id = d.id
     )
