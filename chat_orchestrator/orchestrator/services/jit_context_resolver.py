@@ -133,6 +133,12 @@ def build_default_registry() -> ProviderRegistry:
         registry.register(DirectoryProvider())
     except Exception:
         LOGGER.warning("DirectoryProvider unavailable", exc_info=True)
+    try:
+        from orchestrator.services.providers.graph_provider import GraphProvider
+
+        registry.register(GraphProvider())
+    except Exception:
+        LOGGER.warning("GraphProvider unavailable", exc_info=True)
     return registry
 
 
