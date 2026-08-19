@@ -426,8 +426,15 @@ class GeminiDescriptionGenerator:
 
         variables_text = "\n".join(var_descriptions) if var_descriptions else "None"
 
-        # Build user prompt with query context and time range info
-        user_prompt = f"""Generate a tool description for this Grafana dashboard panel:
+        # Build user prompt with panel context. Time range and variable-option
+        # enumeration are deliberately NOT asked for here — the server wrapper
+        # (grafana_mcp_server.py's tool_description assembly) already supplies
+        # both, and the system prompt explicitly tells the model not to
+        # duplicate them. variables_text is still passed as context, in case a
+        # variable implies a genuine hard constraint worth the third sentence
+        # (e.g. "only meaningful when grid is set to X") — just not as a list
+        # to transcribe.
+        user_prompt = f"""Panel to describe:
 
 Title: {panel_title}
 Description: {panel_description}
@@ -435,18 +442,8 @@ Description: {panel_description}
 DATA QUERY:
 {panel_query}
 
-Dashboard Variables:
-{variables_text}
-
-TIME RANGE: This tool accepts time_from and time_to parameters for custom time ranges.
-- Examples: "now-1h", "now-24h", "now-7d", "now-30d" for relative times
-- User might ask for "last 24 hours" (use time_from="now-24h", time_to="now")
-
-The tool description should:
-1. Explain what data this panel visualizes (based on the query)
-2. List required variables with their valid options
-3. Mention that time range can be customized
-4. Be concise (2-3 sentences max)"""
+Dashboard Variables (context only — do not enumerate these in your output):
+{variables_text}"""
 
         try:
             result = self.gateway.generate_sync(

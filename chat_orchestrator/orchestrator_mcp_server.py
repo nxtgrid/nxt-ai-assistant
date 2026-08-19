@@ -66,7 +66,11 @@ async def handle_list_tools() -> list[types.Tool]:
     return [
         types.Tool(
             name="retrieve_rag_context",
-            description="Retrieve relevant context from RAG database with permission filtering",
+            description=(
+                "[READ-ONLY] Retrieve relevant context from the RAG database, filtered to "
+                "what user_email is permitted to see. Local Claude Desktop dev/testing tool "
+                "only — production calls RAGProvider directly, not through this MCP server."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -94,7 +98,12 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="get_system_instructions",
-            description="Get system instructions based on user context and entity",
+            description=(
+                "[READ-ONLY] Get the system instructions that would apply for a given user, "
+                "role set, and entity context — without composing a full prompt (for that, "
+                "use compose_prompt). Local Claude Desktop dev/testing tool only — production "
+                "calls InstructionsProvider directly, not through this MCP server."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -127,7 +136,13 @@ async def handle_list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="compose_prompt",
-            description="Compose complete prompt with instructions and RAG context",
+            description=(
+                "[READ-ONLY] Compose the complete prompt (system instructions + RAG context) "
+                "that would be sent to the model for a given query and user. Set "
+                "include_rag=false to compose instructions only, skipping retrieval. Local "
+                "Claude Desktop dev/testing tool only — production composes this directly, "
+                "not through this MCP server."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {

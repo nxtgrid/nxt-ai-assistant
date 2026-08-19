@@ -17,9 +17,10 @@ equipment_diagnostics entries customer-visible; the code has never done so.)
 from typing import Any, Dict, List
 
 TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'get_equipment_status',
-  'description': 'Get current real-time status of equipment at a grid site. Returns inverter '
-                 'power per phase, battery state of charge, grid connection status, PV power, '
-                 'and any active alarms.',
+  'description': '[READ-ONLY] Get current real-time status of equipment at a grid site. '
+                 'Returns inverter power per phase, battery state of charge, grid connection '
+                 'status, PV power, and any active alarms. For "what equipment is installed" '
+                 'rather than its live readings, use get_equipment_details instead.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid site (fuzzy '
@@ -37,25 +38,33 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'get_equipment_status',
                   'required': ['grid_name']},
   'visible_to_customer': False},
  {'name': 'get_site_info',
-  'description': 'Get general site information including online/offline status, phase '
-                 'configuration, equipment counts, and location.',
+  'description': '[READ-ONLY] Get general site metadata: online/offline status, phase '
+                 'configuration, equipment counts, and location. A summary, not live '
+                 'readings — use get_equipment_status for current power/battery/alarm values, '
+                 'or get_equipment_details for the individual equipment inventory.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid site'}},
                   'required': ['grid_name']},
   'visible_to_customer': False},
  {'name': 'get_equipment_details',
-  'description': 'Get detailed equipment inventory including inverters, batteries, and MPPTs '
-                 'with serial numbers and model information.',
+  'description': '[READ-ONLY] Get the equipment inventory for a site — inverters, batteries, '
+                 'and MPPTs with serial numbers and model information. Static inventory, not '
+                 'live readings — use get_equipment_status for current power/battery/alarm '
+                 'values.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid site'}},
                   'required': ['grid_name']},
   'visible_to_customer': False},
  {'name': 'get_historical_power_data',
-  'description': 'Get historical power data for analysis. Can detect grid outages, find peak '
-                 'loads, and analyze power patterns. Supports up to 90 days of historical '
-                 'data.',
+  'description': '[READ-ONLY] Get historical power time-series data, optionally with '
+                 'server-side analysis (outage detection, peak-load finding, phase analysis, '
+                 'summary stats) so you don\'t have to eyeball raw points. Up to 90 days via '
+                 "time_range='last_90d', or a custom start_time/end_time range. For a single "
+                 'specific outage already known to have happened, analyze_grid_outage gives a '
+                 'more focused answer; for a chart image instead of data, use '
+                 'generate_power_chart.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid site'},
@@ -94,9 +103,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'get_equipment_status',
                   'required': ['grid_name']},
   'visible_to_customer': False},
  {'name': 'get_historical_mppt_performance',
-  'description': 'Get historical performance data for one or more specific MPPTs. Provides a '
-                 'time-series of estimated vs. actual power generation, which is essential for '
-                 'diagnosing underperformance of a specific solar charger.',
+  'description': '[READ-ONLY] Get a time-series of estimated vs. actual power generation for '
+                 'one or more specific MPPTs (solar chargers) — the tool for diagnosing why '
+                 'one charger underperforms relative to its expected output. For overall site '
+                 'power/consumption trends rather than a specific MPPT, use '
+                 'get_historical_power_data instead.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid site where the '
@@ -127,8 +138,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'get_equipment_status',
                   'required': ['grid_name']},
   'visible_to_customer': False},
  {'name': 'analyze_grid_outage',
-  'description': 'Analyze a specific grid outage event in detail. Identifies affected phases, '
-                 'load at failure, recovery pattern.',
+  'description': "[READ-ONLY] Analyze one specific grid outage in detail — affected phases, "
+                 "load at failure, and recovery pattern. Omit outage_time to analyze the most "
+                 "recent outage. For finding outages in the first place or seeing multiple, "
+                 "use get_historical_power_data with analysis=['outages'] instead.",
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid site'},
@@ -145,8 +158,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'get_equipment_status',
                   'required': ['grid_name']},
   'visible_to_customer': False},
  {'name': 'generate_power_chart',
-  'description': 'Generate a chart visualizing power data over time. Returns PNG image '
-                 'suitable for Telegram.',
+  'description': '[READ-ONLY] Generate a PNG chart visualizing power data over time — use '
+                 'when the user wants a picture, not just numbers (get_historical_power_data '
+                 'returns the same underlying data without an image). chart_type is required '
+                 'and has no default; pick the one matching the question (e.g. '
+                 "'battery_soc' for charge-level questions, 'outage_events' for downtime).",
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid site'},
@@ -173,8 +189,9 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'get_equipment_status',
                   'required': ['grid_name', 'chart_type']},
   'visible_to_customer': False},
  {'name': 'get_batch_downtime_summary',
-  'description': 'Get a downtime summary (default 24h window, see hours) for multiple grids in '
-                 'parallel. Efficient batch operation with concurrency control. Returns total '
+  'description': '[READ-ONLY] Get a downtime summary (default 24h window, see hours) for '
+                 'multiple grids in parallel — the efficient choice for "how are all my grids '
+                 'doing" instead of calling analyze_grid_outage per grid. Returns total '
                  'downtime minutes, outage count, and status icon per grid.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_names': {'type': 'array',
@@ -191,10 +208,15 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'get_equipment_status',
                   'required': ['grid_names']},
   'visible_to_customer': False},
  {'name': 'schedule_equipment_check',
-  'description': 'Schedule a follow-up check of equipment status. Useful after control actions '
-                 "(restart inverter, reboot comms) to verify success. If delay_minutes is "
-                 "omitted, defaults to 12 min for check_type='site_online' (past "
-                 "restart_comms_chain's ~10 min reconnect window) and 5 min otherwise.",
+  'description': "[READ-ONLY] Build the details of a follow-up equipment check — useful after "
+                 "control actions (restart inverter, reboot comms) to verify success. "
+                 "IMPORTANT: this does NOT itself create a persisted schedule — it only "
+                 "validates the grid and returns the command/timing to schedule (grid_name, "
+                 "resolved check_type, computed delay). To actually make the check happen "
+                 "later, pass the returned command and timing to schedule_user_command "
+                 "(schedule server) in the same turn. If delay_minutes is omitted, defaults to "
+                 "12 min for check_type='site_online' (past restart_comms_chain's ~10 min "
+                 "reconnect window) and 5 min otherwise.",
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid site'},

@@ -21,11 +21,12 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "get_performance_report",
         "description": (
-            "Get comprehensive bot performance report. "
-            "Returns response distribution, escalation breakdown "
-            "(including avg_time_to_close_minutes for resolved escalations, null if none), "
-            "and feedback stats. "
-            "Default: past 7 days, all organizations."
+            "[READ-ONLY] Get a comprehensive bot performance report: response-vs-escalation "
+            "counts, escalation reasons and action types, avg_time_to_close_minutes for "
+            "resolved escalations (null if none resolved), and feedback stats. Use for a "
+            "single all-in-one summary; use the *_chart tools instead when the user wants a "
+            "specific chart image, or list_escalated_messages/list_negative_feedback for "
+            "individual message detail rather than aggregates."
         ),
         "inputSchema": {
             "type": "object",
@@ -47,7 +48,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "response_distribution_chart",
         "description": (
-            "Generate pie chart showing bot responses vs escalations. Returns PNG image."
+            "[READ-ONLY] Generate a pie chart of the top-level split: how many bot messages "
+            "were handled automatically vs. escalated to staff. The broadest of the meta "
+            "charts — use escalation_types_chart, action_types_chart, or "
+            "issue_type_breakdown_chart instead for a breakdown *within* one of those "
+            "categories. Returns a PNG image."
         ),
         "inputSchema": {
             "type": "object",
@@ -69,7 +74,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "escalation_types_chart",
         "description": (
-            "Generate pie chart showing escalation reasons breakdown. Returns PNG image."
+            "[READ-ONLY] Generate a pie chart of escalations broken down by reason (why the "
+            "bot handed off to staff — e.g. user_requested, could_not_answer, "
+            "staff_action_required, safety_escalation). All escalations, not just ones "
+            "needing a specific staff action — for that narrower slice use "
+            "action_types_chart. Returns a PNG image."
         ),
         "inputSchema": {
             "type": "object",
@@ -91,8 +100,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "action_types_chart",
         "description": (
-            "Generate pie chart showing action types for staff_action_required escalations. "
-            "Returns PNG image."
+            "[READ-ONLY] Generate a pie chart of only the staff_action_required escalations, "
+            "broken down by which action was needed (e.g. meter_unassignment, wallet_credit, "
+            "hps_power_limit, commissioning_retry). For the reason breakdown across ALL "
+            "escalations, not just this subset, use escalation_types_chart instead. Returns a "
+            "PNG image."
         ),
         "inputSchema": {
             "type": "object",
@@ -114,8 +126,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "list_escalated_messages",
         "description": (
-            "Get list of recently escalated messages with context. "
-            "Includes user message preview, reason, and timestamp."
+            "[READ-ONLY] List individual escalated messages with context — user message "
+            "preview, escalation reason, and timestamp. Use for message-level detail; use "
+            "escalation_types_chart or get_performance_report instead for aggregate counts. "
+            "No result cap — prefer a narrower `days` window during busy periods."
         ),
         "inputSchema": {
             "type": "object",
@@ -137,8 +151,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "list_negative_feedback",
         "description": (
-            "Get list of bot messages that received negative feedback (thumbs down). "
-            "Includes response preview and timestamp."
+            "[READ-ONLY] List bot messages that received negative feedback (thumbs down), "
+            "with response preview and timestamp. Distinct from escalations — this is "
+            "explicit user dissatisfaction, not a bot handoff. No result cap — prefer a "
+            "narrower `days` window during busy periods."
         ),
         "inputSchema": {
             "type": "object",
@@ -160,8 +176,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
     {
         "name": "issue_type_breakdown_chart",
         "description": (
-            "Generate pie chart showing new conversation threads broken down by issue type "
-            "(token, hps, meter, transaction, commissioning, other). Returns PNG image."
+            "[READ-ONLY] Generate a pie chart of NEW conversation threads broken down by "
+            "issue type (token, hps, meter, transaction, commissioning, other). Different "
+            "population from the other meta charts: this counts incoming conversation topics, "
+            "not escalations or bot responses. Returns a PNG image."
         ),
         "inputSchema": {
             "type": "object",

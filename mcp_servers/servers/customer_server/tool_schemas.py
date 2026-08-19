@@ -28,8 +28,12 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'meter_information',
                  'recent commissioning attempt) and commissioning_status (e.g. SUCCESSFUL, FAILED, '
                  'PROCESSING) when a commissioning record exists.',
   'inputSchema': {'type': 'object',
-                  'properties': {'meter_number': {'type': 'string'},
-                                 'organization_id': {'type': 'integer'}},
+                  'properties': {'meter_number': {'type': 'string',
+                                                  'description': 'The meter number (external '
+                                                                 'reference)'},
+                                 'organization_id': {'type': 'integer',
+                                                     'description': 'Organization ID (injected '
+                                                                    'by orchestrator)'}},
                   'required': ['meter_number']},
   'visible_to_customer': True},
  {'name': 'customer_get_meter_consumption',

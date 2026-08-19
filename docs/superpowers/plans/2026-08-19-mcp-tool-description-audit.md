@@ -344,21 +344,26 @@ and behaviour agree; the two pure-documentation fixes (`create_meter_reading_tas
 `get_batch_downtime_summary`, `design_and_bom`) didn't need new ones since no
 behaviour changed.
 
-### Phase 2 — Rewrite descriptions, server by server
+### Phase 2 — Rewrite descriptions, server by server (done 2026-08-19)
 
-One commit per server, smallest and most broken first. Every commit:
-rewrite → `export_tools.py` → `pytest mcp_servers/tests/` → `pre-commit run --all-files`.
+One commit for the whole phase, per your instruction. Order followed the
+table below; every server verified with `pytest mcp_servers/tests/` before
+moving to the next, one `export_tools.py` regen + full suite + pre-commit at
+the end of the phase.
 
-| Order | Server | Tools | Main work |
+| Order | Server | Tools | What actually happened |
 |---|---|---|---|
-| 1 | `schedule` | 5 | Add `[ACTION …]` to 4 writes; expand all 5 (shortest in the fleet); 4 are customer-visible. |
-| 2 | `meta` | 7 | Add `[READ-ONLY]`; state that 4 return PNGs; note the shared `days`/`organization` defaults. |
-| 3 | `equipment_diagnostics` | 9 | Add tags to all 9; latency bands; fix `get_batch_downtime_summary`; `schedule_equipment_check` is the only write. |
-| 4 | `knowledge` | 10 | Tag the 5 untagged; `edit_doc_section` → `[ACTION - EDITS GOOGLE DOC]`; fix `web_search`; fill 1 param gap. |
-| 5 | `jira` | 9 | Tag the 4 untagged read tools; fill 4 param gaps; add latency band. |
-| 6 | `grid_design` | 28 | Largest job. Tag all 28; `[ACTION - GLOBAL CATALOGUE EDIT]` for the 5 catalogue tools; **add the slow-tool warnings** (`design_and_bom`, `trigger_bom`, `run_auto_design`); expand the 3 stub descriptions. |
-| 7 | `customer` | 22 | Already the best set — normalise slot order, add latency bands, fill 2 param gaps. |
-| 8 | `meters`, `solar`, `reference`, `payment_processor`, `equipment_control` | 12 | Light touch; mostly already compliant. |
+| 1 | `schedule` | 5 | Tagged (4 `[ACTION …]`, 1 `[READ-ONLY]`); expanded all 5. Documented that `cancel` is permanent but `pause` is resumable — the two read as synonyms before. |
+| 2 | `meta` | 7 | Tagged all 7 `[READ-ONLY]`. The 4 pie-chart tools group by 4 *different* populations (bot-response split, escalation reason, action-required subset, new-thread issue type) with near-identical names — added a one-line disambiguator to each pointing at its siblings. Caught myself inventing plausible-sounding escalation-reason examples not in the code (`ESCALATION_REASONS`) — replaced with the real enum values before this went in. |
+| 3 | `equipment_diagnostics` | 9 | Tagged all 9. Found `schedule_equipment_check` doesn't itself persist anything — no DB write happens; it only returns a computed command/timing that the caller must separately pass to `schedule_user_command` to actually schedule it. Retagged it `[READ-ONLY]` (it mutates nothing) and made that explicit — a model could otherwise reasonably assume calling it once was sufficient. |
+| 4 | `knowledge` | 10 | Tagged the 5 untagged (`edit_doc_section` → `[ACTION - DESTRUCTIVE GOOGLE DOC WRITE]`). `summarize_knowledge`'s handler reads a `max_words` argument that wasn't in the schema at all — the model had no way to request a shorter/longer summary. Added it. |
+| 5 | `jira` | 9 | Tagged the 4 untagged reads; filled the 4 empty param descriptions. Found the `issue_key` param description had regressed to plain "Jira issue key" on several tools, silently dropping the "or internal TKT reference" caveat their own tool descriptions promise — verified all 5 issue_key-taking tools actually call `get_internal_ticket()` and support it uniformly, fixed all 5 consistently. |
+| 6 | `grid_design` | 28 | Largest job — tagged all 28 (`[ACTION - GLOBAL CATALOGUE EDIT]` for the 5 shared-template tools). Added `Takes ~10s` to `design_and_bom`/`trigger_bom`/`run_auto_design` after confirming (§1.6) `internal_engine.py` has zero sleep calls for any of the three. |
+| 7 | `customer` | 22 | Already the best-written server — filled the 2 missing param descriptions on `meter_information`. Left the 9 repeated "IMPORTANT: only if explicitly requested…" sentences alone (see Anti-goals) — that's a real duplication finding, not something to silently delete from 9 safety-relevant tools without a replacement mechanism. |
+| 8 | `meters`, `solar`, `equipment_control`, `payment_processor` | 9 | Already fully compliant from Phase 1 (`meters`) or written well from the start — zero changes needed. |
+| 8b | `reference` | 3 | One fix: `get_import_prohibition_list`'s description claimed a "live scrape" — checked the handler and found a 1-hour TTL cache; description would have been a *second* inaccuracy this audit introduced. Fixed to state the cache honestly. |
+| 9 | `grafana` | dynamic | **Code + generator prompt**, no DB data pass, as planned. (a) Wrapper (`grafana_mcp_server.py:2418-2437`) now emits `[READ-ONLY]` and a "few seconds; up to 150s under heavy load" line. (b) Found the suspected double-period bug was real but *inconsistent* — the README's own sample `tool_description` ends without a period, so some panels would double up and others wouldn't depending on what the LLM happened to generate. Fixed deterministically: `base_description.rstrip(". ")` before every join, regardless of what's stored. (c) Rewrote `grafana.panel_description.prompt` per Appendix A. (d) Trimmed the *user*-prompt template (`grafana_indexer_v2.py`) — it was still asking the model to "list required variables" and "mention time range," directly contradicting the new system prompt's "don't duplicate the wrapper" instruction. (e) Regenerated `chat_orchestrator/tests/prompt_checksums.json` per its own documented workflow (delete, rerun twice); diffed against a backup first to confirm the change was scoped to exactly one entry. Existing DB-stored panel descriptions are untouched until the next indexer run, as designed. |
+| 10 | `chat_orchestrator` | 3 | Confirmed this is a **local Claude-Desktop dev/testing harness**, not part of the production `SERVER_METADATA`/`tool_definitions.json` pipeline at all (its own docstring says so; production calls the underlying providers directly). Tagged `[READ-ONLY]`, said so explicitly, and cross-referenced the 3 tools against each other. |
 | 9 | `grafana` | dynamic | **Code + generator prompt; no DB data pass.** (a) Rewrite the wrapper at `grafana_mcp_server.py:2425-2440` to emit `[READ-ONLY]` and the up-to-150 s warning — deterministic text stays deterministic. (b) Rewrite `shared/prompts/library/grafana.panel_description.prompt` so regenerated panels conform (draft below); bump `chat_orchestrator/tests/prompt_checksums.json`. (c) Fix the `f"{base_description}. "` seam — the generator is never told to omit a trailing period, so wrapped descriptions very likely read `…grid.. Returns a chart image…`. Confirm against one live `panels` row, then fix in the prompt (below) and/or `.rstrip(".")` in the wrapper. Existing DB rows are left alone and converge on the next `grafana_indexer_v2.py` run. |
 | 10 | `chat_orchestrator` | 3 | Internal, 3 one-liners; lowest value. |
 
