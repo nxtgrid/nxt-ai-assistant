@@ -1237,7 +1237,8 @@ _FLAGS: List[Flag] = [
         "SETTINGS_BACKEND",
         "auto",
         "Backend for runtime settings management: 'auto' (DigitalOcean if "
-        "DIGITALOCEAN_APP_ID + token are set, else env-file), 'digitalocean', or 'envfile'.",
+        "DIGITALOCEAN_APP_ID + token are set, else read-only), 'digitalocean', "
+        "or 'envfile' for explicit local development.",
         editable=False,
         group="deployment",
         choices=("auto", "digitalocean", "envfile"),
@@ -1246,7 +1247,7 @@ _FLAGS: List[Flag] = [
     _s(
         "SETTINGS_FILE",
         ".env.settings",
-        "Path the env-file settings backend reads/writes when not on DigitalOcean.",
+        "Path used only when SETTINGS_BACKEND=envfile is selected explicitly.",
         editable=False,
         group="deployment",
         set_via="Set in the deployment environment.",
@@ -1463,10 +1464,11 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         "settings_persist",
-        "Settings changes reach the live app",
-        "Without DigitalOcean credentials, changes are written to the local "
-        "SETTINGS_FILE and apply on the next restart of this process only.",
-        ("DIGITALOCEAN_APP_ID", "DIGITALOCEAN_API_TOKEN"),
+        "Settings page has writable storage",
+        "Auto mode is read-only without DigitalOcean credentials. The env-file "
+        "backend must be selected explicitly and is for local development only; "
+        "it does not propagate changes to other services.",
+        (),
         severity="recommended",
     ),
     Capability(
@@ -1522,6 +1524,24 @@ def _is_set(name: str, source: Mapping[str, str]) -> bool:
     return bool((source.get(name) or "").strip())
 
 
+def _settings_persistence_missing(source: Mapping[str, str]) -> List[str]:
+    """Explain why the selected settings backend is not writable."""
+    choice = (source.get("SETTINGS_BACKEND") or "auto").strip().lower()
+    if choice in ("env", "envfile", "file"):
+        return []
+
+    missing_do = [
+        name
+        for name in ("DIGITALOCEAN_APP_ID", "DIGITALOCEAN_API_TOKEN")
+        if not _is_set(name, source)
+    ]
+    if choice in ("do", "digitalocean"):
+        return missing_do
+    if choice == "auto":
+        return [] if not missing_do else ["SETTINGS_BACKEND (no writable backend configured)"]
+    return [f"SETTINGS_BACKEND (unsupported value: {choice})"]
+
+
 def readiness(env: Optional[Mapping[str, str]] = None) -> List[CapabilityStatus]:
     """Per-capability status for the deployment described by ``env``.
 
@@ -1532,6 +1552,11 @@ def readiness(env: Optional[Mapping[str, str]] = None) -> List[CapabilityStatus]
     source = env if env is not None else os.environ
     statuses: List[CapabilityStatus] = []
     for capability in CAPABILITIES:
+        if capability.key == "settings_persist":
+            statuses.append(
+                CapabilityStatus(capability, _settings_persistence_missing(source))
+            )
+            continue
         missing: List[str] = []
         for requirement in capability.requires:
             names = (requirement,) if isinstance(requirement, str) else tuple(requirement)
