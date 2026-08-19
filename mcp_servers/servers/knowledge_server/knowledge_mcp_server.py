@@ -239,12 +239,18 @@ async def _handle_summarize_knowledge(arguments: dict) -> list[types.TextContent
     return [types.TextContent(type="text", text=summary + footer)]
 
 
-def fetch_knowledge_module(slug: str, store: Any = None) -> str:
+def fetch_knowledge_module(slug: str, store: Any = None, gdoc_provider: Any = None) -> str:
     """Return one knowledge module's full body by slug.
 
     Backs the on-demand tier: the model sees only slug and summary in context
     (the '# Available Knowledge' catalog block PromptLibrary.render composes)
     and calls this when it decides a module is relevant.
+
+    A gdoc module resolves here. A graph/directory/episodic module cannot:
+    its body depends on the caller's row-level permissions, which this
+    server does not carry, so it is composed into context automatically
+    instead. Say so plainly rather than returning an empty body, which the
+    model would read as "this module has no content".
     """
     from shared.prompts.knowledge import KnowledgeStore
 
@@ -255,7 +261,25 @@ def fetch_knowledge_module(slug: str, store: Any = None) -> str:
     module = modules.get(slug)
     if not module:
         return f"No knowledge module named '{slug}'. Available: " + ", ".join(sorted(modules))
-    return f"# {module.title}\n\n{module.body}"
+
+    if module.is_jit:
+        return (
+            f"'{slug}' is live context. It is composed into your context "
+            f"automatically when relevant and cannot be fetched on demand here."
+        )
+
+    body = module.body
+    if module.source == "gdoc":
+        if gdoc_provider is None:
+            from shared.prompts.providers_gdoc import GDocProvider
+
+            gdoc_provider = GDocProvider()
+        body = gdoc_provider.body_for(module)
+
+    if not body:
+        return f"Knowledge module '{slug}' could not be loaded from its source."
+
+    return f"# {module.title}\n\n{body}"
 
 
 @registry.tool("get_knowledge_module", _SCHEMAS_BY_NAME["get_knowledge_module"])
