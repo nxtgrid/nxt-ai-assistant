@@ -81,6 +81,90 @@ class TestGenerateDescriptionReturnContract:
         assert description == "Tool for viewing Battery SOC panel"
 
 
+class TestLastError:
+    """last_error is the mechanism that lets a caller show *why* generation
+    failed, not just that it did -- see index_grafana_panels' docstring for
+    "first_generation_error". Without it, a 16/16 failure could only ever be
+    reported as a count plus a generic guessed cause ("check GOOGLE_API_KEY /
+    quota"), which is not always even the right guess."""
+
+    def test_none_before_any_call(self):
+        gen = _generator()
+
+        assert gen.last_error is None
+
+    def test_set_to_the_real_exception_on_failure(self):
+        gen = _generator()
+        gen.gateway.generate_sync.side_effect = RuntimeError("503 Service Unavailable")
+
+        gen.generate_description(
+            panel_title="Battery SOC",
+            panel_description="",
+            panel_query="SELECT soc FROM battery",
+            dashboard_variables=[],
+        )
+
+        assert gen.last_error is not None
+        assert "RuntimeError" in gen.last_error
+        assert "503 Service Unavailable" in gen.last_error
+        assert "Battery SOC" in gen.last_error
+
+    def test_set_on_empty_response_text_too(self):
+        gen = _generator()
+        gen.gateway.generate_sync.return_value = MagicMock(text="")
+
+        gen.generate_description(
+            panel_title="Battery SOC",
+            panel_description="",
+            panel_query="SELECT soc FROM battery",
+            dashboard_variables=[],
+        )
+
+        assert gen.last_error is not None
+        assert "empty text" in gen.last_error
+        assert "Battery SOC" in gen.last_error
+
+    def test_stays_none_after_a_successful_call(self):
+        gen = _generator()
+        gen.gateway.generate_sync.return_value = MagicMock(text="Battery state of charge")
+
+        gen.generate_description(
+            panel_title="Battery SOC",
+            panel_description="",
+            panel_query="SELECT soc FROM battery",
+            dashboard_variables=[],
+        )
+
+        assert gen.last_error is None
+
+    def test_reflects_only_the_most_recent_call(self):
+        """Callers (index_grafana_panels) read last_error immediately after
+        each generate_description() call and copy it into
+        stats["first_generation_error"] on the first failure -- last_error
+        itself is a per-call snapshot, not an accumulator, since the caller
+        owns "keep only the first one" semantics."""
+        gen = _generator()
+        gen.gateway.generate_sync.side_effect = RuntimeError("first failure")
+        gen.generate_description(
+            panel_title="Panel A",
+            panel_description="",
+            panel_query="",
+            dashboard_variables=[],
+        )
+        assert gen.last_error is not None and "first failure" in gen.last_error
+
+        gen.gateway.generate_sync.side_effect = None
+        gen.gateway.generate_sync.return_value = MagicMock(text="ok")
+        gen.generate_description(
+            panel_title="Panel B",
+            panel_description="",
+            panel_query="",
+            dashboard_variables=[],
+        )
+
+        assert gen.last_error is None
+
+
 def test_google_genai_is_importable():
     """Regression test for the actual 2026-08-19 root cause: anansi_app/
     requirements.txt never pinned google-genai, only google-api-python-client
