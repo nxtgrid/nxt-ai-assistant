@@ -7,6 +7,7 @@ All 'find information' tools live here:
 - web_extract: extract content from a URL
 """
 
+import difflib
 import json
 import logging
 import os
@@ -48,6 +49,13 @@ _SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 # Database configuration
 CHAT_DB_URL = os.getenv("CHAT_DB_URL", "")
 CHAT_DB_SERVICE_KEY = os.getenv("CHAT_DB_SERVICE_KEY", "")
+
+# The org id staff conversations resolve to -- same env var and default as
+# servers/customer_server/client_base.py's STAFF_ORG_ID. Read independently
+# rather than imported: MCP servers are separate deployables, each with its
+# own dependency set, and there is no existing precedent in this codebase
+# for one server importing another's module.
+STAFF_ORG_ID: int = int(os.getenv("STAFF_ORG_ID", "2"))
 
 # MCP tool names that are relevant to various topics
 TOOL_TOPIC_MAP = {
@@ -894,6 +902,250 @@ async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
                 "Please try again or edit the document manually.",
             )
         ]
+
+
+# ── Agentic graph tools (P4 Phase 3) ────────────────────────────────────────
+#
+# Agency stays with the main LLM: these are plain read-only query tools, not
+# a second orchestration loop. get_graph_schema/search_entities/
+# get_entity_neighbors/get_entity_evidence call the permission-filtered RPCs
+# from db/migrations/0018 (corrected 0020) and 0023, and every result is
+# scoped to the caller's own organization -- see org_ids_for_request below
+# for exactly how that caller identity reaches this server at all.
+
+
+def org_ids_for_request(organization_id: Optional[int]) -> Optional[List[int]]:
+    """Org filter for the graph RPCs, from the caller's own organization_id.
+
+    organization_id is not a tool argument the model supplies -- ToolExecutor
+    (chat_orchestrator/orchestrator/services/tool_executor.py's
+    _execute_direct_tool/_execute_bridge_tool) injects it into every MCP
+    call's arguments from the webhook request, never LLM-controllable, the
+    same way it already does for customer_server's handlers. It is a single
+    int, not a list and not an is_staff flag -- a caller has exactly one
+    organization (or is staff, resolved to STAFF_ORG_ID the same way
+    servers/customer_server/client_base.py's STAFF_ORG_ID already is).
+
+    None means unrestricted (staff). Raises rather than returning None for
+    anything else falsy: every graph RPC reads NULL as "show everything", so
+    reaching it by accident (a request with no recognized organization_id at
+    all) would hand the whole graph to someone entitled to none of it.
+    """
+    if organization_id == STAFF_ORG_ID:
+        return None
+    if organization_id is None:
+        raise ValueError(
+            "cannot scope a graph query: no organization_id on this request"
+        )
+    return [organization_id]
+
+
+def suggest_near_matches(query: str, permitted_names: List[str]) -> str:
+    """A 'did you mean' line built ONLY from names the caller may see.
+
+    Suggesting from the unfiltered entity table would leak the existence of
+    entities in other organizations -- the subtle version of the permission
+    bug these tools exist to avoid.
+    """
+    close = difflib.get_close_matches(query, permitted_names, n=3, cutoff=0.5)
+    if close:
+        return f"No entity matching '{query}'. Closest by name: {', '.join(close)}."
+    return (
+        f"No entity matching '{query}', and no close names either. "
+        f"Call get_graph_schema to see which entity types exist."
+    )
+
+
+def format_entity_results(rows: List[Dict[str, Any]], query: str) -> str:
+    """Entity search results, or an actionable message. Never a bare empty list."""
+    if not rows:
+        return suggest_near_matches(query, [])
+    lines = [f"Found {len(rows)} entit{'y' if len(rows) == 1 else 'ies'} matching '{query}':", ""]
+    for row in rows:
+        description = f" — {row['description']}" if row.get("description") else ""
+        lines.append(f"- {row['name']} ({row['type']}) [id: {row['id']}]{description}")
+    lines.append("")
+    lines.append("Use get_entity_neighbors with an id above to see what it connects to.")
+    return "\n".join(lines)
+
+
+def format_neighbors(rows: List[Dict[str, Any]], entity_id: str) -> str:
+    """Neighbour results, or an actionable message."""
+    if not rows:
+        return (
+            f"Entity {entity_id} has no visible connections. It may genuinely have "
+            f"none, or the entities on the other side may be outside your access. "
+            f"Try get_entity_evidence to see the source passages instead."
+        )
+    lines = [f"{len(rows)} connection(s):", ""]
+    for row in rows:
+        description = f" — {row['description']}" if row.get("description") else ""
+        lines.append(
+            f"- [{row['direction']}] {row['relationship_type']} → "
+            f"{row['neighbor_name']} ({row['neighbor_type']}) "
+            f"[id: {row['neighbor_id']}]{description}"
+        )
+    return "\n".join(lines)
+
+
+def _graph_client():
+    """The same CHAT_DB_URL/CHAT_DB_SERVICE_KEY client every handler in this
+    file already builds -- returns None, never raises, if unconfigured."""
+    if not CHAT_DB_URL or not CHAT_DB_SERVICE_KEY:
+        return None
+    from supabase import create_client
+
+    return create_client(CHAT_DB_URL, CHAT_DB_SERVICE_KEY)
+
+
+@registry.tool("get_graph_schema", _SCHEMAS_BY_NAME["get_graph_schema"])
+async def _handle_get_graph_schema(arguments: dict) -> list[types.TextContent]:
+    """Handle get_graph_schema tool call."""
+    from shared.graph_primer import render_primer
+
+    try:
+        org_ids = org_ids_for_request(arguments.get("organization_id"))
+    except ValueError as e:
+        return [types.TextContent(type="text", text=str(e))]
+
+    client = _graph_client()
+    if client is None:
+        return [types.TextContent(type="text", text="Knowledge graph is not configured.")]
+
+    try:
+        result = client.rpc(
+            "summarize_entity_graph",
+            {"p_org_ids": org_ids, "p_max_types": 20, "p_examples": 3},
+        ).execute()
+    except Exception as e:
+        logger.warning(f"get_graph_schema failed: {e}")
+        return [types.TextContent(type="text", text=f"Could not load the graph schema: {e}")]
+
+    text = render_primer(result.data or []) or "The knowledge graph has no visible entities."
+    return [types.TextContent(type="text", text=text)]
+
+
+@registry.tool("search_entities", _SCHEMAS_BY_NAME["search_entities"])
+async def _handle_search_entities(arguments: dict) -> list[types.TextContent]:
+    """Handle search_entities tool call."""
+    query = arguments.get("query", "")
+    if not query:
+        return [types.TextContent(type="text", text="Error: query is required")]
+    entity_type = arguments.get("entity_type")
+    limit = arguments.get("limit", 10)
+
+    try:
+        org_ids = org_ids_for_request(arguments.get("organization_id"))
+    except ValueError as e:
+        return [types.TextContent(type="text", text=str(e))]
+
+    client = _graph_client()
+    if client is None:
+        return [types.TextContent(type="text", text="Knowledge graph is not configured.")]
+
+    try:
+        result = client.rpc(
+            "search_entities_permitted",
+            {"p_query": query, "p_org_ids": org_ids, "p_type": entity_type, "p_limit": limit},
+        ).execute()
+    except Exception as e:
+        logger.warning(f"search_entities failed: {e}")
+        return [types.TextContent(type="text", text=f"Entity search failed: {e}")]
+
+    rows = result.data or []
+    if not rows:
+        # Suggestions come from the caller's own permitted set only -- an
+        # unfiltered name search would leak entities outside their access.
+        try:
+            permitted = client.rpc(
+                "search_entities_permitted",
+                {"p_query": "", "p_org_ids": org_ids, "p_type": None, "p_limit": 50},
+            ).execute()
+            permitted_names = [r["name"] for r in (permitted.data or [])]
+        except Exception:
+            permitted_names = []
+        return [types.TextContent(type="text", text=suggest_near_matches(query, permitted_names))]
+
+    return [types.TextContent(type="text", text=format_entity_results(rows, query=query))]
+
+
+@registry.tool("get_entity_neighbors", _SCHEMAS_BY_NAME["get_entity_neighbors"])
+async def _handle_get_entity_neighbors(arguments: dict) -> list[types.TextContent]:
+    """Handle get_entity_neighbors tool call."""
+    entity_id = arguments.get("entity_id", "")
+    if not entity_id:
+        return [types.TextContent(type="text", text="Error: entity_id is required")]
+    relationship_type = arguments.get("relationship_type")
+    limit = arguments.get("limit", 25)
+
+    try:
+        org_ids = org_ids_for_request(arguments.get("organization_id"))
+    except ValueError as e:
+        return [types.TextContent(type="text", text=str(e))]
+
+    client = _graph_client()
+    if client is None:
+        return [types.TextContent(type="text", text="Knowledge graph is not configured.")]
+
+    try:
+        result = client.rpc(
+            "get_entity_neighbors_permitted",
+            {
+                "p_entity_id": entity_id,
+                "p_org_ids": org_ids,
+                "p_rel_type": relationship_type,
+                "p_limit": limit,
+            },
+        ).execute()
+    except Exception as e:
+        logger.warning(f"get_entity_neighbors failed: {e}")
+        return [types.TextContent(type="text", text=f"Could not load neighbors: {e}")]
+
+    return [
+        types.TextContent(
+            type="text", text=format_neighbors(result.data or [], entity_id=entity_id)
+        )
+    ]
+
+
+@registry.tool("get_entity_evidence", _SCHEMAS_BY_NAME["get_entity_evidence"])
+async def _handle_get_entity_evidence(arguments: dict) -> list[types.TextContent]:
+    """Handle get_entity_evidence tool call."""
+    entity_id = arguments.get("entity_id", "")
+    if not entity_id:
+        return [types.TextContent(type="text", text="Error: entity_id is required")]
+    limit = arguments.get("limit", 5)
+
+    try:
+        org_ids = org_ids_for_request(arguments.get("organization_id"))
+    except ValueError as e:
+        return [types.TextContent(type="text", text=str(e))]
+
+    client = _graph_client()
+    if client is None:
+        return [types.TextContent(type="text", text="Knowledge graph is not configured.")]
+
+    try:
+        result = client.rpc(
+            "get_entity_evidence_permitted",
+            {"p_entity_id": entity_id, "p_org_ids": org_ids, "p_limit": limit},
+        ).execute()
+    except Exception as e:
+        logger.warning(f"get_entity_evidence failed: {e}")
+        return [types.TextContent(type="text", text=f"Could not load evidence: {e}")]
+
+    rows = result.data or []
+    if not rows:
+        return [
+            types.TextContent(
+                type="text",
+                text=f"No visible source passages for entity {entity_id}.",
+            )
+        ]
+    lines = [f"{len(rows)} source passage(s) for entity {entity_id}:", ""]
+    for row in rows:
+        lines.append(f"- {row.get('document_title', 'Untitled')}: {row.get('excerpt', '')}")
+    return [types.TextContent(type="text", text="\n".join(lines))]
 
 
 handle_list_tools = server.list_tools()(registry.handle_list_tools)
