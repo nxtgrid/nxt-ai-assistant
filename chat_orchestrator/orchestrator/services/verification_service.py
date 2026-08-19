@@ -24,6 +24,7 @@ from shared.llm import (
     GenerationOptions,
     LLMMessage,
     get_default_generation_gateway,
+    is_generation_configured,
 )
 from shared.llm.model_tiers import resolve_model
 from shared.prompts import PROMPTS
@@ -64,7 +65,17 @@ class ResponseVerificationService:
         Initialize verification service.
 
         Args:
-            api_key: Google API key (defaults to GOOGLE_API_KEY env var)
+            api_key: Explicit provider API key override. Optional -- when
+                omitted, get_default_generation_gateway() resolves the right
+                credential for whichever LLM_PROVIDER is configured (Gemini
+                by default). Don't default this to os.getenv("GOOGLE_API_KEY")
+                here: that forces a Gemini-specific key through even under
+                LLM_PROVIDER=openrouter, since an explicit api_key always
+                wins over the active provider's own env var in the factory --
+                every verification call would then fail instantly. See
+                shared/llm/factory.py's is_generation_configured() docstring
+                for the 2026-08-19 incident this exact pattern caused
+                elsewhere.
 
         No single model for the whole service: verify_response() and
         sanitize_technical_response() each resolve their own prompt's tier
@@ -73,8 +84,11 @@ class ResponseVerificationService:
         previous ``model`` constructor parameter was removed -- confirmed
         unused by every real call site in the codebase.
         """
-        self._api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
-        self._gateway = gateway or get_default_generation_gateway(api_key=self._api_key)
+        # An explicit api_key always makes verification attemptable; absent
+        # that, defer to whichever provider is actually configured rather
+        # than assuming Gemini.
+        self._generation_configured = bool(api_key) or is_generation_configured()
+        self._gateway = gateway or get_default_generation_gateway(api_key=api_key)
 
     async def verify_response(
         self,
@@ -104,8 +118,8 @@ class ResponseVerificationService:
         Returns:
             VerificationResult with passed status, feedback if failed, and categories
         """
-        if not self._api_key:
-            LOGGER.error("GOOGLE_API_KEY not set - cannot verify response")
+        if not self._generation_configured:
+            LOGGER.error("LLM generation not configured - cannot verify response")
             # Fail open: allow response through if verification unavailable
             return VerificationResult(
                 passed=True,
@@ -385,7 +399,7 @@ Respond with a JSON object (and nothing else):
         Returns:
             Original response if clean, or rewritten user-friendly version
         """
-        if not response_text or not self._api_key:
+        if not response_text or not self._generation_configured:
             return response_text
 
         # Skip very short responses
