@@ -38,7 +38,7 @@ def test_grafana_prompt_flag_is_retired():
 
 def test_grafana_prompt_renders_without_the_env_var(monkeypatch):
     monkeypatch.delenv("GRAFANA_PANEL_DESCRIPTION_PROMPT", raising=False)
-    assert "Grafana dashboard panels" in PROMPTS.text("grafana.panel_description")
+    assert "MCP tool description" in PROMPTS.text("grafana.panel_description")
 
 
 def test_no_prompt_text_remains_in_the_registry():
