@@ -181,11 +181,25 @@ def index_all_grafana_panels(since_last_run: bool = False) -> Dict[str, Any]:
             # failure visible instead of a "Grafana sync complete" toast
             # papering over it. See the 2026-08-19 incident:
             # GeminiDescriptionGenerator.generate_description's docstring.
-            print(
-                f"\n⚠️  {generation_failures}/{stats['regenerated']} panel description(s) "
-                f"failed to generate and got a generic fallback instead -- "
-                f"check GOOGLE_API_KEY / the active LLM_PROVIDER's credential and quota."
+            #
+            # first_generation_error carries the actual ⚠️/❌ text from the
+            # first failed panel (index_grafana_panels' docstring). Without
+            # it, this message could only ever say a count and guess at a
+            # cause ("check GOOGLE_API_KEY / quota") -- confirmed live on
+            # 2026-08-19 that the guess can be wrong (the same credentials
+            # demonstrably work for chat_orchestrator's own Gemini calls), so
+            # a generic suggestion is not a substitute for the real error.
+            first_error = stats.get("first_generation_error")
+            message = (
+                f"{generation_failures}/{stats['regenerated']} panel description(s) "
+                f"failed to generate (fell back to generic text)"
             )
+            message += (
+                f". First failure: {first_error}"
+                if first_error
+                else " -- check GOOGLE_API_KEY / the active LLM_PROVIDER's credential and quota"
+            )
+            print(f"\n⚠️  {message}")
             return {
                 "status": "completed_with_generation_failures",
                 "panels_indexed": len(panels_metadata),
@@ -194,11 +208,7 @@ def index_all_grafana_panels(since_last_run: bool = False) -> Dict[str, Any]:
                     set(p["dashboard_uid"] for p in panels_metadata.values())
                 ),
                 "generation_failures": generation_failures,
-                "message": (
-                    f"{generation_failures}/{stats['regenerated']} panel description(s) "
-                    f"failed to generate (fell back to generic text) -- check "
-                    f"GOOGLE_API_KEY / the active LLM_PROVIDER's credential and quota"
-                ),
+                "message": message,
             }
 
         return {
