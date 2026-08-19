@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from orchestrator.config.settings import get_settings
 from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
@@ -42,40 +42,77 @@ class Procedure:
 
 
 class ProcedureProvider:
-    """Extracts and provides access to procedures from Customer Support Doc.
+    """Provides access to procedures, read from context modules.
 
-    Procedures are defined in the CUSTOMER_SUPPORT_DOC_ID Google Doc using
-    a specific format with ## Procedure N: Title headers.
+    Procedures used to be parsed out of the customer.system prompt body
+    (see _parse_procedures below); they now live as individual
+    knowledge_modules rows tagged 'procedure', fetched on demand instead of
+    riding in every conversation. See
+    docs/superpowers/specs/2026-08-19-procedures-to-context-modules-design.md.
+    _parse_procedures is kept -- the migration script that created those
+    rows in the first place (scripts/migrate_procedures_to_modules.py)
+    calls it, and removing it would break re-running that migration.
     """
 
+    PROCEDURE_TAG = "procedure"
+
+    def __init__(self, store: Any = None) -> None:
+        self._store = store
+
+    def _knowledge_store(self):
+        if self._store is None:
+            from shared.prompts.knowledge import KnowledgeStore
+
+            self._store = KnowledgeStore.from_env()
+        return self._store
+
     def get_procedures(self, force_reload: bool = False) -> List[Procedure]:
-        """Fetch and parse procedures from the customer.system prompt
-        (bundled default, or its Google Doc / DB override).
+        """Procedures, read from the context modules tagged 'procedure'.
 
         Args:
-            force_reload: If True, bypass the prompt library's doc cache and
-                re-fetch before parsing.
+            force_reload: If True, invalidate the knowledge store's cache
+                and re-fetch before returning.
 
         Returns:
-            List of Procedure objects found in the document
+            List of Procedure objects, one per procedure-tagged module.
         """
-        if force_reload:
-            PROMPTS.invalidate_doc_cache()
+        store = self._knowledge_store()
+        if force_reload and hasattr(store, "invalidate"):
+            store.invalidate()
 
         try:
-            content = PROMPTS.text("customer.system")
-            procedures = self._parse_procedures(content)
-            LOGGER.info(f"Parsed {len(procedures)} procedures from customer.system")
-            return procedures
-
+            modules = store.all_modules()
         except Exception as e:
-            LOGGER.exception(f"Error fetching procedures: {e}")
+            LOGGER.exception(f"Error fetching procedure modules: {e}")
             return []
+
+        procedures = [
+            Procedure(
+                # Slug, not a positional index: chunk_procedure_map persists
+                # these ids, so a reordered list must not remap them.
+                id=module.slug,
+                number=index,
+                title=module.title,
+                purpose=module.summary,
+                full_text=module.body or "",
+            )
+            for index, module in enumerate(
+                sorted(
+                    (m for m in modules if self.PROCEDURE_TAG in (m.tags or [])),
+                    key=lambda m: m.slug,
+                ),
+                start=1,
+            )
+        ]
+        LOGGER.info(f"Loaded {len(procedures)} procedures from context modules")
+        return procedures
 
     def clear_cache(self) -> None:
         """Force the next get_procedures() call to re-fetch rather than use
-        the prompt library's cached Google Doc body."""
-        PROMPTS.invalidate_doc_cache()
+        the knowledge store's cached module list."""
+        store = self._knowledge_store()
+        if hasattr(store, "invalidate"):
+            store.invalidate()
         LOGGER.info("Cleared procedure cache")
 
     def _parse_procedures(self, content: str) -> List[Procedure]:
