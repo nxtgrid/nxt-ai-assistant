@@ -77,6 +77,11 @@ SAMPLE_VARS = {
         "max_words": 250,
     },
     "procedure.match": {"procedure_descriptions": "PROCEDURE 1: Foo", "content": "support text"},
+    "procedure.module_summary": {
+        "title": "Commissioning Failed",
+        "purpose": "Covers failed commissioning.",
+        "body": "1. Check the DCU link...",
+    },
     "procedure.suggest": {"next_number": 3, "existing_list": "- Procedure 1: Foo", "content": "x"},
     "thread_assignment.classify": {"threads_text": "Thread t1:\n  user: hi", "user_input": "hi"},
     "ticketing.jira_issue_types": {

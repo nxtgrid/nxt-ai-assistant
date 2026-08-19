@@ -1,0 +1,32 @@
+---
+id: procedure.module_summary
+description: Writes a symptom-first one-line summary for a procedure being migrated to a context module.
+owner: ops
+component: shared
+overridable: true
+model: fast
+output: text
+sections: []
+variables: [title, purpose, body]
+access:
+  view: [ops, eng]
+  edit: [ops]
+  publish: [ops]
+---
+Write one line describing when a support agent should open the procedure below.
+
+PROCEDURE TITLE: {{title}}
+
+STATED PURPOSE: {{purpose}}
+
+PROCEDURE BODY (first part):
+{{body}}
+
+The line will be the only thing an AI assistant sees when deciding whether to
+fetch this procedure, so lead with the observable symptom — what a technician or
+customer would actually report — not with what the procedure does.
+
+Good: "Meter commissioning fails or hangs — stays pending, no completion callback."
+Bad: "This procedure covers what to do when commissioning does not complete."
+
+Write under 25 words. Output the line and nothing else.
