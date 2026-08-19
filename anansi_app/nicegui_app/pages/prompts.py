@@ -71,6 +71,12 @@ class KnowledgeTabRow:
     chars: int
     checked: bool
     summary: str = ""
+    # A provider-backed module (see shared/prompts/knowledge.py's is_jit) has
+    # no stored body -- chars is 0 (correct for the pinned-budget sum below,
+    # matching budget_pinned's "unresolved costs nothing" rule) but that
+    # reads as "empty" rather than "resolved at request time" unless a row
+    # can say which one it is.
+    is_jit: bool = False
 
 
 def build_knowledge_tab(modules: List[Any], pins: dict) -> List[KnowledgeTabRow]:
@@ -84,9 +90,13 @@ def build_knowledge_tab(modules: List[Any], pins: dict) -> List[KnowledgeTabRow]
             slug=module.slug,
             title=module.title,
             mode=module.mode,
-            chars=len(module.body),
+            # None for a provider-backed module -- len(None) would crash
+            # (this hazard is the same one build_module_rows had; see
+            # knowledge_modules.py's build_module_rows for the sibling fix).
+            chars=len(module.body or ""),
             checked=bool(pins.get(module.slug)),
             summary=module.summary,
+            is_jit=getattr(module, "is_jit", False),
         )
         for module in sorted(modules, key=lambda m: m.slug)
     ]
@@ -542,7 +552,8 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                                 with ui.row().classes("items-center no-wrap w-full"):
                                     ui.checkbox(value=r.checked, on_change=toggle).props("dense")
                                     with ui.column().classes("gap-0"):
-                                        ui.label(f"{r.title}  ·  {r.mode}  ·  {r.chars} chars")
+                                        size_text = "live" if r.is_jit else f"{r.chars} chars"
+                                        ui.label(f"{r.title}  ·  {r.mode}  ·  {size_text}")
                                         if r.summary:
                                             ui.label(r.summary).classes("text-caption")
 

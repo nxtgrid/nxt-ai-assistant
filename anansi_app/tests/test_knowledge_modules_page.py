@@ -3,8 +3,11 @@
 import pytest
 from nicegui_app.pages.knowledge_modules import (
     ModuleRow,
+    body_is_editable,
     build_module_rows,
     group_module_rows,
+    module_is_deletable,
+    preview_module_body,
     prompt_option_label,
     validate_module,
 )
@@ -29,7 +32,10 @@ def _module(slug, tags=("grid_ops",), mode="pinned"):
 def test_build_module_rows_reports_size():
     rows = build_module_rows([_module("comms")])
     assert rows == [
-        ModuleRow(slug="comms", title="Comms", tags=["grid_ops"], scope="sector", mode="pinned", chars=40)
+        ModuleRow(
+            slug="comms", title="Comms", tags=["grid_ops"], scope="sector", mode="pinned",
+            chars=40, source="manual", size_label="40 chars",
+        )
     ]
 
 
@@ -137,3 +143,129 @@ def test_prompt_option_label_truncates_a_long_description():
 
 def test_prompt_option_label_falls_back_to_bare_id_when_no_description():
     assert prompt_option_label("a.b", "") == "a.b"
+
+
+# ── Provider-backed modules (source badges, read-only bodies, preview) ─────
+
+
+def test_row_reports_live_instead_of_a_char_count_for_jit_modules():
+    modules = [
+        KnowledgeModule(id="g", slug="entity-graph", title="Graph", summary="s",
+                        body=None, source="graph"),
+        KnowledgeModule(id="m", slug="comms", title="Comms", summary="s",
+                        body="12345"),
+    ]
+    rows = {r.slug: r for r in build_module_rows(modules)}
+
+    assert rows["entity-graph"].size_label == "live"
+    assert rows["comms"].size_label == "5 chars"
+
+
+def test_row_carries_the_source():
+    rows = build_module_rows([
+        KnowledgeModule(id="g", slug="entity-graph", title="G", summary="s",
+                        body=None, source="graph")
+    ])
+    assert rows[0].source == "graph"
+
+
+def test_body_is_editable_only_for_manual_modules():
+    assert body_is_editable("manual") is True
+    assert body_is_editable("ingested") is True
+    for source in ("gdoc", "graph", "directory", "episodic"):
+        assert body_is_editable(source) is False, source
+
+
+def test_singleton_providers_cannot_be_deleted():
+    assert module_is_deletable("graph") is False
+    assert module_is_deletable("directory") is False
+    assert module_is_deletable("gdoc") is True
+    assert module_is_deletable("episodic") is True
+    assert module_is_deletable("manual") is True
+
+
+def test_validate_module_does_not_require_a_body_when_not_required():
+    """A provider-backed module's body isn't stored -- the save path must not
+    demand one just because the caller happened to leave the field empty."""
+    validate_module(slug="a", title="A", summary="s", body="", require_body=False)
+
+
+def test_validate_module_still_requires_a_body_by_default():
+    with pytest.raises(ValueError, match="required"):
+        validate_module(slug="a", title="A", summary="s", body="")
+
+
+# ── Preview ──────────────────────────────────────────────────────────────
+
+
+def test_preview_resolves_against_the_viewing_operator():
+    import asyncio
+
+    module = KnowledgeModule(
+        id="d", slug="directory", title="Directory", summary="s", body=None, source="directory"
+    )
+
+    class _Provider:
+        source = "directory"
+
+        async def resolve(self, m, ctx):
+            return f"resolved for staff={ctx.is_staff}"
+
+    text = asyncio.run(preview_module_body(module, _Provider(), is_staff=True))
+    assert text == "resolved for staff=True"
+
+
+def test_preview_reports_an_empty_resolution_clearly():
+    import asyncio
+
+    module = KnowledgeModule(
+        id="e", slug="episodic", title="Episodic", summary="s", body=None, source="episodic"
+    )
+
+    class _Provider:
+        source = "episodic"
+
+        async def resolve(self, m, ctx):
+            return None
+
+    text = asyncio.run(preview_module_body(module, _Provider(), is_staff=True))
+    assert "nothing" in text.lower()
+
+
+def test_preview_reports_a_provider_failure_rather_than_raising():
+    import asyncio
+
+    module = KnowledgeModule(
+        id="g", slug="graph", title="Graph", summary="s", body=None, source="graph"
+    )
+
+    class _Provider:
+        source = "graph"
+
+        async def resolve(self, m, ctx):
+            raise RuntimeError("RPC missing")
+
+    text = asyncio.run(preview_module_body(module, _Provider(), is_staff=True))
+    assert "RPC missing" in text
+
+
+# ── The Prompts page's Context tab: the same null-body / JIT hazard ────────
+# build_knowledge_tab lists every module (including provider-backed ones) so
+# an operator can pin/unpin it to a prompt. It has the exact same
+# len(module.body) crash build_module_rows had -- fixed alongside it here,
+# since a JIT module now genuinely exists once the seed script runs.
+
+
+def test_knowledge_tab_handles_a_jit_module_without_crashing():
+    rows = build_knowledge_tab(
+        [KnowledgeModule(id="g", slug="entity-graph", title="Graph", summary="s",
+                         body=None, source="graph")],
+        {},
+    )
+    assert rows[0].chars == 0
+    assert rows[0].is_jit is True
+
+
+def test_knowledge_tab_marks_manual_modules_as_not_jit():
+    rows = build_knowledge_tab([_module("comms")], {})
+    assert rows[0].is_jit is False
