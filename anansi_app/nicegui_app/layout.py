@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any
 
 from grid_app.lib import perms
@@ -25,12 +26,20 @@ OPERATIONS_NAV = [
     ("/skill-builder", "🧩 Skill Builder"),
 ]
 
-BOT_ADMIN_NAV = [
-    ("/documents", "📚 RAG Knowledgebase"),
-    ("/prompts", "📝 Prompts"),
-    ("/knowledge-modules", "🧠 Context"),
-    ("/settings", "⚙️ Settings"),
-]
+
+@dataclass(frozen=True)
+class NavItem:
+    target: str
+    label: str
+    depth: int = 0
+
+
+BOT_ADMIN_NAV = (
+    NavItem("/prompts", "📝 Prompts"),
+    NavItem("/knowledge-modules", "🧠 Context"),
+    NavItem("/documents", "📚 RAG Knowledgebase", depth=1),
+    NavItem("/settings", "⚙️ Settings"),
+)
 
 # Group order for the Grid Design nav (mirrors the Streamlit sidebar).
 GRID_NAV_GROUP_ORDER = ["Engineering", "Procurement", "Sites", "Catalogue", "Field Ops"]
@@ -39,19 +48,29 @@ _STATUS_COLORS = {"live": "#22c55e", "deploying": "#f59e0b", "down": "#ef4444"}
 _STATUS_TOOLTIPS = {"live": "Bot is live", "deploying": "Deploying…", "down": "Bot is down"}
 
 
-def _nav_button(label: str, target: str, selected: bool) -> None:
+def bot_admin_nav_items() -> tuple[NavItem, ...]:
+    return BOT_ADMIN_NAV
+
+
+def _nav_button(label: str, target: str, selected: bool, depth: int = 0) -> None:
     btn = (
         ui.button(label, on_click=lambda t=target: ui.navigate.to(t))
         .props("flat align=left no-caps dense")
         .classes("w-full")
     )
+    styles = ["padding-left: 1.5rem"] if depth else []
     if selected:
-        btn.style(
-            f"background-color: rgba(77, 166, 255, 0.15); color: #ffffff;"
-            f" border-left: 3px solid {ACCENT}; border-radius: 0 6px 6px 0;"
+        styles.extend(
+            [
+                "background-color: rgba(77, 166, 255, 0.15)",
+                "color: #ffffff",
+                f"border-left: 3px solid {ACCENT}",
+                "border-radius: 0 6px 6px 0",
+            ]
         )
     else:
-        btn.style("color: #cbd5e1;")
+        styles.append("color: #cbd5e1")
+    btn.style("; ".join(styles))
 
 
 def _render_operations_nav(current_path: str, expanded: bool) -> None:
@@ -62,8 +81,13 @@ def _render_operations_nav(current_path: str, expanded: bool) -> None:
 
 def _render_bot_admin_nav(current_path: str, expanded: bool) -> None:
     with ui.expansion("🤖 Bot Admin", value=expanded).classes("w-full").style("color: #e2e8f0"):
-        for target, label in BOT_ADMIN_NAV:
-            _nav_button(label, target, selected=current_path == target)
+        for item in bot_admin_nav_items():
+            _nav_button(
+                item.label,
+                item.target,
+                selected=current_path == item.target,
+                depth=item.depth,
+            )
         langfuse_url = os.getenv("LANGFUSE_DASHBOARD_URL", "").strip()
         if langfuse_url:
             ui.separator().style("background-color: #334155")
@@ -156,7 +180,7 @@ def frame(user: dict[str, Any], current_path: str):
     can_grid = perms.can_view_grid(email)
 
     is_operations_page = any(current_path == target for target, _ in OPERATIONS_NAV)
-    is_bot_admin_page = any(current_path == target for target, _ in BOT_ADMIN_NAV)
+    is_bot_admin_page = any(current_path == item.target for item in BOT_ADMIN_NAV)
     is_grid_page = current_path.startswith("/grid")
 
     with (
