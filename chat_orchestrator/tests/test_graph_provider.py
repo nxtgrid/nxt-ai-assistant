@@ -95,7 +95,9 @@ async def test_customer_query_passes_their_org_ids():
 
     await provider.resolve(_module(), ctx)
 
-    assert seen["params"]["p_org_ids"] == ["7", "9"]
+    # Cast to int: summarize_entity_graph's p_org_ids is integer[], not
+    # uuid[] -- see the real-permission-model memory for why.
+    assert seen["params"]["p_org_ids"] == [7, 9]
 
 
 @pytest.mark.asyncio
@@ -128,3 +130,20 @@ async def test_a_failing_rpc_resolves_to_none():
 async def test_no_client_resolves_to_none():
     ctx = ResolutionContext(scope=RequestScope(), is_staff=True)
     assert await GraphProvider(client=None).resolve(_module(), ctx) is None
+
+
+@pytest.mark.asyncio
+async def test_a_non_integer_organization_id_is_refused_not_sent_raw():
+    """summarize_entity_graph's p_org_ids is integer[] -- a non-numeric org id
+    must never reach the RPC call at all, let alone crash it."""
+
+    class _Client:
+        def rpc(self, *_a, **_k):
+            raise AssertionError("must not query with an unparseable org id")
+
+    provider = GraphProvider(client=_Client())
+    ctx = ResolutionContext(
+        scope=RequestScope(), organization_ids=("not-a-number",), is_staff=False
+    )
+
+    assert await provider.resolve(_module(), ctx) is None

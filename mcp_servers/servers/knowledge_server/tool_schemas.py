@@ -188,4 +188,57 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
   'description': '[READ-ONLY] List the types of documents available in the knowledge base, '
                  'with a count of each — a quick orientation before a targeted search.',
   'inputSchema': {'type': 'object', 'properties': {}},
+  'visible_to_customer': False},
+ {'name': 'get_graph_schema',
+  'description': '[READ-ONLY] List the entity types and relationship types in the knowledge '
+                 'graph, with counts and example entity names. Call this FIRST when a question '
+                 'needs structured facts about equipment, sites or their connections — it tells '
+                 'you what kinds of things exist before you search for specific ones. Returns a '
+                 'compact ontology, filtered to what you may see. For free-text passages rather '
+                 'than entities, use summarize_knowledge instead.',
+  'inputSchema': {'type': 'object', 'properties': {}},
+  'visible_to_customer': False},
+ {'name': 'search_entities',
+  'description': '[READ-ONLY] Find entities in the knowledge graph by name, optionally narrowed '
+                 'to one entity type from get_graph_schema. Use to turn a name a user mentioned '
+                 'into a real entity id before traversing. Returns matching entities with their '
+                 'ids, types and descriptions; suggests near-matches when nothing matches '
+                 'exactly. Follow with get_entity_neighbors to explore what an entity connects '
+                 'to.',
+  'inputSchema': {'type': 'object',
+                  'properties': {'query': {'type': 'string',
+                                           'description': 'Name or partial name to search for.'},
+                                 'entity_type': {'type': 'string',
+                                                 'description': 'Optional type filter — use a '
+                                                                'value from get_graph_schema.'},
+                                 'limit': {'type': 'integer', 'default': 10}},
+                  'required': ['query']},
+  'visible_to_customer': False},
+ {'name': 'get_entity_neighbors',
+  'description': '[READ-ONLY] List what one entity connects to in the knowledge graph, '
+                 'optionally narrowed to one relationship type. Use after search_entities to '
+                 'follow a connection — which meters sit on a DCU, which site a grid belongs '
+                 'to. Returns neighbouring entities with the relationship joining them and its '
+                 'direction. For the source passages behind a claim, use get_entity_evidence.',
+  'inputSchema': {'type': 'object',
+                  'properties': {'entity_id': {'type': 'string',
+                                               'description': 'Entity id from search_entities.'},
+                                 'relationship_type': {'type': 'string',
+                                                       'description': 'Optional filter — use a '
+                                                                      'value from '
+                                                                      'get_graph_schema.'},
+                                 'limit': {'type': 'integer', 'default': 25}},
+                  'required': ['entity_id']},
+  'visible_to_customer': False},
+ {'name': 'get_entity_evidence',
+  'description': '[READ-ONLY] Retrieve the source document passages an entity was extracted '
+                 'from. Use to ground a claim before stating it, or when a neighbour '
+                 'relationship looks surprising and you want to check the underlying text. '
+                 'Returns excerpts with their document titles. For a broad topic summary rather '
+                 'than one entity\'s sources, use summarize_knowledge.',
+  'inputSchema': {'type': 'object',
+                  'properties': {'entity_id': {'type': 'string',
+                                               'description': 'Entity id from search_entities.'},
+                                 'limit': {'type': 'integer', 'default': 5}},
+                  'required': ['entity_id']},
   'visible_to_customer': False}]
