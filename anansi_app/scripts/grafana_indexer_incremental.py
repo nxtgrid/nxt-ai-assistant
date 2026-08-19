@@ -146,7 +146,7 @@ def index_all_grafana_panels(since_last_run: bool = False) -> Dict[str, Any]:
             print("ℹ️  Force reindex enabled, will regenerate all descriptions")
 
         # Run indexing
-        panels_metadata, available_dashboards, dashboard_variables = index_grafana_panels(
+        panels_metadata, available_dashboards, dashboard_variables, stats = index_grafana_panels(
             grafana_url=grafana_url,
             grafana_username=grafana_username,
             grafana_password=grafana_password,
@@ -171,11 +171,42 @@ def index_all_grafana_panels(since_last_run: bool = False) -> Dict[str, Any]:
         )
         print(f"✓ Variables stored for {len(dashboard_variables)} dashboards")
 
+        generation_failures = stats.get("generation_failed", 0)
+        if generation_failures:
+            # Don't report "completed" when panels silently fell back to
+            # generic descriptions -- the caller (grafana_indexer_incremental
+            # __main__, invoked as a subprocess by the NiceGUI "Sync Now"
+            # button) only surfaces stderr/stdout to the UI when the process
+            # exits non-zero, so this status is what actually makes the
+            # failure visible instead of a "Grafana sync complete" toast
+            # papering over it. See the 2026-08-19 incident:
+            # GeminiDescriptionGenerator.generate_description's docstring.
+            print(
+                f"\n⚠️  {generation_failures}/{stats['regenerated']} panel description(s) "
+                f"failed to generate and got a generic fallback instead -- "
+                f"check GOOGLE_API_KEY / the active LLM_PROVIDER's credential and quota."
+            )
+            return {
+                "status": "completed_with_generation_failures",
+                "panels_indexed": len(panels_metadata),
+                "folder_name": folder_name,
+                "dashboards_processed": len(
+                    set(p["dashboard_uid"] for p in panels_metadata.values())
+                ),
+                "generation_failures": generation_failures,
+                "message": (
+                    f"{generation_failures}/{stats['regenerated']} panel description(s) "
+                    f"failed to generate (fell back to generic text) -- check "
+                    f"GOOGLE_API_KEY / the active LLM_PROVIDER's credential and quota"
+                ),
+            }
+
         return {
             "status": "completed",
             "panels_indexed": len(panels_metadata),
             "folder_name": folder_name,
             "dashboards_processed": len(set(p["dashboard_uid"] for p in panels_metadata.values())),
+            "generation_failures": 0,
         }
 
     except Exception as e:
@@ -210,6 +241,14 @@ if __name__ == "__main__":
     if result["status"] == "completed":
         print(f"\n✅ Grafana indexing completed: {result['panels_indexed']} panels indexed")
         sys.exit(0)
+    elif result["status"] == "completed_with_generation_failures":
+        # Data DID save (the successfully-generated panels are correct) --
+        # this isn't a total failure, but it must still exit non-zero so the
+        # NiceGUI "Sync Now" button's subprocess wrapper (settings.py's
+        # _sync_now/_run_grafana_indexer) shows the real message instead of
+        # "Grafana sync complete" papering over silently-fallback-text panels.
+        print(f"\n⚠️  Grafana indexing completed with warnings: {result.get('message', '')}")
+        sys.exit(1)
     else:
         print(f"\n❌ Grafana indexing failed: {result.get('message', 'Unknown error')}")
         sys.exit(1)
