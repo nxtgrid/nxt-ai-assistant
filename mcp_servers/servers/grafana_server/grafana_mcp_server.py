@@ -2418,20 +2418,26 @@ async def handle_list_tools() -> List[types.Tool]:
         panel_title = panel_info.get("title", "Untitled")
         panel_type = panel_info.get("panel_type", "timeseries")
         base_description = panel_info.get("tool_description", f"Render {panel_title} panel")
+        # The stored tool_description's trailing punctuation is inconsistent (LLM-generated,
+        # sometimes ends in '.', sometimes not — see grafana.panel_description.prompt) —
+        # strip it so the joins below never produce a double period.
+        base_description = base_description.rstrip(". ")
 
         # Build tool description with guidance for the LLM
         # Instruct the LLM to ask for required variables rather than just listing them
         if panel_type in ["stat", "gauge", "bargauge"]:
             tool_description = (
-                f"{base_description}. "
-                f"Returns a calculated metric value. "
+                f"[READ-ONLY] {base_description}. "
+                f"Returns a calculated metric value. Takes a few seconds; can take up to 150s "
+                f"under heavy Grafana load. "
                 f"IMPORTANT: Before calling this tool, ask the user which grid and time period "
                 f"they want if not already specified."
             )
         else:
             tool_description = (
-                f"{base_description}. "
-                f"Returns a chart image or metric data. "
+                f"[READ-ONLY] {base_description}. "
+                f"Returns a chart image or metric data. Takes a few seconds; can take up to "
+                f"150s under heavy Grafana load. "
                 f"IMPORTANT: Before calling this tool, ask the user which grid and time period "
                 f"they want if not already specified."
             )

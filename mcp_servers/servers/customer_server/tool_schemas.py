@@ -28,8 +28,12 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'meter_information',
                  'recent commissioning attempt) and commissioning_status (e.g. SUCCESSFUL, FAILED, '
                  'PROCESSING) when a commissioning record exists.',
   'inputSchema': {'type': 'object',
-                  'properties': {'meter_number': {'type': 'string'},
-                                 'organization_id': {'type': 'integer'}},
+                  'properties': {'meter_number': {'type': 'string',
+                                                  'description': 'The meter number (external '
+                                                                 'reference)'},
+                                 'organization_id': {'type': 'integer',
+                                                     'description': 'Organization ID (injected '
+                                                                    'by orchestrator)'}},
                   'required': ['meter_number']},
   'visible_to_customer': True},
  {'name': 'customer_get_meter_consumption',
@@ -104,8 +108,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'meter_information',
                   'required': ['grid_name']},
   'visible_to_customer': True},
  {'name': 'customer_get_all_grids_status',
-  'description': '[READ-ONLY] Status dashboard for all accessible grids, including service status '
-                 'icons and weather.',
+  'description': '[READ-ONLY] Status dashboard for every grid the caller can access, including '
+                 'service status icons and weather — the multi-grid overview. For one grid in '
+                 'full detail (power status, capacity, DCU connectivity, per-phase inverter '
+                 'output), use customer_get_grid_status instead.',
   'inputSchema': {'type': 'object', 'properties': {}},
   'visible_to_customer': True},
  {'name': 'customer_get_last_gtr_summary',

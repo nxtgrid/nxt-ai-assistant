@@ -21,10 +21,21 @@ omitted the flag entirely, which read as customer-visible through
 from typing import Any, Dict, List
 
 TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
-  'description': 'Search the internal knowledge base for structured documentation on technical '
-                 'procedures.',
+  'description': '[READ-ONLY] Search the internal knowledge base and return an LLM-generated '
+                 'summary of relevant documentation on a technical topic or procedure, with a '
+                 'footer noting which live-data tools apply. Takes a few seconds (semantic '
+                 'search + summarization). For a specific known module by slug rather than an '
+                 'open-ended topic search, get_knowledge_module is more direct and doesn\'t '
+                 'lose detail to summarization.',
   'inputSchema': {'type': 'object',
-                  'properties': {'topic': {'type': 'string'}},
+                  'properties': {'topic': {'type': 'string',
+                                           'description': 'Topic or procedure to search for and '
+                                                          'summarize (e.g. "meter commissioning '
+                                                          'steps", "HPS power limit tiers").'},
+                                 'max_words': {'type': 'integer',
+                                               'description': 'Target length of the generated '
+                                                              'summary in words.',
+                                               'default': 250}},
                   'required': ['topic']},
   'visible_to_customer': False},
  {'name': 'get_knowledge_module',
@@ -70,7 +81,9 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                                  'country': {'type': 'string',
                                              'description': 'Two-letter country code to bias '
                                                             "results (e.g., 'ng' for Nigeria, 'cd' "
-                                                            'for DRC). Optional.'},
+                                                            "for DRC). Defaults to 'ng'. Pass an "
+                                                            'empty string for no country bias.',
+                                             'default': 'ng'},
                                  'topic': {'type': 'string',
                                            'description': "'general' (default) or 'news' for "
                                                           'recent news articles',
@@ -104,7 +117,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                   'required': ['url']},
   'visible_to_customer': False},
  {'name': 'find_document',
-  'description': 'Search Google Drive for a document by name fragment or document code (e.g., '
+  'description': '[READ-ONLY] Search Google Drive for a document by name fragment or document code (e.g., '
                  "'DOC-1234', 'ExampleSite Technical Review'). Returns the document name, URL, and "
                  'Google Doc ID if exactly one match is found. If multiple matches are found, '
                  'returns an error listing them so the user can provide a specific link. Use this '
@@ -118,7 +131,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                   'required': ['query']},
   'visible_to_customer': False},
  {'name': 'read_document',
-  'description': 'Read the full content of a Google Doc as markdown. Use this to understand the '
+  'description': '[READ-ONLY] Read the full content of a Google Doc as markdown. Use this to understand the '
                  "document's structure, style, and existing content before editing. Requires a "
                  'document ID — use find_document first if you only have a name.',
   'inputSchema': {'type': 'object',
@@ -129,7 +142,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                   'required': ['document_id']},
   'visible_to_customer': False},
  {'name': 'scan_doc_comments',
-  'description': 'Scan a Google Doc for pending @anansibot comments. Returns a list of comments '
+  'description': '[READ-ONLY] Scan a Google Doc for pending @anansibot comments. Returns a list of comments '
                  'with their highlighted text, instruction, and comment ID. Use this before '
                  'edit_doc_section to see what edits are requested in a document.',
   'inputSchema': {'type': 'object',
@@ -141,13 +154,13 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                   'required': ['document_id']},
   'visible_to_customer': False},
  {'name': 'edit_doc_section',
-  'description': 'Edit a section of a Google Doc with formatted markdown. SAFETY: This is a '
-                 'destructive write operation. Before calling: (1) confirm with the user which '
-                 'document and section will be edited, (2) never assume a document ID from context '
-                 '— require an explicit file ID. If the user provides a name, use find_document '
-                 'first. If find_document returns 2+ results, ask the user which one. Supports: '
-                 '**bold**, *italic*, ## headings, - bullets, 1. numbered lists, | tables |, '
-                 '[links](url).',
+  'description': '[ACTION - DESTRUCTIVE GOOGLE DOC WRITE] Edit a section of a Google Doc with '
+                 'formatted markdown, overwriting the existing section text. Before calling: '
+                 '(1) confirm with the user which document and section will be edited, (2) '
+                 'never assume a document ID from context — require an explicit file ID. If '
+                 'the user provides a name, use find_document first. If find_document returns '
+                 '2+ results, ask the user which one. Supports: **bold**, *italic*, ## '
+                 'headings, - bullets, 1. numbered lists, | tables |, [links](url).',
   'inputSchema': {'type': 'object',
                   'properties': {'document_id': {'type': 'string',
                                                  'description': 'Google Doc file ID (required — '
@@ -172,6 +185,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                   'required': ['document_id']},
   'visible_to_customer': False},
  {'name': 'list_document_types',
-  'description': 'List the types of documents available in the knowledge base with counts.',
+  'description': '[READ-ONLY] List the types of documents available in the knowledge base, '
+                 'with a count of each — a quick orientation before a targeted search.',
   'inputSchema': {'type': 'object', 'properties': {}},
   'visible_to_customer': False}]

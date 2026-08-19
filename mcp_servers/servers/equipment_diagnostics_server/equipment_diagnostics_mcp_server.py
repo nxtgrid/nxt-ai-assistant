@@ -968,13 +968,30 @@ async def _handle_generate_power_chart(
         return [TextContent(type="text", text=f"Chart generation failed: {str(e)}")]
 
 
+
+# schedule_equipment_check's default delay_minutes, by check_type, when the
+# caller doesn't pass one explicitly. 'site_online' is the check that
+# verifies a comms-chain restart succeeded (the site reconnecting IS coming
+# back online), so it gets a longer default: restart_comms_chain's own tool
+# description warns reconnection can take "up to 10 minutes" — 12 leaves a
+# buffer past that ceiling rather than landing mid-recovery. Every other
+# check_type (grid_consumption, battery_status, full_status) has no such
+# stated recovery window, so they keep the plain 5-minute default.
+_CHECK_TYPE_DEFAULT_DELAY_MINUTES = {"site_online": 12}
+_DEFAULT_DELAY_MINUTES = 5
+
+
 async def _handle_schedule_equipment_check(
     plat: VRMPlatform, arguments: Dict[str, Any]
 ) -> List[TextContent]:
     """Handle schedule_equipment_check tool call."""
     grid_name = arguments.get("grid_name")
-    delay_minutes = arguments.get("delay_minutes", 5)
     check_type = arguments.get("check_type", "full_status")
+    delay_minutes = arguments.get("delay_minutes")
+    if delay_minutes is None:
+        delay_minutes = _CHECK_TYPE_DEFAULT_DELAY_MINUTES.get(
+            check_type, _DEFAULT_DELAY_MINUTES
+        )
     expected_condition = arguments.get("expected_condition")
     notify_on_failure = arguments.get("notify_on_failure", True)
 

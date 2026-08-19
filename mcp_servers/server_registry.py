@@ -67,7 +67,7 @@ SERVER_METADATA = {
         "module": "servers.meta_server.meta_mcp_server",
     },
     "grid_design": {
-        "description": "Grid design and Bill of Materials generation via AppSheet",
+        "description": "Grid design and Bill of Materials generation",
         "module": "servers.grid_design_server.grid_design_mcp_server",
     },
     "solar": {

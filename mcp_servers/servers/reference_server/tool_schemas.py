@@ -38,7 +38,9 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [
         "name": "get_import_prohibition_list",
         "description": (
             "[READ-ONLY] Fetch the current Nigeria import prohibition list from the Nigeria "
-            "Customs Service website. Returns all categories of absolutely prohibited imports."
+            "Customs Service website, cached for up to 1 hour (first call after expiry takes a "
+            "few seconds; cached calls are instant). Returns all categories of absolutely "
+            "prohibited imports."
         ),
         "inputSchema": {"type": "object", "properties": {}},
         "visible_to_customer": False,

@@ -29,7 +29,7 @@ to decide whether a non-staff user may see a tool. Every schema below sets it to
 from typing import Any, Dict, List
 
 READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'search_issues_with_comments',
-  'description': "List and filter multiple Jira issues i.e. tickets. Use for 'my tickets', 'open "
+  'description': "[READ-ONLY] List and filter multiple Jira issues i.e. tickets. Use for 'my tickets', 'open "
                  "tickets', or searching by grid/org. Does NOT provide details for a single "
                  'ticket. By default excludes Done tickets unless statuses are explicitly provided '
                  'or exclude_done is set to false. When presenting results, always include the '
@@ -58,8 +58,16 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'search_issues_with_com
                                                                 'a meter number, device ID, or '
                                                                 'grid name; otherwise omit and '
                                                                 'filter the results yourself.'},
-                                 'grid': {'type': 'string'},
-                                 'organization': {'type': 'string'},
+                                 'grid': {'type': 'string',
+                                          'description': 'Filter to tickets tagged with this '
+                                                         'grid. Fuzzy-matched against Jira\'s '
+                                                         'valid grid list — an approximate or '
+                                                         'misspelled name still resolves.'},
+                                 'organization': {'type': 'string',
+                                                  'description': 'Filter to tickets tagged '
+                                                                 "with this organization "
+                                                                 '(exact match against Jira\'s '
+                                                                 'Organizations field).'},
                                  'statuses': {'type': 'array',
                                               'items': {'type': 'string'},
                                               'description': 'Filter by Jira statuses. Valid '
@@ -78,23 +86,28 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'search_issues_with_com
                                                                  'are explicitly set.'}}},
   'visible_to_customer': False},
  {'name': 'get_issue',
-  'description': 'Retrieve full details for one ticket. Supports Jira keys (e.g., OPS-123) and '
-                 'internal references (e.g., TKT-000123).',
+  'description': '[READ-ONLY] Retrieve full details for one ticket. Supports Jira keys (e.g., OPS-123) and '
+                 'internal references (e.g., TKT-000123). Does not search or filter — for that, '
+                 'use search_issues_with_comments.',
   'inputSchema': {'type': 'object',
-                  'properties': {'issue_key': {'type': 'string', 'description': 'Jira issue key'}},
+                  'properties': {'issue_key': {'type': 'string',
+                                               'description': 'Jira issue key (e.g., OPS-123) '
+                                                              'or internal ticket reference '
+                                                              '(e.g., TKT-000123)'}},
                   'required': ['issue_key']},
   'visible_to_customer': False},
  {'name': 'get_ticket_statistics',
-  'description': 'Get aggregated ticket statistics for the last N days (open + closed). Returns '
+  'description': '[READ-ONLY] Get aggregated ticket statistics for the last N days (open + closed). Returns '
                  'tickets per grid, top ticket types, and grids with above-average ticket counts. '
-                 'Use for executive summaries.',
+                 'Use for executive summaries — for individual ticket listings, use '
+                 'search_issues_with_comments instead.',
   'inputSchema': {'type': 'object',
                   'properties': {'days': {'type': 'integer',
                                           'description': 'Number of days to look back. Default: '
                                                          '30'}}},
   'visible_to_customer': False},
  {'name': 'get_on_call',
-  'description': 'Get the JSM on-call schedule for a date range — use for any question about who '
+  'description': '[READ-ONLY] Get the JSM on-call schedule for a date range — use for any question about who '
                  "was, is, or will be on call. Works for past dates (e.g. 'last weekend'), "
                  'present, and future. Pass start_date as YYYY-MM-DD or ISO 8601.',
   'inputSchema': {'type': 'object',
@@ -108,18 +121,27 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'search_issues_with_com
   'visible_to_customer': False}]
 
 ACTION_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'add_comment',
-  'description': '[ACTION] Add a new comment to a ticket (Jira or internal TKT reference).',
+  'description': '[ACTION] Add a new comment to a ticket (Jira or internal TKT reference). The '
+                 "comment is automatically prefixed with the requesting user's name/email "
+                 "attribution — don't include your own attribution in comment_text.",
   'inputSchema': {'type': 'object',
-                  'properties': {'issue_key': {'type': 'string'},
-                                 'comment_text': {'type': 'string'}},
+                  'properties': {'issue_key': {'type': 'string',
+                                               'description': 'Jira issue key (e.g., OPS-2148) '
+                                                              'or internal ticket reference '
+                                                              '(e.g., TKT-000123)'},
+                                 'comment_text': {'type': 'string',
+                                                  'description': 'The comment body to add.'}},
                   'required': ['issue_key', 'comment_text']},
   'visible_to_customer': False},
  {'name': 'get_transitions',
   'description': '[READ-ONLY] Get available status transitions for a ticket. Internal tickets '
-                 'support the Done transition only.',
+                 'support the Done transition only. Call before change_status if the valid '
+                 "transition names for this ticket aren't already known.",
   'inputSchema': {'type': 'object',
                   'properties': {'issue_key': {'type': 'string',
-                                               'description': 'Jira issue key (e.g., PROJ-123)'}},
+                                               'description': 'Jira issue key (e.g., PROJ-123) '
+                                                              'or internal ticket reference '
+                                                              '(e.g., TKT-000123)'}},
                   'required': ['issue_key']},
   'visible_to_customer': False},
  {'name': 'change_status',
@@ -129,7 +151,9 @@ ACTION_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'add_comment',
                  'support Done only.',
   'inputSchema': {'type': 'object',
                   'properties': {'issue_key': {'type': 'string',
-                                               'description': 'Jira issue key (e.g., OPS-2148)'},
+                                               'description': 'Jira issue key (e.g., OPS-2148) '
+                                                              'or internal ticket reference '
+                                                              '(e.g., TKT-000123)'},
                                  'transition': {'type': 'string',
                                                 'description': "Target status name (e.g., 'Done', "
                                                                "'In Progress', 'To Do')"}},
@@ -141,7 +165,9 @@ ACTION_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'add_comment',
                  'Returns an error if the user is not found in Jira.',
   'inputSchema': {'type': 'object',
                   'properties': {'issue_key': {'type': 'string',
-                                               'description': 'Jira issue key (e.g., OPS-2148)'},
+                                               'description': 'Jira issue key (e.g., OPS-2148) '
+                                                              'or internal ticket reference '
+                                                              '(e.g., TKT-000123)'},
                                  'assignee': {'type': 'string',
                                               'description': "Name, email, 'me' (self-assign), or "
                                                              "'unassigned' (remove assignee)"}},

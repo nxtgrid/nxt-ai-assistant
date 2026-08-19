@@ -1,12 +1,12 @@
 {
   "$schema": "tool_definitions_schema.json",
   "version": "1.0.0",
-  "exported_at": "2026-07-22T14:47:03.495659Z",
+  "exported_at": "2026-08-19T11:51:07.263047Z",
   "tools": {
     "equipment_diagnostics": [
       {
         "name": "get_equipment_status",
-        "description": "Get current real-time status of equipment at a grid site. Returns inverter power per phase, battery state of charge, grid connection status, PV power, and any active alarms.",
+        "description": "[READ-ONLY] Get current real-time status of equipment at a grid site. Returns inverter power per phase, battery state of charge, grid connection status, PV power, and any active alarms. For \"what equipment is installed\" rather than its live readings, use get_equipment_details instead.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -37,7 +37,7 @@
       },
       {
         "name": "get_site_info",
-        "description": "Get general site information including online/offline status, phase configuration, equipment counts, and location.",
+        "description": "[READ-ONLY] Get general site metadata: online/offline status, phase configuration, equipment counts, and location. A summary, not live readings — use get_equipment_status for current power/battery/alarm values, or get_equipment_details for the individual equipment inventory.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -54,7 +54,7 @@
       },
       {
         "name": "get_equipment_details",
-        "description": "Get detailed equipment inventory including inverters, batteries, and MPPTs with serial numbers and model information.",
+        "description": "[READ-ONLY] Get the equipment inventory for a site — inverters, batteries, and MPPTs with serial numbers and model information. Static inventory, not live readings — use get_equipment_status for current power/battery/alarm values.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -71,7 +71,7 @@
       },
       {
         "name": "get_historical_power_data",
-        "description": "Get historical power data for analysis. Can detect grid outages, find peak loads, and analyze power patterns. Supports up to 90 days of historical data.",
+        "description": "[READ-ONLY] Get historical power time-series data, optionally with server-side analysis (outage detection, peak-load finding, phase analysis, summary stats) so you don't have to eyeball raw points. Up to 90 days via time_range='last_90d', or a custom start_time/end_time range. For a single specific outage already known to have happened, analyze_grid_outage gives a more focused answer; for a chart image instead of data, use generate_power_chart.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -130,7 +130,7 @@
       },
       {
         "name": "get_historical_mppt_performance",
-        "description": "Get historical performance data for one or more specific MPPTs. Provides a time-series of estimated vs. actual power generation, which is essential for diagnosing underperformance of a specific solar charger.",
+        "description": "[READ-ONLY] Get a time-series of estimated vs. actual power generation for one or more specific MPPTs (solar chargers) — the tool for diagnosing why one charger underperforms relative to its expected output. For overall site power/consumption trends rather than a specific MPPT, use get_historical_power_data instead.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -176,7 +176,7 @@
       },
       {
         "name": "analyze_grid_outage",
-        "description": "Analyze a specific grid outage event in detail. Identifies affected phases, load at failure, recovery pattern.",
+        "description": "[READ-ONLY] Analyze one specific grid outage in detail — affected phases, load at failure, and recovery pattern. Omit outage_time to analyze the most recent outage. For finding outages in the first place or seeing multiple, use get_historical_power_data with analysis=['outages'] instead.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -202,7 +202,7 @@
       },
       {
         "name": "generate_power_chart",
-        "description": "Generate a chart visualizing power data over time. Returns PNG image suitable for Telegram.",
+        "description": "[READ-ONLY] Generate a PNG chart visualizing power data over time — use when the user wants a picture, not just numbers (get_historical_power_data returns the same underlying data without an image). chart_type is required and has no default; pick the one matching the question (e.g. 'battery_soc' for charge-level questions, 'outage_events' for downtime).",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -249,7 +249,7 @@
       },
       {
         "name": "get_batch_downtime_summary",
-        "description": "Get 24-hour downtime summary for multiple grids in parallel. Efficient batch operation with concurrency control. Returns total downtime minutes, outage count, and status icon per grid.",
+        "description": "[READ-ONLY] Get a downtime summary (default 24h window, see hours) for multiple grids in parallel — the efficient choice for \"how are all my grids doing\" instead of calling analyze_grid_outage per grid. Returns total downtime minutes, outage count, and status icon per grid.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -279,7 +279,7 @@
       },
       {
         "name": "schedule_equipment_check",
-        "description": "Schedule a follow-up check of equipment status. Useful after control actions (restart inverter, reboot comms) to verify success. Default: 5 min for inverter, 12 min for comms.",
+        "description": "[READ-ONLY] Build the details of a follow-up equipment check — useful after control actions (restart inverter, reboot comms) to verify success. IMPORTANT: this does NOT itself create a persisted schedule — it only validates the grid and returns the command/timing to schedule (grid_name, resolved check_type, computed delay). To actually make the check happen later, pass the returned command and timing to schedule_user_command (schedule server) in the same turn. If delay_minutes is omitted, defaults to 12 min for check_type='site_online' (past restart_comms_chain's ~10 min reconnect window) and 5 min otherwise.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -289,8 +289,7 @@
             },
             "delay_minutes": {
               "type": "integer",
-              "description": "Minutes to wait before check",
-              "default": 5
+              "description": "Minutes to wait before check. Omit to use the check_type-based default (see tool description)."
             },
             "check_type": {
               "type": "string",
@@ -323,7 +322,7 @@
     "jira": [
       {
         "name": "search_issues_with_comments",
-        "description": "List and filter multiple Jira issues i.e. tickets. Use for 'my tickets', 'open tickets', or searching by grid/org. Does NOT provide details for a single ticket. By default excludes Done tickets unless statuses are explicitly provided or exclude_done is set to false. When presenting results, always include the created date in short format (e.g. '15 Mar') alongside each ticket. IMPORTANT: for topic or category questions (e.g. 'tickets about DCUs being offline', 'grid downtime tickets'), do NOT rely on text_search — tickets rarely use the same words as the question. Instead fetch the open tickets without text_search (the list is small) and judge from the summaries yourself which ones match the topic.",
+        "description": "[READ-ONLY] List and filter multiple Jira issues i.e. tickets. Use for 'my tickets', 'open tickets', or searching by grid/org. Does NOT provide details for a single ticket. By default excludes Done tickets unless statuses are explicitly provided or exclude_done is set to false. When presenting results, always include the created date in short format (e.g. '15 Mar') alongside each ticket. IMPORTANT: for topic or category questions (e.g. 'tickets about DCUs being offline', 'grid downtime tickets'), do NOT rely on text_search — tickets rarely use the same words as the question. Instead fetch the open tickets without text_search (the list is small) and judge from the summaries yourself which ones match the topic.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -332,10 +331,12 @@
               "description": "Literal keyword match against summary/description — only finds tickets that contain these exact words. Monitoring alert tickets use templated phrasing that often differs from how a user describes the issue (e.g. a DCU outage ticket reads 'DCU 230401080 in Okpokunou could have a problem, causing Meter Issues', not 'DCU offline'; an inverter problem reads 'RESTART FAILED - Inverter Off' or 'Grid outage', not 'downtime'). Use only for distinctive literal strings like a meter number, device ID, or grid name; otherwise omit and filter the results yourself."
             },
             "grid": {
-              "type": "string"
+              "type": "string",
+              "description": "Filter to tickets tagged with this grid. Fuzzy-matched against Jira's valid grid list — an approximate or misspelled name still resolves."
             },
             "organization": {
-              "type": "string"
+              "type": "string",
+              "description": "Filter to tickets tagged with this organization (exact match against Jira's Organizations field)."
             },
             "statuses": {
               "type": "array",
@@ -358,13 +359,13 @@
       },
       {
         "name": "get_issue",
-        "description": "Retrieve full details for one ticket. Supports Jira keys (e.g., OPS-123) and internal references (e.g., TKT-000123).",
+        "description": "[READ-ONLY] Retrieve full details for one ticket. Supports Jira keys (e.g., OPS-123) and internal references (e.g., TKT-000123). Does not search or filter — for that, use search_issues_with_comments.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "issue_key": {
               "type": "string",
-              "description": "Ticket reference (Jira key or internal TKT reference)"
+              "description": "Jira issue key (e.g., OPS-123) or internal ticket reference (e.g., TKT-000123)"
             }
           },
           "required": [
@@ -375,7 +376,7 @@
       },
       {
         "name": "get_ticket_statistics",
-        "description": "Get aggregated ticket statistics for the last N days (open + closed). Returns tickets per grid, top ticket types, and grids with above-average ticket counts. Use for executive summaries.",
+        "description": "[READ-ONLY] Get aggregated ticket statistics for the last N days (open + closed). Returns tickets per grid, top ticket types, and grids with above-average ticket counts. Use for executive summaries — for individual ticket listings, use search_issues_with_comments instead.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -389,7 +390,7 @@
       },
       {
         "name": "get_on_call",
-        "description": "Get the JSM on-call schedule for a date range — use for any question about who was, is, or will be on call. Works for past dates (e.g. 'last weekend'), present, and future. Pass start_date as YYYY-MM-DD or ISO 8601.",
+        "description": "[READ-ONLY] Get the JSM on-call schedule for a date range — use for any question about who was, is, or will be on call. Works for past dates (e.g. 'last weekend'), present, and future. Pass start_date as YYYY-MM-DD or ISO 8601.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -410,15 +411,17 @@
       },
       {
         "name": "add_comment",
-        "description": "[ACTION] Add a new comment to a ticket (Jira or internal TKT reference).",
+        "description": "[ACTION] Add a new comment to a ticket (Jira or internal TKT reference). The comment is automatically prefixed with the requesting user's name/email attribution — don't include your own attribution in comment_text.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "issue_key": {
-              "type": "string"
+              "type": "string",
+              "description": "Jira issue key (e.g., OPS-2148) or internal ticket reference (e.g., TKT-000123)"
             },
             "comment_text": {
-              "type": "string"
+              "type": "string",
+              "description": "The comment body to add."
             }
           },
           "required": [
@@ -430,13 +433,13 @@
       },
       {
         "name": "get_transitions",
-        "description": "[READ-ONLY] Get available status transitions for a ticket. Internal tickets support the Done transition only.",
+        "description": "[READ-ONLY] Get available status transitions for a ticket. Internal tickets support the Done transition only. Call before change_status if the valid transition names for this ticket aren't already known.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "issue_key": {
               "type": "string",
-              "description": "Ticket reference (Jira key or internal TKT reference)"
+              "description": "Jira issue key (e.g., PROJ-123) or internal ticket reference (e.g., TKT-000123)"
             }
           },
           "required": [
@@ -447,13 +450,13 @@
       },
       {
         "name": "change_status",
-        "description": "[ACTION] Change the status of a ticket (e.g., close, start progress, reopen). Internal tickets support Done only.",
+        "description": "[ACTION] Change the status of a ticket (e.g., close, start progress, reopen). Use transition names like 'Done', 'In Progress', 'To Do'. If the ticket is unassigned, it will be auto-assigned to the requesting user. Internal tickets support Done only.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "issue_key": {
               "type": "string",
-              "description": "Ticket reference (Jira key or internal TKT reference)"
+              "description": "Jira issue key (e.g., OPS-2148) or internal ticket reference (e.g., TKT-000123)"
             },
             "transition": {
               "type": "string",
@@ -475,7 +478,7 @@
           "properties": {
             "issue_key": {
               "type": "string",
-              "description": "Jira issue key (e.g., OPS-2148)"
+              "description": "Jira issue key (e.g., OPS-2148) or internal ticket reference (e.g., TKT-000123)"
             },
             "assignee": {
               "type": "string",
@@ -578,7 +581,7 @@
       },
       {
         "name": "create_meter_reading_task",
-        "description": "[ACTION - SENDS COMMAND TO METER] Create remote reading task for any meter type. This tool ACTIVELY COMMUNICATES with the physical meter by sending a command. Automatically routes to the correct API based on meter type from Supabase: (1) Calin V1 meters - uses PLC-based remote reading via V1 API, (2) Calin V2 meters - uses RF-based remote reading via V2 API with protocol IDs, (3) LoRaWAN meters - sends Chirpstack downlink with Calin protocol encoding. This is a TWO-STEP operation: (1) sends downlink command to meter, (2) waits 15 seconds, (3) checks uplink response from meter. Total time: approximately 15-20 seconds. IMPORTANT: Only call this tool ONCE per conversation response - do NOT batch multiple meter readings in a single response. Supports reading types: 'voltage' (line voltage), 'current' (current draw), 'power' (active power), 'energy' (accumulated energy), 'current_credit' (remaining prepaid credit), 'power_limit' (maximum power threshold setting), 'relay_status' (meter relay on/off state), 'power_down_count' (number of power outages), 'special_status' (meter error/tamper flags), 'meter_version' (firmware version). For Calin V2, you can also use numeric protocol IDs (e.g., 5 for voltage, 39 for current credit). Returns complete reading result with meter data.",
+        "description": "[ACTION - SENDS COMMAND TO METER] Create remote reading task for any meter type. This tool ACTIVELY COMMUNICATES with the physical meter by sending a command. Automatically routes to the correct API based on meter type from Supabase: (1) Calin V1 meters - uses PLC-based remote reading via V1 API, (2) Calin V2 meters - uses RF-based remote reading via V2 API with protocol IDs, (3) LoRaWAN meters - sends Chirpstack downlink with Calin protocol encoding. This is a TWO-STEP operation: (1) sends downlink command to meter, (2) waits 15 seconds, (3) checks uplink response from meter. Total time: approximately 15-20 seconds. IMPORTANT: Only call this tool ONCE per conversation response - do NOT batch multiple meter readings in a single response. Reading-type support DIFFERS by meter type (auto-detected from Supabase, not knowable in advance from this tool) — an unsupported combination fails immediately with a generic error, not a helpful one, so picking a supported type up front matters. Calin V2 supports: 'voltage', 'power', 'current_credit', 'relay_status', 'power_down_count', 'maximum_power_threshold' (the meter's configured max-power cutoff — NOT the same as 'power_limit', which V2 does not support), 'special_status', 'meter_version' — or a numeric protocol ID (e.g. 5 for voltage, 39 for current_credit). LoRaWAN supports: 'voltage', 'current', 'power', 'energy', 'current_credit', 'relay_status'. 'voltage', 'power', 'current_credit', and 'relay_status' are the only four types that work on both. 'power_limit' is not supported on EITHER V2 or LoRaWAN — do not use it unless the meter is confirmed Calin V1. Calin V1 accepts any reading_type string as-is; validity is enforced by the V1 API itself, not checked here. If the meter's type is unknown, prefer one of the four cross-supported types, or check with the user first. Returns complete reading result with meter data.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -588,7 +591,7 @@
             },
             "reading_type": {
               "type": "string",
-              "description": "Type of reading to request. Common types: 'voltage', 'current', 'power', 'energy', 'current_credit', 'power_limit', 'relay_status', 'power_down_count', 'special_status', 'meter_version'. For Calin V2, can also use numeric protocol ID (e.g., 5, 11, 39).",
+              "description": "Type of reading to request — support differs by meter type, see the tool description. 'voltage', 'power', 'current_credit', 'relay_status' work everywhere except unconfirmed V1 meters. For Calin V2, can also use a numeric protocol ID (e.g., 5, 11, 39, 46).",
               "enum": [
                 "voltage",
                 "current",
@@ -736,10 +739,12 @@
           "type": "object",
           "properties": {
             "meter_number": {
-              "type": "string"
+              "type": "string",
+              "description": "The meter number (external reference)"
             },
             "organization_id": {
-              "type": "integer"
+              "type": "integer",
+              "description": "Organization ID (injected by orchestrator)"
             }
           },
           "required": [
@@ -849,7 +854,7 @@
       },
       {
         "name": "customer_get_all_grids_status",
-        "description": "[READ-ONLY] Status dashboard for all accessible grids, including service status icons and weather.",
+        "description": "[READ-ONLY] Status dashboard for every grid the caller can access, including service status icons and weather — the multi-grid overview. For one grid in full detail (power status, capacity, DCU connectivity, per-phase inverter output), use customer_get_grid_status instead.",
         "inputSchema": {
           "type": "object",
           "properties": {}
@@ -1248,7 +1253,7 @@
     "schedule": [
       {
         "name": "schedule_user_command",
-        "description": "Schedule a message (slash command or plain text) to run later or on a recurring basis (e.g., 'daily at 9am', 'every other monday at 9am', 'monthly on the 1st at 9am').",
+        "description": "[ACTION - CREATES A SCHEDULE] Schedule a message (slash command or plain text) to run once or on a recurring basis (e.g., 'daily at 9am', 'every other monday at 9am', 'monthly on the 1st at 9am'). Use when the user wants something to run later or repeatedly, rather than right now. Returns a confirmation with the new schedule's ID and next run time (in the chat's timezone) — use list_user_schedules to see it again later.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1257,7 +1262,8 @@
               "description": "The message to schedule. Can be a slash command like '/tickets' or any regular text like 'show me the tickets assigned to anyone'"
             },
             "time_expression": {
-              "type": "string"
+              "type": "string",
+              "description": "When to run it, in natural language — a one-time time ('tomorrow at 3pm') or a recurrence ('daily at 9am', 'every monday at 9am', 'monthly on the 1st at 9am')."
             }
           },
           "required": [
@@ -1269,13 +1275,13 @@
       },
       {
         "name": "list_user_schedules",
-        "description": "List all active scheduled commands for the current chat. Shows schedule ID, command, timing, and next run time.",
+        "description": "[READ-ONLY] List scheduled commands for the current chat. Shows schedule ID, command, timing, and next run time. Active schedules only by default — pass include_inactive to also see paused and cancelled ones.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "include_inactive": {
               "type": "boolean",
-              "description": "Include paused and completed schedules",
+              "description": "Include paused and cancelled schedules alongside active ones",
               "default": false
             }
           },
@@ -1285,7 +1291,7 @@
       },
       {
         "name": "cancel_user_schedule",
-        "description": "Cancel a scheduled command by its ID. The ID can be found using list_user_schedules.",
+        "description": "[ACTION - CANCELS SCHEDULE] Permanently stop a scheduled command. Unlike pause_user_schedule, a cancelled schedule cannot be resumed — to run it again, create a new one with schedule_user_command. Find the schedule_id with list_user_schedules first if the user only described the schedule (e.g. \"the daily tickets one\").",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1302,13 +1308,13 @@
       },
       {
         "name": "pause_user_schedule",
-        "description": "Pause a recurring schedule. Can be resumed later.",
+        "description": "[ACTION - PAUSES SCHEDULE] Temporarily stop a recurring schedule without losing it. Unlike cancel_user_schedule, this can be undone with resume_user_schedule. Has no effect on one-time (non-recurring) schedules that have already fired.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "schedule_id": {
               "type": "string",
-              "description": "The schedule ID to pause"
+              "description": "The schedule ID to pause (UUID format or first 8 characters)"
             }
           },
           "required": [
@@ -1319,13 +1325,13 @@
       },
       {
         "name": "resume_user_schedule",
-        "description": "Resume a paused schedule.",
+        "description": "[ACTION - RESUMES SCHEDULE] Resume a schedule previously paused with pause_user_schedule, recalculating its next run time from now. Fails if the schedule isn't currently paused (e.g. it was cancelled, or a one-time schedule's original time has already passed — create a new schedule instead).",
         "inputSchema": {
           "type": "object",
           "properties": {
             "schedule_id": {
               "type": "string",
-              "description": "The schedule ID to resume"
+              "description": "The schedule ID to resume (UUID format or first 8 characters)"
             }
           },
           "required": [
@@ -1338,7 +1344,7 @@
     "meta": [
       {
         "name": "get_performance_report",
-        "description": "Get comprehensive bot performance report. Returns response distribution, escalation breakdown (including avg_time_to_close_minutes for resolved escalations, null if none), and feedback stats. Default: past 7 days, all organizations.",
+        "description": "[READ-ONLY] Get a comprehensive bot performance report: response-vs-escalation counts, escalation reasons and action types, avg_time_to_close_minutes for resolved escalations (null if none resolved), and feedback stats. Use for a single all-in-one summary; use the *_chart tools instead when the user wants a specific chart image, or list_escalated_messages/list_negative_feedback for individual message detail rather than aggregates.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1358,7 +1364,7 @@
       },
       {
         "name": "response_distribution_chart",
-        "description": "Generate pie chart showing bot responses vs escalations. Returns PNG image.",
+        "description": "[READ-ONLY] Generate a pie chart of the top-level split: how many bot messages were handled automatically vs. escalated to staff. The broadest of the meta charts — use escalation_types_chart, action_types_chart, or issue_type_breakdown_chart instead for a breakdown *within* one of those categories. Returns a PNG image.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1378,7 +1384,7 @@
       },
       {
         "name": "escalation_types_chart",
-        "description": "Generate pie chart showing escalation reasons breakdown. Returns PNG image.",
+        "description": "[READ-ONLY] Generate a pie chart of escalations broken down by reason (why the bot handed off to staff — e.g. user_requested, could_not_answer, staff_action_required, safety_escalation). All escalations, not just ones needing a specific staff action — for that narrower slice use action_types_chart. Returns a PNG image.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1398,7 +1404,7 @@
       },
       {
         "name": "action_types_chart",
-        "description": "Generate pie chart showing action types for staff_action_required escalations. Returns PNG image.",
+        "description": "[READ-ONLY] Generate a pie chart of only the staff_action_required escalations, broken down by which action was needed (e.g. meter_unassignment, wallet_credit, hps_power_limit, commissioning_retry). For the reason breakdown across ALL escalations, not just this subset, use escalation_types_chart instead. Returns a PNG image.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1418,7 +1424,7 @@
       },
       {
         "name": "list_escalated_messages",
-        "description": "Get list of recently escalated messages with context. Includes user message preview, reason, and timestamp.",
+        "description": "[READ-ONLY] List individual escalated messages with context — user message preview, escalation reason, and timestamp. Use for message-level detail; use escalation_types_chart or get_performance_report instead for aggregate counts. No result cap — prefer a narrower `days` window during busy periods.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1438,7 +1444,7 @@
       },
       {
         "name": "list_negative_feedback",
-        "description": "Get list of bot messages that received negative feedback (thumbs down). Includes response preview and timestamp.",
+        "description": "[READ-ONLY] List bot messages that received negative feedback (thumbs down), with response preview and timestamp. Distinct from escalations — this is explicit user dissatisfaction, not a bot handoff. No result cap — prefer a narrower `days` window during busy periods.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1458,7 +1464,7 @@
       },
       {
         "name": "issue_type_breakdown_chart",
-        "description": "Generate pie chart showing new conversation threads broken down by issue type (token, hps, meter, transaction, commissioning, other). Returns PNG image.",
+        "description": "[READ-ONLY] Generate a pie chart of NEW conversation threads broken down by issue type (token, hps, meter, transaction, commissioning, other). Different population from the other meta charts: this counts incoming conversation topics, not escalations or bot responses. Returns a PNG image.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1480,7 +1486,7 @@
     "grid_design": [
       {
         "name": "design_and_bom",
-        "description": "Create a grid design and generate Bill of Materials (BOM). This tool: 1) Creates a grid if it doesn't exist by name, 2) Creates a new design with specified parameters (every parameter the old AppSheet design form offered is accepted — technology choices, connection split, Wp/connection override, regulation constraint, 3-phase enforcement, SPD type, distances, tariff), 3) Runs auto-design sizing and BOM generation, 4) Returns energy specs, BOM items and cost summary. Call list_design_options first to see valid technology choices. Use this when users ask to create a new solar grid design or generate a BOM.",
+        "description": "[ACTION - CREATES GRID/DESIGN, WRITES BOM] Create a grid design and generate Bill of Materials (BOM). This tool: 1) Creates a grid if it doesn't exist by name, 2) Creates a new design (accepts the full parameter set — technology choices, connection split, Wp/connection override, regulation constraint, 3-phase enforcement, SPD type, distances, tariff), 3) Runs auto-design sizing and BOM generation, 4) Returns energy specs, BOM items and cost summary. Takes ~10s. Call list_design_options first to see valid technology choices. Use this when users ask to create a new solar grid design or generate a BOM.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1563,11 +1569,11 @@
             },
             "target_kwp": {
               "type": "number",
-              "description": "Target kWp to constrain the design (optional, AppSheet calculates freely if not provided)"
+              "description": "Target kWp to constrain the design (optional — the auto-design engine sizes it freely if not provided)"
             },
             "target_kwh": {
               "type": "number",
-              "description": "Target kWh to constrain the design (optional, AppSheet calculates freely if not provided)"
+              "description": "Target kWh to constrain the design (optional — the auto-design engine sizes it freely if not provided)"
             },
             "avg_service_drop_length_m": {
               "type": "number",
@@ -1650,7 +1656,7 @@
       },
       {
         "name": "find_grid",
-        "description": "Find an existing grid by name",
+        "description": "[READ-ONLY] Find an existing grid by name (fuzzy-matched) and return its record, including its id. Use to confirm a grid exists before creating a design on it, or to resolve a grid name to the id some gd_* tools require. Most design tools take grid_name directly and resolve it themselves — call this first only when you need the id or record itself.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1667,7 +1673,7 @@
       },
       {
         "name": "get_design_bom",
-        "description": "Get the Bill of Materials for an existing design",
+        "description": "[READ-ONLY] Get the Bill of Materials for an existing design. Returns whatever BOM currently exists — call trigger_bom first if none has been generated yet, or if component costs may have changed since the last one.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1684,7 +1690,7 @@
       },
       {
         "name": "update_design",
-        "description": "Update parameters on an existing design. Accepts any design parameter (not just layout distances) — e.g. wp_per_conn_override (also called Wp/conn, Wp per connection), regulation_constraint (also called Nigerian law/DARES; allowed values 'None'/'Nigeria - DARES'), max_connections, technology types (inverter_type, battery_type, mppt_type, pv_type), and the layout-derived distance fields (Avg Distance to PV Combiner (m), Distance to Feeder Pillar (m), Average Service Drop Length (m)). Use after site layout to set real cable distances, or any time a design parameter needs to change.",
+        "description": "[ACTION] Update parameters on an existing design. Accepts any design parameter (not just layout distances) — e.g. wp_per_conn_override (also called Wp/conn, Wp per connection), regulation_constraint (also called Nigerian law/DARES; allowed values 'None'/'Nigeria - DARES'), max_connections, technology types (inverter_type, battery_type, mppt_type, pv_type), and the layout-derived distance fields (Avg Distance to PV Combiner (m), Distance to Feeder Pillar (m), Average Service Drop Length (m)). Use after site layout to set real cable distances, or any time a design parameter needs to change.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1721,7 +1727,7 @@
       },
       {
         "name": "trigger_bom",
-        "description": "Trigger BOM generation for a design, wait for completion, and return results. Use when component costs may have changed — this recomputes costs from the gd_purchases ledger and replaces gd_bom_items, stamping bom_generated_at.",
+        "description": "[ACTION - WRITES BOM] Trigger BOM generation for a design, wait for completion, and return results. Takes ~10s. Use when component costs may have changed — this recomputes costs from the gd_purchases ledger and replaces gd_bom_items, stamping bom_generated_at.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1742,7 +1748,7 @@
       },
       {
         "name": "list_design_options",
-        "description": "List valid design-creation choices: technology types (inverters, batteries, MPPTs, PV panels — from the rental catalogue, with assembly classes and compatible technology families to tell them apart), technology families, SPD type options, regulation constraint options, and the form defaults applied when a parameter is omitted. Call this before design_and_bom when the user wants to choose equipment or override defaults interactively.",
+        "description": "[READ-ONLY] List valid design-creation choices: technology types (inverters, batteries, MPPTs, PV panels — from the rental catalogue, with assembly classes and compatible technology families to tell them apart), technology families, SPD type options, regulation constraint options, and the form defaults applied when a parameter is omitted. Call this before design_and_bom when the user wants to choose equipment or override defaults interactively.",
         "inputSchema": {
           "type": "object",
           "properties": {},
@@ -1752,7 +1758,7 @@
       },
       {
         "name": "list_design_technology_families",
-        "description": "List first-class design technology families/architectures such as victron and deye. Use this for requests like 'redo this design using Deye' before editing individual equipment fields. Each family includes its default design parameters, compatible subassemblies from gd_subassemblies.design_types, and the matching site-layout type.",
+        "description": "[READ-ONLY] List first-class design technology families/architectures such as victron and deye. Use this for requests like 'redo this design using Deye' before editing individual equipment fields. Each family includes its default design parameters, compatible subassemblies from gd_subassemblies.design_types, and the matching site-layout type.",
         "inputSchema": {
           "type": "object",
           "properties": {},
@@ -1762,7 +1768,7 @@
       },
       {
         "name": "create_design",
-        "description": "Create a new design row for a grid WITHOUT auto-sizing or generating a BOM by default — the low-drama 'just record it' tool. Contrast with design_and_bom, which defaults to auto-sizing AND generating a BOM in one call. Creates the grid if it doesn't exist by name. `params` accepts the same fields as design_and_bom's flat schema (technology choices, connection split, wp_per_conn_override — also called Wp/conn, Wp per connection — regulation_constraint — also called Nigerian law/DARES, allowed values 'None'/'Nigeria - DARES' — 3-phase enforcement, SPD type, distances, tariff), just as a JSON blob instead of individual arguments. Set run_auto_design and/or generate_bom to true to also size and/or BOM the design in the same call.",
+        "description": "[ACTION - CREATES GRID/DESIGN] Create a new design row for a grid WITHOUT auto-sizing or generating a BOM by default — the low-drama 'just record it' tool. Contrast with design_and_bom, which defaults to auto-sizing AND generating a BOM in one call. Creates the grid if it doesn't exist by name. `params` accepts the same fields as design_and_bom's flat schema (technology choices, connection split, wp_per_conn_override — also called Wp/conn, Wp per connection — regulation_constraint — also called Nigerian law/DARES, allowed values 'None'/'Nigeria - DARES' — 3-phase enforcement, SPD type, distances, tariff), just as a JSON blob instead of individual arguments. Set run_auto_design and/or generate_bom to true to also size and/or BOM the design in the same call.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1799,7 +1805,7 @@
       },
       {
         "name": "get_design",
-        "description": "Return current design parameters, energy specs, and design_parameters for an existing design — use before proposing a parameter change so you can quote current values.",
+        "description": "[READ-ONLY] Return current design parameters, energy specs, and design_parameters for an existing design — use before proposing a parameter change so you can quote current values.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1816,7 +1822,7 @@
       },
       {
         "name": "list_design_artifacts",
-        "description": "List artifact types (maps, layouts, QGIS projects, etc.) generated for this design, with version counts and the latest version's metadata. Use before get_design_artifact to see what's available.",
+        "description": "[READ-ONLY] List artifact types (maps, layouts, QGIS projects, etc.) generated for this design, with version counts and the latest version's metadata. Use before get_design_artifact to see what's available.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1833,7 +1839,7 @@
       },
       {
         "name": "get_design_artifact",
-        "description": "Fetch one version of a generated design artifact (e.g. a site map image or QGIS project file). `version` is a 0-based index into the artifact's version history, newest first — 0 is the latest version, 1 is the one before that, etc. Stale or otherwise unreachable versions (files removed from Drive) are automatically skipped in favor of the next available older version. The returned entry includes a `web_view_link` — relay this link to the user (Telegram unfurls Drive links).",
+        "description": "[READ-ONLY] Fetch one version of a generated design artifact (e.g. a site map image or QGIS project file). `version` is a 0-based index into the artifact's version history, newest first — 0 is the latest version, 1 is the one before that, etc. Stale or otherwise unreachable versions (files removed from Drive) are automatically skipped in favor of the next available older version. The returned entry includes a `web_view_link` — relay this link to the user (Telegram unfurls Drive links).",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1860,7 +1866,7 @@
       },
       {
         "name": "run_auto_design",
-        "description": "Re-run sizing (inverter/battery/MPPT/PV selection, kWp/kWh/kVA) for an existing design, optionally applying parameter overrides first. WARNING: re-running auto-design REPLACES ALL of the design's subassemblies. If any subassembly on this design has been manually added, removed, or resized, the call is blocked unless force=true — which discards those manual edits.",
+        "description": "[ACTION - REPLACES SUBASSEMBLIES] Re-run sizing (inverter/battery/MPPT/PV selection, kWp/kWh/kVA) for an existing design, optionally applying parameter overrides first. Takes ~10s. WARNING: re-running auto-design REPLACES ALL of the design's subassemblies. If any subassembly on this design has been manually added, removed, or resized, the call is blocked unless force=true — which discards those manual edits.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1887,7 +1893,7 @@
       },
       {
         "name": "change_design_technology",
-        "description": "Change an existing design to a first-class technology family such as 'deye' or 'victron'. Prefer this over manually editing inverter_type/battery_type for requests like 'redo this design using Deye'. Applies the family-compatible equipment defaults, optionally reruns auto-design and BOM, and returns the matching site_layout_type hint for LPP artifact reruns.",
+        "description": "[ACTION - REPLACES SUBASSEMBLIES] Change an existing design to a first-class technology family such as 'deye' or 'victron'. Prefer this over manually editing inverter_type/battery_type for requests like 'redo this design using Deye'. Applies the family-compatible equipment defaults, optionally reruns auto-design and BOM, and returns the matching site_layout_type hint for LPP artifact reruns.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1928,7 +1934,7 @@
       },
       {
         "name": "duplicate_design",
-        "description": "Create a new design cloned from an existing one, with optional parameter overrides — e.g. 'new design like X but with Wp/conn 150 instead of 120'. Clones onto the same grid as the source design.",
+        "description": "[ACTION - CREATES DESIGN] Create a new design cloned from an existing one, with optional parameter overrides — e.g. 'new design like X but with Wp/conn 150 instead of 120'. Clones onto the same grid as the source design.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1965,7 +1971,7 @@
       },
       {
         "name": "list_design_subassemblies",
-        "description": "List the active subassembly instances on an existing design.",
+        "description": "[READ-ONLY] List the active subassembly instances on an existing design, each with its own row id (the design_subassembly_row_id that remove_subassembly/set_subassembly_qty require — not the design id), quantity, and computed kWp/kWh/kVA. Call before either of those two tools to get the row id to act on.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -1982,7 +1988,7 @@
       },
       {
         "name": "add_subassembly",
-        "description": "Add a subassembly instance to an existing design by catalogue name (fuzzy-matched — if the name is ambiguous, the closest candidates are returned instead of an arbitrary guess). Marks the design as manually-edited, which blocks a future run_auto_design/update_design rerun_auto_design call unless force=true is passed there.",
+        "description": "[ACTION] Add a subassembly instance to an existing design by catalogue name (fuzzy-matched — if the name is ambiguous, the closest candidates are returned instead of an arbitrary guess). Marks the design as manually-edited, which blocks a future run_auto_design/update_design rerun_auto_design call unless force=true is passed there.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2009,7 +2015,7 @@
       },
       {
         "name": "remove_subassembly",
-        "description": "Remove (soft-delete) a subassembly instance from a design. Requires the design_subassembly_row_id from list_design_subassemblies — NOT the design id. Marks the design as manually-edited, which blocks a future run_auto_design/update_design rerun_auto_design call unless force=true is passed there.",
+        "description": "[ACTION] Remove (soft-delete) a subassembly instance from a design. Requires the design_subassembly_row_id from list_design_subassemblies — NOT the design id. Marks the design as manually-edited, which blocks a future run_auto_design/update_design rerun_auto_design call unless force=true is passed there.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2026,7 +2032,7 @@
       },
       {
         "name": "set_subassembly_qty",
-        "description": "Change the quantity of a subassembly instance already on a design (kWp/kWh/kVA on the row are scaled proportionally). Requires the design_subassembly_row_id from list_design_subassemblies — NOT the design id. Marks the design as manually-edited, which blocks a future run_auto_design/update_design rerun_auto_design call unless force=true is passed there.",
+        "description": "[ACTION] Change the quantity of a subassembly instance already on a design (kWp/kWh/kVA on the row are scaled proportionally). Requires the design_subassembly_row_id from list_design_subassemblies — NOT the design id. Marks the design as manually-edited, which blocks a future run_auto_design/update_design rerun_auto_design call unless force=true is passed there.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2048,7 +2054,7 @@
       },
       {
         "name": "list_subassembly_components",
-        "description": "Catalogue-level (staff-only): lists what a subassembly TEMPLATE is made of — components and/or nested subassemblies — as opposed to list_design_subassemblies, which lists subassembly instances on a specific design.",
+        "description": "[READ-ONLY] Catalogue-level (staff-only): lists what a subassembly TEMPLATE is made of — components and/or nested subassemblies — as opposed to list_design_subassemblies, which lists subassembly instances on a specific design.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2065,7 +2071,7 @@
       },
       {
         "name": "add_subassembly_component",
-        "description": "Catalogue-level (staff-only): add a child component or nested subassembly to a subassembly TEMPLATE. This is a GLOBAL catalogue edit — it affects EVERY design that uses this subassembly template on its next BOM/auto-design regen, not just one design. Exactly one of component_name or child_subassembly_name must be given. Nesting a subassembly inside something it already (directly or indirectly) contains is rejected as a circular reference. Consider duplicate_subassembly first if you want a design-specific variant instead of changing the shared template.",
+        "description": "[ACTION - GLOBAL CATALOGUE EDIT] Catalogue-level (staff-only): add a child component or nested subassembly to a subassembly TEMPLATE. This is a GLOBAL catalogue edit — it affects EVERY design that uses this subassembly template on its next BOM/auto-design regen, not just one design. Exactly one of component_name or child_subassembly_name must be given. Nesting a subassembly inside something it already (directly or indirectly) contains is rejected as a circular reference. Consider duplicate_subassembly first if you want a design-specific variant instead of changing the shared template.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2099,7 +2105,7 @@
       },
       {
         "name": "remove_subassembly_component",
-        "description": "Catalogue-level (staff-only): remove a child component/subassembly from a subassembly TEMPLATE. GLOBAL catalogue edit — affects every design using this template on its next BOM/auto-design regen.",
+        "description": "[ACTION - GLOBAL CATALOGUE EDIT] Catalogue-level (staff-only): remove a child component/subassembly from a subassembly TEMPLATE. GLOBAL catalogue edit — affects every design using this template on its next BOM/auto-design regen.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2116,7 +2122,7 @@
       },
       {
         "name": "set_subassembly_component_qty",
-        "description": "Catalogue-level (staff-only): change the quantity of a child component/subassembly within a subassembly TEMPLATE. GLOBAL catalogue edit — affects every design using this template on its next BOM/auto-design regen.",
+        "description": "[ACTION - GLOBAL CATALOGUE EDIT] Catalogue-level (staff-only): change the quantity of a child component/subassembly within a subassembly TEMPLATE. GLOBAL catalogue edit — affects every design using this template on its next BOM/auto-design regen.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2138,7 +2144,7 @@
       },
       {
         "name": "duplicate_subassembly",
-        "description": "Catalogue-level (staff-only): clone a subassembly TEMPLATE (all fields plus its full component list) under a new description. Use before editing composition to create a design-specific variant without affecting the original template used elsewhere.",
+        "description": "[ACTION - CREATES CATALOGUE TEMPLATE] Catalogue-level (staff-only): clone a subassembly TEMPLATE (all fields plus its full component list) under a new description. Use before editing composition to create a design-specific variant without affecting the original template used elsewhere.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2160,7 +2166,7 @@
       },
       {
         "name": "gd_describe_tables",
-        "description": "Returns the full registry of gd_* tables available to gd_list_rows/gd_get_row/gd_upsert_row/gd_delete_row, each with its scope, writable columns, and a one-line description. Scopes: 'grid' tables are anchored to a single grid/site and require a grid filter on every read/write; 'catalog' tables are global reference data (shared across every grid) and are staff-only, since a write there affects every grid that references it; 'denied' tables (identity/permission surfaces) are never accessible through generic CRUD. Call this BEFORE attempting to use the other four generic tools — it's the schema map that tells you which table to use and what columns it accepts.",
+        "description": "[READ-ONLY] Returns the full registry of gd_* tables available to gd_list_rows/gd_get_row/gd_upsert_row/gd_delete_row, each with its scope, writable columns, and a one-line description. Scopes: 'grid' tables are anchored to a single grid/site and require a grid filter on every read/write; 'catalog' tables are global reference data (shared across every grid) and are staff-only, since a write there affects every grid that references it; 'denied' tables (identity/permission surfaces) are never accessible through generic CRUD. Call this BEFORE attempting to use the other four generic tools — it's the schema map that tells you which table to use and what columns it accepts.",
         "inputSchema": {
           "type": "object",
           "properties": {}
@@ -2169,7 +2175,7 @@
       },
       {
         "name": "gd_list_rows",
-        "description": "Generic row listing for any gd_* table from gd_describe_tables. For 'grid'-scoped tables you MUST supply a grid filter — either grid_name or filters['grid']/filters['grid_id'] — otherwise the call is rejected; 'catalog' tables are staff-only and ignore grid_name. Prefer the dedicated Phase A tools (get_design, list_design_subassemblies, list_subassembly_components, etc.) for common operations — reserve this for the long tail of tables that don't have a purpose-built tool.",
+        "description": "[READ-ONLY] Generic row listing for any gd_* table from gd_describe_tables. For 'grid'-scoped tables you MUST supply a grid filter — either grid_name or filters['grid']/filters['grid_id'] — otherwise the call is rejected; 'catalog' tables are staff-only and ignore grid_name. Prefer the dedicated Phase A tools (get_design, list_design_subassemblies, list_subassembly_components, etc.) for common operations — reserve this for the long tail of tables that don't have a purpose-built tool.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2204,7 +2210,7 @@
       },
       {
         "name": "gd_get_row",
-        "description": "Fetch a single row by id from any gd_* table from gd_describe_tables, with the same scope-based access rules as gd_list_rows (grid-scoped tables check the row's own grid; catalog tables are staff-only; denied tables are never accessible).",
+        "description": "[READ-ONLY] Fetch a single row by id from any gd_* table from gd_describe_tables, with the same scope-based access rules as gd_list_rows (grid-scoped tables check the row's own grid; catalog tables are staff-only; denied tables are never accessible).",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2226,7 +2232,7 @@
       },
       {
         "name": "gd_upsert_row",
-        "description": "Create or update a row in any gd_* table from gd_describe_tables. Omit row_id to create a new row; provide it to update an existing one. Call gd_describe_tables first to see this table's writable_columns — unknown columns are rejected. created_by/updated_by are stamped automatically from the caller and can never be set here. IMPORTANT: writes to a 'catalog'-scope table affect EVERY grid that references that row — confirm with the user before writing to a catalog table. Soft-deleted rows are NOT resurrected by omitting 'active' from values (there is no 'active' column in any writable_columns set; it's server-managed — use gd_delete_row for delete, not an upsert). Moving a row's grid-anchor column (e.g. a design's 'grid') to a different grid re-checks access against the new grid, not just the row's current one.",
+        "description": "[ACTION] Create or update a row in any gd_* table from gd_describe_tables. Omit row_id to create a new row; provide it to update an existing one. Call gd_describe_tables first to see this table's writable_columns — unknown columns are rejected. created_by/updated_by are stamped automatically from the caller and can never be set here. IMPORTANT: writes to a 'catalog'-scope table affect EVERY grid that references that row — confirm with the user before writing to a catalog table. Soft-deleted rows are NOT resurrected by omitting 'active' from values (there is no 'active' column in any writable_columns set; it's server-managed — use gd_delete_row for delete, not an upsert). Moving a row's grid-anchor column (e.g. a design's 'grid') to a different grid re-checks access against the new grid, not just the row's current one.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2252,7 +2258,7 @@
       },
       {
         "name": "gd_delete_row",
-        "description": "SOFT delete a row (sets active=false) in any gd_* table from gd_describe_tables — never a hard delete. Check with the user before deleting rows in a 'catalog'-scope table, since that has global impact across every grid that references it. No automatic referential check is performed — other rows may still reference this one after it's deactivated.",
+        "description": "[ACTION - SOFT DELETE] SOFT delete a row (sets active=false) in any gd_* table from gd_describe_tables — never a hard delete. Check with the user before deleting rows in a 'catalog'-scope table, since that has global impact across every grid that references it. No automatic referential check is performed — other rows may still reference this one after it's deactivated.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2330,12 +2336,18 @@
     "knowledge": [
       {
         "name": "summarize_knowledge",
-        "description": "Search the internal knowledge base for structured documentation on technical procedures.",
+        "description": "[READ-ONLY] Search the internal knowledge base and return an LLM-generated summary of relevant documentation on a technical topic or procedure, with a footer noting which live-data tools apply. Takes a few seconds (semantic search + summarization). For a specific known module by slug rather than an open-ended topic search, get_knowledge_module is more direct and doesn't lose detail to summarization.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "topic": {
-              "type": "string"
+              "type": "string",
+              "description": "Topic or procedure to search for and summarize (e.g. \"meter commissioning steps\", \"HPS power limit tiers\")."
+            },
+            "max_words": {
+              "type": "integer",
+              "description": "Target length of the generated summary in words.",
+              "default": 250
             }
           },
           "required": [
@@ -2345,8 +2357,25 @@
         "visible_to_customer": false
       },
       {
+        "name": "get_knowledge_module",
+        "description": "[READ-ONLY] Fetch the full body of a technical knowledge module by slug. System prompts pin a catalog of on-demand modules (slug and one-line summary only) under a '# Available Knowledge' section when relevant -- call this to retrieve a module's full content once you've decided it's relevant to the current question.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "slug": {
+              "type": "string",
+              "description": "Module slug from the Available Knowledge catalog."
+            }
+          },
+          "required": [
+            "slug"
+          ]
+        },
+        "visible_to_customer": false
+      },
+      {
         "name": "list_document_types",
-        "description": "List the types of documents available in the knowledge base with counts.",
+        "description": "[READ-ONLY] List the types of documents available in the knowledge base, with a count of each — a quick orientation before a targeted search.",
         "inputSchema": {
           "type": "object",
           "properties": {}
@@ -2365,7 +2394,8 @@
             },
             "country": {
               "type": "string",
-              "description": "Two-letter country code to bias results (e.g., 'ng' for Nigeria, 'cd' for DRC). Optional."
+              "description": "Two-letter country code to bias results (e.g., 'ng' for Nigeria, 'cd' for DRC). Defaults to 'ng'. Pass an empty string for no country bias.",
+              "default": "ng"
             },
             "topic": {
               "type": "string",
@@ -2411,7 +2441,7 @@
       },
       {
         "name": "find_document",
-        "description": "Search Google Drive for a document by name fragment or document code (e.g., 'DOC-1234', 'ExampleSite Technical Review'). Returns the document name, URL, and Google Doc ID if exactly one match is found. If multiple matches are found, returns an error listing them so the user can provide a specific link. Use this when a user references a document by name or code and you need its ID for editing or reading.",
+        "description": "[READ-ONLY] Search Google Drive for a document by name fragment or document code (e.g., 'DOC-1234', 'ExampleSite Technical Review'). Returns the document name, URL, and Google Doc ID if exactly one match is found. If multiple matches are found, returns an error listing them so the user can provide a specific link. Use this when a user references a document by name or code and you need its ID for editing or reading.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2428,7 +2458,7 @@
       },
       {
         "name": "read_document",
-        "description": "Read the full content of a Google Doc as markdown. Use this to understand the document's structure, style, and existing content before editing. Requires a document ID — use find_document first if you only have a name.",
+        "description": "[READ-ONLY] Read the full content of a Google Doc as markdown. Use this to understand the document's structure, style, and existing content before editing. Requires a document ID — use find_document first if you only have a name.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2467,7 +2497,7 @@
       },
       {
         "name": "scan_doc_comments",
-        "description": "Scan a Google Doc for pending @anansibot comments. Returns a list of comments with their highlighted text, instruction, and comment ID. Use this before edit_doc_section to see what edits are requested in a document.",
+        "description": "[READ-ONLY] Scan a Google Doc for pending @anansibot comments. Returns a list of comments with their highlighted text, instruction, and comment ID. Use this before edit_doc_section to see what edits are requested in a document.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2484,7 +2514,7 @@
       },
       {
         "name": "edit_doc_section",
-        "description": "Edit a section of a Google Doc with formatted markdown. SAFETY: This is a destructive write operation. Before calling: (1) confirm with the user which document and section will be edited, (2) never assume a document ID from context — require an explicit file ID. If the user provides a name, use find_document first. If find_document returns 2+ results, ask the user which one. Supports: **bold**, *italic*, ## headings, - bullets, 1. numbered lists, | tables |, [links](url).",
+        "description": "[ACTION - DESTRUCTIVE GOOGLE DOC WRITE] Edit a section of a Google Doc with formatted markdown, overwriting the existing section text. Before calling: (1) confirm with the user which document and section will be edited, (2) never assume a document ID from context — require an explicit file ID. If the user provides a name, use find_document first. If find_document returns 2+ results, ask the user which one. Supports: **bold**, *italic*, ## headings, - bullets, 1. numbered lists, | tables |, [links](url).",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -2536,7 +2566,7 @@
       },
       {
         "name": "get_import_prohibition_list",
-        "description": "[READ-ONLY] Fetch the current Nigeria import prohibition list from the Nigeria Customs Service website. Returns all categories of absolutely prohibited imports.",
+        "description": "[READ-ONLY] Fetch the current Nigeria import prohibition list from the Nigeria Customs Service website, cached for up to 1 hour (first call after expiry takes a few seconds; cached calls are instant). Returns all categories of absolutely prohibited imports.",
         "inputSchema": {
           "type": "object",
           "properties": {}

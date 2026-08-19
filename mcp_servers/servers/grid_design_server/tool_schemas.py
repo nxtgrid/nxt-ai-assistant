@@ -16,15 +16,14 @@ whether a non-staff user may see a tool, so it is load-bearing, not decoration.
 from typing import Any, Dict, List
 
 TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
-  'description': 'Create a grid design and generate Bill of Materials (BOM). This tool: 1) '
-                 "Creates a grid if it doesn't exist by name, 2) Creates a new design with "
-                 'specified parameters (every parameter the old AppSheet design form offered '
-                 'is accepted — technology choices, connection split, Wp/connection override, '
-                 'regulation constraint, 3-phase enforcement, SPD type, distances, tariff), 3) '
-                 'Runs auto-design sizing and BOM generation, 4) Returns energy specs, BOM '
-                 'items and cost summary. Call list_design_options first to see valid '
-                 'technology choices. Use this when users ask to create a new solar grid '
-                 'design or generate a BOM.',
+  'description': '[ACTION - CREATES GRID/DESIGN, WRITES BOM] Create a grid design and generate Bill of Materials (BOM). This tool: 1) '
+                 "Creates a grid if it doesn't exist by name, 2) Creates a new design "
+                 '(accepts the full parameter set — technology choices, connection split, '
+                 'Wp/connection override, regulation constraint, 3-phase enforcement, SPD '
+                 'type, distances, tariff), 3) Runs auto-design sizing and BOM generation, '
+                 '4) Returns energy specs, BOM items and cost summary. Takes ~10s. Call '
+                 'list_design_options first to see valid technology choices. Use this when '
+                 'users ask to create a new solar grid design or generate a BOM.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid (will be '
@@ -101,14 +100,14 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                                                   'default': False},
                                  'target_kwp': {'type': 'number',
                                                 'description': 'Target kWp to constrain the '
-                                                               'design (optional, AppSheet '
-                                                               'calculates freely if not '
-                                                               'provided)'},
+                                                               'design (optional — the '
+                                                               'auto-design engine sizes it '
+                                                               'freely if not provided)'},
                                  'target_kwh': {'type': 'number',
                                                 'description': 'Target kWh to constrain the '
-                                                               'design (optional, AppSheet '
-                                                               'calculates freely if not '
-                                                               'provided)'},
+                                                               'design (optional — the '
+                                                               'auto-design engine sizes it '
+                                                               'freely if not provided)'},
                                  'avg_service_drop_length_m': {'type': 'number',
                                                                'description': 'Average service '
                                                                               'drop cable '
@@ -225,14 +224,20 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['grid_name', 'design_name', 'max_connections']},
   'visible_to_customer': False},
  {'name': 'find_grid',
-  'description': 'Find an existing grid by name',
+  'description': '[READ-ONLY] Find an existing grid by name (fuzzy-matched) and return its '
+                 'record, including its id. Use to confirm a grid exists before creating a '
+                 'design on it, or to resolve a grid name to the id some gd_* tools require. '
+                 'Most design tools take grid_name directly and resolve it themselves — call '
+                 'this first only when you need the id or record itself.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid to find'}},
                   'required': ['grid_name']},
   'visible_to_customer': False},
  {'name': 'get_design_bom',
-  'description': 'Get the Bill of Materials for an existing design',
+  'description': '[READ-ONLY] Get the Bill of Materials for an existing design. Returns '
+                 'whatever BOM currently exists — call trigger_bom first if none has been '
+                 'generated yet, or if component costs may have changed since the last one.',
   'inputSchema': {'type': 'object',
                   'properties': {'design_id': {'type': 'string',
                                                'description': 'ID of the design to get BOM '
@@ -240,7 +245,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_id']},
   'visible_to_customer': False},
  {'name': 'update_design',
-  'description': 'Update parameters on an existing design. Accepts any design parameter (not '
+  'description': '[ACTION] Update parameters on an existing design. Accepts any design parameter (not '
                  'just layout distances) — e.g. wp_per_conn_override (also called Wp/conn, Wp '
                  'per connection), regulation_constraint (also called Nigerian law/DARES; '
                  "allowed values 'None'/'Nigeria - DARES'), max_connections, technology types "
@@ -287,10 +292,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_id', 'updates']},
   'visible_to_customer': False},
  {'name': 'trigger_bom',
-  'description': 'Trigger BOM generation for a design, wait for completion, and return '
-                 'results. Use when component costs may have changed — this recomputes costs '
-                 'from the gd_purchases ledger and replaces gd_bom_items, stamping '
-                 'bom_generated_at.',
+  'description': '[ACTION - WRITES BOM] Trigger BOM generation for a design, wait for '
+                 'completion, and return results. Takes ~10s. Use when component costs may '
+                 'have changed — this recomputes costs from the gd_purchases ledger and '
+                 'replaces gd_bom_items, stamping bom_generated_at.',
   'inputSchema': {'type': 'object',
                   'properties': {'design_id': {'type': 'string',
                                                'description': 'UNIQUEID of the design to '
@@ -301,7 +306,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_id']},
   'visible_to_customer': False},
  {'name': 'list_design_options',
-  'description': 'List valid design-creation choices: technology types (inverters, batteries, '
+  'description': '[READ-ONLY] List valid design-creation choices: technology types (inverters, batteries, '
                  'MPPTs, PV panels — from the rental catalogue, with assembly classes and '
                  'compatible technology families to tell them apart), technology families, SPD '
                  'type options, regulation constraint options, and the form defaults applied '
@@ -310,7 +315,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
   'inputSchema': {'type': 'object', 'properties': {}, 'required': []},
   'visible_to_customer': False},
  {'name': 'list_design_technology_families',
-  'description': 'List first-class design technology families/architectures such as victron '
+  'description': '[READ-ONLY] List first-class design technology families/architectures such as victron '
                  "and deye. Use this for requests like 'redo this design using Deye' before "
                  'editing individual equipment fields. Each family includes its default design '
                  'parameters, compatible subassemblies from gd_subassemblies.design_types, and '
@@ -318,7 +323,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
   'inputSchema': {'type': 'object', 'properties': {}, 'required': []},
   'visible_to_customer': False},
  {'name': 'create_design',
-  'description': 'Create a new design row for a grid WITHOUT auto-sizing or generating a BOM '
+  'description': '[ACTION - CREATES GRID/DESIGN] Create a new design row for a grid WITHOUT auto-sizing or generating a BOM '
                  "by default — the low-drama 'just record it' tool. Contrast with "
                  'design_and_bom, which defaults to auto-sizing AND generating a BOM in one '
                  "call. Creates the grid if it doesn't exist by name. `params` accepts the "
@@ -365,7 +370,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['grid_name', 'design_name']},
   'visible_to_customer': False},
  {'name': 'get_design',
-  'description': 'Return current design parameters, energy specs, and design_parameters for an '
+  'description': '[READ-ONLY] Return current design parameters, energy specs, and design_parameters for an '
                  'existing design — use before proposing a parameter change so you can quote '
                  'current values.',
   'inputSchema': {'type': 'object',
@@ -375,7 +380,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_id']},
   'visible_to_customer': False},
  {'name': 'list_design_artifacts',
-  'description': 'List artifact types (maps, layouts, QGIS projects, etc.) generated for this '
+  'description': '[READ-ONLY] List artifact types (maps, layouts, QGIS projects, etc.) generated for this '
                  "design, with version counts and the latest version's metadata. Use before "
                  "get_design_artifact to see what's available.",
   'inputSchema': {'type': 'object',
@@ -384,7 +389,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_id']},
   'visible_to_customer': False},
  {'name': 'get_design_artifact',
-  'description': 'Fetch one version of a generated design artifact (e.g. a site map image or '
+  'description': '[READ-ONLY] Fetch one version of a generated design artifact (e.g. a site map image or '
                  "QGIS project file). `version` is a 0-based index into the artifact's version "
                  'history, newest first — 0 is the latest version, 1 is the one before that, '
                  'etc. Stale or otherwise unreachable versions (files removed from Drive) are '
@@ -414,8 +419,8 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_id', 'artifact_type']},
   'visible_to_customer': False},
  {'name': 'run_auto_design',
-  'description': 'Re-run sizing (inverter/battery/MPPT/PV selection, kWp/kWh/kVA) for an '
-                 'existing design, optionally applying parameter overrides first. WARNING: '
+  'description': '[ACTION - REPLACES SUBASSEMBLIES] Re-run sizing (inverter/battery/MPPT/PV selection, kWp/kWh/kVA) for an '
+                 'existing design, optionally applying parameter overrides first. Takes ~10s. WARNING: '
                  "re-running auto-design REPLACES ALL of the design's subassemblies. If any "
                  'subassembly on this design has been manually added, removed, or resized, the '
                  'call is blocked unless force=true — which discards those manual edits.',
@@ -440,7 +445,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_id']},
   'visible_to_customer': False},
  {'name': 'change_design_technology',
-  'description': "Change an existing design to a first-class technology family such as 'deye' "
+  'description': "[ACTION - REPLACES SUBASSEMBLIES] Change an existing design to a first-class technology family such as 'deye' "
                  "or 'victron'. Prefer this over manually editing inverter_type/battery_type "
                  "for requests like 'redo this design using Deye'. Applies the "
                  'family-compatible equipment defaults, optionally reruns auto-design and BOM, '
@@ -471,7 +476,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_id', 'technology_family']},
   'visible_to_customer': False},
  {'name': 'duplicate_design',
-  'description': 'Create a new design cloned from an existing one, with optional parameter '
+  'description': '[ACTION - CREATES DESIGN] Create a new design cloned from an existing one, with optional parameter '
                  "overrides — e.g. 'new design like X but with Wp/conn 150 instead of 120'. "
                  'Clones onto the same grid as the source design.',
   'inputSchema': {'type': 'object',
@@ -501,14 +506,18 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['source_design_id', 'new_design_name']},
   'visible_to_customer': False},
  {'name': 'list_design_subassemblies',
-  'description': 'List the active subassembly instances on an existing design.',
+  'description': '[READ-ONLY] List the active subassembly instances on an existing design, '
+                 'each with its own row id (the design_subassembly_row_id that '
+                 'remove_subassembly/set_subassembly_qty require — not the design id), '
+                 'quantity, and computed kWp/kWh/kVA. Call before either of those two tools to '
+                 'get the row id to act on.',
   'inputSchema': {'type': 'object',
                   'properties': {'design_id': {'type': 'string',
                                                'description': 'UNIQUEID of the design'}},
                   'required': ['design_id']},
   'visible_to_customer': False},
  {'name': 'add_subassembly',
-  'description': 'Add a subassembly instance to an existing design by catalogue name '
+  'description': '[ACTION] Add a subassembly instance to an existing design by catalogue name '
                  '(fuzzy-matched — if the name is ambiguous, the closest candidates are '
                  'returned instead of an arbitrary guess). Marks the design as '
                  'manually-edited, which blocks a future run_auto_design/update_design '
@@ -528,7 +537,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_id', 'subassembly_name', 'qty']},
   'visible_to_customer': False},
  {'name': 'remove_subassembly',
-  'description': 'Remove (soft-delete) a subassembly instance from a design. Requires the '
+  'description': '[ACTION] Remove (soft-delete) a subassembly instance from a design. Requires the '
                  'design_subassembly_row_id from list_design_subassemblies — NOT the design '
                  'id. Marks the design as manually-edited, which blocks a future '
                  'run_auto_design/update_design rerun_auto_design call unless force=true is '
@@ -545,7 +554,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_subassembly_row_id']},
   'visible_to_customer': False},
  {'name': 'set_subassembly_qty',
-  'description': 'Change the quantity of a subassembly instance already on a design '
+  'description': '[ACTION] Change the quantity of a subassembly instance already on a design '
                  '(kWp/kWh/kVA on the row are scaled proportionally). Requires the '
                  'design_subassembly_row_id from list_design_subassemblies — NOT the design '
                  'id. Marks the design as manually-edited, which blocks a future '
@@ -566,7 +575,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['design_subassembly_row_id', 'qty']},
   'visible_to_customer': False},
  {'name': 'list_subassembly_components',
-  'description': 'Catalogue-level (staff-only): lists what a subassembly TEMPLATE is made of — '
+  'description': '[READ-ONLY] Catalogue-level (staff-only): lists what a subassembly TEMPLATE is made of — '
                  'components and/or nested subassemblies — as opposed to '
                  'list_design_subassemblies, which lists subassembly instances on a specific '
                  'design.',
@@ -577,7 +586,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['subassembly_id']},
   'visible_to_customer': False},
  {'name': 'add_subassembly_component',
-  'description': 'Catalogue-level (staff-only): add a child component or nested subassembly to '
+  'description': '[ACTION - GLOBAL CATALOGUE EDIT] Catalogue-level (staff-only): add a child component or nested subassembly to '
                  'a subassembly TEMPLATE. This is a GLOBAL catalogue edit — it affects EVERY '
                  'design that uses this subassembly template on its next BOM/auto-design '
                  'regen, not just one design. Exactly one of component_name or '
@@ -619,7 +628,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['subassembly_id']},
   'visible_to_customer': False},
  {'name': 'remove_subassembly_component',
-  'description': 'Catalogue-level (staff-only): remove a child component/subassembly from a '
+  'description': '[ACTION - GLOBAL CATALOGUE EDIT] Catalogue-level (staff-only): remove a child component/subassembly from a '
                  'subassembly TEMPLATE. GLOBAL catalogue edit — affects every design using '
                  'this template on its next BOM/auto-design regen.',
   'inputSchema': {'type': 'object',
@@ -630,7 +639,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['row_id']},
   'visible_to_customer': False},
  {'name': 'set_subassembly_component_qty',
-  'description': 'Catalogue-level (staff-only): change the quantity of a child '
+  'description': '[ACTION - GLOBAL CATALOGUE EDIT] Catalogue-level (staff-only): change the quantity of a child '
                  'component/subassembly within a subassembly TEMPLATE. GLOBAL catalogue edit — '
                  'affects every design using this template on its next BOM/auto-design regen.',
   'inputSchema': {'type': 'object',
@@ -644,7 +653,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['row_id', 'qty']},
   'visible_to_customer': False},
  {'name': 'duplicate_subassembly',
-  'description': 'Catalogue-level (staff-only): clone a subassembly TEMPLATE (all fields plus '
+  'description': '[ACTION - CREATES CATALOGUE TEMPLATE] Catalogue-level (staff-only): clone a subassembly TEMPLATE (all fields plus '
                  'its full component list) under a new description. Use before editing '
                  'composition to create a design-specific variant without affecting the '
                  'original template used elsewhere.',
@@ -659,7 +668,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['source_subassembly_id', 'new_description']},
   'visible_to_customer': False},
  {'name': 'gd_describe_tables',
-  'description': 'Returns the full registry of gd_* tables available to '
+  'description': '[READ-ONLY] Returns the full registry of gd_* tables available to '
                  'gd_list_rows/gd_get_row/gd_upsert_row/gd_delete_row, each with its scope, '
                  "writable columns, and a one-line description. Scopes: 'grid' tables are "
                  'anchored to a single grid/site and require a grid filter on every '
@@ -672,7 +681,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
   'inputSchema': {'type': 'object', 'properties': {}},
   'visible_to_customer': False},
  {'name': 'gd_list_rows',
-  'description': 'Generic row listing for any gd_* table from gd_describe_tables. For '
+  'description': '[READ-ONLY] Generic row listing for any gd_* table from gd_describe_tables. For '
                  "'grid'-scoped tables you MUST supply a grid filter — either grid_name or "
                  "filters['grid']/filters['grid_id'] — otherwise the call is rejected; "
                  "'catalog' tables are staff-only and ignore grid_name. Prefer the dedicated "
@@ -703,7 +712,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['table']},
   'visible_to_customer': False},
  {'name': 'gd_get_row',
-  'description': 'Fetch a single row by id from any gd_* table from gd_describe_tables, with '
+  'description': '[READ-ONLY] Fetch a single row by id from any gd_* table from gd_describe_tables, with '
                  'the same scope-based access rules as gd_list_rows (grid-scoped tables check '
                  "the row's own grid; catalog tables are staff-only; denied tables are never "
                  'accessible).',
@@ -717,7 +726,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['table', 'row_id']},
   'visible_to_customer': False},
  {'name': 'gd_upsert_row',
-  'description': 'Create or update a row in any gd_* table from gd_describe_tables. Omit '
+  'description': '[ACTION] Create or update a row in any gd_* table from gd_describe_tables. Omit '
                  'row_id to create a new row; provide it to update an existing one. Call '
                  "gd_describe_tables first to see this table's writable_columns — unknown "
                  'columns are rejected. created_by/updated_by are stamped automatically from '
@@ -746,7 +755,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'design_and_bom',
                   'required': ['table', 'values']},
   'visible_to_customer': False},
  {'name': 'gd_delete_row',
-  'description': 'SOFT delete a row (sets active=false) in any gd_* table from '
+  'description': '[ACTION - SOFT DELETE] SOFT delete a row (sets active=false) in any gd_* table from '
                  'gd_describe_tables — never a hard delete. Check with the user before '
                  "deleting rows in a 'catalog'-scope table, since that has global impact "
                  'across every grid that references it. No automatic referential check is '
