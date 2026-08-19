@@ -312,6 +312,34 @@ class TestSaveSkill:
 
         assert result["skill"]["slug"] == "weekly-kpi-digest"
 
+    def test_status_defaults_to_active(self):
+        service = _service([], [])
+
+        result = service.save_skill("Find Tickets", "Finds tickets.", self._steps(), True, "a@b.com")
+
+        assert result["skill"]["status"] == "active"
+
+    def test_an_explicit_status_is_honoured(self):
+        """A draft saves as a draft directly -- never active-then-corrected."""
+        service = _service([], [])
+
+        result = service.save_skill(
+            "Find Tickets", "Finds tickets.", self._steps(), True, "a@b.com", status="draft"
+        )
+
+        assert result["success"] is True
+        assert result["skill"]["status"] == "draft"
+
+    def test_an_invalid_status_is_rejected(self):
+        service = _service([], [])
+
+        result = service.save_skill(
+            "Find Tickets", "Finds tickets.", self._steps(), True, "a@b.com", status="published"
+        )
+
+        assert result["success"] is False
+        assert "published" in result["error"]
+
 
 def test_list_skills_returns_every_status():
     """The admin list shows drafts and disabled skills; the catalog does not."""
@@ -382,6 +410,65 @@ def test_update_skill_status_accepts_the_four_valid_values():
             "1", status, actor="ops@example.com"
         )
         assert result["success"] is True, status
+
+
+def test_update_skill_writes_identity_and_status_together():
+    captured = {}
+
+    class _Table:
+        def update(self, payload):
+            captured.update(payload)
+            return self
+
+        def eq(self, *_a):
+            return self
+
+        def execute(self):
+            class _R:
+                data = [dict(captured, id="1")]
+
+            return _R()
+
+    class _Client:
+        def table(self, _n):
+            return _Table()
+
+    result = SkillBuilderService(client=_Client()).update_skill(
+        "1", title="New Title", summary="New summary.", staff_only=False,
+        status="active", actor="ops@example.com",
+    )
+
+    assert result["success"] is True
+    assert captured["title"] == "New Title"
+    assert captured["summary"] == "New summary."
+    assert captured["staff_only"] is False
+    assert captured["status"] == "active"
+
+
+def test_update_skill_rejects_an_unknown_status():
+    result = SkillBuilderService(client=None).update_skill(
+        "1", title="T", summary="S", staff_only=True, status="published", actor="x"
+    )
+    assert result["success"] is False
+    assert "published" in result["error"]
+
+
+def test_update_skill_rejects_a_blank_title():
+    result = SkillBuilderService(client=None).update_skill(
+        "1", title="   ", summary="S", staff_only=True, status="draft", actor="x"
+    )
+    assert result["success"] is False
+    assert "title" in result["error"].lower()
+
+
+def test_update_skill_with_no_client_returns_failure():
+    service = SkillBuilderService.__new__(SkillBuilderService)
+    service.client = None
+
+    result = service.update_skill(
+        "1", title="T", summary="S", staff_only=True, status="draft", actor="x"
+    )
+    assert result["success"] is False
 
 
 def test_schedule_summary_reports_cron_and_anchor():
@@ -458,3 +545,51 @@ def test_schedule_summary_survives_a_query_failure():
             raise RuntimeError("db down")
 
     assert SkillBuilderService(client=_Client()).schedule_summaries() == {}
+
+
+def test_set_skill_schedule_derives_cron_from_frequency():
+    captured = {}
+
+    class _Table:
+        def upsert(self, payload, **_k):
+            captured.update(payload)
+            return self
+
+        def execute(self):
+            class _R:
+                data = [captured]
+
+            return _R()
+
+    class _Client:
+        def table(self, _n):
+            return _Table()
+
+    result = SkillBuilderService(client=_Client()).set_skill_schedule(
+        "1", anchor_entity_type="grid", first_run="2026-09-01 08:00",
+        frequency="Weekly", actor="ops@example.com",
+    )
+
+    assert result["success"] is True
+    assert captured["skill_id"] == "1"
+    assert captured["anchor_entity_type"] == "grid"
+    assert captured["cron_expression"].startswith("0 8 ")
+    assert captured["command"] is None
+
+
+def test_set_skill_schedule_rejects_an_unsupported_anchor():
+    result = SkillBuilderService(client=None).set_skill_schedule(
+        "1", anchor_entity_type="meter", first_run="2026-09-01 08:00",
+        frequency="Weekly", actor="x",
+    )
+    assert result["success"] is False
+    assert "meter" in result["error"]
+
+
+def test_set_skill_schedule_rejects_an_unparseable_first_run():
+    result = SkillBuilderService(client=None).set_skill_schedule(
+        "1", anchor_entity_type="grid", first_run="next tuesday",
+        frequency="Weekly", actor="x",
+    )
+    assert result["success"] is False
+    assert "first run" in result["error"].lower()

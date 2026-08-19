@@ -579,6 +579,12 @@ CREATE TABLE IF NOT EXISTS user_schedules (
         CHECK ((skill_id IS NULL) = (anchor_entity_type IS NULL))
 );
 
+-- At most one schedule per skill (0026); unlimited command-type rows, since
+-- Postgres does not treat repeated NULLs as conflicting in a unique index.
+CREATE UNIQUE INDEX IF NOT EXISTS user_schedules_skill_id_unique
+    ON user_schedules (skill_id)
+    WHERE skill_id IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS user_schedule_logs (
     id                      uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     schedule_id             uuid NOT NULL REFERENCES user_schedules (id) ON DELETE CASCADE,

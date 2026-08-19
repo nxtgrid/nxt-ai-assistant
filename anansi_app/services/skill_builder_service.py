@@ -133,6 +133,57 @@ class SkillBuilderService:
             logger.exception("Error updating skill %s status", skill_id)
             return {"success": False, "error": str(e)}
 
+    def update_skill(
+        self,
+        skill_id: str,
+        title: str,
+        summary: str,
+        staff_only: bool,
+        status: str,
+        actor: str,
+    ) -> Dict[str, Any]:
+        """Update an existing skill's identity and status together.
+
+        The editor modal's Identity card always shows title/summary/staff
+        and status together (nicegui_app/pages/skills.py's _open_editor),
+        so a single write matches what the UI actually offers -- there is
+        no separate "just rename it" affordance today. Does not touch
+        steps: this modal has no way to re-edit an existing skill's saved
+        steps yet (see render_builder's initial_steps docstring), so a
+        steps column would have nothing new to write.
+        """
+        if not title.strip():
+            return {"success": False, "error": "Title is required"}
+        if status not in self.VALID_STATUSES:
+            return {
+                "success": False,
+                "error": f"'{status}' is not a valid status; expected one of "
+                         f"{', '.join(self.VALID_STATUSES)}",
+            }
+        if not self.client:
+            return {"success": False, "error": "Chat DB not configured"}
+        try:
+            response = (
+                self.client.table("skills")
+                .update(
+                    {
+                        "title": title.strip(),
+                        "summary": summary.strip(),
+                        "staff_only": staff_only,
+                        "status": status,
+                    }
+                )
+                .eq("id", skill_id)
+                .execute()
+            )
+            if not response.data:
+                return {"success": False, "error": "Update returned no row"}
+            logger.info("Skill %s updated (status -> %s) by %s", skill_id, status, actor)
+            return {"success": True, "skill": response.data[0]}
+        except Exception as e:
+            logger.exception("Error updating skill %s", skill_id)
+            return {"success": False, "error": str(e)}
+
     def schedule_summaries(self) -> Dict[str, Dict[str, Any]]:
         """skill_id -> its schedule row, for the list page's Schedule column.
 
@@ -258,6 +309,94 @@ class SkillBuilderService:
             )
             return 0
 
+    # Must match anansi_app/nicegui_app/pages/broadcast.py's _build_recurrence,
+    # minus "Does not repeat" -- that maps to no recurrence at all (returns
+    # None), which this treats as an error rather than a one-time schedule.
+    # A one-off skill run doesn't need a persistent cron row; run it from the
+    # builder instead.
+    SUPPORTED_ANCHORS = ("grid", "organization")
+
+    def set_skill_schedule(
+        self,
+        skill_id: str,
+        anchor_entity_type: str,
+        first_run: str,
+        frequency: str,
+        actor: str,
+    ) -> Dict[str, Any]:
+        """Schedule a skill to fan out across every eligible entity.
+
+        Reuses broadcast.py's _build_recurrence rather than deriving cron a
+        second way -- the two must agree on what "Weekly" means. `frequency`
+        must be one of its REPEAT_OPTIONS other than "Does not repeat":
+        "Weekly", "Every other week", "Monthly (same date)" or
+        "Monthly (same weekday)".
+
+        `command` is explicitly None: user_schedules_command_xor_skill_chk
+        requires exactly one of command / skill_id per row. `chat_id` is
+        NOT NULL on user_schedules but meaningless for a skill row -- the
+        dispatcher (skill_schedule_dispatch.py) fans out by
+        anchor_entity_type and never reads it -- so it gets a clearly
+        synthetic placeholder rather than a real chat. `created_by_user_id`
+        is also NOT NULL with no real id available from an admin-UI actor
+        (unlike schedule_mcp_server.py's chat-originated schedules, which
+        have a real Telegram user_id); `actor`'s email fills both identity
+        columns rather than leaving either fabricated or null.
+
+        Upserts on skill_id (see migration 0026's partial unique index) --
+        reopening the modal and changing the schedule replaces the one row
+        rather than accumulating duplicates.
+        """
+        from datetime import datetime, timezone
+
+        if anchor_entity_type not in self.SUPPORTED_ANCHORS:
+            return {
+                "success": False,
+                "error": f"'{anchor_entity_type}' is not a supported anchor; expected "
+                         f"{' or '.join(self.SUPPORTED_ANCHORS)}",
+            }
+        try:
+            when = datetime.strptime(first_run.strip(), "%Y-%m-%d %H:%M").replace(
+                tzinfo=timezone.utc
+            )
+        except (ValueError, AttributeError):
+            return {
+                "success": False,
+                "error": "Could not read the first run time; expected YYYY-MM-DD HH:MM",
+            }
+
+        from nicegui_app.pages.broadcast import _build_recurrence
+
+        recurrence = _build_recurrence(when, frequency) or {}
+        if not recurrence.get("cron_expression"):
+            return {"success": False, "error": f"Could not derive a schedule from '{frequency}'"}
+
+        if not self.client:
+            return {"success": False, "error": "Chat DB not configured"}
+
+        payload = {
+            "skill_id": skill_id,
+            "command": None,
+            "chat_id": f"skill:{skill_id}",
+            "created_by_user_id": actor,
+            "created_by_email": actor,
+            "anchor_entity_type": anchor_entity_type,
+            "cron_expression": recurrence["cron_expression"],
+            "schedule_type": recurrence.get("schedule_type", "recurring"),
+            "timezone": recurrence.get("timezone", "UTC"),
+            "is_active": True,
+            "status": "active",
+        }
+        try:
+            response = (
+                self.client.table("user_schedules")
+                .upsert(payload, on_conflict="skill_id")
+                .execute()
+            )
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+        return {"success": True, "schedule": (response.data or [payload])[0]}
+
     def _unique_slug(self, title: str) -> str:
         """First free ``slug``, ``slug-2``, ``slug-3``... against existing
         skills -- same collision-handling shape as context_expert's
@@ -279,13 +418,25 @@ class SkillBuilderService:
         steps: List[Dict[str, Any]],
         staff_only: bool,
         created_by: str,
+        status: str = "active",
     ) -> Dict[str, Any]:
         """Persist a finished skill (the builder's Save panel action).
 
         `steps` must already be in the stored skills.steps shape (see
         skill_validation.py's module docstring) -- the caller is expected to
         have called POST /skills/validate and blocked the save on any
-        severity="error" finding first; this method does not re-validate.
+        severity="error" finding first; this method does not re-validate
+        steps.
+
+        `status` defaults to "active" to match the standalone builder page's
+        one-shot save (nicegui_app/pages/skill_builder.py), which predates
+        the draft concept and has no status picker of its own. The skills
+        list editor modal (nicegui_app/pages/skills.py) passes its own
+        status choice explicitly instead -- this inserts the row at that
+        status directly rather than saving active and immediately
+        correcting it with a second update_skill_status call, which would
+        put a still-unreviewed draft into the model's context for the
+        (small but nonzero) window between the two writes.
 
         Returns {"success": True, "skill": <row>} or
         {"success": False, "error": <message>} -- matches the dict-result
@@ -298,6 +449,12 @@ class SkillBuilderService:
             return {"success": False, "error": "Title is required"}
         if not steps:
             return {"success": False, "error": "A skill needs at least one step"}
+        if status not in self.VALID_STATUSES:
+            return {
+                "success": False,
+                "error": f"'{status}' is not a valid status; expected one of "
+                         f"{', '.join(self.VALID_STATUSES)}",
+            }
 
         try:
             slug = self._unique_slug(title)
@@ -311,7 +468,7 @@ class SkillBuilderService:
                         "steps": steps,
                         "inputs": [],
                         "staff_only": staff_only,
-                        "status": "active",
+                        "status": status,
                         "created_by": created_by,
                     }
                 )

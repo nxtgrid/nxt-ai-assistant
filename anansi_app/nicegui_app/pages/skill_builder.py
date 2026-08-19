@@ -1,5 +1,6 @@
-"""Skill builder page (Phase 4 of
-docs/superpowers/plans/2026-08-06-user-designed-skills.md).
+"""The chat-driven skill builder widget (originally Phase 4 of
+docs/superpowers/plans/2026-08-06-user-designed-skills.md; no longer a page
+of its own since P3's Task 9 -- see below).
 
 Interactive, chat-driven authoring surface for user-designed skills: the
 author has a normal conversation (full tool access, as if talking to the
@@ -7,7 +8,17 @@ bot directly) via chat_orchestrator's POST /chat -- one user message = one
 step. There is no artificial read-only/write restriction *during* design;
 the per-step "allow this step to make changes" and "also return this
 response" controls are authoring metadata for later replay (Phase 5), held
-in this page's own state and only baked into the stored steps shape at Save.
+in the caller's state dict and only baked into the stored steps shape at
+Save (see _derive_steps_payload).
+
+render_builder is the reusable piece: it renders the transcript, input,
+send and rewind controls into the current container and returns the
+mutable state dict a caller reads from -- nicegui_app/pages/skills.py's
+"New skill" modal is the only caller now. There is no standalone page or
+`render` function anymore: /skill-builder (main.py) redirects to /skills
+rather than routing here, and the module-level Save-as-skill dialog that
+used to wrap this for that route was removed with it -- see git history
+(P3 Task 9) if that flow needs to be revived.
 
 Rewind archives a step and everything after it (see
 services/skill_builder_service.py's archive_from_message_index) and
@@ -32,7 +43,6 @@ from __future__ import annotations
 
 import os
 import re
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -113,17 +123,6 @@ def _validate_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return resp.json().get("errors", [])
 
 
-def _summarize_steps(steps: List[Dict[str, Any]], title: str) -> str:
-    resp = requests.post(
-        f"{_orchestrator_base_url()}/skills/summarize",
-        headers=_orchestrator_headers(),
-        json={"steps": steps, "title": title},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json().get("summary", "")
-
-
 def _group_into_steps(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Group a flat, chronological chat_messages list into one entry per
     user message: {"user_message": <row>, "response_messages": [<row>...]}.
@@ -160,6 +159,39 @@ def _step_tool_names(step: Dict[str, Any]) -> List[str]:
     return names
 
 
+# Response text an escalation produces when a tool failed. A step that
+# captured one of these saved an apology, not a result -- saving that skill
+# bakes the apology in permanently.
+_FAILURE_MARKERS = (
+    "#nxtaction",
+    "unable to retrieve",
+    "something went wrong on our end",
+)
+
+
+def _step_had_tool_error(step: Dict[str, Any]) -> bool:
+    """Whether this step's tools failed rather than returning data.
+
+    Two signals, either sufficient: an explicit error on a recorded tool
+    result, or escalation text in the response. Adapted to the real
+    response_messages shape (see _step_tool_names/_group_into_steps) rather
+    than the plan's assumed flat "tool_calls" list -- a tool invocation and
+    its result are two entries in response_messages: the row carrying
+    function_call names the call, and (per skill_builder_service.py's
+    _MESSAGE_COLUMNS) tool_result on either that row or a later one carries
+    the outcome, which the orchestrator swallows and escalates from rather
+    than surfacing to the builder as a distinct error field.
+    """
+    for m in step["response_messages"]:
+        result = m.get("tool_result")
+        if isinstance(result, dict) and result.get("error"):
+            return True
+    if "escalate_to_support" in _step_tool_names(step):
+        return True
+    text = _step_response_text(step).lower()
+    return any(marker in text for marker in _FAILURE_MARKERS)
+
+
 def _derive_steps_payload(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Build the skills.steps-shaped payload from the current transcript +
     per-step flags -- see
@@ -184,17 +216,41 @@ def _derive_steps_payload(state: Dict[str, Any]) -> List[Dict[str, Any]]:
                 # The final step is always an implicit response step even if
                 # not flagged -- see the plan's "Run-mode output" section.
                 "is_response_step": is_last or flags["is_response_step"],
+                "had_tool_error": _step_had_tool_error(step),
             }
         )
     return steps
 
 
-async def render(user: dict[str, Any]) -> None:
-    user_email = user.get("email", "unknown")
+async def render_builder(
+    user_email: str, user_id: str, initial_steps: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
+    """Render the step builder (transcript, input, send, rewind) into the
+    current container.
+
+    Returns the mutable `state` dict the caller reads after the user is
+    done -- it stays live via the closures below, so a caller that reads
+    `state["steps"]` later (e.g. on its own Save click) sees every update,
+    not a snapshot from when this function returned. Extracted from
+    `render` unchanged so the same widget serves both the standalone page
+    and the skills modal (Phase 3) -- the transcript, send and rewind
+    behaviour is deliberately untouched.
+
+    `user_id` is the caller's to build, not derived here: it must be fresh
+    per builder session (a bare email would make every session for one
+    staff member collapse into a single never-ending chat_orchestrator
+    session -- see generate_session_id), and each caller knows its own
+    freshness boundary (a page load vs. a modal open).
+
+    `initial_steps` is accepted for the editor modal's future "resume an
+    existing skill's steps" use and is not wired to anything yet -- neither
+    this phase nor the modal built on top of it (Task 8) populates it, so a
+    skill's steps still can't be reopened for further chat-driven editing
+    once saved. Tracked as a known gap, not silently solved here.
+    """
     db = get_skill_builder_service()
 
     state: Dict[str, Any] = {
-        "draft_id": str(uuid.uuid4()),
         "session_id": None,
         "steps": [],
         "flags": {},  # step index -> {"allow_write": bool, "is_response_step": bool}
@@ -202,42 +258,24 @@ async def render(user: dict[str, Any]) -> None:
         "sending": False,
     }
 
-    def _user_id() -> str:
-        # Per-draft, not per-user: a stable user_id would make every builder
-        # session for one staff member collapse into a single
-        # never-ending chat_orchestrator session (see generate_session_id).
-        # A fresh draft_id per page load gives each "New skill" attempt its
-        # own session.
-        return f"{user_email}:{state['draft_id']}"
-
-    ui.label("🧩 Skill Builder").classes("text-h5")
-    ui.label(
-        "Chat normally to build a skill step by step. Each message you send becomes one "
-        "step; rewind any step to redo it and everything after."
-    ).classes("text-caption")
-
     if not _identity_configured():
         ui.label(
             "⚠️ IDENTITY_ASSERTION_KEY is not configured on chat_orchestrator. The builder "
             "cannot send messages until it is set -- see chat_orchestrator/.env.example."
         ).classes("text-negative")
-        return
+        return state
 
     if not await run.io_bound(db.is_configured):
         ui.label("⚠️ Database not configured. Check CHAT_DB_URL and CHAT_DB_SERVICE_KEY.").classes(
             "text-negative"
         )
-        return
+        return state
 
     transcript = ui.column().classes("w-full gap-3")
 
     with ui.row().classes("w-full items-end gap-2"):
         message_input = ui.textarea("Next step").classes("flex-grow").props("autogrow")
         send_button = ui.button("Send", icon="send")
-
-    with ui.row().classes("w-full justify-end"):
-        save_button = ui.button("💾 Save as skill", color="primary")
-    save_button.set_visibility(False)
 
     async def _refresh_transcript() -> None:
         if not state["session_id"]:
@@ -260,7 +298,6 @@ async def render(user: dict[str, Any]) -> None:
             state["validation_errors"] = []
 
         _rebuild_transcript()
-        save_button.set_visibility(bool(state["steps"]))
 
     def _rebuild_transcript() -> None:
         transcript.clear()
@@ -328,7 +365,7 @@ async def render(user: dict[str, Any]) -> None:
         send_button.disable()
         try:
             result = await run.io_bound(
-                lambda: _send_chat_message(message=text, user_id=_user_id(), user_email=user_email)
+                lambda: _send_chat_message(message=text, user_id=user_id, user_email=user_email)
             )
         except requests.HTTPError as e:
             ui.notify(f"Send failed: {_error_detail(e)}", type="negative")
@@ -371,55 +408,5 @@ async def render(user: dict[str, Any]) -> None:
 
     send_button.on_click(_send)
 
-    async def _open_save_dialog() -> None:
-        derived = _derive_steps_payload(state)
-        blocking = [e for e in state["validation_errors"] if e["severity"] == "error"]
-        if blocking:
-            ui.notify("Fix validation errors before saving.", type="negative")
-            return
-
-        with ui.dialog() as dialog, ui.card().classes("w-[32rem] gap-2"):
-            ui.label("Save as skill").classes("text-h6")
-            title_input = ui.input("Title").classes("w-full")
-            summary_input = ui.textarea("Summary").classes("w-full").props("autogrow")
-            staff_switch = ui.switch("Staff only", value=True)
-
-            async def _prefill_summary() -> None:
-                title = title_input.value.strip() if title_input.value else ""
-                if not title:
-                    return
-                try:
-                    summary_input.value = await run.io_bound(
-                        lambda: _summarize_steps(derived, title)
-                    )
-                except Exception as e:
-                    ui.notify(f"Could not auto-generate a summary: {e}", type="warning")
-
-            title_input.on("blur", _prefill_summary)
-
-            with ui.row().classes("w-full justify-end gap-2"):
-                ui.button("Cancel", on_click=dialog.close).props("flat")
-
-                async def _confirm_save() -> None:
-                    result = await run.io_bound(
-                        lambda: db.save_skill(
-                            title_input.value or "",
-                            summary_input.value or "",
-                            derived,
-                            staff_switch.value,
-                            user_email,
-                        )
-                    )
-                    if result.get("success"):
-                        ui.notify(f"Saved '{result['skill']['title']}'.", type="positive")
-                        dialog.close()
-                    else:
-                        ui.notify(result.get("error") or "Save failed", type="negative")
-
-                ui.button("Save", on_click=_confirm_save, color="primary")
-
-        dialog.open()
-
-    save_button.on_click(_open_save_dialog)
-
     await _refresh_transcript()
+    return state
