@@ -30,7 +30,7 @@ def _get_previous_month_days_back() -> int:
     return (today - first_of_prev).days
 
 
-@register_step("fetch_chat_chronology")
+@register_step("fetch_chat_chronology", exposed_to_builder=True)
 async def fetch_chat_chronology(context: StepContext) -> StepResult:
     """Fetch chat messages related to the grids being reviewed for the previous month."""
     grids = context.get_state("resolved_grids") or []

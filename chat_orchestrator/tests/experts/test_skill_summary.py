@@ -115,3 +115,22 @@ class TestGenerateSkillSummary:
         sent_prompt = mock_gateway.generate.call_args.args[0][0].text
         assert "List all open tickets." in sent_prompt
         assert "Evaluate each for closure." in sent_prompt
+
+    @pytest.mark.asyncio
+    async def test_a_function_step_contributes_its_handler_name_not_none(self):
+        """A [function] step has no instruction (SkillStepPayload's name and
+        instruction are both Optional for it) -- the prompt should read its
+        handler name, not the literal string "None"."""
+        mock_gateway = SimpleNamespace(
+            generate=AsyncMock(return_value=SimpleNamespace(text="summary"))
+        )
+        steps = [{"index": 0, "kind": "function", "handler": "fetch_grafana_kpis"}]
+        with patch(
+            "orchestrator.experts.skill_summary.get_default_generation_gateway",
+            return_value=mock_gateway,
+        ):
+            await generate_skill_summary(steps)
+
+        sent_prompt = mock_gateway.generate.call_args.args[0][0].text
+        assert "fetch_grafana_kpis" in sent_prompt
+        assert "None" not in sent_prompt

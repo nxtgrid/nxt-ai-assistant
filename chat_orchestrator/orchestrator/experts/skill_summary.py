@@ -42,8 +42,13 @@ def _truncate_at_word_boundary(text: str, limit: int) -> str:
 
 
 def _build_summary_prompt(steps: List[Dict[str, Any]], title: str) -> str:
+    # A P3 [function] step has no instruction text (SkillStepPayload's
+    # instruction is Optional and empty/None for it) -- fall back to its
+    # handler name so the line describes something instead of reading
+    # blank or the literal string "None".
     step_lines = "\n".join(
-        f"{i + 1}. {step.get('instruction', '')}" for i, step in enumerate(steps)
+        f"{i + 1}. {step.get('instruction') or step.get('handler') or ''}"
+        for i, step in enumerate(steps)
     )
     header = f"Skill title: {title}\n\n" if title else ""
     return (

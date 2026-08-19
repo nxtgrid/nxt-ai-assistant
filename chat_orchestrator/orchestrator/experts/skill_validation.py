@@ -32,6 +32,9 @@ from orchestrator.experts.skill_step_bindings import parse_output_binding
 _READ_VAR_RE = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 _IDENTIFIER_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
 
+# P3's function steps (docs/superpowers/plans/2026-08-22-p3-skills-lifecycle-and-function-steps.md).
+VALID_STEP_KINDS = ("llm", "function")
+
 
 @dataclass(frozen=True)
 class ValidationError:
@@ -49,7 +52,9 @@ def _var_display(name: str) -> str:
 
 
 def validate_skill_steps(
-    steps: List[Dict[str, Any]], declared_inputs: Optional[List[str]] = None
+    steps: List[Dict[str, Any]],
+    declared_inputs: Optional[List[str]] = None,
+    exposed_handlers: Optional[List[str]] = None,
 ) -> List[ValidationError]:
     """Validate a skill's step list. Returns [] when everything checks out.
 
@@ -59,15 +64,61 @@ def validate_skill_steps(
     - No two steps declare the same output var.
     - A write clause names a valid Python-identifier-shaped variable.
     - (warning, not error) a write that no later step reads.
+    - A `kind="function"` step (P3) names a handler in `exposed_handlers`.
 
     `declared_inputs` are the skill's own input names (Phase 3 concept --
     pass `[]`/omit until that exists; every read then must come from an
     earlier step's write).
+
+    `exposed_handlers` is step_registry.get_step_registry().builder_exposed_handlers()
+    -- omit (the default, None) to skip handler-name checking entirely
+    (existing callers that predate function steps, and this module's own
+    llm-only test suite, pass no handler list at all and must keep
+    working).
     """
     errors: List[ValidationError] = []
     seen_output_vars: Dict[str, int] = {}  # name -> index of the step that wrote it
 
     ordered_steps = sorted(steps, key=lambda s: s.get("index", 0))
+
+    # Pass 0: step kind and handler validity. Runs first -- a malformed
+    # function step would otherwise be misdiagnosed as a bad llm step by
+    # the passes below, which assume every step has an `instruction`.
+    for step in ordered_steps:
+        index = step.get("index", 0)
+        name = step.get("name") or step.get("handler") or f"step_{index}"
+        kind = step.get("kind") or "llm"
+
+        if kind not in VALID_STEP_KINDS:
+            errors.append(
+                ValidationError(
+                    index,
+                    name,
+                    f"unknown step kind {kind!r}; expected one of "
+                    f"{', '.join(VALID_STEP_KINDS)}",
+                )
+            )
+            continue
+
+        if kind != "function":
+            continue
+
+        handler = step.get("handler")
+        if not handler:
+            errors.append(
+                ValidationError(index, name, "a function step must name a handler")
+            )
+            continue
+
+        if exposed_handlers is not None and handler not in exposed_handlers:
+            errors.append(
+                ValidationError(
+                    index,
+                    name,
+                    f"handler {handler!r} is not available to the skill builder; "
+                    f"available: {', '.join(exposed_handlers) or '(none)'}",
+                )
+            )
 
     # Pass 1: each step's own write clause is well-formed and unique.
     for step in ordered_steps:
@@ -75,33 +126,44 @@ def validate_skill_steps(
         name = step.get("name") or f"step_{index}"
         instruction = step.get("instruction") or ""
         stored_output_var = step.get("output_var")
+        is_function_step = (step.get("kind") or "llm") == "function"
 
-        _read_text, parsed_output_var = parse_output_binding(instruction)
+        if is_function_step:
+            # The write comes from the handler's return value, not a
+            # '-> {{var}}' clause in an instruction -- nothing to parse, and
+            # no write-clause-vs-output_var consistency to check. It still
+            # goes through the same identifier/uniqueness checks below as
+            # an llm step's write, though: a bad or colliding output_var is
+            # exactly as broken coming from a handler as from a clause.
+            effective_output_var = stored_output_var
+        else:
+            _read_text, parsed_output_var = parse_output_binding(instruction)
 
-        if stored_output_var and not parsed_output_var:
-            errors.append(
-                ValidationError(
-                    index,
-                    name,
-                    f"declares output_var {stored_output_var!r} but its instruction has no "
-                    f"'-> {_var_display(stored_output_var)}' write clause",
+            if stored_output_var and not parsed_output_var:
+                errors.append(
+                    ValidationError(
+                        index,
+                        name,
+                        f"declares output_var {stored_output_var!r} but its instruction has no "
+                        f"'-> {_var_display(stored_output_var)}' write clause",
+                    )
                 )
-            )
-        elif (
-            stored_output_var
-            and parsed_output_var
-            and stored_output_var != parsed_output_var
-        ):
-            errors.append(
-                ValidationError(
-                    index,
-                    name,
-                    f"instruction's write clause names {_var_display(parsed_output_var)} "
-                    f"but the stored output_var is {_var_display(stored_output_var)}",
+            elif (
+                stored_output_var
+                and parsed_output_var
+                and stored_output_var != parsed_output_var
+            ):
+                errors.append(
+                    ValidationError(
+                        index,
+                        name,
+                        f"instruction's write clause names {_var_display(parsed_output_var)} "
+                        f"but the stored output_var is {_var_display(stored_output_var)}",
+                    )
                 )
-            )
 
-        effective_output_var = stored_output_var or parsed_output_var
+            effective_output_var = stored_output_var or parsed_output_var
+
         if not effective_output_var:
             continue
 

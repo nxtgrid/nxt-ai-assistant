@@ -807,14 +807,24 @@ async def handle_chat(request: Request, background_tasks: BackgroundTasks):
 
 class SkillStepPayload(BaseModel):
     """One authored step, mirroring the stored skills.steps shape -- see
-    skill_validation.py's module docstring for the canonical shape."""
+    skill_validation.py's module docstring for the canonical shape.
+
+    name and instruction are optional (not just "may be empty") because a
+    P3 `kind="function"` step carries neither: its display name is `handler`
+    and it has no instruction text to render. Both stay required-by-
+    convention (never actually None) for the pre-P3 default kind="llm"
+    shape -- skill_validation.py's own field defaults (`step.get("name") or
+    ...`) already tolerate their absence either way.
+    """
 
     index: int
-    name: str
-    instruction: str
+    name: Optional[str] = None
+    instruction: Optional[str] = None
     output_var: Optional[str] = None
     allow_write: bool = False
     is_response_step: bool = False
+    kind: Optional[str] = None
+    handler: Optional[str] = None
 
 
 class SkillValidationErrorPayload(BaseModel):
@@ -846,11 +856,19 @@ async def validate_skill(request: Request, body: SkillValidateRequest) -> SkillV
     """
     get_auth_method(request)  # 401s on missing/invalid key
 
+    # orchestrator.experts.__init__ already imports orchestrator.experts.handlers
+    # (see that package's own __init__), which is what runs every
+    # @register_step(...) decorator -- importing skill_validation below,
+    # itself inside orchestrator.experts, already guarantees that happened,
+    # so builder_exposed_handlers() reflects every real opt-in with no
+    # separate "make sure handlers are loaded" step needed here.
     from orchestrator.experts.skill_validation import validate_skill_steps
+    from orchestrator.experts.step_registry import get_step_registry
 
     errors = validate_skill_steps(
         [step.model_dump() for step in body.steps],
         declared_inputs=body.declared_inputs,
+        exposed_handlers=get_step_registry().builder_exposed_handlers(),
     )
     return SkillValidateResponse(
         errors=[
