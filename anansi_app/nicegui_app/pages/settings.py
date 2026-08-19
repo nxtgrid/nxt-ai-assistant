@@ -8,7 +8,8 @@ default, group, label, choices, bounds and editability). Widgets are chosen by
 new flag needs no edit to this file.
 
 Persistence reuses ``services.settings_service.SettingsService`` unchanged
-(which wraps ``shared.config.settings_backends`` -> DigitalOcean / env-file).
+(which wraps ``shared.config.settings_backends`` -> DigitalOcean, explicit
+local env-file, or read-only fallback).
 
 Save model: widgets are event-driven, writing to a local ``pending`` dict with a
 live "dirty" indicator (no Streamlit-style full rerun). A single explicit **Save**

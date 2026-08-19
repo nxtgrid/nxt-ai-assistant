@@ -65,6 +65,28 @@ class TestBotReplies:
         assert _status(env, "bot_replies").missing == ["TELEGRAM_BOT_TOKEN"]
 
 
+class TestSettingsPersistence:
+    def test_auto_without_digitalocean_credentials_is_read_only(self):
+        status = _status({"SETTINGS_BACKEND": "auto"}, "settings_persist")
+
+        assert not status.satisfied
+        assert status.missing == ["SETTINGS_BACKEND (no writable backend configured)"]
+
+    def test_explicit_envfile_is_accepted_for_local_development(self):
+        status = _status({"SETTINGS_BACKEND": "envfile"}, "settings_persist")
+
+        assert status.satisfied
+
+    def test_auto_with_digitalocean_credentials_is_writable(self):
+        env = {
+            "SETTINGS_BACKEND": "auto",
+            "DIGITALOCEAN_APP_ID": "app-id",
+            "DIGITALOCEAN_API_TOKEN": "token",
+        }
+
+        assert _status(env, "settings_persist").satisfied
+
+
 class TestSeverity:
     def test_optional_integrations_are_recommended_not_required(self):
         for key in ("escalations_to_jira", "grafana_tools"):

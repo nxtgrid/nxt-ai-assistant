@@ -585,9 +585,19 @@ ALLOWED_VIEWER_EMAILS=admin@example.com
 ```
 
 #### Tier 1 — settings changes persist
-Nothing further: the portable env-file backend writes `.env.settings` and
-changes apply on the next process restart. To drive a live DigitalOcean app
-spec instead (redeploys on save):
+Without a configured remote backend, the Settings page is read-only. This is
+deliberate: a file written inside the admin container cannot update the bot's
+separate process or survive replacement on most container hosts.
+
+For local settings-page development only, opt into the env-file backend:
+```bash
+SETTINGS_BACKEND=envfile
+SETTINGS_FILE=.env.settings
+```
+This records changes in the selected file but does not load them into other
+services automatically. Set their environment and restart them explicitly.
+
+For DigitalOcean, configure the live app-spec backend (redeploys on save):
 ```bash
 DIGITALOCEAN_APP_ID=your-do-app-id
 DIGITALOCEAN_API_TOKEN=your-do-api-token
@@ -864,10 +874,10 @@ git push origin main
 #### Faster deploys: prebuilt images (optional)
 
 By default, App Platform builds each service's Dockerfile from scratch on
-every deploy (no cross-deploy layer cache, and all three services rebuild
+every deploy (no cross-deploy layer cache, and both services rebuild
 even if only one changed) — this is what makes the default path take
 several minutes. `.github/workflows/build-images.yml` builds and pushes
-each service to GHCR with GitHub Actions' own build cache, only rebuilding
+both services to GHCR with GitHub Actions' own build cache, only rebuilding
 services whose paths actually changed. `.do/app.image.example.yaml` shows
 the equivalent app spec using `image:` sources instead of `github:` +
 `dockerfile_path:`, so App Platform just pulls a ready-made image instead

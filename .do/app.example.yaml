@@ -389,11 +389,6 @@ ingress:
         path:
           prefix: /webhook
     - component:
-        name: tools-service
-      match:
-        path:
-          prefix: /mcp
-    - component:
         name: anansi-app
       match:
         path:
@@ -426,15 +421,6 @@ services:
       period_seconds: 30
 
     envs:
-      # Bridge URL (internal service communication)
-      - key: BRIDGE_URL
-        value: "${tools-service.PRIVATE_URL}"
-        scope: RUN_TIME
-      # Tools service URL (same as BRIDGE_URL, used by user_permissions.py)
-      - key: TOOLS_SERVICE_URL
-        value: "${tools-service.PRIVATE_URL}"
-        scope: RUN_TIME
-
       # JIRA Configuration
       - key: JIRA_PROJECT_KEY
         value: ""
@@ -477,46 +463,7 @@ services:
       # All other env vars inherited from app-level
 
   # ---------------------------------------------------------------------------
-  # Service 2: Tools Service
-  # REST API bridge for MCP server tools
-  # IMPORTANT: Uses Dockerfile to include shared/ directory
-  # ---------------------------------------------------------------------------
-  - name: tools-service
-    github:
-      repo: your-org/anansi
-      branch: main
-      deploy_on_push: true
-    dockerfile_path: mcp_servers/Dockerfile
-    http_port: 8080
-    instance_count: 1
-    instance_size_slug: basic-xxs  # 512MB RAM, 1 vCPU
-    health_check:
-      http_path: /
-      initial_delay_seconds: 10
-      period_seconds: 30
-
-    envs:
-      # Service-specific Feature Flags
-      - key: EQUIPMENT_CONTROL_ACTIONS_ENABLED
-        value: "true"
-        scope: RUN_TIME
-      # Equipment control whitelist - comma-separated emails
-      # Users in this list can execute /inverters_restart and /comms_reboot commands
-      - key: EQUIPMENT_CONTROL_ALLOWED_USERS
-        value: "admin@example.com"
-        scope: RUN_TIME
-      # Internal URL so the Jira MCP server can close internal tickets through
-      # TicketService (POST /internal/tickets/{ref}/close) instead of writing
-      # the tickets table directly -- that direct write bypassed the ticket
-      # update notifier, so a bot-initiated close never reached Telegram.
-      - key: CHAT_ORCHESTRATOR_URL
-        value: "${chat-orchestrator.PRIVATE_URL}"
-        scope: RUN_TIME
-      # All other env vars (including API_KEY, used to authenticate the call
-      # above) inherited from app-level
-
-  # ---------------------------------------------------------------------------
-  # Service 3: Anansi App
+  # Service 2: Anansi App
   # NiceGUI app for chat history, settings, grid design, and broadcasts
   # Uses Dockerfile to include shared/ for telegram_markdown, etc.
   # ---------------------------------------------------------------------------

@@ -5,6 +5,7 @@ in ``shared/config/flag_registry.py`` but forgets to regenerate the example file
 or drifts the settings service, one of these tests fails with a clear fix.
 """
 
+import stat
 from pathlib import Path
 
 from shared.config import flag_registry as fr
@@ -208,6 +209,14 @@ class TestBackends:
         assert "JIRA_ENABLED=false" in contents
         assert "MAX_TOOL_ROUNDS=7" in contents
 
+    def test_envfile_is_owner_readable_only(self, tmp_path):
+        path = tmp_path / "settings.env"
+
+        ok, err = EnvFileBackend(path=str(path)).update({"OPENROUTER_API_KEY": "secret"})
+
+        assert ok and err is None
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
     def test_envfile_writes_editable_model_settings(self, tmp_path):
         path = tmp_path / "settings.env"
         backend = EnvFileBackend(path=str(path))
@@ -229,11 +238,33 @@ class TestBackends:
         monkeypatch.setenv("SETTINGS_BACKEND", "digitalocean")
         assert isinstance(get_backend(), DigitalOceanBackend)
 
+    def test_get_backend_unknown_value_fails_closed(self, monkeypatch):
+        monkeypatch.setenv("SETTINGS_BACKEND", "typo")
+        monkeypatch.setenv("DIGITALOCEAN_APP_ID", "abc123")
+        monkeypatch.setenv("DIGITALOCEAN_API_TOKEN", "tok")
+
+        assert get_backend().name == "readonly"
+
     def test_get_backend_auto_without_do_creds(self, monkeypatch):
         monkeypatch.setenv("SETTINGS_BACKEND", "auto")
         monkeypatch.delenv("DIGITALOCEAN_APP_ID", raising=False)
         monkeypatch.delenv("DIGITALOCEAN_API_TOKEN", raising=False)
-        assert isinstance(get_backend(), EnvFileBackend)
+        assert get_backend().name == "readonly"
+
+    def test_auto_without_do_creds_rejects_updates(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("SETTINGS_BACKEND", "auto")
+        monkeypatch.setenv("SETTINGS_FILE", str(tmp_path / "must-not-be-written.env"))
+        monkeypatch.delenv("DIGITALOCEAN_APP_ID", raising=False)
+        monkeypatch.delenv("DIGITALOCEAN_API_TOKEN", raising=False)
+
+        ok, err = get_backend().update({"JIRA_ENABLED": False})
+
+        assert ok is False
+        assert err == (
+            "Runtime settings are read-only on this deployment. Configure a supported "
+            "remote backend, or set SETTINGS_BACKEND=envfile explicitly for local "
+            "development."
+        )
 
     def test_get_backend_auto_with_do_creds(self, monkeypatch):
         monkeypatch.setenv("SETTINGS_BACKEND", "auto")

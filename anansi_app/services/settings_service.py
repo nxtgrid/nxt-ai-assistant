@@ -4,8 +4,9 @@ Thin adapter over the shared, host-agnostic settings layer:
 
 * :mod:`shared.config.flag_registry` is the single source of truth for which
   flags exist, their types, defaults, service scope, and editability.
-* :mod:`shared.config.settings_backends` persists changes to the deployment
-  (DigitalOcean App Platform, or a portable env-file on any other host).
+* :mod:`shared.config.settings_backends` persists changes through an explicit
+  backend (DigitalOcean App Platform or a local-development env file), and is
+  read-only when no writable backend is configured.
 
 The public API (``get_current_settings`` / ``update_settings`` /
 ``get_available_models`` / ``get_log_levels``) is unchanged so the Streamlit

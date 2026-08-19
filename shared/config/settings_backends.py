@@ -6,16 +6,18 @@ settings UI unusable on any other host (k8s, Fly, Heroku, bare metal).
 
 This module decouples the *what* (which flags exist — see
 :mod:`shared.config.flag_registry`) from the *where* (the deployment backend that
-persists them). Two backends ship today:
+persists them). Three backends ship today:
 
 * :class:`DigitalOceanBackend` — reads/writes the app spec via the DO API
   (the original behaviour, now driven by the flag registry).
-* :class:`EnvFileBackend` — a portable default that overlays a dotenv-style file
-  on ``os.environ``; works on any host.
+* :class:`EnvFileBackend` — an explicit local-development backend that writes a
+  dotenv-style file. It does not propagate settings to other services.
+* :class:`ReadOnlyBackend` — the safe fallback when no remote control plane is
+  configured. Reads continue to use the process environment; writes fail loudly.
 
 Select a backend with the ``SETTINGS_BACKEND`` env var (``auto`` | ``digitalocean``
 | ``envfile``). ``auto`` uses DigitalOcean when ``DIGITALOCEAN_APP_ID`` and
-``DIGITALOCEAN_API_TOKEN`` are present, otherwise the env-file backend.
+``DIGITALOCEAN_API_TOKEN`` are present, otherwise settings are read-only.
 """
 
 from __future__ import annotations
@@ -74,13 +76,35 @@ class SettingsBackend(ABC):
         """Persist ``settings``. Returns ``(success, error_message)``."""
 
 
+class ReadOnlyBackend(SettingsBackend):
+    """Safe fallback for deployments without a writable control plane."""
+
+    name = "readonly"
+
+    def available(self) -> bool:
+        return True
+
+    def get_all(self) -> Dict[str, str]:
+        return {}
+
+    def update(
+        self, settings: Mapping[str, Any], restart: bool = True
+    ) -> Tuple[bool, Optional[str]]:
+        return (
+            False,
+            "Runtime settings are read-only on this deployment. Configure a supported "
+            "remote backend, or set SETTINGS_BACKEND=envfile explicitly for local "
+            "development.",
+        )
+
+
 class EnvFileBackend(SettingsBackend):
-    """Portable backend: a dotenv file overlaid on the process environment.
+    """Explicit local-development backend backed by a dotenv file.
 
     Reads return the current env (with the settings file merged on top); writes
     persist editable settings to the file at ``SETTINGS_FILE`` (default
-    ``.env.settings``). Changes take effect on the next process restart — there
-    is no remote control plane to redeploy.
+    ``.env.settings``). The file is not shared with other containers and is not
+    loaded automatically by Anansi services; operators must wire that explicitly.
     """
 
     name = "envfile"
@@ -121,10 +145,12 @@ class EnvFileBackend(SettingsBackend):
         existing = self._read_file()
         existing.update({k: _as_env_str(v) for k, v in writable.items()})
         try:
-            with open(self.path, "w", encoding="utf-8") as handle:
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                os.fchmod(handle.fileno(), 0o600)
                 handle.write(
                     "# Anansi runtime settings (written by the admin UI).\n"
-                    "# Loaded on process startup; restart the service to apply changes.\n"
+                    "# Local development only; services do not load this automatically.\n"
                 )
                 for key in sorted(existing):
                     handle.write(f"{key}={existing[key]}\n")
@@ -265,24 +291,27 @@ def get_backend(prefer_remote: bool = True) -> SettingsBackend:
 
     Args:
         prefer_remote: When ``SETTINGS_BACKEND=auto``, only select the remote
-            (DigitalOcean) backend if it is actually available; otherwise fall
-            back to the portable env-file backend.
+            (DigitalOcean) backend if it is actually available; otherwise use
+            the safe read-only backend.
     """
     choice = os.getenv("SETTINGS_BACKEND", "auto").strip().lower()
     if choice in ("do", "digitalocean"):
         return DigitalOceanBackend()
     if choice in ("env", "envfile", "file"):
         return EnvFileBackend()
-    # auto
+    if choice != "auto":
+        return ReadOnlyBackend()
+
     do = DigitalOceanBackend()
     if prefer_remote and do.available():
         return do
-    return EnvFileBackend()
+    return ReadOnlyBackend()
 
 
 __all__ = [
     "MAX_ENV_VAR_SIZE",
     "SettingsBackend",
+    "ReadOnlyBackend",
     "EnvFileBackend",
     "DigitalOceanBackend",
     "get_backend",
