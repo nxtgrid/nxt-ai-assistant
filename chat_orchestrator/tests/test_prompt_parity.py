@@ -43,6 +43,11 @@ SAMPLE_VARS = {
         "reference_block": "",
     },
     "doc_editor.locate_edits": {"instruction": "fix the intro", "markdown": "# Title\n\nBody"},
+    "episodic.distill": {
+        "anchor_name": "Alpha",
+        "messages_text": "- inverter tripped\n- replaced fuse",
+        "target_words": 200,
+    },
     "ingestion.classify_document": {"content": "sample document text"},
     "ingestion.detect_contradictions": {
         "existing_knowledge": "existing knowledge block",

@@ -43,7 +43,14 @@ def legacy_doc_id_for(prompt_id: str) -> Optional[str]:
     return os.getenv(env_var, "").strip() or None
 
 
-def _default_fetch(doc_id: str) -> str:
+def fetch_doc_text(doc_id: str) -> Optional[str]:
+    """Export a Drive file as markdown text via the service-account plumbing.
+
+    The single place that knows how to reach Drive for a doc id -- GDocStore
+    (prompt-level overrides) and GDocProvider (providers_gdoc.py, knowledge
+    module bodies) both call this rather than each setting up their own
+    client.
+    """
     from shared.utils.gdrive_doc_fetcher import fetch_google_doc_markdown
 
     return fetch_google_doc_markdown(doc_id) or ""
@@ -59,7 +66,7 @@ class GDocStore:
     def __init__(
         self,
         doc_id_for: Callable[[str], Optional[str]] = legacy_doc_id_for,
-        fetch: Callable[[str], str] = _default_fetch,
+        fetch: Callable[[str], str] = fetch_doc_text,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
     ) -> None:
         self._doc_id_for = doc_id_for

@@ -21,6 +21,12 @@ LOGGER = get_logger(__name__)
 
 PINNED_BUDGET_CHARS = 20000
 
+# Sources whose body needs async, per-request resolution (permission-filtered
+# database reads) via JitContextResolver. `gdoc` is deliberately excluded: it
+# resolves synchronously inside PromptLibrary via a TTL-cached fetch, the
+# same way prompt-level doc overrides already do.
+JIT_SOURCES: Tuple[str, ...] = ("graph", "directory", "episodic")
+
 
 @dataclass(frozen=True)
 class KnowledgeModule:
@@ -28,14 +34,25 @@ class KnowledgeModule:
     slug: str
     title: str
     summary: str
-    body: str
+    body: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     scope: str = "sector"
     mode: str = "pinned"
+    source: str = "manual"
+    source_ref: Optional[str] = None
 
     @property
     def is_site_scoped(self) -> bool:
         return self.scope.startswith("site:")
+
+    @property
+    def is_jit(self) -> bool:
+        """Whether this module's body needs async resolution.
+
+        Only sources needing per-request permission filtering against the
+        database are JIT; see JIT_SOURCES.
+        """
+        return self.source in JIT_SOURCES
 
 
 def select_for_prompt(
@@ -75,7 +92,9 @@ def budget_pinned(
     dropped: List[KnowledgeModule] = []
     used = 0
     for module in ordered:
-        size = len(module.body)
+        # An unresolved provider body costs nothing here -- its real size is
+        # only known once JitContextResolver runs, outside this budget.
+        size = len(module.body or "")
         if used + size <= limit:
             kept.append(module)
             used += size
@@ -92,7 +111,11 @@ def budget_pinned(
 def render_pinned(modules: List[KnowledgeModule]) -> Optional[str]:
     if not modules:
         return None
-    parts = [f"## {m.title}\n\n{m.body.strip()}" for m in modules]
+    # A JIT module whose body hasn't resolved yet (or failed to) contributes
+    # nothing here rather than crashing on a None body.
+    parts = [f"## {m.title}\n\n{m.body.strip()}" for m in modules if m.body]
+    if not parts:
+        return None
     return "# Technical Knowledge\n\n" + "\n\n".join(parts)
 
 
@@ -150,7 +173,9 @@ class KnowledgeStore:
         try:
             result = (
                 self._client.table("knowledge_modules")
-                .select("id, slug, title, summary, body, tags, scope, mode")
+                .select(
+                    "id, slug, title, summary, body, tags, scope, mode, source, source_ref"
+                )
                 .eq("is_active", True)
                 .execute()
             )

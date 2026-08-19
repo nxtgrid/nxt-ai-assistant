@@ -1,0 +1,22 @@
+---
+id: episodic.distill
+description: Distills recent chat messages about a grid or organization into durable, still-true lessons for episodic memory.
+owner: ops
+component: anansi_app
+overridable: true
+model: fast
+output: text
+sections: []
+variables: [anchor_name, messages_text, target_words]
+access:
+  view: [ops, eng]
+  edit: [ops]
+  publish: [ops]
+---
+Below are recent support and operations messages about {{anchor_name}}.
+
+{{messages_text}}
+
+Write a distilled understanding of {{anchor_name}} in about {{target_words}} words. Capture durable, still-true facts: recurring faults, equipment quirks, decisions taken and why, and anything a technician arriving today would need to know.
+
+This is not a transcript or a summary of the conversation. Omit anything resolved, superseded, or specific to one exchange. Write plain prose with no preamble.

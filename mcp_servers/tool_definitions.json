@@ -1,7 +1,7 @@
 {
   "$schema": "tool_definitions_schema.json",
   "version": "1.0.0",
-  "exported_at": "2026-08-19T11:51:07.263047Z",
+  "exported_at": "2026-08-19T21:07:07.880866Z",
   "tools": {
     "equipment_diagnostics": [
       {

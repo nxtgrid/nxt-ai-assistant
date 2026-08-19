@@ -112,3 +112,44 @@ def test_diff_prompt_pins_removes_deselected():
 def test_diff_prompt_pins_is_a_noop_when_unchanged():
     to_add, to_remove = diff_prompt_pins({"a.b"}, {"a.b"})
     assert to_add == set() and to_remove == set()
+
+
+def test_module_defaults_to_manual_source():
+    assert _module("comms").source == "manual"
+
+
+def test_manual_module_is_not_jit():
+    assert _module("comms").is_jit is False
+
+
+def test_provider_sources_are_jit():
+    for source in ("graph", "directory", "episodic"):
+        module = KnowledgeModule(
+            id=source, slug=source, title=source, summary="s", body=None, source=source
+        )
+        assert module.is_jit is True, source
+
+
+def test_gdoc_module_is_not_jit():
+    """gdoc resolves synchronously inside PromptLibrary, not via the async resolver."""
+    module = KnowledgeModule(
+        id="d", slug="d", title="D", summary="s", body=None, source="gdoc", source_ref="abc123"
+    )
+    assert module.is_jit is False
+    assert module.source_ref == "abc123"
+
+
+def test_budget_treats_unresolved_body_as_zero_cost():
+    jit = KnowledgeModule(
+        id="g", slug="graph", title="Graph", summary="s", body=None, source="graph"
+    )
+    kept, dropped = budget_pinned([jit])
+    assert kept == [jit]
+    assert dropped == []
+
+
+def test_render_pinned_skips_unresolved_bodies():
+    jit = KnowledgeModule(
+        id="g", slug="graph", title="Graph", summary="s", body=None, source="graph"
+    )
+    assert render_pinned([jit]) is None

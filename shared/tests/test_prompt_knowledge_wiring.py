@@ -137,3 +137,57 @@ def test_compose_uses_pins_not_tags(monkeypatch):
     text, used = library._compose_knowledge(spec, RequestScope())
     assert "Radio checks hourly." in text
     assert used == ["comms"]
+
+
+def test_pinned_gdoc_module_body_is_resolved_at_render():
+    from shared.prompts.core import PromptLibrary
+    from shared.prompts.knowledge import KnowledgeModule
+
+    module = KnowledgeModule(
+        id="d", slug="procs", title="Procedures", summary="How-tos.",
+        body=None, mode="pinned", source="gdoc", source_ref="doc-1",
+    )
+
+    class _Knowledge:
+        def all_modules(self):
+            return [module]
+
+        def overrides_for(self, _prompt_id):
+            return {"procs": True}
+
+    class _Gdoc:
+        def body_for(self, m):
+            return f"live body for {m.source_ref}"
+
+    library = PromptLibrary(knowledge=_Knowledge(), gdoc_module_provider=_Gdoc())
+    rendered = library.render("staff.system")
+
+    assert "live body for doc-1" in (rendered.context_text or "")
+    assert "procs" in rendered.knowledge_used
+
+
+def test_gdoc_module_that_fails_to_resolve_is_dropped_not_rendered_empty():
+    from shared.prompts.core import PromptLibrary
+    from shared.prompts.knowledge import KnowledgeModule
+
+    module = KnowledgeModule(
+        id="d", slug="procs", title="Procedures", summary="How-tos.",
+        body=None, mode="pinned", source="gdoc", source_ref="doc-1",
+    )
+
+    class _Knowledge:
+        def all_modules(self):
+            return [module]
+
+        def overrides_for(self, _prompt_id):
+            return {"procs": True}
+
+    class _Gdoc:
+        def body_for(self, _m):
+            return None
+
+    library = PromptLibrary(knowledge=_Knowledge(), gdoc_module_provider=_Gdoc())
+    rendered = library.render("staff.system")
+
+    assert "Procedures" not in (rendered.context_text or "")
+    assert "procs" not in rendered.knowledge_used

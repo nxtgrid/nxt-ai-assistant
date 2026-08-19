@@ -18,6 +18,7 @@ from orchestrator.graphs.state import ConversationState
 from orchestrator.models.schemas import EntityContext, UserContext
 from orchestrator.services.command_parser import COMMAND_REGISTRY
 from orchestrator.services.expert_instructions_provider import ExpertInstructionsProvider
+from orchestrator.services.jit_context_resolver import get_jit_resolver
 
 
 async def _generate_commands_context(user_context: Optional[UserContext]) -> str:
@@ -214,6 +215,22 @@ async def _fetch_enrichment(
         return "", []
 
 
+async def _fetch_jit_context(
+    prompt_id: str,
+    user_context: Optional[UserContext],
+    grid: Optional[str] = None,
+) -> Tuple[str, List[str]]:
+    """Resolve provider-backed context modules. Fail open."""
+    try:
+        from shared.prompts.providers import ResolutionContext
+
+        ctx = ResolutionContext.from_user_context(user_context, grid=grid)
+        return await get_jit_resolver().resolve_for_prompt(prompt_id, ctx)
+    except Exception as e:
+        LOGGER.warning(f"JIT context resolution failed (continuing without): {e}")
+        return "", []
+
+
 async def _fetch_user_preferences(
     user_context: Optional[Any],
 ) -> List[Dict[str, Any]]:
@@ -265,6 +282,11 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
     user_input = state.get("user_input", "")
     user_email = user_context.user_email if user_context else None
 
+    # InstructionsProvider picks staff.system vs customer.system from
+    # user_context.is_staff (instructions_provider.py:373-381) -- derive the
+    # same way here rather than threading a new return value through.
+    _prompt_id = "staff.system" if (user_context and user_context.is_staff) else "customer.system"
+
     # Run all independent fetches concurrently
     (
         (system_instructions, context_message, prompt_provenance),
@@ -273,6 +295,7 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
         verification_instructions,
         (enrichment_context, grid_names),
         user_preferences,
+        (jit_context, jit_used),
     ) = await asyncio.gather(
         _fetch_instructions(user_context, entity_ctx),
         _fetch_troubleshooting(),
@@ -280,6 +303,7 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
         _fetch_verification_instructions(),
         _fetch_enrichment(user_context),
         _fetch_user_preferences(user_context),
+        _fetch_jit_context(_prompt_id, user_context),
     )
 
     # Assemble system_instructions
@@ -353,6 +377,16 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
         else:
             context_message = enrichment_context
         LOGGER.info(f"Added enrichment context: {len(enrichment_context)} chars")
+
+    # Append just-in-time context modules
+    if jit_context:
+        context_message = (
+            f"{context_message}\n\n{jit_context}" if context_message else jit_context
+        )
+        LOGGER.info(
+            f"Added JIT context: {len(jit_used)} module(s) "
+            f"({', '.join(jit_used)}), {len(jit_context)} chars"
+        )
 
     # Append user preferences (after enrichment, before scheduled constraints)
     if user_preferences:
