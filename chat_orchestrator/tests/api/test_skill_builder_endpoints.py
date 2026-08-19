@@ -101,6 +101,43 @@ class TestValidateSkillEndpoint:
 
         assert response.errors == []
 
+    @pytest.mark.asyncio
+    async def test_a_function_step_payload_needs_neither_name_nor_instruction(self):
+        """A [function] step's SkillStepPayload predates P3 name/instruction
+        as required fields -- both must now be optional, or constructing this
+        payload itself raises pydantic.ValidationError before validate_skill
+        is ever called. A deliberately-fake handler name (never legitimately
+        exposed, unlike a real handler -- see Task 13) keeps this test about
+        the payload shape parsing, not about the registry's live contents;
+        a real, non-empty error list, not [], still proves it reached
+        validate_skill_steps."""
+        body = SkillValidateRequest(
+            steps=[SkillStepPayload(index=0, kind="function", handler="not_a_real_handler")]
+        )
+
+        response = await validate_skill(_authed_request(), body)
+
+        assert len(response.errors) == 1
+        assert response.errors[0].step_index == 0
+        assert "not_a_real_handler" in response.errors[0].message
+
+    @pytest.mark.asyncio
+    async def test_exposed_handlers_reach_validate_skill_steps(self):
+        body = SkillValidateRequest(
+            steps=[SkillStepPayload(index=0, kind="function", handler="not_a_real_handler")]
+        )
+
+        with patch(
+            "orchestrator.experts.step_registry.get_step_registry"
+        ) as mock_registry:
+            mock_registry.return_value.builder_exposed_handlers.return_value = [
+                "fetch_grafana_kpis"
+            ]
+            response = await validate_skill(_authed_request(), body)
+
+        assert len(response.errors) == 1
+        assert "not_a_real_handler" in response.errors[0].message
+
 
 class TestSummarizeSkillEndpoint:
     @pytest.mark.asyncio

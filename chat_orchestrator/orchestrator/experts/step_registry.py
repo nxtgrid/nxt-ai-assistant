@@ -88,6 +88,7 @@ class StepHandlerRegistry:
         self._handlers: Dict[str, StepHandler] = {}
         self._schemas: Dict[str, StepSchema] = {}
         self._contracts: Dict[str, StepContract] = {}
+        self._builder_exposed: set[str] = set()
 
     def register(
         self,
@@ -192,6 +193,20 @@ class StepHandlerRegistry:
         """
         return name in self._contracts
 
+    def expose_to_builder(self, name: str) -> None:
+        """Opt a registered handler into the skill builder's step picker.
+
+        Deliberately separate from register(): most existing @register_step
+        call sites (the package_generator/ingestion_expert/grids_technical_reviewer
+        pipeline handlers) must NOT be builder-reachable, so exposure is an
+        explicit, reviewed second step, not a registration side effect.
+        """
+        self._builder_exposed.add(name)
+
+    def builder_exposed_handlers(self) -> List[str]:
+        """Handler names a skill author may pick, sorted for stable display."""
+        return sorted(self._builder_exposed)
+
     def list_handlers(self) -> list[str]:
         """List all registered handler names.
 
@@ -223,6 +238,7 @@ class StepHandlerRegistry:
         self._handlers.clear()
         self._schemas.clear()
         self._contracts.clear()
+        self._builder_exposed.clear()
         LOGGER.debug("Cleared all step handlers, schemas, and contracts")
 
 
@@ -242,7 +258,11 @@ def get_step_registry() -> StepHandlerRegistry:
     return _global_registry
 
 
-def register_step(name: str, contract: Optional[StepContract] = None):
+def register_step(
+    name: str,
+    contract: Optional[StepContract] = None,
+    exposed_to_builder: bool = False,
+):
     """Decorator to register a step handler function.
 
     Parameter confirmation is handled at the expert/workflow level using
@@ -268,13 +288,22 @@ def register_step(name: str, contract: Optional[StepContract] = None):
             `orchestrator.experts.step_contracts.StepContract`). Defaults to
             None so every existing `@register_step("name")` call site keeps
             working unchanged.
+        exposed_to_builder: Opts this handler into the skill builder's
+            [function:...] step picker (see StepHandlerRegistry.expose_to_builder).
+            Defaults to False: this registry holds handlers that write to
+            spreadsheets, trigger BOM generation and sleep on external
+            systems, and none of those belong in a picker a non-engineer
+            drives. Each opt-in is its own deliberate, reviewed line.
 
     Returns:
         Decorator function
     """
 
     def decorator(func: StepHandler) -> StepHandler:
-        get_step_registry().register(name, func, contract=contract)
+        registry = get_step_registry()
+        registry.register(name, func, contract=contract)
+        if exposed_to_builder:
+            registry.expose_to_builder(name)
         return func
 
     return decorator

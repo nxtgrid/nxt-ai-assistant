@@ -95,20 +95,38 @@ def build_parsed_steps(skill_steps: List[Dict[str, Any]]) -> List[ParsedStep]:
     parser instead cannot do this -- see execute_workflow's pre_parsed_steps
     docstring for why.
 
-    Every skill step is an [llm] step: the builder is a chat interface with
-    no notion of registered Python function handlers (those are a
-    Google-Doc-expert concept) -- see the plan's Phase 2.
+    A step's `kind` is "llm" (the default -- every step predating P3's
+    function steps omits it, so this must not change their behaviour) or
+    "function", naming a handler the builder's step picker exposed (see
+    step_registry.py's exposed_to_builder). A function step's own handler
+    brings its own tool access, so is_skill_step (which unlocks {{var}}
+    binding and read-only tool gating for [llm] steps) stays False for it.
 
     The final step is always forced is_response_step=True even if not
     explicitly flagged by its author, per the plan's "Run-mode output"
     section: "The final step is always treated as an implicit response
     step... so a skill with zero flagged steps still delivers exactly one
-    message."
+    message." -- true for both kinds.
     """
     ordered = sorted(skill_steps, key=lambda s: s.get("index", 0))
     parsed: List[ParsedStep] = []
     for i, step in enumerate(ordered):
         is_last = i == len(ordered) - 1
+        kind = step.get("kind") or "llm"
+
+        if kind == "function":
+            parsed.append(
+                ParsedStep(
+                    index=i,
+                    step_type="function",
+                    name=step.get("handler") or f"step_{i + 1}",
+                    description=step.get("instruction") or "",
+                    is_skill_step=False,
+                    is_response_step=is_last or bool(step.get("is_response_step", False)),
+                )
+            )
+            continue
+
         parsed.append(
             ParsedStep(
                 index=i,

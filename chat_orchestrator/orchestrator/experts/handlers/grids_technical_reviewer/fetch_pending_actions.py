@@ -364,7 +364,7 @@ async def fetch_pending_from_sheet(
             return [], f"Error: {error_msg}"
 
 
-@register_step("fetch_pending_actions")
+@register_step("fetch_pending_actions", exposed_to_builder=True)
 async def fetch_pending_actions(context: StepContext) -> StepResult:
     """Fetch pending issues from previous review sections.
 

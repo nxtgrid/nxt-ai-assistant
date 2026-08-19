@@ -149,3 +149,61 @@ class TestReadOnlyToolFiltering:
     def test_empty_tools_list_returns_empty(self):
         assert filter_tools_for_step([], allow_write=False) == []
         assert filter_tools_for_step([], allow_write=True) == []
+
+
+def test_a_step_without_a_kind_is_an_llm_step():
+    """Every existing skills.steps row omits `kind`; none may change behaviour."""
+    from orchestrator.experts.skill_runner import build_parsed_steps
+
+    parsed = build_parsed_steps([{"index": 0, "name": "a", "instruction": "do a"}])
+
+    assert parsed[0].step_type == "llm"
+    assert parsed[0].is_skill_step is True
+
+
+def test_a_function_step_becomes_a_function_parsed_step():
+    from orchestrator.experts.skill_runner import build_parsed_steps
+
+    parsed = build_parsed_steps([
+        {"index": 0, "kind": "function", "handler": "fetch_grafana_kpis",
+         "output_var": "kpis"},
+    ])
+
+    assert parsed[0].step_type == "function"
+    assert parsed[0].name == "fetch_grafana_kpis"
+
+
+def test_a_function_step_is_not_marked_as_a_skill_step():
+    """is_skill_step unlocks {{var}} binding for [llm] steps and is
+    meaningless for [function] steps, which have their own tool access."""
+    from orchestrator.experts.skill_runner import build_parsed_steps
+
+    parsed = build_parsed_steps([
+        {"index": 0, "kind": "function", "handler": "fetch_grafana_kpis"},
+    ])
+
+    assert parsed[0].is_skill_step is False
+
+
+def test_mixed_steps_keep_their_order():
+    from orchestrator.experts.skill_runner import build_parsed_steps
+
+    parsed = build_parsed_steps([
+        {"index": 1, "name": "reason", "instruction": "analyse {{kpis}}"},
+        {"index": 0, "kind": "function", "handler": "fetch_grafana_kpis",
+         "output_var": "kpis"},
+    ])
+
+    assert [s.step_type for s in parsed] == ["function", "llm"]
+    assert [s.index for s in parsed] == [0, 1]
+
+
+def test_the_final_step_is_still_forced_to_be_a_response_step():
+    from orchestrator.experts.skill_runner import build_parsed_steps
+
+    parsed = build_parsed_steps([
+        {"index": 0, "kind": "function", "handler": "fetch_grafana_kpis"},
+        {"index": 1, "name": "reply", "instruction": "summarise"},
+    ])
+
+    assert parsed[-1].is_response_step is True

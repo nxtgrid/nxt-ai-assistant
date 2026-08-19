@@ -562,7 +562,7 @@ def extract_metric_value(
     return None
 
 
-@register_step("fetch_grafana_kpis")
+@register_step("fetch_grafana_kpis", exposed_to_builder=True)
 async def fetch_grafana_kpis(context: StepContext) -> StepResult:
     """Fetch KPIs from Grids KPI dashboard.
 

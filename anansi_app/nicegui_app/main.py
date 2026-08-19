@@ -140,17 +140,25 @@ async def agents_route() -> None:
 
 @ui.page("/skill-builder")
 async def skill_builder_route() -> None:
+    # Retired (Task 9): /skills is the entry point now, with the same
+    # builder mounted inside its "New skill" modal. Redirect rather than
+    # delete so a bookmark or saved link still lands somewhere real.
+    ui.navigate.to("/skills")
+
+
+@ui.page("/skills")
+async def skills_route() -> None:
     user = auth.current_user()
     if not user:
         ui.navigate.to("/login")
         return
-    with layout.frame(user, "/skill-builder"):
+    with layout.frame(user, "/skills"):
         if not perms.can_view_bot_admin(user["email"]):
             layout.access_denied()
             return
-        from nicegui_app.pages import skill_builder
+        from nicegui_app.pages import skills
 
-        await skill_builder.render(user)
+        await skills.render(user)
 
 
 @ui.page("/settings")
