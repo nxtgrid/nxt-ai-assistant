@@ -18,6 +18,7 @@
   "intent_router.route": "3c79c3247802f1a10a7abafaa4d71451896113a1684a0b0dcaf449ca94cd9e3e",
   "knowledge.summarize_topic": "9c02457de0c8f6f6619633e616ca4e53c48581ca291c914ec5a0b5fe01ec443b",
   "procedure.match": "d1c45ee58c0a40c00d688c35edae670133cc7d41cbae257b891c0f2baefbeef0",
+  "procedure.module_summary": "e87747883c7cedc8dae252b84034b97e133828a9653faf62accf4f0519fe2300",
   "procedure.suggest": "2d52055d647855f9e5edebbf862504f5c3afd5d2ebd4de70550b338403e311c1",
   "staff.system": "4207a052ae96e4f80fdbe3b671190f87be0c520f2efff7bc840a126e1b3533dc",
   "thread_assignment.classify": "d7ff222bf1f1c67be63e2c4ff50a140fdb090fa55d268e34c6d1e22940107c0d",
