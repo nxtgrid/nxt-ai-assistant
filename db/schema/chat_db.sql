@@ -781,17 +781,25 @@ BEGIN
 END;
 $$;
 
--- entities/relationships/entity_mentions carry NO permission columns. The only
--- path to row-level permission is
---   entities -> entity_mentions -> documents.allowed_organization_ids
--- so every aggregate here goes through that join. p_org_ids IS NULL means
--- unrestricted (staff), matching search_chunks_with_permissions' convention.
--- Note both endpoints of a relationship must be visible -- a relationship
--- whose far end lives in another org's documents is not surfaced at all.
+-- entities/relationships/entity_mentions carry NO permission columns. The
+-- real permission mechanism -- confirmed via pg_get_functiondef against the
+-- live search_chunks_with_permissions, see the real-permission-model-is-
+-- chunk-metadata-not-documents-column memory -- is chunks.chunk_metadata's
+-- allowed_org_ids/allowed_role_ids JSONB arrays (integer, absent-or-both-
+-- empty = public), never documents.allowed_organization_ids, which is dead
+-- schema (every row is '{}', its own column default). 0020 corrected this
+-- function from the documents-column version 0018 originally shipped with,
+-- which crashed outright on a real (integer) org id. p_org_ids IS NULL means
+-- unrestricted (staff). The role-based branch is structural parity with
+-- search_chunks_with_permissions; no caller can drive it yet (no client-side
+-- role-name -> numeric-id mapping exists), same honest limitation
+-- rag_provider.build_search_arguments documents for user_role_ids. Note both
+-- endpoints of a relationship must be visible -- a relationship whose far
+-- end is only mentioned in a chunk this caller can't see is not surfaced.
 CREATE OR REPLACE FUNCTION summarize_entity_graph(
-    p_org_ids    uuid[] DEFAULT NULL,
-    p_max_types  int    DEFAULT 20,
-    p_examples   int    DEFAULT 3
+    p_org_ids    integer[] DEFAULT NULL,
+    p_max_types  int       DEFAULT 20,
+    p_examples   int       DEFAULT 3
 )
 RETURNS TABLE (
     kind          text,     -- 'entity' | 'relationship'
@@ -808,9 +816,34 @@ BEGIN
            OR EXISTS (
                SELECT 1
                FROM entity_mentions em
-               JOIN documents d ON d.id = em.document_id
+               JOIN chunks c ON c.id = em.chunk_id
                WHERE em.entity_id = e.id
-                 AND d.allowed_organization_ids && p_org_ids
+                 AND (
+                     (
+                         c.chunk_metadata ? 'allowed_role_ids'
+                         AND c.chunk_metadata->'allowed_role_ids' IS NOT NULL
+                         AND EXISTS (
+                             SELECT 1 FROM unnest('{}'::integer[]) AS ur(rid)
+                             WHERE c.chunk_metadata->'allowed_role_ids' @> to_jsonb(ur.rid)
+                         )
+                     )
+                     OR (
+                         c.chunk_metadata ? 'allowed_org_ids'
+                         AND c.chunk_metadata->'allowed_org_ids' IS NOT NULL
+                         AND EXISTS (
+                             SELECT 1 FROM unnest(p_org_ids) AS uo(oid)
+                             WHERE c.chunk_metadata->'allowed_org_ids' @> to_jsonb(uo.oid)
+                         )
+                     )
+                     OR (
+                         NOT (c.chunk_metadata ? 'allowed_role_ids')
+                         AND NOT (c.chunk_metadata ? 'allowed_org_ids')
+                     )
+                     OR (
+                         c.chunk_metadata->'allowed_role_ids' = '[]'::jsonb
+                         AND c.chunk_metadata->'allowed_org_ids' = '[]'::jsonb
+                     )
+                 )
            )
     ),
     entity_types AS (

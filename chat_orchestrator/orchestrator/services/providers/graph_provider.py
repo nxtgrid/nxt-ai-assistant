@@ -60,11 +60,20 @@ class GraphProvider:
 
         # Staff see everything; everyone else is scoped to their orgs. A
         # caller with no orgs gets nothing -- never NULL, which the RPC
-        # reads as unrestricted.
+        # reads as unrestricted. summarize_entity_graph's p_org_ids is
+        # integer[] (0020 corrected this from an unworkable uuid[] -- see
+        # the real-permission-model memory), so cast explicitly rather than
+        # relying on PostgREST to coerce a numeric-looking string; a
+        # genuinely non-numeric organization id is a data problem worth
+        # surfacing, not silently swallowing into an empty/unrestricted query.
         if ctx.is_staff:
             org_ids = None
         elif ctx.organization_ids:
-            org_ids = list(ctx.organization_ids)
+            try:
+                org_ids = [int(o) for o in ctx.organization_ids]
+            except (TypeError, ValueError) as e:
+                LOGGER.warning(f"Non-integer organization id in {ctx.organization_ids}: {e}")
+                return None
         else:
             return None
 
