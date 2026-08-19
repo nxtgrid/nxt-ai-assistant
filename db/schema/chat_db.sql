@@ -852,7 +852,7 @@ CREATE TABLE IF NOT EXISTS knowledge_modules (
     slug         text NOT NULL UNIQUE,
     title        text NOT NULL,
     summary      text NOT NULL,
-    body         text NOT NULL,
+    body         text,
     tags         text[] NOT NULL DEFAULT '{}',
     scope        text NOT NULL DEFAULT 'sector',
     mode         text NOT NULL DEFAULT 'pinned',
@@ -865,7 +865,11 @@ CREATE TABLE IF NOT EXISTS knowledge_modules (
     updated_by   text,
     CONSTRAINT knowledge_modules_mode_chk CHECK (mode IN ('pinned', 'on_demand')),
     CONSTRAINT knowledge_modules_source_chk
-        CHECK (source IN ('manual', 'gdoc', 'ingested'))
+        CHECK (source IN ('manual', 'gdoc', 'ingested', 'graph', 'directory', 'episodic')),
+    -- A provider-backed module (graph/directory/episodic) stores no body --
+    -- it resolves at render time. See 0017_context_module_providers.sql.
+    CONSTRAINT knowledge_modules_body_required_chk
+        CHECK (source IN ('graph', 'directory', 'episodic') OR body IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS knowledge_modules_tags_idx

@@ -180,3 +180,46 @@ def test_set_prompt_modules_ignores_unknown_slugs(store):
 
 def test_unconfigured_store_set_prompt_modules_is_a_noop():
     KnowledgeStore(client=None).set_prompt_modules("staff.system", ["alpha"], actor="ada@x.com")
+
+
+def test_all_modules_reads_source_columns():
+    """The store must select source/source_ref or every module looks manual."""
+
+    class _Result:
+        data = [
+            {
+                "id": "1", "slug": "graph-overview", "title": "Graph", "summary": "s",
+                "body": None, "tags": [], "scope": "sector", "mode": "pinned",
+                "source": "graph", "source_ref": None,
+            }
+        ]
+
+    class _Table:
+        def __init__(self):
+            self.selected = ""
+
+        def select(self, columns):
+            self.selected = columns
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            return _Result()
+
+    class _Client:
+        def __init__(self):
+            self.table_obj = _Table()
+
+        def table(self, _name):
+            return self.table_obj
+
+    client = _Client()
+    store = KnowledgeStore(client=client)
+    modules = store.all_modules()
+
+    assert "source" in client.table_obj.selected
+    assert "source_ref" in client.table_obj.selected
+    assert modules[0].source == "graph"
+    assert modules[0].is_jit is True
