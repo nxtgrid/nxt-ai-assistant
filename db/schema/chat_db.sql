@@ -706,11 +706,30 @@ BEGIN
 END;
 $$;
 
+-- HOTFIX 2026-08-19: this file's previous version of search_chunks_with_permissions
+-- (query_embedding/p_organization_id/match_count/similarity_threshold) was stale --
+-- NOT what production actually runs. The PARAMETER LIST below is confirmed against
+-- live production via pg_get_function_identity_arguments:
+--
+--     search_chunks_with_permissions(query_embedding vector, match_threshold
+--         double precision, match_count integer, user_role_ids integer[],
+--         user_org_ids integer[])
+--
+-- The BODY below is NOT confirmed -- it is a best-effort reconstruction
+-- consistent with the single-org version above and documents.allowed_organization_ids,
+-- not a verified mirror of the real function. It deliberately treats an empty
+-- user_org_ids as "matches nothing" rather than "unrestricted" (see
+-- rag_provider.build_search_arguments's docstring for why), and does not use
+-- user_role_ids at all, since what the real function does with it is unknown.
+-- Before trusting this file to recreate production behavior, replace this
+-- function with the output of:
+--     SELECT pg_get_functiondef('search_chunks_with_permissions'::regproc);
 CREATE OR REPLACE FUNCTION search_chunks_with_permissions(
-    query_embedding         vector(768),
-    p_organization_id       integer DEFAULT NULL,
-    match_count             int DEFAULT 10,
-    similarity_threshold    float DEFAULT 0.5
+    query_embedding      vector(768),
+    match_threshold      float DEFAULT 0.7,
+    match_count          int DEFAULT 10,
+    user_role_ids        integer[] DEFAULT '{}',
+    user_org_ids         integer[] DEFAULT '{}'
 )
 RETURNS TABLE (
     id          uuid,
@@ -726,10 +745,10 @@ BEGIN
            c.chunk_metadata AS metadata
     FROM chunks c
     JOIN documents d ON c.document_id = d.id
-    WHERE 1 - (c.embedding <=> query_embedding) > similarity_threshold
-      AND (
-          p_organization_id IS NULL
-          OR p_organization_id::text::uuid = ANY(d.allowed_organization_ids)
+    WHERE 1 - (c.embedding <=> query_embedding) > match_threshold
+      AND EXISTS (
+          SELECT 1 FROM unnest(user_org_ids) oid
+          WHERE oid::text::uuid = ANY(d.allowed_organization_ids)
       )
     ORDER BY c.embedding <=> query_embedding
     LIMIT match_count;

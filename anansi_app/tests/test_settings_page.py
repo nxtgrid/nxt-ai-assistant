@@ -67,6 +67,26 @@ class TestGroupIsInert:
         assert page.group_is_inert("conversation", pending) is False
 
 
+class TestGroupExpansionPresentation:
+    def test_every_group_is_closed_without_a_search(self):
+        for group in fr.groups():
+            presentation = page.group_expansion_presentation(query="", inert=False)
+            assert presentation.expanded is False, group.id
+
+    def test_a_search_opens_matching_active_groups(self):
+        presentation = page.group_expansion_presentation(query="model", inert=False)
+        assert presentation.expanded is True
+
+    def test_an_inert_group_stays_closed_during_search(self):
+        presentation = page.group_expansion_presentation(query="grafana", inert=True)
+        assert presentation.expanded is False
+
+    def test_closed_and_open_icons_point_right_and_down(self):
+        presentation = page.group_expansion_presentation(query="", inert=False)
+        assert presentation.expand_icon == "chevron_right"
+        assert presentation.expanded_icon == "expand_more"
+
+
 def test_page_contains_no_hardcoded_flag_names():
     """Adding a flag to the registry must require no edit to this page.
 

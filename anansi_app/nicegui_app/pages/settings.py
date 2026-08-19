@@ -70,6 +70,17 @@ class ModelSectionPlan:
     show_openrouter_routes: bool
 
 
+@dataclass(frozen=True)
+class GroupExpansionPresentation:
+    expanded: bool
+    expand_icon: str = "chevron_right"
+    expanded_icon: str = "expand_more"
+
+
+def group_expansion_presentation(*, query: str, inert: bool) -> GroupExpansionPresentation:
+    return GroupExpansionPresentation(expanded=bool(query) and not inert)
+
+
 def _coerce_for_save(flag, value: Any) -> Any:
     if flag.type is FlagType.BOOL:
         return bool(value)
@@ -449,12 +460,14 @@ async def render(log_levels: list[str] | None = None) -> None:
                 header = group.title
                 if changed_here:
                     header += f"  ·  {changed_here} changed"
-                expanded = bool(state["query"]) or group.id in ("bot_control", "models")
-                section = ui.expansion(header, value=expanded and not inert).classes(
+                presentation = group_expansion_presentation(query=state["query"], inert=inert)
+                section = ui.expansion(header, value=presentation.expanded).classes(
                     "w-full q-mb-sm"
                 )
                 section.props(
                     'header-class="text-h6 text-weight-bold" expand-icon-class="text-h5" '
+                    f'expand-icon="{presentation.expand_icon}" '
+                    f'expanded-icon="{presentation.expanded_icon}" '
                     "dense-toggle switch-toggle-side"
                 )
                 with section:
