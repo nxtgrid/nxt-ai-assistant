@@ -360,7 +360,11 @@ CREATE TABLE IF NOT EXISTS chunks (
     embedding_model     text,
     embedding_task_type text,
     chunk_metadata      jsonb DEFAULT '{}',
-    created_at          timestamptz DEFAULT now()
+    created_at          timestamptz DEFAULT now(),
+    -- Dense vectors are poor at exact token match (part numbers, error codes
+    -- like E-402). Generated + STORED so it backfills on write with no
+    -- ingestion change. See 0021_chunks_fulltext.sql.
+    content_tsv         tsvector GENERATED ALWAYS AS (to_tsvector('english', coalesce(content, ''))) STORED
 );
 
 CREATE INDEX IF NOT EXISTS chunks_document_id_idx ON chunks (document_id);
@@ -368,6 +372,8 @@ CREATE INDEX IF NOT EXISTS chunks_document_id_idx ON chunks (document_id);
 -- Vector similarity index (required for RAG search performance at scale)
 CREATE INDEX IF NOT EXISTS chunks_embedding_idx ON chunks
     USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+
+CREATE INDEX IF NOT EXISTS chunks_content_tsv_idx ON chunks USING gin (content_tsv);
 
 -- GraphRAG entities
 CREATE TABLE IF NOT EXISTS entities (
@@ -732,51 +738,158 @@ BEGIN
 END;
 $$;
 
--- HOTFIX 2026-08-19: this file's previous version of search_chunks_with_permissions
--- (query_embedding/p_organization_id/match_count/similarity_threshold) was stale --
--- NOT what production actually runs. The PARAMETER LIST below is confirmed against
--- live production via pg_get_function_identity_arguments:
---
---     search_chunks_with_permissions(query_embedding vector, match_threshold
---         double precision, match_count integer, user_role_ids integer[],
---         user_org_ids integer[])
---
--- The BODY below is NOT confirmed -- it is a best-effort reconstruction
--- consistent with the single-org version above and documents.allowed_organization_ids,
--- not a verified mirror of the real function. It deliberately treats an empty
--- user_org_ids as "matches nothing" rather than "unrestricted" (see
--- rag_provider.build_search_arguments's docstring for why), and does not use
--- user_role_ids at all, since what the real function does with it is unknown.
--- Before trusting this file to recreate production behavior, replace this
--- function with the output of:
---     SELECT pg_get_functiondef('search_chunks_with_permissions'::regproc);
+-- CONFIRMED 2026-08-19 via SELECT pg_get_functiondef(
+-- 'search_chunks_with_permissions'::regproc) against live production --
+-- this is the real function, word for word, not a reconstruction. It does
+-- NOT use documents.allowed_organization_ids (that column is dead: every
+-- row is '{}', its own default). The real filter is per-chunk, on
+-- chunk_metadata's allowed_role_ids/allowed_org_ids JSONB arrays: absent or
+-- both empty means public; a present non-empty array means the caller's
+-- user_role_ids/user_org_ids must overlap it. See the
+-- real-permission-model-is-chunk-metadata-not-documents-column memory.
 CREATE OR REPLACE FUNCTION search_chunks_with_permissions(
-    query_embedding      vector(768),
-    match_threshold      float DEFAULT 0.7,
-    match_count          int DEFAULT 10,
-    user_role_ids        integer[] DEFAULT '{}',
-    user_org_ids         integer[] DEFAULT '{}'
+    query_embedding vector,
+    match_threshold double precision DEFAULT 0.7,
+    match_count integer DEFAULT 10,
+    user_role_ids integer[] DEFAULT '{}'::integer[],
+    user_org_ids integer[] DEFAULT '{}'::integer[]
+)
+RETURNS TABLE(chunk_id uuid, document_id uuid, content text, chunk_metadata jsonb, similarity double precision)
+LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN QUERY
+    SELECT
+        c.id as chunk_id,
+        c.document_id,
+        c.content,
+        c.chunk_metadata,
+        1 - (c.embedding <=> query_embedding) as similarity
+    FROM chunks c
+    WHERE 1 - (c.embedding <=> query_embedding) > match_threshold
+      AND (
+          -- Check allowed_role_ids in chunk_metadata (if user has any matching role)
+          (
+              c.chunk_metadata ? 'allowed_role_ids'
+              AND c.chunk_metadata->'allowed_role_ids' IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM unnest(user_role_ids) AS ur(rid)
+                  WHERE c.chunk_metadata->'allowed_role_ids' @> to_jsonb(ur.rid)
+              )
+          )
+          OR
+          -- Check allowed_org_ids in chunk_metadata (if user belongs to any matching org)
+          (
+              c.chunk_metadata ? 'allowed_org_ids'
+              AND c.chunk_metadata->'allowed_org_ids' IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM unnest(user_org_ids) AS uo(oid)
+                  WHERE c.chunk_metadata->'allowed_org_ids' @> to_jsonb(uo.oid)
+              )
+          )
+          OR
+          -- No restrictions = public document (accessible to all)
+          (
+              NOT (c.chunk_metadata ? 'allowed_role_ids')
+              AND NOT (c.chunk_metadata ? 'allowed_org_ids')
+          )
+          OR
+          -- Empty arrays = public document
+          (
+              c.chunk_metadata->'allowed_role_ids' = '[]'::jsonb
+              AND c.chunk_metadata->'allowed_org_ids' = '[]'::jsonb
+          )
+      )
+    ORDER BY c.embedding <=> query_embedding
+    LIMIT match_count;
+END;
+$$;
+
+-- Hybrid dense+sparse search fused with Reciprocal Rank Fusion. Dense vectors
+-- are poor at exact token match (part numbers, error codes like E-402); the
+-- sparse ranker (content_tsv, see the chunks table above) catches those. RRF
+-- rather than a weighted score blend: cosine similarity and ts_rank are on
+-- incomparable scales, so any weighting would need retuning per corpus; RRF
+-- uses only rank position. Permission filtering matches
+-- search_chunks_with_permissions exactly (chunk_metadata-based, not
+-- documents.allowed_organization_ids -- see that function's comment above).
+CREATE OR REPLACE FUNCTION search_chunks_hybrid(
+    query_embedding vector(768),
+    query_text      text,
+    p_org_ids       integer[] DEFAULT NULL,
+    match_count     int       DEFAULT 10,
+    rrf_k           int       DEFAULT 60
 )
 RETURNS TABLE (
     id          uuid,
     document_id uuid,
     content     text,
-    similarity  float,
+    score       float,
     metadata    jsonb
-) LANGUAGE plpgsql AS $$
+) LANGUAGE plpgsql STABLE AS $$
 BEGIN
     RETURN QUERY
-    SELECT c.id, c.document_id, c.content,
-           1 - (c.embedding <=> query_embedding) AS similarity,
-           c.chunk_metadata AS metadata
-    FROM chunks c
-    JOIN documents d ON c.document_id = d.id
-    WHERE 1 - (c.embedding <=> query_embedding) > match_threshold
-      AND EXISTS (
-          SELECT 1 FROM unnest(user_org_ids) oid
-          WHERE oid::text::uuid = ANY(d.allowed_organization_ids)
-      )
-    ORDER BY c.embedding <=> query_embedding
+    WITH permitted AS (
+        SELECT c.id, c.document_id, c.content, c.chunk_metadata, c.embedding, c.content_tsv
+        FROM chunks c
+        WHERE p_org_ids IS NULL
+           OR (
+               (
+                   c.chunk_metadata ? 'allowed_role_ids'
+                   AND c.chunk_metadata->'allowed_role_ids' IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1 FROM unnest('{}'::integer[]) AS ur(rid)
+                       WHERE c.chunk_metadata->'allowed_role_ids' @> to_jsonb(ur.rid)
+                   )
+               )
+               OR (
+                   c.chunk_metadata ? 'allowed_org_ids'
+                   AND c.chunk_metadata->'allowed_org_ids' IS NOT NULL
+                   AND EXISTS (
+                       SELECT 1 FROM unnest(p_org_ids) AS uo(oid)
+                       WHERE c.chunk_metadata->'allowed_org_ids' @> to_jsonb(uo.oid)
+                   )
+               )
+               OR (
+                   NOT (c.chunk_metadata ? 'allowed_role_ids')
+                   AND NOT (c.chunk_metadata ? 'allowed_org_ids')
+               )
+               OR (
+                   c.chunk_metadata->'allowed_role_ids' = '[]'::jsonb
+                   AND c.chunk_metadata->'allowed_org_ids' = '[]'::jsonb
+               )
+           )
+    ),
+    dense AS (
+        SELECT p.id,
+               row_number() OVER (ORDER BY p.embedding <=> query_embedding) AS rank
+        FROM permitted p
+        WHERE p.embedding IS NOT NULL
+        ORDER BY p.embedding <=> query_embedding
+        LIMIT match_count * 4
+    ),
+    sparse AS (
+        SELECT p.id,
+               row_number() OVER (
+                   ORDER BY ts_rank(p.content_tsv,
+                                    websearch_to_tsquery('english', query_text)) DESC
+               ) AS rank
+        FROM permitted p
+        WHERE p.content_tsv @@ websearch_to_tsquery('english', query_text)
+        ORDER BY ts_rank(p.content_tsv,
+                         websearch_to_tsquery('english', query_text)) DESC
+        LIMIT match_count * 4
+    ),
+    fused AS (
+        SELECT COALESCE(d.id, s.id) AS id,
+               COALESCE(1.0 / (rrf_k + d.rank), 0.0)
+             + COALESCE(1.0 / (rrf_k + s.rank), 0.0) AS score
+        FROM dense d
+        FULL OUTER JOIN sparse s ON s.id = d.id
+    )
+    SELECT p.id, p.document_id, p.content, f.score, p.chunk_metadata
+    FROM fused f
+    JOIN permitted p ON p.id = f.id
+    ORDER BY f.score DESC
     LIMIT match_count;
 END;
 $$;
