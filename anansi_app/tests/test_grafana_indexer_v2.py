@@ -163,3 +163,27 @@ class TestLastError:
         )
 
         assert gen.last_error is None
+
+
+def test_google_genai_is_importable():
+    """Regression test for the actual 2026-08-19 root cause: anansi_app/
+    requirements.txt never pinned google-genai, only google-api-python-client
+    and google-auth (Docs/Sheets access, unrelated to Gemini generation).
+    GeminiGateway.client (shared/llm/gemini.py) does `from google import
+    genai` lazily, so the gap didn't fail at import time -- it failed the
+    first time any panel actually tried to generate, as "cannot import name
+    'genai' from 'google' (unknown location)", indistinguishable at a glance
+    from a real Gemini API error. Every test above mocks gen.gateway
+    directly, bypassing .client (and this import) entirely, which is exactly
+    why none of them caught it. This one doesn't mock anything.
+
+    Note this only regression-protects local/deployed installs of
+    anansi_app/requirements.txt, not CI: ci.yml's "Run tests (anansi_app)"
+    step installs mcp_servers/requirements.txt (which does pin google-genai)
+    for both the mcp_servers and anansi_app test jobs, not anansi_app's own
+    requirements.txt -- so this test would stay green in CI even if the pin
+    were removed from anansi_app/requirements.txt again. Run
+    `pip install -r anansi_app/requirements.txt` in a clean venv before this
+    test to actually exercise the gap CI can't see.
+    """
+    from google import genai  # noqa: F401

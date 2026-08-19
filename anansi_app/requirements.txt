@@ -15,6 +15,19 @@ croniter>=6.2.3  # recurring broadcasts need '#' (nth weekday) and 'L' cron synt
 loguru>=0.7.3
 google-api-python-client>=2.194.0,<3
 google-auth>=2.55.2,<3
+# Required by shared.llm.gemini.GeminiGateway (grafana_indexer_v2.py's
+# GeminiDescriptionGenerator is this app's only caller) -- its `client`
+# property does `from google import genai` lazily, on first use. Without
+# this pin, google-api-python-client + google-auth still populate a
+# `google` namespace package, so the import doesn't fail at process start;
+# it fails the first time anything actually tries to generate, with
+# "cannot import name 'genai' from 'google' (unknown location)". That
+# masked itself as a Gemini API failure for every single panel description
+# generation -- see the 2026-08-19 grafana panel_description indexer
+# incident: it was never GOOGLE_API_KEY, LLM_PROVIDER, quota, or call
+# volume, just this package never having been installed here. Pin matches
+# chat_orchestrator/pyproject.toml's google-genai range exactly.
+google-genai>=1.0,<3.0
 
 # Required by shared.config.settings (pydantic BaseSettings), pulled in via
 # settings_service.py -> shared.config. Mirrors mcp_servers/requirements.txt.
