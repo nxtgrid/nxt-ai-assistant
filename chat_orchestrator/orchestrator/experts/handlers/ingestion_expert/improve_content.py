@@ -160,6 +160,15 @@ async def improve_content(context: StepContext) -> StepResult:
     For manual input (interactive/inline_text), runs quality evaluation,
     optional iterative improvement, and auto-naming.
     """
+    if context.get_state("skip_improve_content"):
+        # A live-linked document is the source of truth. Rewriting it here
+        # would produce text that is thrown away at render time. In
+        # practice a gdrive fetch's input_mode gate below already skips
+        # this step for every gdrive source (live or snapshot) -- this
+        # check is a second, explicit guarantee for the live-link case
+        # specifically, independent of that gate's own future evolution.
+        return StepResult(progress_message="Using the document as written.")
+
     input_mode = context.get_state("input_mode")
 
     # --- Passthrough for Google Drive documents ---

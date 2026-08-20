@@ -26,20 +26,41 @@ def resolve_mode(body: str) -> str:
 
 
 def build_module_payload(
-    slug: str, title: str, summary: str, body: str, mode: str, actor: str
+    slug: str,
+    title: str,
+    summary: str,
+    body: str,
+    mode: str,
+    actor: str,
+    source: str = "manual",
+    source_ref: str = "",
+    source_tab: str = "",
+    doc_audience: str = "acl_mirror",
 ) -> Dict[str, Any]:
-    """A knowledge_modules row for a staff-authored module."""
-    return {
+    """A knowledge_modules row for a staff-authored module.
+
+    A doc-linked module stores no body: the document is the source of truth
+    and is fetched fresh at request time, so a stored copy could only drift.
+    Its audience defaults to mirroring the document's own sharing.
+    """
+    payload: Dict[str, Any] = {
         "slug": slug,
         "title": title,
         "summary": summary,
-        "body": body,
         "tags": [],
         "scope": "global",
         "mode": mode,
-        "source": "manual",
+        "source": source,
         "updated_by": actor,
     }
+    if source == "gdoc":
+        payload["source_ref"] = source_ref
+        payload["source_tab"] = source_tab or None
+        payload["doc_audience"] = doc_audience
+        payload["doc_audience_set_by"] = actor
+    else:
+        payload["body"] = body
+    return payload
 
 
 @register_step("store_module")
@@ -59,6 +80,10 @@ async def store_module(context: StepContext) -> StepResult:
         body=body,
         mode=context.get_state("module_mode") or resolve_mode(body),
         actor=actor,
+        source=context.get_state("module_source") or "manual",
+        source_ref=context.get_state("module_source_ref") or "",
+        source_tab=context.get_state("module_source_tab") or "",
+        doc_audience=context.get_state("module_doc_audience") or "acl_mirror",
     )
 
     store = await asyncio.to_thread(KnowledgeStore.from_env)

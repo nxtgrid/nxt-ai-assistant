@@ -27,8 +27,13 @@ GDRIVE_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{25,60}$")
 
 # Regex patterns to extract file ID from various Google URLs
 GDOC_URL_PATTERN = re.compile(r"docs\.google\.com/document/d/([a-zA-Z0-9_-]+)")
+GSHEET_URL_PATTERN = re.compile(r"docs\.google\.com/spreadsheets/d/([a-zA-Z0-9_-]+)")
 GDRIVE_URL_PATTERN = re.compile(r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)")
 GDRIVE_OPEN_PATTERN = re.compile(r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)")
+
+DOCUMENT_MIME = "application/vnd.google-apps.document"
+SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet"
+SUPPORTED_DRIVE_MIMES = (DOCUMENT_MIME, SPREADSHEET_MIME, "application/pdf")
 
 # Pattern to detect folder URLs (not ingestible as a single document)
 GDRIVE_FOLDER_PATTERN = re.compile(r"drive\.google\.com/drive/(?:u/\d+/)?folders/([a-zA-Z0-9_-]+)")
@@ -55,7 +60,7 @@ def extract_file_id(text: str) -> Optional[str]:
     text = text.strip()
 
     # Check various URL patterns
-    for pattern in [GDOC_URL_PATTERN, GDRIVE_URL_PATTERN, GDRIVE_OPEN_PATTERN]:
+    for pattern in [GDOC_URL_PATTERN, GSHEET_URL_PATTERN, GDRIVE_URL_PATTERN, GDRIVE_OPEN_PATTERN]:
         match = pattern.search(text)
         if match:
             return match.group(1)
@@ -413,6 +418,13 @@ async def _fetch_from_gdrive(context: StepContext, file_id: str) -> StepResult:
             await context.send_progress_to_user(f"Processing PDF: {title}")
             content, file_type = await _extract_pdf_content(service, file_id, title)
 
+        elif mime_type == SPREADSHEET_MIME:
+            await context.send_progress_to_user(f"Reading sheet: {title}")
+            from shared.utils.gdrive_doc_fetcher import fetch_google_sheet_markdown
+
+            content = await asyncio.to_thread(fetch_google_sheet_markdown, file_id, None)
+            file_type = "google_sheet"
+
         elif mime_type in [
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/msword",
@@ -428,6 +440,7 @@ async def _fetch_from_gdrive(context: StepContext, file_id: str) -> StepResult:
                 f"Unsupported file type: {mime_type}\n\n"
                 f"Supported formats:\n"
                 f"• Google Docs\n"
+                f"• Google Sheets\n"
                 f"• PDF files"
             )
 
@@ -439,8 +452,10 @@ async def _fetch_from_gdrive(context: StepContext, file_id: str) -> StepResult:
         LOGGER.info(f"Fetched '{title}' ({len(content)} chars, type: {file_type})")
 
         # Construct source URL based on file type
-        if mime_type == "application/vnd.google-apps.document":
+        if mime_type == DOCUMENT_MIME:
             source_url = f"https://docs.google.com/document/d/{file_id}/edit"
+        elif mime_type == SPREADSHEET_MIME:
+            source_url = f"https://docs.google.com/spreadsheets/d/{file_id}/edit"
         else:
             source_url = f"https://drive.google.com/file/d/{file_id}/view"
 

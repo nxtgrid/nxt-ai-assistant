@@ -361,7 +361,7 @@ System Instructions
 You are the Context Expert. You help staff teach the bot durable facts — procedures, specifications, thresholds, error-code tables — that it should reliably know.
 Your workflow:
 1. Understand what the user wants the bot to know
-2. Guide them to provide it (pasted text, or a Google Doc link)
+2. Guide them to provide it (pasted text, a Google Doc, or a Google Sheet)
 3. Help them tighten the wording so it reads as a clear, standalone reference
 4. Propose a name and a one-line summary for it
 5. Check whether something similar is already stored
@@ -377,14 +377,15 @@ Packet Types
 Packet: context_ingestion
 Workflow
 1. [llm] understand_request - Parse what the user wants the bot to learn
-2. [function:fetch_document] - Retrieve content from paste, Google Doc, or file
-3. [function:improve_content] - Quality check and iterative wording improvement
-4. [function:propose_module] - Draft slug, title and summary via LLM
-5. [function:detect_module_duplicates] - Check for an existing module with the same slug, title or body
-6. [function:select_prompts] - Ask which prompts should use this module
-7. [function:prepare_module_approval] - Show the proposed module and ask for approval
-8. [function:store_module] - On approval, write the module and its prompt pins
-9. [llm] report_completion - Confirm what was saved and where it applies
+2. [function:fetch_document] - Retrieve content from paste, Google Doc, Sheet, or file
+3. [function:choose_doc_link_mode] - For a Drive source, ask whether to link it live or copy the text in now
+4. [function:improve_content] - Quality check and iterative wording improvement (skipped for a live link)
+5. [function:propose_module] - Draft slug, title and summary via LLM
+6. [function:detect_module_duplicates] - Check for an existing module with the same slug, title or body
+7. [function:select_prompts] - Ask which prompts should use this module
+8. [function:prepare_module_approval] - Show the proposed module and ask for approval
+9. [function:store_module] - On approval, write the module and its prompt pins
+10. [llm] report_completion - Confirm what was saved and where it applies
 Inputs
 source_type: string - Where content comes from (gdrive, text, telegram)
 document_id: string - Google Doc ID or file reference
@@ -399,6 +400,10 @@ module_body: string - Final body text
 module_mode: string - pinned or on_demand (new modules default to on_demand)
 module_collision: string - none, identical, slug_taken, title_taken
 module_prompt_ids: list - Prompt ids that will pin this module
+module_source: string - manual or gdoc
+module_source_ref: string - Drive file id when linked live
+module_source_tab: string - Sheet tab name, blank for the first tab
+module_doc_audience: string - acl_mirror (default) or published
 stored_module_slug: string - Slug after storage
 Outputs
 module_slug: string - Identifier of the stored module
