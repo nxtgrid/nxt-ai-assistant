@@ -160,12 +160,18 @@ class ModuleRow:
     chars: int
     source: str = "manual"
     size_label: str = ""
+    # Not shown in _render_row -- only used to make a module findable via
+    # the search box (see filter_context_rows). Same reasoning as chars
+    # above: already in memory here, so carrying it costs nothing new.
+    summary: str = ""
+    body: str = ""
 
 
 def build_module_rows(modules: List[Any]) -> List[ModuleRow]:
     rows = []
     for m in sorted(modules, key=lambda m: m.slug):
-        chars = len(m.body or "")
+        body = m.body or ""
+        chars = len(body)
         source = getattr(m, "source", "manual")
         rows.append(
             ModuleRow(
@@ -175,6 +181,8 @@ def build_module_rows(modules: List[Any]) -> List[ModuleRow]:
                 # resolves differently per caller -- a number here would be
                 # a fiction.
                 size_label="live" if source in PROVIDER_SOURCES else f"{chars} chars",
+                summary=m.summary,
+                body=body,
             )
         )
     return rows
@@ -194,6 +202,29 @@ def group_module_rows(rows: List[ModuleRow]) -> List[Tuple[str, List[ModuleRow]]
     order += sorted(m for m in by_mode if m not in MODE_LABELS)
 
     return [(MODE_LABELS.get(m, m), by_mode[m]) for m in order]
+
+
+def filter_context_rows(rows: List[ModuleRow], query: str) -> List[ModuleRow]:
+    """Case-insensitive substring match over slug, title, summary and body.
+
+    Mirrors prompts.py's own top-of-page search box and its
+    filter_module_rows helper in spirit, but is deliberately a separate
+    function/name: it filters a different row type (ModuleRow, which has a
+    body field KnowledgeTabRow doesn't), and test_knowledge_modules_page.py
+    already imports from both modules in one file -- reusing the name would
+    force an import alias for no benefit.
+    """
+    needle = query.strip().lower()
+    if not needle:
+        return list(rows)
+    return [
+        r
+        for r in rows
+        if needle in r.slug.lower()
+        or needle in r.title.lower()
+        or needle in r.summary.lower()
+        or needle in r.body.lower()
+    ]
 
 
 def prompt_option_label(prompt_id: str, description: str, max_len: int = 70) -> str:
@@ -262,12 +293,20 @@ async def render(user_email: str) -> None:
         ).classes("text-warning")
         return
 
+    # Placed after the readiness check (not right below the caption): with
+    # storage unconfigured we return above and never build a list, so a
+    # search box here would have nothing to search -- same placement logic
+    # as the Prompts page's search_input, which only ever filters a list
+    # that's actually going to render.
+    search_input = ui.input(placeholder="Search context modules…").classes("w-full")
     list_container = ui.column().classes("w-full gap-0")
 
     def refresh() -> None:
         list_container.clear()
         store.invalidate()
         rows = build_module_rows(store.all_modules())
+        all_empty = not rows
+        rows = filter_context_rows(rows, search_input.value or "")
         with list_container:
             with ui.row().classes("justify-end w-full"):
                 ui.button(
@@ -275,9 +314,15 @@ async def render(user_email: str) -> None:
                     on_click=lambda: _open_edit_dialog(None, store, refresh, user_email),
                 ).props("color=primary")
             if not rows:
-                ui.label("No context modules yet. Use /learn in Telegram to add one.").classes(
-                    "text-italic"
+                # Two different reasons for an empty list need two different
+                # messages: genuinely no modules yet (keep the /learn hint)
+                # vs. modules exist but this search matched none of them.
+                message = (
+                    "No context modules yet. Use /learn in Telegram to add one."
+                    if all_empty
+                    else "No context modules match your search."
                 )
+                ui.label(message).classes("text-italic")
                 return
             for label, group in group_module_rows(rows):
                 section = ui.expansion(f"{label}  ·  {len(group)}", value=True).classes(
@@ -288,6 +333,7 @@ async def render(user_email: str) -> None:
                     for row in group:
                         _render_row(row, store, refresh, user_email)
 
+    search_input.on_value_change(lambda: refresh())
     refresh()
 
 
