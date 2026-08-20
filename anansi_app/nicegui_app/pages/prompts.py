@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from nicegui import ui
 
+from nicegui_app import branding
 from shared.prompts import PROMPTS
 from shared.prompts.access import can_edit_prompt, can_publish_prompt, can_view_prompt
 from shared.prompts.components import COMPONENT_LABELS, COMPONENT_ORDER, UNCATEGORIZED
@@ -215,8 +216,9 @@ def body_action_visibility(dirty: bool, can_edit: bool, can_publish: bool) -> Tu
 async def render(user_email: str) -> None:
     ui.label("📝 Prompts").classes("text-h5")
     ui.label(
-        "Every prompt Anansi sends to a model, in one place. Overridable prompts can be "
-        "edited here without a redeploy; locked prompts are reviewed and shipped with the app."
+        f"Every prompt {branding.PUBLIC_PRODUCT_NAME} sends to a model, in one place. "
+        "Overridable prompts can be edited here without a redeploy; locked prompts are reviewed "
+        "and shipped with the app."
     ).classes("text-caption")
 
     store = OverrideStore.from_env()

@@ -61,3 +61,14 @@ def test_nicegui_shell_consumes_public_brand_contract():
 def test_legacy_product_marks_are_removed():
     for filename in ("anansi_logo.png", "anansi_logo_nobg.png", "anansi_spider.png"):
         assert not (ASSETS_DIR / filename).exists()
+
+
+def test_remaining_user_facing_copy_uses_public_name():
+    settings_source = (REPO_ROOT / "anansi_app/nicegui_app/pages/settings.py").read_text()
+    prompts_source = (REPO_ROOT / "anansi_app/nicegui_app/pages/prompts.py").read_text()
+    mini_app_html = (REPO_ROOT / "mini_app/index.html").read_text()
+
+    assert 'f"Configure {branding.PUBLIC_PRODUCT_NAME} bot behavior and features."' in settings_source
+    assert 'f"Every prompt {branding.PUBLIC_PRODUCT_NAME} sends to a model, in one place. "' in prompts_source
+    assert "<title>Mini-Grids Assistant</title>" in mini_app_html
+    assert "<title>Anansi Mini App</title>" not in mini_app_html
