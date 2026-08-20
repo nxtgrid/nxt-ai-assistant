@@ -52,7 +52,6 @@ class PromptLibrary:
         overrides: Optional[Any] = None,
         knowledge: Optional[Any] = None,
         doc_override_for: Optional[DocOverrideFor] = None,
-        gdoc_module_provider: Optional[Any] = None,
     ) -> None:
         self._bundled = bundled or BundledStore()
         # `overrides` (an OverrideStore, or any object with the same duck-typed
@@ -63,7 +62,6 @@ class PromptLibrary:
         self._gdoc_body_for = gdoc_body_for
         self._invalidate_gdoc = invalidate_gdoc
         self._knowledge = knowledge
-        self._gdoc_modules = gdoc_module_provider
         # getattr, not direct attribute access: existing tests pass minimal
         # duck-typed `overrides` fakes (e.g. shared/tests/test_prompt_write_api.py's
         # RecordingStore) that predate this method and have no reason to grow
@@ -170,12 +168,6 @@ class PromptLibrary:
         """
         return self._bundled.get(prompt_id).body
 
-    def _with_resolved_body(self, module):
-        """Fill in a gdoc module's body. Other sources pass through."""
-        if module.source != "gdoc" or self._gdoc_modules is None:
-            return module
-        return dataclasses.replace(module, body=self._gdoc_modules.body_for(module))
-
     def _compose_knowledge(
         self, spec: PromptSpec, scope: RequestScope
     ) -> Tuple[Optional[str], List[str]]:
@@ -192,12 +184,10 @@ class PromptLibrary:
             return None, []
 
         chosen = select_for_prompt(modules, pins, scope)
-        # A gdoc module has no stored body; resolve it here, synchronously,
-        # the same way prompt-level doc overrides already resolve. JIT
-        # sources (graph/directory/episodic) are handled by
-        # JitContextResolver instead and are skipped entirely.
+        # JIT sources (gdoc/graph/directory/episodic) all need the caller's
+        # identity, which render() does not carry. JitContextResolver handles
+        # them and appends its output to context_message instead.
         chosen = [m for m in chosen if not m.is_jit]
-        chosen = [self._with_resolved_body(m) for m in chosen]
         chosen = [m for m in chosen if m.body]
 
         pinned, _dropped = budget_pinned([m for m in chosen if m.mode == "pinned"])
@@ -302,7 +292,6 @@ def _build_default_library() -> PromptLibrary:
     from shared.prompts.gdoc import GDocStore
     from shared.prompts.knowledge import KnowledgeStore
     from shared.prompts.overrides import OverrideStore
-    from shared.prompts.providers_gdoc import GDocProvider
 
     overrides = OverrideStore.from_env()
     gdoc_store = GDocStore(doc_id_for=overrides.doc_id_for)
@@ -311,7 +300,6 @@ def _build_default_library() -> PromptLibrary:
         gdoc_body_for=gdoc_store.body_for,
         invalidate_gdoc=gdoc_store.invalidate,
         knowledge=KnowledgeStore.from_env(),
-        gdoc_module_provider=GDocProvider(),
     )
 
 

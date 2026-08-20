@@ -123,19 +123,21 @@ def test_manual_module_is_not_jit():
 
 
 def test_provider_sources_are_jit():
-    for source in ("graph", "directory", "episodic"):
+    for source in ("gdoc", "graph", "directory", "episodic"):
         module = KnowledgeModule(
             id=source, slug=source, title=source, summary="s", body=None, source=source
         )
         assert module.is_jit is True, source
 
 
-def test_gdoc_module_is_not_jit():
-    """gdoc resolves synchronously inside PromptLibrary, not via the async resolver."""
+def test_a_gdoc_module_carries_its_source_ref():
+    """gdoc resolves via the async JIT resolver, not synchronously inside
+    PromptLibrary -- it needs the caller's identity for the Drive ACL check,
+    which render() does not carry."""
     module = KnowledgeModule(
         id="d", slug="d", title="D", summary="s", body=None, source="gdoc", source_ref="abc123"
     )
-    assert module.is_jit is False
+    assert module.is_jit is True
     assert module.source_ref == "abc123"
 
 

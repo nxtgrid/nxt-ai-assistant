@@ -128,6 +128,12 @@ def build_default_registry() -> ProviderRegistry:
     """
     registry = ProviderRegistry()
     try:
+        from shared.prompts.providers_gdoc import GDocProvider
+
+        registry.register(GDocProvider())
+    except Exception:
+        LOGGER.warning("GDocProvider unavailable", exc_info=True)
+    try:
         from orchestrator.services.providers.directory_provider import DirectoryProvider
 
         registry.register(DirectoryProvider())

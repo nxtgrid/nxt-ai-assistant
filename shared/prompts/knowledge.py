@@ -21,11 +21,12 @@ LOGGER = get_logger(__name__)
 
 PINNED_BUDGET_CHARS = 20000
 
-# Sources whose body needs async, per-request resolution (permission-filtered
-# database reads) via JitContextResolver. `gdoc` is deliberately excluded: it
-# resolves synchronously inside PromptLibrary via a TTL-cached fetch, the
-# same way prompt-level doc overrides already do.
-JIT_SOURCES: Tuple[str, ...] = ("graph", "directory", "episodic")
+# Sources whose body is produced per-request rather than stored. All of them
+# need the caller's identity: graph/directory/episodic filter database rows by
+# permission, and gdoc checks the caller against the document's Drive ACL.
+# PromptLibrary.render() is synchronous and carries no identity, so these
+# resolve through JitContextResolver instead.
+JIT_SOURCES: Tuple[str, ...] = ("gdoc", "graph", "directory", "episodic")
 
 
 @dataclass(frozen=True)
