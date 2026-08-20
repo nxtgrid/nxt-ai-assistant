@@ -36,19 +36,55 @@ ROLE_RANK = {
 }
 
 
+def _permission_grants(
+    perm: dict,
+    user_email: str,
+    required_rank: int,
+    need_write: bool,
+) -> bool:
+    """Whether one Drive permission entry grants this user the required role.
+
+    Extracted so the permissions.list() and files.get() branches below cannot
+    drift apart -- they previously carried two near-identical copies of this
+    logic, and only one of them would have gained `domain` support.
+
+    'group' entries deliberately never grant: expanding group membership needs
+    the Admin SDK, which is not wired up. Direct shares are the workaround.
+    """
+    if ROLE_RANK.get(perm.get("role", ""), -1) < required_rank:
+        return False
+
+    if perm.get("emailAddress", "").lower() == user_email.lower():
+        return True
+
+    perm_type = perm.get("type")
+    if perm_type == "anyone":
+        return not need_write
+    if perm_type == "domain":
+        domain = (perm.get("domain") or "").lower()
+        # endswith on "@" + domain, not a bare suffix check: "notexample.com"
+        # must not satisfy a permission for "example.com".
+        return bool(domain) and user_email.lower().endswith("@" + domain)
+    return False
+
+
 async def user_can_access(
     file_id: str,
     user_email: str | None,
     need_write: bool = False,
+    strict: bool = False,
 ) -> bool:
     """Check if a user has access to a Google Drive file.
 
-    Returns False (fail-closed) if email is None. Checks exact email match
-    and 'anyone' link sharing. Logs denied access at WARNING level for audit.
+    Returns False (fail-closed) if email is None. Logs denied access at
+    WARNING level for audit.
 
-    Falls back to files.get() when permissions.list() fails or returns empty.
-    If the service account can reach the file at all (link-share or Shared
-    Drive inherited access), read access is granted.
+    ``strict=True`` removes only the final "service account could reach the
+    file, so allow read" fallback. Everything else -- explicit email match,
+    'anyone' link sharing, domain-wide sharing, and the files.get() retry when
+    permissions.list() is unavailable -- behaves identically. Callers that
+    surface document *content* to an end user must pass strict=True: without
+    it, any link-shared or Shared Drive file is readable by everyone.
     """
     if not user_email:
         LOGGER.warning(f"Drive access denied: no user email for file={file_id}")
@@ -71,7 +107,7 @@ async def user_can_access(
                 lambda: service.permissions()
                 .list(
                     fileId=file_id,
-                    fields="permissions(emailAddress,role,type)",
+                    fields="permissions(emailAddress,role,type,domain)",
                     supportsAllDrives=True,
                 )
                 .execute()
@@ -85,14 +121,7 @@ async def user_can_access(
 
         if permissions:
             for perm in permissions:
-                # Exact email match with sufficient role
-                if (
-                    perm.get("emailAddress", "").lower() == user_email.lower()
-                    and ROLE_RANK.get(perm.get("role", ""), -1) >= required_rank
-                ):
-                    return True
-                # 'Anyone with link' — allow for read only
-                if perm.get("type") == "anyone" and not need_write:
+                if _permission_grants(perm, user_email, required_rank, need_write):
                     return True
 
         # Fall back to files.get() when permissions.list() failed or returned
@@ -105,29 +134,32 @@ async def user_can_access(
                 lambda: service.files()
                 .get(
                     fileId=file_id,
-                    fields="id,permissions(emailAddress,role,type)",
+                    fields="id,permissions(emailAddress,role,type,domain)",
                     supportsAllDrives=True,
                 )
                 .execute()
             )
             for perm in meta.get("permissions", []):
-                if (
-                    perm.get("emailAddress", "").lower() == user_email.lower()
-                    and ROLE_RANK.get(perm.get("role", ""), -1) >= required_rank
-                ):
-                    return True
-                if perm.get("type") == "anyone" and not need_write:
+                if _permission_grants(perm, user_email, required_rank, need_write):
                     return True
 
-            # Service account reached the file but sees no explicit permissions
+            # Service account reached the file but sees no matching permission
             # → inherited/link-share access. Grant read; write still requires
-            # an explicit direct share.
+            # an explicit direct share. strict=True withholds it: this branch
+            # would otherwise grant every caller read on any link-shared or
+            # Shared Drive file.
             if not need_write and meta.get("id"):
-                LOGGER.info(
-                    f"Drive fallback: granting read access to {user_email} for {file_id}"
-                    " (service account can access file — link or inherited share)"
-                )
-                return True
+                if strict:
+                    LOGGER.info(
+                        f"Strict check withheld {file_id} from {user_email}: reachable "
+                        f"by the service account but no permission entry matches"
+                    )
+                else:
+                    LOGGER.info(
+                        f"Drive fallback: granting read access to {user_email} for {file_id}"
+                        " (service account can access file — link or inherited share)"
+                    )
+                    return True
 
         LOGGER.warning(f"Drive access denied: user={user_email} file={file_id} required={required}")
         return False
