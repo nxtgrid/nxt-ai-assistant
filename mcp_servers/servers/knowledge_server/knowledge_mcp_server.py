@@ -247,18 +247,30 @@ async def _handle_summarize_knowledge(arguments: dict) -> list[types.TextContent
     return [types.TextContent(type="text", text=summary + footer)]
 
 
-def fetch_knowledge_module(slug: str, store: Any = None, gdoc_provider: Any = None) -> str:
-    """Return one knowledge module's full body by slug.
+# Sources whose body depends on row-level database permissions this server
+# does not carry. They are composed into context automatically instead.
+# `gdoc` is deliberately NOT here: it is JIT, but it resolves from a caller's
+# Drive access, which this server *can* check.
+UNFETCHABLE_SOURCES = ("graph", "directory", "episodic")
+
+
+async def fetch_knowledge_module(
+    slug: str,
+    user_email: Optional[str] = None,
+    store: Any = None,
+    gdoc_provider: Any = None,
+) -> str:
+    """Return one knowledge module's full body by slug, for this caller.
 
     Backs the on-demand tier: the model sees only slug and summary in context
-    (the '# Available Knowledge' catalog block PromptLibrary.render composes)
     and calls this when it decides a module is relevant.
 
-    A gdoc module resolves here. A graph/directory/episodic module cannot:
-    its body depends on the caller's row-level permissions, which this
-    server does not carry, so it is composed into context automatically
-    instead. Say so plainly rather than returning an empty body, which the
-    model would read as "this module has no content".
+    A gdoc module is gated on the caller's Drive access -- without that this
+    tool is a read primitive for every attached document, since the model
+    chooses the slug. A graph/directory/episodic module cannot resolve here:
+    its body depends on row-level permissions this server does not carry, so
+    say so plainly rather than returning an empty body, which the model would
+    read as "this module has no content".
     """
     from shared.prompts.knowledge import KnowledgeStore
 
@@ -270,7 +282,7 @@ def fetch_knowledge_module(slug: str, store: Any = None, gdoc_provider: Any = No
     if not module:
         return f"No knowledge module named '{slug}'. Available: " + ", ".join(sorted(modules))
 
-    if module.is_jit:
+    if module.source in UNFETCHABLE_SOURCES:
         return (
             f"'{slug}' is live context. It is composed into your context "
             f"automatically when relevant and cannot be fetched on demand here."
@@ -278,11 +290,21 @@ def fetch_knowledge_module(slug: str, store: Any = None, gdoc_provider: Any = No
 
     body = module.body
     if module.source == "gdoc":
+        from shared.prompts.providers import ResolutionContext
+        from shared.prompts.types import RequestScope
+
         if gdoc_provider is None:
             from shared.prompts.providers_gdoc import GDocProvider
 
             gdoc_provider = GDocProvider()
-        body = gdoc_provider.body_for(module)
+
+        ctx = ResolutionContext(scope=RequestScope(), user_email=user_email)
+        if not await gdoc_provider.visible_to(module, ctx):
+            return (
+                f"You do not have access to the document behind '{slug}'. "
+                f"Ask the document owner to share it with you."
+            )
+        body = await gdoc_provider.resolve(module, ctx)
 
     if not body:
         return f"Knowledge module '{slug}' could not be loaded from its source."
@@ -296,7 +318,14 @@ async def _handle_get_knowledge_module(arguments: dict) -> list[types.TextConten
     slug = arguments.get("slug", "")
     if not slug:
         return [types.TextContent(type="text", text="Error: slug is required")]
-    return [types.TextContent(type="text", text=fetch_knowledge_module(slug))]
+    # user_email is injected by the orchestrator's tool_executor, not declared
+    # in the tool schema and never model-controlled.
+    return [
+        types.TextContent(
+            type="text",
+            text=await fetch_knowledge_module(slug, user_email=arguments.get("user_email")),
+        )
+    ]
 
 
 @registry.tool("list_document_types", _SCHEMAS_BY_NAME["list_document_types"])

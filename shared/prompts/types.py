@@ -38,8 +38,13 @@ class RequestScope:
     organization_id: Optional[str] = None
 
     def matches(self, scope: str) -> bool:
-        """Whether a module declaring ``scope`` applies to this request."""
-        if scope == "sector":
+        """Whether a module declaring ``scope`` applies to this request.
+
+        'sector' is the pre-0018 spelling of 'global' and stays accepted
+        permanently: this method fails closed on an unknown value, so a row
+        the rename missed would stop contributing with no error anywhere.
+        """
+        if scope in ("global", "sector"):
             return True
         if scope.startswith("site:"):
             return bool(self.grid) and scope[5:].lower() == (self.grid or "").lower()

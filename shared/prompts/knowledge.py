@@ -21,11 +21,12 @@ LOGGER = get_logger(__name__)
 
 PINNED_BUDGET_CHARS = 20000
 
-# Sources whose body needs async, per-request resolution (permission-filtered
-# database reads) via JitContextResolver. `gdoc` is deliberately excluded: it
-# resolves synchronously inside PromptLibrary via a TTL-cached fetch, the
-# same way prompt-level doc overrides already do.
-JIT_SOURCES: Tuple[str, ...] = ("graph", "directory", "episodic")
+# Sources whose body is produced per-request rather than stored. All of them
+# need the caller's identity: graph/directory/episodic filter database rows by
+# permission, and gdoc checks the caller against the document's Drive ACL.
+# PromptLibrary.render() is synchronous and carries no identity, so these
+# resolve through JitContextResolver instead.
+JIT_SOURCES: Tuple[str, ...] = ("gdoc", "graph", "directory", "episodic")
 
 
 @dataclass(frozen=True)
@@ -36,10 +37,16 @@ class KnowledgeModule:
     summary: str
     body: Optional[str] = None
     tags: List[str] = field(default_factory=list)
-    scope: str = "sector"
+    scope: str = "global"
     mode: str = "pinned"
     source: str = "manual"
     source_ref: Optional[str] = None
+    source_tab: Optional[str] = None
+    # Only meaningful for source='gdoc'. 'acl_mirror' resolves the body only
+    # for a caller who can read the file in Drive; 'published' resolves for
+    # everyone the prompt serves. None for every other source.
+    doc_audience: Optional[str] = None
+    doc_audience_set_by: Optional[str] = None
 
     @property
     def is_site_scoped(self) -> bool:
@@ -174,7 +181,8 @@ class KnowledgeStore:
             result = (
                 self._client.table("knowledge_modules")
                 .select(
-                    "id, slug, title, summary, body, tags, scope, mode, source, source_ref"
+                    "id, slug, title, summary, body, tags, scope, mode, source, "
+                    "source_ref, source_tab, doc_audience, doc_audience_set_by"
                 )
                 .eq("is_active", True)
                 .execute()

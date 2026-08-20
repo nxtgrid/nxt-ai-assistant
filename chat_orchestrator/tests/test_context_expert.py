@@ -148,8 +148,138 @@ def test_build_module_payload_shape():
         "summary": "s",
         "body": "b",
         "tags": [],
-        "scope": "sector",
+        "scope": "global",
         "mode": "on_demand",
         "source": "manual",
         "updated_by": "ops@example.com",
     }
+
+
+def test_a_typed_module_payload_is_unchanged():
+    payload = build_module_payload(
+        slug="s", title="T", summary="x", body="typed body",
+        mode="on_demand", actor="tech@example.com",
+    )
+
+    assert payload["source"] == "manual"
+    assert payload["body"] == "typed body"
+    assert "source_ref" not in payload
+
+
+def test_a_doc_linked_payload_stores_no_body():
+    """The document is the source of truth; a stored copy would only drift."""
+    payload = build_module_payload(
+        slug="s", title="T", summary="x", body="ignored",
+        mode="on_demand", actor="tech@example.com",
+        source="gdoc", source_ref="doc-1", source_tab="Errors",
+    )
+
+    assert payload["source"] == "gdoc"
+    assert payload["source_ref"] == "doc-1"
+    assert payload["source_tab"] == "Errors"
+    assert payload["doc_audience"] == "acl_mirror"
+    assert payload["doc_audience_set_by"] == "tech@example.com"
+    assert "body" not in payload
+
+
+def test_a_doc_linked_payload_can_be_published():
+    payload = build_module_payload(
+        slug="s", title="T", summary="x", body="", mode="on_demand",
+        actor="tech@example.com", source="gdoc", source_ref="doc-1",
+        doc_audience="published",
+    )
+
+    assert payload["doc_audience"] == "published"
+
+
+def test_a_spreadsheet_is_an_accepted_drive_type():
+    from orchestrator.experts.handlers.ingestion_expert.fetch_document import (
+        SUPPORTED_DRIVE_MIMES,
+    )
+
+    assert "application/vnd.google-apps.spreadsheet" in SUPPORTED_DRIVE_MIMES
+
+
+class _Ctx:
+    """Minimal StepContext stand-in for the link-mode question."""
+
+    def __init__(self, state, user_input=None):
+        self._state, self.user_input = state, user_input
+
+    def get_state(self, key, default=None):
+        return self._state.get(key, default)
+
+
+@pytest.mark.asyncio
+async def test_pasted_text_is_never_asked_about_linking():
+    from orchestrator.experts.handlers.context_expert.choose_doc_link_mode import (
+        choose_doc_link_mode,
+    )
+
+    result = await choose_doc_link_mode(_Ctx({"source_type": "manual_input"}))
+
+    assert result.needs_user_input is False
+
+
+@pytest.mark.asyncio
+async def test_a_drive_source_is_asked_once():
+    from orchestrator.experts.handlers.context_expert.choose_doc_link_mode import (
+        choose_doc_link_mode,
+    )
+
+    result = await choose_doc_link_mode(_Ctx({"source_type": "gdrive"}))
+
+    assert result.needs_user_input is True
+    assert result.state_updates["awaiting_link_mode"] is True
+
+
+@pytest.mark.asyncio
+async def test_choosing_live_records_the_file_id_and_skips_the_rewrite():
+    from orchestrator.experts.handlers.context_expert.choose_doc_link_mode import (
+        choose_doc_link_mode,
+    )
+
+    result = await choose_doc_link_mode(
+        _Ctx({"source_type": "gdrive", "awaiting_link_mode": True, "source_id": "doc-9"}, "1")
+    )
+
+    assert result.state_updates["module_source"] == "gdoc"
+    assert result.state_updates["module_source_ref"] == "doc-9"
+    assert result.state_updates["module_doc_audience"] == "acl_mirror"
+    assert result.state_updates["skip_improve_content"] is True
+
+
+@pytest.mark.asyncio
+async def test_choosing_a_snapshot_keeps_the_manual_source():
+    from orchestrator.experts.handlers.context_expert.choose_doc_link_mode import (
+        choose_doc_link_mode,
+    )
+
+    result = await choose_doc_link_mode(
+        _Ctx({"source_type": "gdrive", "awaiting_link_mode": True, "source_id": "doc-9"}, "2")
+    )
+
+    assert result.state_updates["module_source"] == "manual"
+    assert "skip_improve_content" not in result.state_updates
+
+
+@pytest.mark.asyncio
+async def test_an_unclear_answer_asks_again():
+    from orchestrator.experts.handlers.context_expert.choose_doc_link_mode import (
+        choose_doc_link_mode,
+    )
+
+    result = await choose_doc_link_mode(
+        _Ctx({"source_type": "gdrive", "awaiting_link_mode": True}, "maybe")
+    )
+
+    assert result.needs_user_input is True
+
+
+@pytest.mark.asyncio
+async def test_skip_improve_content_flag_short_circuits_the_step():
+    from orchestrator.experts.handlers.ingestion_expert.improve_content import improve_content
+
+    result = await improve_content(_Ctx({"skip_improve_content": True}))
+
+    assert "as written" in (result.progress_message or "").lower()

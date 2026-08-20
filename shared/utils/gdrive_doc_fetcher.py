@@ -579,6 +579,89 @@ def parse_sections(content: str, start_section: Optional[str] = None) -> dict[st
     return sections
 
 
+SPREADSHEET_MIME = "application/vnd.google-apps.spreadsheet"
+DOCUMENT_MIME = "application/vnd.google-apps.document"
+
+SHEET_MAX_ROWS = 200
+SHEET_MAX_CHARS = 20000
+
+
+def _sheet_cell(value) -> str:
+    """A pipe or newline would break the table row the cell sits in."""
+    return str(value).replace("|", "\\|").replace("\n", " ").strip()
+
+
+def rows_to_markdown_table(
+    rows: list,
+    max_rows: int = SHEET_MAX_ROWS,
+    max_chars: int = SHEET_MAX_CHARS,
+) -> str:
+    """Sheet values as a markdown table, capped by rows and characters.
+
+    The first non-blank row is the header and fixes the column count. The
+    Sheets API omits trailing empty cells, so data rows are ragged and get
+    padded; over-wide rows are cut to the header width. Truncation drops
+    whole rows and says so in a footer -- a silently capped table reads as
+    the complete table to both an operator and a model.
+    """
+    rows = [r for r in rows if any(str(c).strip() for c in r)]
+    if not rows:
+        return ""
+
+    header = [_sheet_cell(c) for c in rows[0]]
+    width = len(header)
+    if width == 0:
+        return ""
+
+    total = len(rows) - 1
+    lines = [
+        "| " + " | ".join(header) + " |",
+        "| " + " | ".join(["---"] * width) + " |",
+    ]
+    for row in rows[1 : max_rows + 1]:
+        cells = [_sheet_cell(c) for c in list(row)[:width]]
+        cells += [""] * (width - len(cells))
+        lines.append("| " + " | ".join(cells) + " |")
+
+    # Drop whole rows until the char cap is met. Never cut mid-row: a partial
+    # row is invalid markdown and renders as literal pipes.
+    while len("\n".join(lines)) > max_chars and len(lines) > 3:
+        lines.pop()
+
+    shown = len(lines) - 2
+    table = "\n".join(lines)
+    if shown < total:
+        table += f"\n\n_(truncated: showing first {shown:,} of {total:,} rows)_"
+    return table
+
+
+def fetch_google_sheet_markdown(file_id: str, tab: Optional[str] = None) -> Optional[str]:
+    """Export one sheet tab as a markdown table.
+
+    Uses the Sheets API rather than Drive's CSV export, which can only ever
+    return the first tab. ``tab=None`` means the first tab.
+    """
+    from googleapiclient.discovery import build
+
+    from shared.utils.google_auth import get_sheets_credentials
+
+    service = build("sheets", "v4", credentials=get_sheets_credentials())
+    if not tab:
+        meta = service.spreadsheets().get(spreadsheetId=file_id).execute()
+        sheets = meta.get("sheets") or []
+        if not sheets:
+            return None
+        tab = sheets[0]["properties"]["title"]
+
+    result = (
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=file_id, range=tab)
+        .execute()
+    )
+    return rows_to_markdown_table(result.get("values") or []) or None
+
+
 def fetch_google_doc(doc_id: str) -> Optional[str]:
     """
     Convenience function to fetch a Google Doc by ID.

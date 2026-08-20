@@ -123,19 +123,21 @@ def test_manual_module_is_not_jit():
 
 
 def test_provider_sources_are_jit():
-    for source in ("graph", "directory", "episodic"):
+    for source in ("gdoc", "graph", "directory", "episodic"):
         module = KnowledgeModule(
             id=source, slug=source, title=source, summary="s", body=None, source=source
         )
         assert module.is_jit is True, source
 
 
-def test_gdoc_module_is_not_jit():
-    """gdoc resolves synchronously inside PromptLibrary, not via the async resolver."""
+def test_a_gdoc_module_carries_its_source_ref():
+    """gdoc resolves via the async JIT resolver, not synchronously inside
+    PromptLibrary -- it needs the caller's identity for the Drive ACL check,
+    which render() does not carry."""
     module = KnowledgeModule(
         id="d", slug="d", title="D", summary="s", body=None, source="gdoc", source_ref="abc123"
     )
-    assert module.is_jit is False
+    assert module.is_jit is True
     assert module.source_ref == "abc123"
 
 
@@ -153,3 +155,44 @@ def test_render_pinned_skips_unresolved_bodies():
         id="g", slug="graph", title="Graph", summary="s", body=None, source="graph"
     )
     assert render_pinned([jit]) is None
+
+
+def test_a_module_carries_its_audience_and_tab():
+    module = KnowledgeModule(
+        id="d", slug="specs", title="Specs", summary="s", body=None,
+        source="gdoc", source_ref="abc123", source_tab="Thresholds",
+        doc_audience="acl_mirror", doc_audience_set_by=None,
+    )
+    assert module.source_tab == "Thresholds"
+    assert module.doc_audience == "acl_mirror"
+
+
+def test_audience_defaults_to_none_for_a_typed_module():
+    module = KnowledgeModule(id="m", slug="m", title="M", summary="s", body="text")
+    assert module.doc_audience is None
+    assert module.source_tab is None
+
+
+def test_global_scope_matches_every_request():
+    from shared.prompts.types import RequestScope
+
+    assert RequestScope().matches("global") is True
+    assert RequestScope(organization_id="7").matches("global") is True
+
+
+def test_sector_is_still_accepted_as_a_synonym():
+    """matches() fails closed on an unknown scope, so a row the migration
+    missed would go silently dark. Both spellings work, permanently."""
+    from shared.prompts.types import RequestScope
+
+    assert RequestScope().matches("sector") is True
+
+
+def test_an_unknown_scope_still_matches_nothing():
+    from shared.prompts.types import RequestScope
+
+    assert RequestScope().matches("universe") is False
+
+
+def test_a_new_module_defaults_to_global_scope():
+    assert KnowledgeModule(id="m", slug="m", title="M", summary="s", body="b").scope == "global"

@@ -25,3 +25,19 @@ def test_knowledge_modules_dialog_has_viewport_scroll_container():
     src = KNOWLEDGE_MODULES_PATH.read_text()
 
     assert "max-height: calc(100dvh - 32px); overflow-y: auto" in src
+
+
+def test_the_dialog_offers_a_document_source():
+    src = KNOWLEDGE_MODULES_PATH.read_text()
+
+    assert "Google Doc or Sheet" in src
+
+
+def test_the_preview_resolves_as_the_viewing_operator():
+    """Preview must be a dry run of the real gate, not a second gate that
+    could disagree with it. It previously passed no caller identity at all,
+    so a document module would resolve under whatever the provider defaulted
+    to rather than under the operator's own Drive access."""
+    src = KNOWLEDGE_MODULES_PATH.read_text()
+
+    assert "user_email=user_email" in src

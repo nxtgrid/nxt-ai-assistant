@@ -24,6 +24,36 @@ LOGGER = get_logger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
 
+# Matches PromptLibrary's PINNED_BUDGET_CHARS. budget_pinned never sees these
+# bodies -- a provider body has no length until it resolves, which happens
+# here -- so without this one large document uncaps every prompt it is pinned
+# to.
+JIT_BUDGET_CHARS = 20000
+
+
+def budget_resolved(resolved, limit: int = JIT_BUDGET_CHARS):
+    """Fit resolved bodies into the budget by dropping whole modules.
+
+    Site-scoped material is kept first: most specific, least replaceable.
+    Mirrors shared.prompts.knowledge.budget_pinned, including never cutting
+    a document in half.
+    """
+    kept, dropped, used = [], [], 0
+    for module, text in sorted(
+        resolved, key=lambda pair: (not pair[0].is_site_scoped, pair[0].slug)
+    ):
+        if used + len(text) <= limit:
+            kept.append((module, text))
+            used += len(text)
+        else:
+            dropped.append(module)
+    if dropped:
+        LOGGER.warning(
+            f"Live context exceeded the {limit}-char budget; dropped "
+            f"{len(dropped)} module(s): {', '.join(m.slug for m in dropped)}"
+        )
+    return kept
+
 
 class JitContextResolver:
     """Resolves the provider-backed modules a prompt pins."""
@@ -55,9 +85,9 @@ class JitContextResolver:
             return "", []
 
         pinned = [m for m in chosen if m.mode == "pinned"]
-        on_demand = [m for m in chosen if m.mode != "pinned"]
+        on_demand = await self._visible_only([m for m in chosen if m.mode != "pinned"], ctx)
 
-        resolved = await self._resolve_all(pinned, ctx)
+        resolved = budget_resolved(await self._resolve_all(pinned, ctx))
 
         blocks: List[str] = []
         used: List[str] = []
@@ -79,6 +109,33 @@ class JitContextResolver:
             used.extend(m.slug for m in on_demand)
 
         return "\n\n".join(blocks), used
+
+    async def _visible_only(
+        self, modules: List[KnowledgeModule], ctx: ResolutionContext
+    ) -> List[KnowledgeModule]:
+        """Drop on-demand modules this caller may not fetch.
+
+        A catalog line carries the module's summary, which can itself be
+        sensitive -- and listing something the caller will be refused wastes
+        a model turn. Providers without a visible_to (graph, directory,
+        episodic) filter inside resolve() instead and pass through here.
+        """
+        out: List[KnowledgeModule] = []
+        for module in modules:
+            provider = self._registry.get(module.source)
+            check = getattr(provider, "visible_to", None) if provider else None
+            if check is None:
+                out.append(module)
+                continue
+            try:
+                if await asyncio.wait_for(check(module, ctx), timeout=self.timeout_seconds):
+                    out.append(module)
+            except Exception:
+                LOGGER.warning(
+                    f"Visibility check failed for '{module.slug}'; withholding",
+                    exc_info=True,
+                )
+        return out
 
     async def _resolve_all(
         self, modules: List[KnowledgeModule], ctx: ResolutionContext
@@ -127,6 +184,12 @@ def build_default_registry() -> ProviderRegistry:
     registered provider" warning per request instead of a stack trace.
     """
     registry = ProviderRegistry()
+    try:
+        from shared.prompts.providers_gdoc import GDocProvider
+
+        registry.register(GDocProvider())
+    except Exception:
+        LOGGER.warning("GDocProvider unavailable", exc_info=True)
     try:
         from orchestrator.services.providers.directory_provider import DirectoryProvider
 

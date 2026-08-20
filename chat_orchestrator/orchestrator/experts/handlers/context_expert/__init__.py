@@ -3,6 +3,7 @@
 Authors curated context modules (`knowledge_modules`) from staff input, as
 opposed to the ingestion_expert which embeds documents into the RAG corpus.
 
+- choose_doc_link_mode: for a Drive source, ask whether to link it live or copy the text in
 - propose_module: LLM drafts slug/title/summary from the improved body
 - detect_module_duplicates: slug/hash/title collision check against existing modules
 - select_prompts: ask which prompts should use this module
@@ -13,6 +14,9 @@ fetch_document and improve_content are reused unchanged from ingestion_expert --
 step handlers register globally by name, so the workflow just names them.
 """
 
+from orchestrator.experts.handlers.context_expert.choose_doc_link_mode import (
+    choose_doc_link_mode,
+)
 from orchestrator.experts.handlers.context_expert.detect_module_duplicates import (
     detect_module_duplicates,
 )
@@ -24,6 +28,7 @@ from orchestrator.experts.handlers.context_expert.select_prompts import select_p
 from orchestrator.experts.handlers.context_expert.store_module import store_module
 
 __all__ = [
+    "choose_doc_link_mode",
     "propose_module",
     "detect_module_duplicates",
     "select_prompts",
