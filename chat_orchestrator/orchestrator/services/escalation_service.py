@@ -2598,13 +2598,19 @@ class EscalationService:
             if full:
                 old_escalations.append(full)
         if old_escalations and self._escalation_chat_id:
-            old_count = len(old_escalations)
-            lines = [
-                f"⚠️ *{old_count} escalation{'s' if old_count > 1 else ''} "
-                f"older than {max_age_hours}h with no ticket:*"
-            ]
             chat_id_str = str(self._escalation_chat_id)
             channel_id = chat_id_str[4:] if chat_id_str.startswith("-100") else None
+            # A bare, unlinked bullet isn't actionable — the Track/Close buttons
+            # only exist on the original Telegram message, so staff can't do
+            # anything with a name alone (replying to the alert itself, e.g.
+            # "close", has no handler). Only render entries whose message we can
+            # actually link to; escalations with no resolvable delivery receipt
+            # (see DeliveryRepository.find_by_escalation -- the canonical
+            # dual-write in _record_canonical_escalation is best-effort and can
+            # leave this unresolvable) are counted in a footer instead of shown
+            # as dead bullets, so they stay visible without being clickable.
+            linkable_lines: List[str] = []
+            unlinkable_count = 0
             for esc in old_escalations:
                 username = esc.get("customer_username")
                 email = esc.get("customer_email") or ""
@@ -2615,10 +2621,38 @@ class EscalationService:
                 msg_id = esc.get("escalation_message_id")
                 if msg_id and isinstance(msg_id, int) and channel_id:
                     link = f"https://t.me/c/{channel_id}/{msg_id}"
-                    lines.append(f"• {label}{org_part} — [View]({link})")
+                    linkable_lines.append(f"• {label}{org_part} — [View]({link})")
                 else:
-                    lines.append(f"• {label}{org_part}")
-            if old_count == 20:
+                    unlinkable_count += 1
+                    LOGGER.warning(
+                        "Escalation sweep: old escalation {} has no traceable Telegram "
+                        "message (delivery receipt missing) -- dropping from alert",
+                        esc.get("id"),
+                    )
+
+            shown_count = len(linkable_lines)
+            if shown_count:
+                lines = [
+                    f"⚠️ *{shown_count} escalation{'s' if shown_count > 1 else ''} "
+                    f"older than {max_age_hours}h with no ticket:*",
+                    *linkable_lines,
+                ]
+                if unlinkable_count:
+                    lines.append(
+                        f"_(+{unlinkable_count} more with no traceable Telegram message "
+                        f"— check Supabase)_"
+                    )
+            else:
+                lines = [
+                    f"⚠️ *{unlinkable_count} escalation{'s' if unlinkable_count > 1 else ''} "
+                    f"older than {max_age_hours}h with no ticket and no traceable Telegram "
+                    f"message — check Supabase.*"
+                ]
+            # The query itself is capped (list_unfiled(..., limit=20)) -- at the
+            # cap there may be more old escalations than we fetched at all, on
+            # top of whatever this batch's own unlinkable count already covers.
+            # Applies to both branches above, not just the bulleted one.
+            if len(old_escalations) == 20:
                 lines.append("_(showing first 20 — check Supabase for full list)_")
             await self._send_telegram_message(
                 chat_id=self._escalation_chat_id,
