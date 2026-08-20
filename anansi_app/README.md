@@ -1,5 +1,8 @@
 # Anansi Admin App
 
+> **Naming:** Anansi is the internal project and deployment name. The user-facing product is
+> **Mini-Grids Assistant**; its public identity is defined in `nicegui_app/branding.py`.
+
 A NiceGUI web application for administering the Anansi chat bot. Provides chat history browsing, settings management, MCP server toggles, broadcast scheduling, and live bot status — all behind Google OAuth authentication.
 
 ## Features

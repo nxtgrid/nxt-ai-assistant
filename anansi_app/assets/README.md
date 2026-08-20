@@ -1,8 +1,18 @@
 # Assets Folder
 
-This folder contains static assets for the Anansi App interface.
+This folder contains static assets for the internally named Anansi app, presented to users as
+**Mini-Grids Assistant**.
 
-## Organization Logo
+## Product identity
 
-Place your organization's white-on-transparent logo here as `org_logo_white.svg`.
-It will appear in the sidebar. If no logo file is present, a text-based fallback is displayed.
+- `mini_grids_assistant_logo.png` — approved transparent 880×890 master mark
+- `favicon-16.png` — 16×16 browser derivative
+- `favicon-32.png` — 32×32 browser derivative used by NiceGUI
+- `favicon.ico` — canonical ICO derivative
+
+Do not reintroduce the retired spider/robot marks. Public identity constants and asset URLs
+live in `nicegui_app/branding.py`.
+
+## Organization logo
+
+`org_logo_white.svg` is an independent operator-provided organization-logo slot.
