@@ -15,9 +15,11 @@ from typing import Any
 from grid_app.lib import perms
 from nicegui import run, ui
 
-SIDEBAR_BG = "#141824"
-ACCENT = "#4da6ff"
-PAGE_BG = "#f0f2f6"
+from nicegui_app import branding
+
+SIDEBAR_BG = branding.BRAND_NIGHT
+ACCENT = branding.BRAND_BLUE
+PAGE_BG = branding.BRAND_CANVAS
 
 OPERATIONS_NAV = [
     ("/tickets", "🎫 Tickets"),
@@ -145,11 +147,20 @@ def _render_grid_nav(current_path: str, expanded: bool) -> None:
 
 def _render_status_logo() -> None:
     """Logo with a live bot-status dot, refreshed every 30s (was st.fragment)."""
-    with ui.row().classes("items-center gap-2").style("padding: 0.75rem 0.75rem 0;"):
-        ui.image("/assets/anansi_logo.png").classes("w-9 h-9").props("fit=contain")
-        ui.label("Anansi").classes("text-lg text-bold").style("color: #ffffff")
+    with (
+        ui.row()
+        .classes("items-center gap-2 w-full no-wrap")
+        .style("padding: 0.75rem 0.75rem 0;")
+    ):
+        ui.image(branding.LOGO_URL).classes("w-10 h-10 shrink-0").props(
+            'fit=contain alt="Mini-Grids Assistant logo"'
+        )
+        ui.label(branding.PUBLIC_PRODUCT_NAME).classes("text-bold").style(
+            "color: #ffffff; font-size: 0.95rem; line-height: 1.1; "
+            "max-width: 8.25rem; white-space: normal;"
+        )
         dot = ui.element("div").style(
-            "width: 10px; height: 10px; border-radius: 9999px;"
+            "width: 10px; height: 10px; min-width: 10px; border-radius: 9999px;"
             f" background-color: {_STATUS_COLORS['down']};"
         )
         tooltip = ui.tooltip(_STATUS_TOOLTIPS["down"])

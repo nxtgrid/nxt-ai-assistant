@@ -38,3 +38,26 @@ def test_active_brand_assets_have_expected_binary_contract():
     assert _png_ihdr(ASSETS_DIR / branding.FAVICON_16_FILENAME) == (16, 16, 8, 6)
     assert _png_ihdr(ASSETS_DIR / branding.FAVICON_32_FILENAME) == (32, 32, 8, 6)
     assert (ASSETS_DIR / branding.FAVICON_ICO_FILENAME).read_bytes()[:4] == b"\x00\x00\x01\x00"
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_nicegui_shell_consumes_public_brand_contract():
+    main_source = (REPO_ROOT / "anansi_app/nicegui_app/main.py").read_text()
+    layout_source = (REPO_ROOT / "anansi_app/nicegui_app/layout.py").read_text()
+
+    assert "ui.label(branding.PUBLIC_PRODUCT_NAME)" in main_source
+    assert "ui.label(branding.LOGIN_PROMPT)" in main_source
+    assert "title=branding.PUBLIC_PRODUCT_NAME" in main_source
+    assert "ASSETS_DIR / branding.FAVICON_32_FILENAME" in main_source
+    assert "ui.image(branding.LOGO_URL)" in main_source
+    assert "ui.image(branding.LOGO_URL)" in layout_source
+    assert "ui.label(branding.PUBLIC_PRODUCT_NAME)" in layout_source
+    assert "anansi_logo" not in main_source
+    assert "anansi_logo" not in layout_source
+
+
+def test_legacy_product_marks_are_removed():
+    for filename in ("anansi_logo.png", "anansi_logo_nobg.png", "anansi_spider.png"):
+        assert not (ASSETS_DIR / filename).exists()
