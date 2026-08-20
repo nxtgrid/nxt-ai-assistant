@@ -247,11 +247,13 @@ async def _open_editor(row, schedule, service, refresh, user_email) -> None:
 
     The Workflow card mounts the same chat-driven builder the standalone
     /skill-builder page used to (render_builder, extracted for exactly this
-    reuse) -- but only for a *new* workflow. Reopening an existing one's
-    steps for further chat-driven editing is a known gap: render_builder's
-    initial_steps parameter exists for this and is not wired up yet (see
-    its docstring), so editing an existing workflow here covers identity,
-    status and schedule only, not its step transcript.
+    reuse), for New and Edit alike. Editing seeds it with the workflow's
+    stored steps via initial_steps: each renders as an inert "not yet
+    re-run" card until the author actually re-sends it, so a re-run is a
+    real execution against live tools, not a replay of old transcript --
+    see render_builder's docstring for the pending-tail mechanism, and
+    _derive_steps_payload for how anything left un-re-run is preserved
+    verbatim at Save.
 
     Sized and structured like the rest of the app's editor modals
     (broadcast.py, knowledge_modules.py, prompts.py: a capped-width card
@@ -408,22 +410,26 @@ async def _open_editor(row, schedule, service, refresh, user_email) -> None:
 
             summary_input.on_value_change(_on_summary_edited)
 
-        # Now fill the Workflow card placeholder created above.
-        if row:
-            with steps_card:
-                ui.label("Workflow").classes("text-subtitle2")
+        # Now fill the Workflow card placeholder created above. Mounted for
+        # both New and Edit alike -- render_builder's initial_steps handles
+        # the difference (empty for New, the stored steps for Edit; see its
+        # docstring and _derive_steps_payload for how a partially-re-run
+        # edit is preserved).
+        with steps_card:
+            ui.label("Workflow").classes("text-subtitle2")
+            if row:
                 ui.label(
-                    "Editing an existing workflow's steps isn't supported here yet -- "
-                    "this save will keep its current steps unchanged."
+                    "Each step below is re-runnable, one at a time from the top -- "
+                    "grey cards haven't been re-run in this session yet and are "
+                    "saved unchanged if you don't get to them."
                 ).classes("text-xs text-gray-500")
-            state_holder: Dict[str, Any] = {"steps": None}
-        else:
-            with steps_card:
-                ui.label("Workflow").classes("text-subtitle2")
-                builder_user_id = f"{user_email}:{uuid.uuid4()}"
-                state_holder = await render_builder(
-                    user_email, builder_user_id, on_summary_update=_apply_auto_summary
-                )
+            builder_user_id = f"{user_email}:{uuid.uuid4()}"
+            state_holder = await render_builder(
+                user_email,
+                builder_user_id,
+                initial_steps=(row.get("steps") or []) if row else [],
+                on_summary_update=_apply_auto_summary,
+            )
 
         with ui.row().classes("w-full justify-end gap-2"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
@@ -457,16 +463,10 @@ async def _open_editor(row, schedule, service, refresh, user_email) -> None:
                 else:
                     title = derive_fallback_title(summary_text)
 
-                if state_holder.get("steps") is None:
-                    # Editing an existing workflow: the Workflow card above
-                    # didn't mount a builder, so nothing to derive -- keep
-                    # it as is.
-                    steps = row.get("steps") or []
-                else:
-                    steps = _derive_steps_payload(state_holder)
-                    if not steps:
-                        ui.notify("Send at least one message to build a step.", type="negative")
-                        return
+                steps = _derive_steps_payload(state_holder)
+                if not steps:
+                    ui.notify("Send at least one message to build a step.", type="negative")
+                    return
 
                 if status_select.value == "active":
                     ok, reason = can_promote_to_active(
