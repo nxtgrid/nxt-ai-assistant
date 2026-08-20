@@ -84,29 +84,31 @@ Everything downstream reads these fields. No user-visible change.
 **Files:** `chat_orchestrator/orchestrator/experts/step_contracts.py`,
 test `chat_orchestrator/tests/experts/test_step_contracts.py`
 
-- [ ] **Task 1.1 — `OutputSpec`.** `name`, `value_type`, `description`,
+- [x] **Task 1.1 — `OutputSpec`.** `name`, `value_type`, `description`,
       `where` (`"state"` | `"data"`). Declares what a step returns so a caller
       can chain onto it; `produces_state` alone gives names with no types and
       `StepResult.data` is undeclared entirely.
-- [ ] **Task 1.2 — `MUTATION_KINDS`** = `("external_write", "db_write",
+- [x] **Task 1.2 — `MUTATION_KINDS`** = `("external_write", "db_write",
       "notification", "control_action")`.
-- [ ] **Task 1.3 — `MockSpec`.** Fields `state_updates: Dict`, `data: Dict`,
+- [x] **Task 1.3 — `MockSpec`.** Fields `state_updates: Dict`, `data: Dict`,
       `message: str`. Deliberately **not** `frozen=True` (it holds dicts, so a
       generated `__hash__` would raise; nothing hashes contracts, and failing
       loudly beats a silently-unhashable frozen type). Values must be
       self-evidently synthetic (`MOCK-` prefixes, obviously fake ids).
-- [ ] **Task 1.4 — new `StepContract` fields**, all defaulted so the 17 existing
+- [x] **Task 1.4 — new `StepContract` fields**, all defaulted so the 17 existing
       contracts and 35 uncontracted handlers keep working untouched:
       `mutates: bool = False`, `mutation_kind: str = ""`,
       `outputs: tuple[OutputSpec, ...] = ()`, `mock: Optional[MockSpec] = None`,
       `required_permission: str = ""`, `expected_latency_seconds: float = 0.0`.
-- [ ] **Task 1.5 — `validate_mock_covers_outputs(contract)`.** A `MockSpec` that
+- [x] **Task 1.5 — `validate_mock_covers_outputs(contract)`.** A `MockSpec` that
       doesn't populate every `produces_state` key is the failure mode that makes
       mocked runs worthless: mock `copy_lpp_template` into an empty result and
       `populate_lpp_cells` fails its `document_id` precondition, so the run dies
       at the first mutation and proves nothing. Return findings, don't raise.
-- [ ] **Task 1.6 — tests** for each of the above, plus a regression asserting a
+- [x] **Task 1.6 — tests** for each of the above, plus a regression asserting a
       bare `StepContract()` still constructs with every new field defaulted.
+
+**Done 2026-08-20** (`428df915`). 27 tests.
 
 ## Phase 2 — Run-scoped state carrier
 
@@ -115,28 +117,30 @@ The blocker. Without it, Phase 4's tools cannot satisfy their own preconditions.
 **Files:** `workflow_executor.py`, `step_context.py`,
 test `chat_orchestrator/tests/experts/test_skill_run_state.py`
 
-- [ ] **Task 2.1** — Give a skill run one state object playing the role
+- [x] **Task 2.1** — Give a skill run one state object playing the role
       `packet_state` plays in a workflow run. Thread it through the
       `_execute_skill_step_tool_call` loop so each call reads prior calls'
       `state_updates` and `data`. **Reuse `StepContext.packet_state` /
       `accumulated_results` and `StepResult.state_updates` / `data`** — do not
       invent a parallel mechanism.
-- [ ] **Task 2.2** — Verify state survives across rounds of the tool loop in
+- [x] **Task 2.2** — Verify state survives across rounds of the tool loop in
       `_execute_skill_step_tool_call`, not just within one round.
-- [ ] **Task 2.3** — Test: two chained handler calls, the second reading a key
+- [x] **Task 2.3** — Test: two chained handler calls, the second reading a key
       the first produced.
+
+**Done 2026-08-20** (`ba8c3aea`). `StepContext.apply_result()`. 13 tests.
 
 ## Phase 3 — Soft failures
 
 **Files:** `step_context.py` (`StepResult`), `workflow_executor.py`
 (`_execute_function_step`), test `test_soft_failures.py`
 
-- [ ] **Task 3.1 — `StepResult.soft_failure(code, message, remediation)`.**
+- [x] **Task 3.1 — `StepResult.soft_failure(code, message, remediation)`.**
       Returned to the model as a normal tool result. **Must not halt the run** —
       that is the whole difference from `StepResult.failure()`.
-- [ ] **Task 3.2 — codes:** `missing_parameter`, `invalid_parameter`,
+- [x] **Task 3.2 — codes:** `missing_parameter`, `invalid_parameter`,
       `unmet_prerequisite`, `guard_satisfied`, `not_permitted`.
-- [ ] **Task 3.3 — precondition checking from contracts.** Before running a
+- [x] **Task 3.3 — precondition checking from contracts.** Before running a
       handler, check `consumes_state` against run state. On a miss, return
       `unmet_prerequisite` naming **which step produces the key** (derive by
       scanning other contracts' `produces_state`).
@@ -146,28 +150,48 @@ test `chat_orchestrator/tests/experts/test_skill_run_state.py`
       Ordering stops being implicit in recipe line-order and becomes an enforced
       precondition. Per the operator ruling, this is the *only* ordering
       guardrail; do not add a pinned-order mechanism.
-- [ ] **Task 3.4 — `guard_satisfied`** from `guard_keys`, so a re-called step
+- [x] **Task 3.4 — `guard_satisfied`** from `guard_keys`, so a re-called step
       reports "already done" instead of redoing external work.
-- [ ] **Task 3.5** — `_execute_function_step` keeps `StepResult.failure` for
+- [x] **Task 3.5** — `_execute_function_step` keeps `StepResult.failure` for
       genuine crashes; only contract-detectable misuse becomes a soft failure.
+
+**Done 2026-08-21** (`d44551c1`). Task 3.3 reuses the pre-existing (unrelated
+"Phase C/D") `validate_step_prerequisites`/`PrereqReport` rather than
+re-deriving producer-chain scanning — see
+`WorkflowExecutor._soft_failure_before_running_step`'s own docstring for the
+full reasoning. Only `unmet_prerequisite`/`guard_satisfied` get automatic
+detection here; `missing_parameter`/`invalid_parameter`/`not_permitted` are
+vocabulary a handler or Phase 6 can use, not auto-fired by this phase. 20
+tests.
 
 ## Phase 4 — Steps as callable tools
 
 **Files:** new `step_tool_schema.py`, `workflow_executor.py`,
 tests `test_step_tool_schema.py`
 
-- [ ] **Task 4.1 — derive a JSON-schema tool declaration from `StepContract`.**
+- [x] **Task 4.1 — derive a JSON-schema tool declaration from `StepContract`.**
       Inputs come from `params` **and** caller-suppliable `consumes_state` keys
       (see fact 1 — `params` alone is empty for most steps). A key only a prior
       step can produce is documented as a precondition, not an argument.
       Outputs come from `outputs`.
-- [ ] **Task 4.2 — route by name in `_execute_skill_step_tool_call`:** a call
+- [x] **Task 4.2 — route by name in `_execute_skill_step_tool_call`:** a call
       matching a registered handler goes to `_execute_function_step`; everything
       else keeps going to `context.mcp_executor`. Preserve the existing
       never-raise contract — failures come back as `ToolCallResult(success=False)`.
-- [ ] **Task 4.3** — only contract-bearing, permission-cleared handlers get
+- [x] **Task 4.3** — only contract-bearing, permission-cleared handlers get
       declared. No contract ⇒ not offered.
-- [ ] **Task 4.4** — tests: schema shape, handler-vs-MCP routing, unknown name.
+- [x] **Task 4.4** — tests: schema shape, handler-vs-MCP routing, unknown name.
+
+**Done 2026-08-21** (`3b546172`). One addition beyond the literal task text,
+made for a concrete reason: mutating steps also need `allow_write=True`
+(mirroring `filter_tools_for_step`'s existing MCP read-only gate, via
+`contract.mutates` instead of a name prefix) — without it, "permission-
+cleared" alone would let a non-allow_write skill step reach real handlers
+like `write_review_section`/`send_lpp_map_to_telegram` the moment Phase 6
+adds real permission checking, since `required_permission` and `mutates`
+answer different questions. `allow_write` threaded through
+`_execute_llm_step` → `_call_llm_step_with_tools` →
+`_execute_skill_step_tool_call` to reach the routing check.
 
 ## Phase 5 — Mock mode
 
