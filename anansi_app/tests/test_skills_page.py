@@ -99,6 +99,90 @@ def test_format_schedule_handles_a_missing_cron():
     assert format_schedule({"anchor_entity_type": "grid", "is_active": True}) == "—"
 
 
+def test_schedule_form_defaults_with_no_schedule():
+    from nicegui_app.pages.skills import REPEAT_OPTIONS, schedule_form_defaults
+
+    assert schedule_form_defaults(None) == {
+        "anchor": "", "repeat": REPEAT_OPTIONS[0], "first_run": "",
+    }
+
+
+def test_schedule_form_defaults_with_an_inactive_schedule():
+    """An already-completed one-time run, or one an operator previously
+    removed, must read the same as no schedule at all -- Save's removal
+    branch relies on this same rule to avoid firing a pointless removal
+    call on a workflow that isn't really scheduled (see Task 6)."""
+    from nicegui_app.pages.skills import REPEAT_OPTIONS, schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "grid", "cron_expression": None,
+        "schedule_type": "once", "next_run_at": "2026-09-01T08:00:00+00:00",
+        "is_active": False,
+    }
+    assert schedule_form_defaults(schedule) == {
+        "anchor": "", "repeat": REPEAT_OPTIONS[0], "first_run": "",
+    }
+
+
+def test_schedule_form_defaults_for_a_weekly_schedule():
+    from nicegui_app.pages.skills import schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "grid", "cron_expression": "0 8 * * 1",
+        "schedule_type": "recurring", "next_run_at": "2026-09-01T08:00:00+00:00",
+        "is_active": True,
+    }
+    assert schedule_form_defaults(schedule) == {
+        "anchor": "grid", "repeat": "Weekly", "first_run": "2026-09-01 08:00",
+    }
+
+
+def test_schedule_form_defaults_for_a_biweekly_schedule():
+    from nicegui_app.pages.skills import schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "organization", "cron_expression": "0 8 * * 1",
+        "schedule_type": "biweekly", "next_run_at": "2026-09-01T08:00:00+00:00",
+        "is_active": True,
+    }
+    assert schedule_form_defaults(schedule)["repeat"] == "Every other week"
+
+
+def test_schedule_form_defaults_for_a_monthly_same_date_schedule():
+    from nicegui_app.pages.skills import schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "grid", "cron_expression": "0 8 15 * *",
+        "schedule_type": "recurring", "next_run_at": "2026-09-15T08:00:00+00:00",
+        "is_active": True,
+    }
+    assert schedule_form_defaults(schedule)["repeat"] == "Monthly (same date)"
+
+
+def test_schedule_form_defaults_for_a_monthly_same_weekday_schedule():
+    from nicegui_app.pages.skills import schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "grid", "cron_expression": "0 8 * * 1#3",
+        "schedule_type": "recurring", "next_run_at": "2026-09-15T08:00:00+00:00",
+        "is_active": True,
+    }
+    assert schedule_form_defaults(schedule)["repeat"] == "Monthly (same weekday)"
+
+
+def test_schedule_form_defaults_for_a_one_time_schedule():
+    from nicegui_app.pages.skills import schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "grid", "cron_expression": None,
+        "schedule_type": "once", "next_run_at": "2026-09-01T08:00:00+00:00",
+        "is_active": True,
+    }
+    assert schedule_form_defaults(schedule) == {
+        "anchor": "grid", "repeat": "Does not repeat", "first_run": "2026-09-01 08:00",
+    }
+
+
 def test_every_status_has_a_colour():
     for status in ("draft", "active", "disabled", "unusable"):
         assert status in STATUS_COLORS
@@ -274,3 +358,86 @@ def test_a_step_with_no_tool_calls_is_not_flagged():
     from nicegui_app.pages.skill_builder import _step_had_tool_error
 
     assert _step_had_tool_error({"response_messages": []}) is False
+
+
+def _make_live_step(content: str) -> dict:
+    return {"user_message": {"content": content, "message_index": 0}, "response_messages": []}
+
+
+def test_derive_steps_payload_with_no_pending_tail_is_unchanged():
+    """New-workflow path (initial_steps=[]) -- must keep behaving exactly as
+    before this change."""
+    from nicegui_app.pages.skill_builder import _derive_steps_payload
+
+    state = {
+        "steps": [_make_live_step("do a")],
+        "flags": {0: {"allow_write": False, "is_response_step": False}},
+        "initial_steps": [],
+    }
+    steps = _derive_steps_payload(state)
+    assert len(steps) == 1
+    assert steps[0]["instruction"] == "do a"
+    assert steps[0]["is_response_step"] is True  # only step -> forced last
+
+
+def test_derive_steps_payload_appends_an_untouched_pending_tail():
+    from nicegui_app.pages.skill_builder import _derive_steps_payload
+
+    stored = [
+        {"index": 0, "name": "a", "instruction": "do a", "allow_write": False,
+         "is_response_step": False, "had_tool_error": False, "result_preview": "got a"},
+        {"index": 1, "name": "b", "instruction": "do b", "allow_write": True,
+         "is_response_step": False, "had_tool_error": False, "result_preview": "got b"},
+        {"index": 2, "name": "c", "instruction": "do c", "allow_write": False,
+         "is_response_step": True, "had_tool_error": False, "result_preview": "got c"},
+    ]
+    state = {"steps": [], "flags": {}, "initial_steps": stored}
+
+    steps = _derive_steps_payload(state)
+
+    assert len(steps) == 3
+    assert [s["instruction"] for s in steps] == ["do a", "do b", "do c"]
+    assert [s["index"] for s in steps] == [0, 1, 2]
+    assert steps[1]["allow_write"] is True  # passed through verbatim
+    assert steps[2]["is_response_step"] is True
+
+
+def test_derive_steps_payload_mixes_live_and_pending():
+    from nicegui_app.pages.skill_builder import _derive_steps_payload
+
+    stored = [
+        {"index": 0, "name": "a", "instruction": "do a (stored)", "allow_write": False,
+         "is_response_step": False, "had_tool_error": False, "result_preview": ""},
+        {"index": 1, "name": "b", "instruction": "do b (stored)", "allow_write": False,
+         "is_response_step": False, "had_tool_error": False, "result_preview": ""},
+    ]
+    state = {
+        "steps": [_make_live_step("do a (re-run)")],
+        "flags": {0: {"allow_write": False, "is_response_step": False}},
+        "initial_steps": stored,
+    }
+
+    steps = _derive_steps_payload(state)
+
+    assert len(steps) == 2
+    assert steps[0]["instruction"] == "do a (re-run)"  # the live re-run wins
+    assert steps[1]["instruction"] == "do b (stored)"  # untouched, preserved verbatim
+    assert steps[1]["index"] == 1
+    assert steps[1]["is_response_step"] is True  # now the combined-last step
+
+
+def test_derive_steps_payload_preserves_a_function_step_in_the_pending_tail():
+    """A P3 function-kind step can't be produced or re-run by this chat
+    builder -- it must ride through untouched, not be dropped or crash."""
+    from nicegui_app.pages.skill_builder import _derive_steps_payload
+
+    stored = [
+        {"index": 0, "kind": "function", "handler": "fetch_grafana_kpis",
+         "output_var": "kpis", "is_response_step": True},
+    ]
+    state = {"steps": [], "flags": {}, "initial_steps": stored}
+
+    steps = _derive_steps_payload(state)
+
+    assert steps[0]["kind"] == "function"
+    assert steps[0]["handler"] == "fetch_grafana_kpis"

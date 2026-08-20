@@ -231,9 +231,20 @@ def _derive_steps_payload(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     chat_orchestrator/orchestrator/experts/skill_validation.py's module
     docstring for the canonical shape. Used for /skills/validate,
     /skills/summarize, and Save, so all three always see the same steps.
+
+    Appends whatever's left of state["initial_steps"] beyond the live
+    transcript -- the "pending tail" (steps from a reopened workflow not yet
+    re-run this session) -- verbatim, renumbered only. This is what makes
+    "open Edit, Save without touching anything" reproduce the stored steps
+    byte-for-byte, and what lets a step kind this builder can't produce
+    (e.g. a P3 "function" step) survive an edit untouched instead of being
+    dropped.
     """
+    live_count = len(state["steps"])
+    pending_tail = state.get("initial_steps", [])[live_count:]
+    step_count = live_count + len(pending_tail)
+
     steps = []
-    step_count = len(state["steps"])
     for index, step in enumerate(state["steps"]):
         instruction = step["user_message"].get("content") or ""
         _read_text, output_var = _parse_output_binding(instruction)
@@ -246,8 +257,9 @@ def _derive_steps_payload(state: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "instruction": instruction,
                 "output_var": output_var,
                 "allow_write": flags["allow_write"],
-                # The final step is always an implicit response step even if
-                # not flagged -- see the plan's "Run-mode output" section.
+                # The final step (of the combined live + pending sequence)
+                # is always an implicit response step even if not flagged --
+                # see the plan's "Run-mode output" section.
                 "is_response_step": is_last or flags["is_response_step"],
                 "had_tool_error": _step_had_tool_error(step),
                 # Builder-only context for /skills/summarize (item b) -- what
@@ -256,6 +268,15 @@ def _derive_steps_payload(state: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "result_preview": _step_response_text(step)[:_RESULT_PREVIEW_CHARS],
             }
         )
+
+    for offset, stored_step in enumerate(pending_tail):
+        index = live_count + offset
+        is_last = index == step_count - 1
+        kept = dict(stored_step)
+        kept["index"] = index
+        kept["is_response_step"] = is_last or kept.get("is_response_step", False)
+        steps.append(kept)
+
     return steps
 
 
@@ -282,11 +303,19 @@ async def render_builder(
     session -- see generate_session_id), and each caller knows its own
     freshness boundary (a page load vs. a modal open).
 
-    `initial_steps` is accepted for the editor modal's future "resume an
-    existing skill's steps" use and is not wired to anything yet -- neither
-    this phase nor the modal built on top of it (Task 8) populates it, so a
-    skill's steps still can't be reopened for further chat-driven editing
-    once saved. Tracked as a known gap, not silently solved here.
+    `initial_steps` is the stored `skills.steps` list when this builder is
+    reopened to edit an existing workflow (`[]` for a brand-new one). It is
+    captured once into `state["initial_steps"]` at mount and never mutated;
+    "how much of it is still pending" is a *derived* value
+    (`state["initial_steps"][len(state["steps"]):]`), not tracked state --
+    slicing by the live step count is what makes this self-correcting under
+    Rewind for free (archiving live steps back to zero re-expands the
+    pending tail to the full original list with no bookkeeping needed).
+    Each pending step renders as an inert, greyed "not yet re-run" card
+    (`_render_pending_step`) until its instruction is actually (re-)sent, at
+    which point it graduates into a normal live step sourced from the real
+    transcript exactly like any other. See `_derive_steps_payload` for how a
+    still-pending tail is preserved verbatim into the saved payload.
 
     `on_summary_update`, if given, is called with the freshly auto-generated
     summary (item b) every time it changes -- after every send/rewind, as
@@ -303,6 +332,7 @@ async def render_builder(
     state: Dict[str, Any] = {
         "session_id": None,
         "steps": [],
+        "initial_steps": initial_steps or [],
         "flags": {},  # step index -> {"allow_write": bool, "is_response_step": bool}
         "validation_errors": [],
         "sending": False,
@@ -364,18 +394,67 @@ async def render_builder(
 
         _rebuild_transcript()
 
+        # Prime the input with the next not-yet-re-run step, but only when
+        # nothing else already claimed the box: _send() just cleared it to
+        # "" (prefill applies below), _rewind() just set it to the rewound
+        # step's real sent text (non-empty -- Rewind's own "edit and resend
+        # this" intent wins instead, unchanged from before this feature).
+        pending_tail = state["initial_steps"][len(state["steps"]):]
+        if pending_tail and not message_input.value:
+            message_input.value = pending_tail[0].get("instruction") or ""
+
     def _rebuild_transcript() -> None:
         transcript.clear()
         errors_by_step: Dict[int, List[Dict[str, Any]]] = {}
         for err in state["validation_errors"]:
             errors_by_step.setdefault(err["step_index"], []).append(err)
 
+        live_count = len(state["steps"])
+        pending_tail = state["initial_steps"][live_count:]
+
         with transcript:
             for index, step in enumerate(state["steps"]):
                 _render_step(index, step, errors_by_step.get(index, []))
 
+            for offset, stored_step in enumerate(pending_tail):
+                _render_pending_step(live_count + offset, stored_step, is_up_next=(offset == 0))
+
+            # Only meaningful for a reopened workflow -- initial_steps is
+            # always [] for a brand-new one, so pending_tail is always []
+            # there too and this never renders.
+            if state["initial_steps"] and pending_tail:
+                total = len(state["initial_steps"])
+                ui.label(
+                    f"{total - len(pending_tail)} of {total} steps re-run -- "
+                    f"the rest will be saved unchanged."
+                ).classes("text-caption text-grey-6")
+
+    def _render_pending_step(index: int, stored_step: Dict[str, Any], is_up_next: bool) -> None:
+        """A step from initial_steps not yet re-run in this edit session --
+        greyed out, nothing to act on yet. Graduates into a normal
+        _render_step card the moment its instruction is actually (re-)sent;
+        see _refresh_transcript's auto-fill and the pending-tail slice in
+        _rebuild_transcript."""
+        card_classes = "w-full bg-grey-2"
+        if is_up_next:
+            card_classes += " border-l-4 border-primary"
+        with ui.card().classes(card_classes):
+            label = f"Step {index + 1} · not yet re-run"
+            if is_up_next:
+                label += " · up next"
+            ui.label(label).classes("text-bold text-grey-6")
+            ui.label(stored_step.get("instruction") or "").classes(
+                "text-body1 text-grey-6"
+            ).style("font-style: italic")
+            preview = (stored_step.get("result_preview") or "").strip()
+            if preview:
+                ui.label(f"Previously retrieved: {preview[:200]}").classes(
+                    "text-caption text-grey-5"
+                )
+
     def _render_step(index: int, step: Dict[str, Any], errors: List[Dict[str, Any]]) -> None:
-        is_last = index == len(state["steps"]) - 1
+        pending_tail = state["initial_steps"][len(state["steps"]):]
+        is_last = index == len(state["steps"]) - 1 and not pending_tail
         flags = state["flags"][index]
 
         with ui.card().classes("w-full"):

@@ -8,16 +8,20 @@ survives navigation as a draft rather than being lost.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from nicegui import ui
 
-# Must match nicegui_app.pages.broadcast._build_recurrence's REPEAT_OPTIONS,
-# minus "Does not repeat" -- that produces no recurrence at all (see
-# SkillBuilderService.set_skill_schedule's docstring), so it isn't a
-# meaningful choice here: a one-off skill run doesn't need a persistent cron
-# row, it's just run from the builder.
-REPEAT_OPTIONS = ["Weekly", "Every other week", "Monthly (same date)", "Monthly (same weekday)"]
+# Matches nicegui_app.pages.broadcast._build_recurrence's REPEAT_OPTIONS
+# exactly, including "Does not repeat" -- a real one-time run (see
+# SkillBuilderService.set_skill_schedule), not just "no schedule at all".
+REPEAT_OPTIONS = [
+    "Does not repeat",
+    "Weekly",
+    "Every other week",
+    "Monthly (same date)",
+    "Monthly (same weekday)",
+]
 
 STATUS_COLORS: Dict[str, str] = {
     "draft": "grey",
@@ -37,6 +41,56 @@ def format_schedule(schedule: Dict[str, Any]) -> str:
     if not schedule.get("is_active", True):
         text = f"{text} (paused)"
     return text
+
+
+def schedule_form_defaults(schedule: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """anchor / repeat / first_run string values to preselect when opening
+    Edit on a workflow that may already have a user_schedules row.
+
+    An inactive row (a one-time run that already completed, or one an
+    operator previously removed via remove_skill_schedule) reads identically
+    to no schedule at all -- both here and in _open_editor's Save logic,
+    which must agree on the same "is this really scheduled" question or it
+    will fire a pointless removal call on a workflow that was never actually
+    scheduled to begin with.
+    """
+    if not schedule or not schedule.get("is_active"):
+        return {"anchor": "", "repeat": REPEAT_OPTIONS[0], "first_run": ""}
+
+    anchor = schedule.get("anchor_entity_type") or ""
+
+    first_run = ""
+    next_run_at = schedule.get("next_run_at")
+    if next_run_at:
+        try:
+            from datetime import datetime
+
+            parsed = datetime.fromisoformat(str(next_run_at).replace("Z", "+00:00"))
+            first_run = parsed.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            first_run = ""
+
+    # Only has to round-trip what _build_recurrence itself produces --
+    # skill schedules have exactly one writer -- not arbitrary hand-written
+    # cron.
+    schedule_type = schedule.get("schedule_type")
+    cron = schedule.get("cron_expression") or ""
+    if schedule_type == "biweekly":
+        repeat = "Every other week"
+    elif schedule_type != "recurring" or not cron:
+        repeat = "Does not repeat"
+    else:
+        fields = cron.split()
+        dow = fields[4] if len(fields) > 4 else ""
+        dom = fields[2] if len(fields) > 2 else "*"
+        if "#" in dow:
+            repeat = "Monthly (same weekday)"
+        elif dom != "*":
+            repeat = "Monthly (same date)"
+        else:
+            repeat = "Weekly"
+
+    return {"anchor": anchor, "repeat": repeat, "first_run": first_run}
 
 
 def derive_fallback_title(summary: str) -> str:
@@ -156,19 +210,19 @@ async def render(user: dict[str, Any]) -> None:
                 )
                 return
             for row in rows:
-                _render_row(row, service, refresh, user_email)
+                _render_row(row, schedules.get(row["id"]), service, refresh, user_email)
 
     with ui.row().classes("w-full justify-end mb-2"):
         ui.button(
             "New workflow",
             icon="add",
-            on_click=lambda: _open_editor(None, service, refresh, user_email),
+            on_click=lambda: _open_editor(None, None, service, refresh, user_email),
         ).props("color=primary")
 
     await refresh()
 
 
-def _render_row(row, service, refresh, user_email) -> None:
+def _render_row(row, schedule, service, refresh, user_email) -> None:
     with ui.card().classes("w-full"):
         with ui.row().classes("w-full items-center justify-between"):
             with ui.column().classes("gap-0"):
@@ -182,20 +236,24 @@ def _render_row(row, service, refresh, user_email) -> None:
                 ui.badge(row["status"], color=STATUS_COLORS.get(row["status"], "grey"))
                 ui.button(
                     "Edit",
-                    on_click=lambda r=row: _open_editor(r, service, refresh, user_email),
+                    on_click=lambda r=row, s=schedule: _open_editor(
+                        r, s, service, refresh, user_email
+                    ),
                 ).props("flat dense")
 
 
-async def _open_editor(row, service, refresh, user_email) -> None:
+async def _open_editor(row, schedule, service, refresh, user_email) -> None:
     """New workflow (row=None) or edit an existing one's identity/status/schedule.
 
     The Workflow card mounts the same chat-driven builder the standalone
     /skill-builder page used to (render_builder, extracted for exactly this
-    reuse) -- but only for a *new* workflow. Reopening an existing one's
-    steps for further chat-driven editing is a known gap: render_builder's
-    initial_steps parameter exists for this and is not wired up yet (see
-    its docstring), so editing an existing workflow here covers identity,
-    status and schedule only, not its step transcript.
+    reuse), for New and Edit alike. Editing seeds it with the workflow's
+    stored steps via initial_steps: each renders as an inert "not yet
+    re-run" card until the author actually re-sends it, so a re-run is a
+    real execution against live tools, not a replay of old transcript --
+    see render_builder's docstring for the pending-tail mechanism, and
+    _derive_steps_payload for how anything left un-re-run is preserved
+    verbatim at Save.
 
     Sized and structured like the rest of the app's editor modals
     (broadcast.py, knowledge_modules.py, prompts.py: a capped-width card
@@ -313,6 +371,7 @@ async def _open_editor(row, service, refresh, user_email) -> None:
                 ui.label(
                     "Schedule -- runs once per entity of the chosen type."
                 ).classes("text-xs text-gray-500")
+                schedule_defaults = schedule_form_defaults(schedule)
                 with ui.row().classes("w-full gap-2"):
                     anchor_select = ui.select(
                         {
@@ -320,15 +379,17 @@ async def _open_editor(row, service, refresh, user_email) -> None:
                             "grid": "Per grid",
                             "organization": "Per organization",
                         },
-                        value="",
+                        value=schedule_defaults["anchor"],
                         label="Fan out across",
                     ).classes("flex-grow")
                     repeat_select = ui.select(
                         REPEAT_OPTIONS,
-                        value=REPEAT_OPTIONS[0],
+                        value=schedule_defaults["repeat"],
                         label="Repeat",
                     ).classes("flex-grow")
-                first_run = ui.input("First run (YYYY-MM-DD HH:MM)").classes("w-full")
+                first_run = ui.input(
+                    "First run (YYYY-MM-DD HH:MM)", value=schedule_defaults["first_run"]
+                ).classes("w-full")
 
             # Guards state_holder["summary_user_edited"] against the
             # programmatic write below setting it -- only a real user edit
@@ -349,22 +410,26 @@ async def _open_editor(row, service, refresh, user_email) -> None:
 
             summary_input.on_value_change(_on_summary_edited)
 
-        # Now fill the Workflow card placeholder created above.
-        if row:
-            with steps_card:
-                ui.label("Workflow").classes("text-subtitle2")
+        # Now fill the Workflow card placeholder created above. Mounted for
+        # both New and Edit alike -- render_builder's initial_steps handles
+        # the difference (empty for New, the stored steps for Edit; see its
+        # docstring and _derive_steps_payload for how a partially-re-run
+        # edit is preserved).
+        with steps_card:
+            ui.label("Workflow").classes("text-subtitle2")
+            if row:
                 ui.label(
-                    "Editing an existing workflow's steps isn't supported here yet -- "
-                    "this save will keep its current steps unchanged."
+                    "Each step below is re-runnable, one at a time from the top -- "
+                    "grey cards haven't been re-run in this session yet and are "
+                    "saved unchanged if you don't get to them."
                 ).classes("text-xs text-gray-500")
-            state_holder: Dict[str, Any] = {"steps": None}
-        else:
-            with steps_card:
-                ui.label("Workflow").classes("text-subtitle2")
-                builder_user_id = f"{user_email}:{uuid.uuid4()}"
-                state_holder = await render_builder(
-                    user_email, builder_user_id, on_summary_update=_apply_auto_summary
-                )
+            builder_user_id = f"{user_email}:{uuid.uuid4()}"
+            state_holder = await render_builder(
+                user_email,
+                builder_user_id,
+                initial_steps=(row.get("steps") or []) if row else [],
+                on_summary_update=_apply_auto_summary,
+            )
 
         with ui.row().classes("w-full justify-end gap-2"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
@@ -398,16 +463,10 @@ async def _open_editor(row, service, refresh, user_email) -> None:
                 else:
                     title = derive_fallback_title(summary_text)
 
-                if state_holder.get("steps") is None:
-                    # Editing an existing workflow: the Workflow card above
-                    # didn't mount a builder, so nothing to derive -- keep
-                    # it as is.
-                    steps = row.get("steps") or []
-                else:
-                    steps = _derive_steps_payload(state_holder)
-                    if not steps:
-                        ui.notify("Send at least one message to build a step.", type="negative")
-                        return
+                steps = _derive_steps_payload(state_holder)
+                if not steps:
+                    ui.notify("Send at least one message to build a step.", type="negative")
+                    return
 
                 if status_select.value == "active":
                     ok, reason = can_promote_to_active(
@@ -461,6 +520,26 @@ async def _open_editor(row, service, refresh, user_email) -> None:
                     if not schedule_result.get("success"):
                         ui.notify(
                             f"Saved, but scheduling failed: {schedule_result.get('error')}",
+                            type="warning",
+                        )
+                        dialog.close()
+                        await refresh()
+                        return
+                elif schedule is not None and schedule.get("is_active"):
+                    # Had an ACTIVE schedule; the author explicitly cleared
+                    # it to "Not scheduled" -- remove it rather than
+                    # silently leaving the old row running. is_active gates
+                    # this the same way schedule_form_defaults gates the
+                    # prefill (see its docstring): without it, saving a
+                    # workflow whose one-time run already completed would
+                    # fire a pointless removal call every single time.
+                    removal_result = await run.io_bound(
+                        lambda: service.remove_skill_schedule(skill_id, actor=user_email)
+                    )
+                    if not removal_result.get("success"):
+                        ui.notify(
+                            f"Saved, but removing the schedule failed: "
+                            f"{removal_result.get('error')}",
                             type="warning",
                         )
                         dialog.close()

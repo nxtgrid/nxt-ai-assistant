@@ -309,11 +309,9 @@ class SkillBuilderService:
             )
             return 0
 
-    # Must match anansi_app/nicegui_app/pages/broadcast.py's _build_recurrence,
-    # minus "Does not repeat" -- that maps to no recurrence at all (returns
-    # None), which this treats as an error rather than a one-time schedule.
-    # A one-off skill run doesn't need a persistent cron row; run it from the
-    # builder instead.
+    # Anchors this UI exposes for fan-out. entity_fanout.py is the runtime
+    # source of truth for what's actually wired up; this CHECK-mirroring set
+    # is just this service's own input validation.
     SUPPORTED_ANCHORS = ("grid", "organization")
 
     def set_skill_schedule(
@@ -328,9 +326,15 @@ class SkillBuilderService:
 
         Reuses broadcast.py's _build_recurrence rather than deriving cron a
         second way -- the two must agree on what "Weekly" means. `frequency`
-        must be one of its REPEAT_OPTIONS other than "Does not repeat":
-        "Weekly", "Every other week", "Monthly (same date)" or
-        "Monthly (same weekday)".
+        is one of its REPEAT_OPTIONS: "Does not repeat" (a real one-time run
+        -- see below), "Weekly", "Every other week", "Monthly (same date)"
+        or "Monthly (same weekday)".
+
+        "Does not repeat" stores cron_expression=None, schedule_type="once".
+        _advance_skill_schedule (anansi_app/scripts/broadcast_scheduler.py)
+        already treats any schedule_type outside ("recurring", "biweekly")
+        as one-time: it dispatches once and flips is_active=False,
+        status="completed" -- no dispatcher-side change needed for this.
 
         `command` is explicitly None: user_schedules_command_xor_skill_chk
         requires exactly one of command / skill_id per row. `chat_id` is
@@ -367,9 +371,18 @@ class SkillBuilderService:
 
         from nicegui_app.pages.broadcast import _build_recurrence
 
-        recurrence = _build_recurrence(when, frequency) or {}
-        if not recurrence.get("cron_expression"):
-            return {"success": False, "error": f"Could not derive a schedule from '{frequency}'"}
+        recurrence = _build_recurrence(when, frequency)
+        if recurrence is None:
+            if frequency != "Does not repeat":
+                return {
+                    "success": False,
+                    "error": f"Could not derive a schedule from '{frequency}'",
+                }
+            cron_expression, schedule_type, tz = None, "once", "UTC"
+        else:
+            cron_expression = recurrence["cron_expression"]
+            schedule_type = recurrence.get("schedule_type", "recurring")
+            tz = recurrence.get("timezone", "UTC")
 
         if not self.client:
             return {"success": False, "error": "Chat DB not configured"}
@@ -381,9 +394,10 @@ class SkillBuilderService:
             "created_by_user_id": actor,
             "created_by_email": actor,
             "anchor_entity_type": anchor_entity_type,
-            "cron_expression": recurrence["cron_expression"],
-            "schedule_type": recurrence.get("schedule_type", "recurring"),
-            "timezone": recurrence.get("timezone", "UTC"),
+            "cron_expression": cron_expression,
+            "schedule_type": schedule_type,
+            "timezone": tz,
+            "next_run_at": when.isoformat(),
             "is_active": True,
             "status": "active",
         }
@@ -396,6 +410,34 @@ class SkillBuilderService:
         except Exception as e:
             return {"success": False, "error": str(e)}
         return {"success": True, "schedule": (response.data or [payload])[0]}
+
+    def remove_skill_schedule(self, skill_id: str, actor: str) -> Dict[str, Any]:
+        """Deactivate a skill's schedule -- the editor modal's "Not
+        scheduled" save path, when a schedule existed before (see
+        nicegui_app/pages/skills.py's _open_editor).
+
+        status="cancelled" distinguishes an operator turning this off from
+        a one-time schedule that simply finished
+        (status="completed", set by _advance_skill_schedule in
+        anansi_app/scripts/broadcast_scheduler.py) -- both end up
+        is_active=False and are equally invisible to
+        process_due_skill_schedules; the status text is only for a human
+        reading the row.
+        """
+        if not self.client:
+            return {"success": False, "error": "Chat DB not configured"}
+        try:
+            response = (
+                self.client.table("user_schedules")
+                .update({"is_active": False, "status": "cancelled"})
+                .eq("skill_id", skill_id)
+                .execute()
+            )
+        except Exception as e:
+            logger.exception("Error removing schedule for skill %s", skill_id)
+            return {"success": False, "error": str(e)}
+        logger.info("Schedule removed for skill %s (by %s)", skill_id, actor)
+        return {"success": True, "schedule": (response.data or [None])[0]}
 
     def _unique_slug(self, title: str) -> str:
         """First free ``slug``, ``slug-2``, ``slug-3``... against existing
