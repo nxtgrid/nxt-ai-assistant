@@ -2750,6 +2750,22 @@ class WorkflowExecutor:
         with success=False, fed back to the LLM as a normal function
         response, matching gtr_analysis_conversation.py's existing pattern
         for LLM-driven tool loops elsewhere in this codebase.
+
+        A successful call's output is also merged into `context` via
+        `StepContext.apply_result` (Phase 2 of the skills-as-tools plan's
+        run-scoped state carrier), under the SAME `accumulated_results` key
+        convention `_execute_one_step` already uses for a top-level function
+        step's result (the call/step name). `context` is one shared object
+        across every round of this step's tool-call loop (see
+        `_call_llm_step_with_tools`, this method's caller) -- so a later
+        call, in this round or a later one, can already read an earlier
+        call's output via `context.get_previous_result(call.name)`. MCP
+        tool output carries no `state_updates` (only `data`); once Phase 4
+        routes some calls to registered step handlers instead of MCP, a
+        handler's real `state_updates` become visible the same way via
+        `context.get_state(key)`, satisfying a later handler's
+        `consumes_state` precondition -- reusing this exact mechanism
+        rather than a second one.
         """
         if not context.mcp_executor:
             return ToolCallResult(
@@ -2761,6 +2777,10 @@ class WorkflowExecutor:
             )
         try:
             output = await context.mcp_executor.call_tool(call.name, call.arguments)
+            context.apply_result(
+                call.name,
+                StepResult(data=output if isinstance(output, dict) else {"value": output}),
+            )
             return ToolCallResult(
                 name=call.name, success=True, output=output, tool_call_id=call.tool_call_id
             )

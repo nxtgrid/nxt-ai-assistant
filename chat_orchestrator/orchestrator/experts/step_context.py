@@ -115,6 +115,49 @@ class StepContext:
         """
         return self.accumulated_results.get(step_name)  # type: ignore[no-any-return]
 
+    def apply_result(self, name: str, result: "StepResult") -> None:
+        """Merge a StepResult into this run's shared state, in memory.
+
+        Phase 2 of docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md:
+        the run-scoped state carrier a skill's tool-call loop needs so one
+        call can satisfy a later call's precondition. Deliberately reuses
+        this object's own `packet_state`/`accumulated_results` -- the exact
+        two containers `WorkflowExecutor._execute_one_step` already merges a
+        top-level function step's result into (`context.packet_state.update
+        (result.state_updates)`, `accumulated_results[step.name] =
+        result.data`) -- rather than inventing a parallel mechanism.
+
+        `name` is stored under the same key convention top-level function
+        steps use for `accumulated_results` (the step/handler name), so
+        `get_previous_result(name)` and a later contract's
+        `consumes_results` resolve identically whether `name` ran as a
+        top-level recipe step or as a tool call inside one skill step's
+        loop.
+
+        Callers of this method (`WorkflowExecutor._execute_skill_step_tool_call`)
+        share ONE `StepContext` instance across every round of that step's
+        tool-call loop -- `context` is a fixed parameter passed unchanged
+        into every round, never rebuilt -- so a value applied here is
+        already visible to any later call in the same or a later round via
+        `get_state`/`get_previous_result`, with no further plumbing needed.
+
+        Unlike `_execute_one_step`'s merge, this does NOT persist to the
+        database. DB persistence of `packet_state` stays owned once-per-
+        outer-step by `_execute_one_step`'s own call to
+        `packet_service.update_state` after the whole step (including any
+        inner tool-call loop) completes -- persisting on every inner tool
+        call would be premature and far more frequent than every other
+        step's persistence cadence.
+
+        A `StepResult` with neither `state_updates` nor `data` set (e.g. a
+        read that produced no reusable output) is a safe no-op -- no keys
+        are touched.
+        """
+        if result.state_updates:
+            self.packet_state.update(result.state_updates)
+        if result.data:
+            self.accumulated_results[name] = result.data
+
     def get_input(self, key: str, default: Any = None) -> Any:
         """Get a value from packet inputs or parsed state.
 
