@@ -63,12 +63,18 @@ class ModuleRow:
     chars: int
     source: str = "manual"
     size_label: str = ""
+    # Not shown in _render_row -- only used to make a module findable via
+    # the search box (see filter_context_rows). Same reasoning as chars
+    # above: already in memory here, so carrying it costs nothing new.
+    summary: str = ""
+    body: str = ""
 
 
 def build_module_rows(modules: List[Any]) -> List[ModuleRow]:
     rows = []
     for m in sorted(modules, key=lambda m: m.slug):
-        chars = len(m.body or "")
+        body = m.body or ""
+        chars = len(body)
         source = getattr(m, "source", "manual")
         rows.append(
             ModuleRow(
@@ -78,6 +84,8 @@ def build_module_rows(modules: List[Any]) -> List[ModuleRow]:
                 # resolves differently per caller -- a number here would be
                 # a fiction.
                 size_label="live" if source in PROVIDER_SOURCES else f"{chars} chars",
+                summary=m.summary,
+                body=body,
             )
         )
     return rows

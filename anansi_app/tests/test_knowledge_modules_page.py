@@ -35,6 +35,7 @@ def test_build_module_rows_reports_size():
         ModuleRow(
             slug="comms", title="Comms", tags=["grid_ops"], scope="sector", mode="pinned",
             chars=40, source="manual", size_label="40 chars",
+            summary="s", body="b" * 40,
         )
     ]
 
