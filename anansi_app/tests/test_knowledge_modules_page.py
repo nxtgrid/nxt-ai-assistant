@@ -2,9 +2,12 @@
 
 import pytest
 from nicegui_app.pages.knowledge_modules import (
+    SCOPE_OPTIONS,
     ModuleRow,
     body_is_editable,
     build_module_rows,
+    describe_audience,
+    extract_drive_id,
     group_module_rows,
     module_is_deletable,
     preview_module_body,
@@ -195,60 +198,6 @@ def test_validate_module_still_requires_a_body_by_default():
         validate_module(slug="a", title="A", summary="s", body="")
 
 
-# ── Preview ──────────────────────────────────────────────────────────────
-
-
-def test_preview_resolves_against_the_viewing_operator():
-    import asyncio
-
-    module = KnowledgeModule(
-        id="d", slug="directory", title="Directory", summary="s", body=None, source="directory"
-    )
-
-    class _Provider:
-        source = "directory"
-
-        async def resolve(self, m, ctx):
-            return f"resolved for staff={ctx.is_staff}"
-
-    text = asyncio.run(preview_module_body(module, _Provider(), is_staff=True))
-    assert text == "resolved for staff=True"
-
-
-def test_preview_reports_an_empty_resolution_clearly():
-    import asyncio
-
-    module = KnowledgeModule(
-        id="e", slug="episodic", title="Episodic", summary="s", body=None, source="episodic"
-    )
-
-    class _Provider:
-        source = "episodic"
-
-        async def resolve(self, m, ctx):
-            return None
-
-    text = asyncio.run(preview_module_body(module, _Provider(), is_staff=True))
-    assert "nothing" in text.lower()
-
-
-def test_preview_reports_a_provider_failure_rather_than_raising():
-    import asyncio
-
-    module = KnowledgeModule(
-        id="g", slug="graph", title="Graph", summary="s", body=None, source="graph"
-    )
-
-    class _Provider:
-        source = "graph"
-
-        async def resolve(self, m, ctx):
-            raise RuntimeError("RPC missing")
-
-    text = asyncio.run(preview_module_body(module, _Provider(), is_staff=True))
-    assert "RPC missing" in text
-
-
 # ── The Prompts page's Context tab: the same null-body / JIT hazard ────────
 # build_knowledge_tab lists every module (including provider-backed ones) so
 # an operator can pin/unpin it to a prompt. It has the exact same
@@ -269,3 +218,155 @@ def test_knowledge_tab_handles_a_jit_module_without_crashing():
 def test_knowledge_tab_marks_manual_modules_as_not_jit():
     rows = build_knowledge_tab([_module("comms")], {})
     assert rows[0].is_jit is False
+
+
+# ── Doc source, audience, and the honest scope dropdown ─────────────────────
+
+
+def test_a_doc_module_body_is_not_editable():
+    assert body_is_editable("gdoc") is False
+    assert body_is_editable("manual") is True
+
+
+def test_global_is_a_valid_scope():
+    validate_module(slug="s", title="T", summary="x", body="b", scope="global")
+
+
+def test_sector_is_still_a_valid_scope():
+    validate_module(slug="s", title="T", summary="x", body="b", scope="sector")
+
+
+def test_an_unknown_scope_is_rejected():
+    with pytest.raises(ValueError, match="scope"):
+        validate_module(slug="s", title="T", summary="x", body="b", scope="universe")
+
+
+def test_scope_options_offer_global_and_org_and_a_disabled_site():
+    """A free-text box accepted site:FOO and produced a module that never
+    fired -- nothing populates RequestScope.grid anywhere."""
+    labels = {opt["value"]: opt for opt in SCOPE_OPTIONS}
+
+    assert "global" in labels
+    assert "org:" in labels
+    assert labels["site:"]["disabled"] is True
+
+
+def test_a_doc_module_requires_a_source_ref():
+    with pytest.raises(ValueError, match="Google Doc or Sheet"):
+        validate_module(
+            slug="s", title="T", summary="x", body="", scope="global",
+            require_body=False, source="gdoc", source_ref="",
+        )
+
+
+def test_a_doc_module_requires_an_audience():
+    with pytest.raises(ValueError, match="audience"):
+        validate_module(
+            slug="s", title="T", summary="x", body="", scope="global",
+            require_body=False, source="gdoc", source_ref="doc-1", doc_audience=None,
+        )
+
+
+def test_a_valid_doc_module_passes():
+    validate_module(
+        slug="s", title="T", summary="x", body="", scope="global",
+        require_body=False, source="gdoc", source_ref="doc-1",
+        doc_audience="acl_mirror",
+    )
+
+
+def test_describe_audience_warns_about_a_mirrored_customer_module():
+    """It would provably resolve to nothing for a customer."""
+    warning = describe_audience("acl_mirror", pinned_prompts=["customer.system"])
+
+    assert warning is not None
+    assert "customer" in warning.lower()
+
+
+def test_describe_audience_is_quiet_for_a_staff_only_module():
+    assert describe_audience("acl_mirror", pinned_prompts=["staff.system"]) is None
+
+
+def test_describe_audience_is_quiet_for_a_published_module():
+    assert describe_audience("published", pinned_prompts=["customer.system"]) is None
+
+
+def test_extract_drive_id_reads_a_docs_url():
+    assert extract_drive_id(
+        "https://docs.google.com/document/d/1AbC_dEf-23456789012345678/edit"
+    ) == "1AbC_dEf-23456789012345678"
+
+
+def test_extract_drive_id_reads_a_sheets_url():
+    assert extract_drive_id(
+        "https://docs.google.com/spreadsheets/d/1AbC_dEf-23456789012345678/edit#gid=0"
+    ) == "1AbC_dEf-23456789012345678"
+
+
+def test_extract_drive_id_accepts_a_bare_id():
+    assert extract_drive_id("1AbC_dEf-23456789012345678") == "1AbC_dEf-23456789012345678"
+
+
+def test_extract_drive_id_rejects_nonsense():
+    assert extract_drive_id("not a link") is None
+    assert extract_drive_id("") is None
+
+
+# ── Preview now resolves as the operator, not a hardcoded staff context ─────
+
+
+def test_preview_resolves_against_the_viewing_operator():
+    import asyncio
+
+    module = KnowledgeModule(
+        id="d", slug="directory", title="Directory", summary="s", body=None, source="directory"
+    )
+
+    class _Provider:
+        source = "directory"
+
+        async def resolve(self, m, ctx):
+            return f"resolved for {ctx.user_email}"
+
+    text = asyncio.run(
+        preview_module_body(module, _Provider(), user_email="ops@example.com")
+    )
+    assert text == "resolved for ops@example.com"
+
+
+def test_preview_reports_an_empty_resolution_clearly():
+    import asyncio
+
+    module = KnowledgeModule(
+        id="e", slug="episodic", title="Episodic", summary="s", body=None, source="episodic"
+    )
+
+    class _Provider:
+        source = "episodic"
+
+        async def resolve(self, m, ctx):
+            return None
+
+    text = asyncio.run(
+        preview_module_body(module, _Provider(), user_email="ops@example.com")
+    )
+    assert "nothing" in text.lower()
+
+
+def test_preview_reports_a_provider_failure_rather_than_raising():
+    import asyncio
+
+    module = KnowledgeModule(
+        id="g", slug="graph", title="Graph", summary="s", body=None, source="graph"
+    )
+
+    class _Provider:
+        source = "graph"
+
+        async def resolve(self, m, ctx):
+            raise RuntimeError("RPC missing")
+
+    text = asyncio.run(
+        preview_module_body(module, _Provider(), user_email="ops@example.com")
+    )
+    assert "RPC missing" in text

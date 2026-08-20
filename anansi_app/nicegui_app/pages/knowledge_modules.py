@@ -8,6 +8,7 @@ is explicit per prompt -- see the Context tab on the Prompts page.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, List, Tuple
@@ -16,6 +17,101 @@ from nicegui import ui
 
 VALID_MODES = {"pinned", "on_demand"}
 VALID_SOURCES = {"manual", "gdoc", "ingested"}
+
+VALID_SCOPES_PREFIXED = ("site:", "org:")
+LEGACY_GLOBAL_SCOPES = ("global", "sector")
+
+# Free text let an operator type site:FOO and get a module that never fires --
+# nothing populates RequestScope.grid anywhere in the codebase.
+SCOPE_OPTIONS = [
+    {
+        "value": "global",
+        "label": "Everywhere",
+        "help": "Included in every conversation this prompt serves.",
+        "disabled": False,
+    },
+    {
+        "value": "org:",
+        "label": "One organization",
+        "help": "Included only when the caller belongs to this organization.",
+        "disabled": False,
+    },
+    {
+        "value": "site:",
+        "label": "One grid",
+        "help": "Not currently wired up — a grid-scoped module never matches.",
+        "disabled": True,
+    },
+]
+
+AUDIENCE_OPTIONS = {
+    "acl_mirror": "Mirror the document's sharing (only people who can open it)",
+    "published": "Publish to everyone this prompt serves",
+}
+
+_DRIVE_ID_PATTERNS = (
+    re.compile(r"docs\.google\.com/document/d/([a-zA-Z0-9_-]+)"),
+    re.compile(r"docs\.google\.com/spreadsheets/d/([a-zA-Z0-9_-]+)"),
+    re.compile(r"drive\.google\.com/file/d/([a-zA-Z0-9_-]+)"),
+    re.compile(r"drive\.google\.com/open\?id=([a-zA-Z0-9_-]+)"),
+)
+_BARE_DRIVE_ID = re.compile(r"^[a-zA-Z0-9_-]{25,60}$")
+
+
+def extract_drive_id(text: str) -> "str | None":
+    """The file id from a Docs/Sheets/Drive URL, or a bare id.
+
+    Anansi_app must not import from chat_orchestrator, so this duplicates
+    (rather than reuses) the equivalent extractor in the /learn handler's
+    fetch_document.py.
+    """
+    text = (text or "").strip()
+    for pattern in _DRIVE_ID_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return match.group(1)
+    return text if _BARE_DRIVE_ID.match(text) else None
+
+
+def describe_audience(doc_audience: str, pinned_prompts: List[str]) -> "str | None":
+    """A warning to show at attach time, or None.
+
+    A mirrored module pinned to a customer-facing prompt resolves to nothing
+    for customers -- their email is not in an internal document's ACL. Fail
+    loudly here rather than silently at render.
+    """
+    if doc_audience != "acl_mirror":
+        return None
+    if not any(p.startswith("customer.") for p in pinned_prompts):
+        return None
+    return (
+        "⚠️ This module mirrors the document's sharing, but it is attached to a "
+        "customer-facing prompt. Customers are not in the document's sharing list, "
+        "so it will contribute nothing for them. Choose \"Publish to everyone\" if "
+        "customers are meant to see this content."
+    )
+
+
+def _scope_kind(scope: str) -> str:
+    """Which SCOPE_OPTIONS entry a stored scope string belongs to."""
+    if scope.startswith("org:"):
+        return "org:"
+    if scope.startswith("site:"):
+        return "site:"
+    return "global"
+
+
+def _scope_detail(scope: str) -> str:
+    """The part after the prefix, for the detail field."""
+    return scope.split(":", 1)[1] if ":" in scope else ""
+
+
+def compose_scope(kind: str, detail: str) -> str:
+    """Rebuild the stored scope string from the two controls."""
+    detail = detail.strip()
+    if kind == "global" or not detail:
+        return "global"
+    return f"{kind}{detail}"
 
 MODE_LABELS = {"pinned": "Pinned", "on_demand": "On-demand"}
 MODE_ORDER = ["pinned", "on_demand"]
@@ -34,7 +130,8 @@ SINGLETON_SOURCES = ("graph", "directory")
 
 # Shown under a non-editable body field, keyed by source.
 _READONLY_BODY_EXPLANATIONS = {
-    "gdoc": "Body comes from the attached Google Doc.",
+    "gdoc": "Body comes from the attached Google Doc or Sheet, fetched fresh at "
+            "request time and filtered to what the caller may see.",
     "graph": "Body is generated from the knowledge graph at request time, "
              "filtered to what the caller may see.",
     "directory": "Body lists the grids, organizations and people the "
@@ -112,9 +209,12 @@ def validate_module(
     title: str,
     summary: str,
     body: str,
-    scope: str = "sector",
+    scope: str = "global",
     mode: str = "pinned",
     require_body: bool = True,
+    source: str = "manual",
+    source_ref: str = "",
+    doc_audience: "str | None" = None,
 ) -> None:
     """Reject a module that would fail silently at render time.
 
@@ -131,8 +231,15 @@ def validate_module(
             "an on_demand module needs a summary: it is the only thing the model "
             "sees before deciding to fetch the body"
         )
-    if scope != "sector" and not (scope.startswith("site:") or scope.startswith("org:")):
-        raise ValueError("scope must be 'sector', 'site:<name>' or 'org:<id>'")
+    if scope not in LEGACY_GLOBAL_SCOPES and not scope.startswith(VALID_SCOPES_PREFIXED):
+        raise ValueError("scope must be 'global', 'site:<name>' or 'org:<id>'")
+    if source == "gdoc":
+        if not source_ref.strip():
+            raise ValueError("a document module needs a Google Doc or Sheet link")
+        if doc_audience not in AUDIENCE_OPTIONS:
+            raise ValueError(
+                f"a document module needs an audience: {sorted(AUDIENCE_OPTIONS)}"
+            )
 
 
 async def render(user_email: str) -> None:
@@ -184,18 +291,22 @@ async def render(user_email: str) -> None:
     refresh()
 
 
-async def preview_module_body(module: Any, provider: Any, is_staff: bool) -> str:
+async def preview_module_body(module: Any, provider: Any, user_email: str) -> str:
     """Resolve a provider module for display in the admin UI.
 
-    Resolves against the viewing operator's own permissions, not a
-    privileged context -- an operator previewing a module should see what
-    they themselves would get, and never be shown data they could not
-    otherwise reach.
+    Resolves against the viewing operator's own permissions. For a document
+    module that means their own Drive access -- preview is a dry run of the
+    real gate, not a second gate that could disagree with it. Anything else
+    would show an operator content they cannot otherwise reach.
     """
     from shared.prompts.providers import ResolutionContext
     from shared.prompts.types import RequestScope
 
-    ctx = ResolutionContext(scope=RequestScope(), is_staff=is_staff)
+    # is_staff stays True and is accurate: /knowledge-modules is gated on
+    # can_view_bot_admin, so anyone reaching this dialog is staff. What was
+    # missing is user_email -- without it a document module resolved under
+    # no identity at all.
+    ctx = ResolutionContext(scope=RequestScope(), user_email=user_email, is_staff=True)
     try:
         body = await provider.resolve(module, ctx)
     except Exception as e:
@@ -246,10 +357,56 @@ async def _open_edit_dialog(
         summary_input = ui.input("Summary", value=existing.summary if existing else "").classes(
             "w-full"
         )
-        scope_input = ui.input(
-            "Scope (sector | site:<name> | org:<id>)",
-            value=existing.scope if existing else "sector",
+
+        source_select = ui.select(
+            {"manual": "Typed here", "gdoc": "Google Doc or Sheet"},
+            value="gdoc" if source == "gdoc" else "manual",
+            label="Source",
         ).classes("w-full")
+        # The slug is the identity and the source decides the storage shape;
+        # neither may drift on an existing module.
+        source_select.set_enabled(existing is None)
+
+        doc_row = ui.column().classes("w-full gap-2")
+        with doc_row:
+            doc_ref_input = ui.input(
+                "Google Doc or Sheet link or ID",
+                value=(existing.source_ref if existing else "") or "",
+            ).classes("w-full")
+            doc_tab_input = ui.input(
+                "Sheet tab (optional — first tab if blank)",
+                value=(existing.source_tab if existing else "") or "",
+            ).classes("w-full")
+            audience_select = ui.select(
+                AUDIENCE_OPTIONS,
+                value=(existing.doc_audience if existing else None) or "acl_mirror",
+                label="Who may see this content",
+            ).classes("w-full")
+            if existing and existing.doc_audience_set_by:
+                ui.label(
+                    f"Audience last set by {existing.doc_audience_set_by}"
+                ).classes("text-caption text-grey")
+            audience_warning = ui.label("").classes("text-caption text-warning")
+        doc_row.bind_visibility_from(source_select, "value", lambda v: v == "gdoc")
+
+        scope_select = ui.select(
+            {o["value"]: o["label"] for o in SCOPE_OPTIONS},
+            value=_scope_kind(existing.scope if existing else "global"),
+            label="Applies to",
+        ).classes("w-full")
+        scope_help = ui.label("").classes("text-caption text-grey")
+        scope_detail = ui.input(
+            "Organization ID", value=_scope_detail(existing.scope if existing else "")
+        ).classes("w-full")
+
+        def _on_scope_change() -> None:
+            option = next(o for o in SCOPE_OPTIONS if o["value"] == scope_select.value)
+            scope_help.set_text(option["help"])
+            scope_detail.set_visibility(scope_select.value == "org:")
+
+        scope_select.on_value_change(lambda _e: _on_scope_change())
+        _on_scope_change()
+
         mode_select = ui.select(
             sorted(VALID_MODES), value=existing.mode if existing else "pinned", label="Mode"
         ).classes("w-full")
@@ -271,9 +428,24 @@ async def _open_edit_dialog(
             .style("min-height: 16rem; border: 1px solid #e0e0e0; padding: 0.5rem;")
         )
 
-        def _switch_view(e) -> None:
+        async def _resolved_body() -> str:
+            """The live document, as this operator would actually receive it."""
+            from orchestrator.services.jit_context_resolver import build_default_registry
+
+            if existing is None:
+                return "_Save the module first to preview its document._"
+            provider = build_default_registry().get(source)
+            if provider is None:
+                return f"No '{source}' provider is available in this process."
+            return await preview_module_body(existing, provider, user_email=user_email)
+
+        async def _switch_view(e) -> None:
             if e.value == "Preview":
-                body_preview.set_content(body_input.value)
+                if body_is_editable(source):
+                    body_preview.set_content(body_input.value)
+                else:
+                    body_preview.set_content("_Resolving…_")
+                    body_preview.set_content(await _resolved_body())
             body_input.set_visibility(e.value == "Edit")
             body_preview.set_visibility(e.value == "Preview")
 
@@ -282,32 +454,9 @@ async def _open_edit_dialog(
         if not body_is_editable(source):
             body_input.props("readonly").classes("opacity-60")
             ui.label(_READONLY_BODY_EXPLANATIONS[source]).classes("text-xs text-gray-500")
-
-            preview_output = ui.markdown("").classes("w-full").style(
-                "min-height: 4rem; border: 1px dashed #e0e0e0; padding: 0.5rem;"
-            )
-            preview_output.set_visibility(False)
-
-            async def _run_preview() -> None:
-                from orchestrator.services.jit_context_resolver import build_default_registry
-
-                provider = build_default_registry().get(source)
-                if provider is None:
-                    preview_output.set_content(
-                        f"No '{source}' provider is available in this process."
-                    )
-                else:
-                    # anansi_app is a staff/ops-only admin tool -- whoever can
-                    # reach this dialog at all is staff, so the "viewing
-                    # operator's own permissions" preview_module_body's
-                    # docstring refers to are staff permissions here. There
-                    # is no per-customer view of this page to preview as.
-                    preview_output.set_content(
-                        await preview_module_body(existing, provider, is_staff=True)
-                    )
-                preview_output.set_visibility(True)
-
-            ui.button("Preview", on_click=_run_preview).props("flat dense")
+            # The dialog opens on Preview by default -- resolve once now so
+            # the pane isn't just showing the (always-empty) stored body.
+            body_preview.set_content(await _resolved_body())
 
         prompt_options = {
             pid: prompt_option_label(pid, PROMPTS.spec(pid).description)
@@ -320,16 +469,30 @@ async def _open_edit_dialog(
             label="Used by these prompts",
         ).classes("w-full").props("use-chips")
 
+        def _refresh_audience_warning() -> None:
+            audience_warning.set_text(
+                describe_audience(audience_select.value, list(prompts_select.value or [])) or ""
+            )
+
+        audience_select.on_value_change(lambda _e: _refresh_audience_warning())
+        prompts_select.on_value_change(lambda _e: _refresh_audience_warning())
+        _refresh_audience_warning()
+
         async def save() -> None:
+            chosen_source = source_select.value
+            scope_value = compose_scope(scope_select.value, scope_detail.value)
             try:
                 validate_module(
                     slug=slug_input.value.strip(),
                     title=title_input.value.strip(),
                     summary=summary_input.value.strip(),
                     body=body_input.value,
-                    scope=scope_input.value.strip() or "sector",
+                    scope=scope_value,
                     mode=mode_select.value,
-                    require_body=body_is_editable(source),
+                    require_body=body_is_editable(chosen_source),
+                    source=chosen_source,
+                    source_ref=doc_ref_input.value,
+                    doc_audience=audience_select.value if chosen_source == "gdoc" else None,
                 )
             except ValueError as e:
                 ui.notify(str(e), type="negative")
@@ -340,15 +503,37 @@ async def _open_edit_dialog(
                 "title": title_input.value.strip(),
                 "summary": summary_input.value.strip(),
                 "tags": list(existing.tags) if existing else [],
-                "scope": scope_input.value.strip() or "sector",
+                "scope": scope_value,
                 "mode": mode_select.value,
+                "source": chosen_source,
                 "updated_by": user_email,
             }
+            if chosen_source == "gdoc":
+                file_id = extract_drive_id(doc_ref_input.value)
+                if not file_id:
+                    ui.notify("That doesn't look like a Google Doc or Sheet link", type="negative")
+                    return
+                # You cannot attach a document you cannot open yourself.
+                from shared.utils.drive_permissions import user_can_access
+
+                if not await user_can_access(file_id, user_email, strict=True):
+                    ui.notify(
+                        "You don't have access to that document, so you can't attach it.",
+                        type="negative",
+                    )
+                    return
+                row["source_ref"] = file_id
+                row["source_tab"] = doc_tab_input.value.strip() or None
+                row["doc_audience"] = audience_select.value
+                # Only stamp attribution when the decision actually changes,
+                # so an unrelated title edit doesn't reassign authorship.
+                if not existing or existing.doc_audience != audience_select.value:
+                    row["doc_audience_set_by"] = user_email
             # A provider body is never stored -- the field is read-only and
             # left blank in the UI, so sending it here would overwrite a
             # real NULL with an empty string for no reason. Omit the key
             # entirely so the column is left untouched.
-            if body_is_editable(source):
+            if body_is_editable(chosen_source):
                 row["body"] = body_input.value
             try:
                 if existing:
