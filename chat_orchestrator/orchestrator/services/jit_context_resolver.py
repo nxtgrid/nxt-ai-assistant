@@ -85,7 +85,7 @@ class JitContextResolver:
             return "", []
 
         pinned = [m for m in chosen if m.mode == "pinned"]
-        on_demand = [m for m in chosen if m.mode != "pinned"]
+        on_demand = await self._visible_only([m for m in chosen if m.mode != "pinned"], ctx)
 
         resolved = budget_resolved(await self._resolve_all(pinned, ctx))
 
@@ -109,6 +109,33 @@ class JitContextResolver:
             used.extend(m.slug for m in on_demand)
 
         return "\n\n".join(blocks), used
+
+    async def _visible_only(
+        self, modules: List[KnowledgeModule], ctx: ResolutionContext
+    ) -> List[KnowledgeModule]:
+        """Drop on-demand modules this caller may not fetch.
+
+        A catalog line carries the module's summary, which can itself be
+        sensitive -- and listing something the caller will be refused wastes
+        a model turn. Providers without a visible_to (graph, directory,
+        episodic) filter inside resolve() instead and pass through here.
+        """
+        out: List[KnowledgeModule] = []
+        for module in modules:
+            provider = self._registry.get(module.source)
+            check = getattr(provider, "visible_to", None) if provider else None
+            if check is None:
+                out.append(module)
+                continue
+            try:
+                if await asyncio.wait_for(check(module, ctx), timeout=self.timeout_seconds):
+                    out.append(module)
+            except Exception:
+                LOGGER.warning(
+                    f"Visibility check failed for '{module.slug}'; withholding",
+                    exc_info=True,
+                )
+        return out
 
     async def _resolve_all(
         self, modules: List[KnowledgeModule], ctx: ResolutionContext

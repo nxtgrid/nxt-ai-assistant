@@ -282,3 +282,116 @@ def test_budget_resolved_on_an_empty_list_is_empty():
     from orchestrator.services.jit_context_resolver import budget_resolved
 
     assert budget_resolved([], limit=100) == []
+
+
+class _GatedProvider:
+    source = "gdoc"
+
+    def __init__(self, visible):
+        self._visible = visible
+
+    async def visible_to(self, _module, _ctx):
+        return self._visible
+
+    async def resolve(self, _module, _ctx):
+        return "body"
+
+
+def _on_demand_module(slug="secret-doc"):
+    from shared.prompts.knowledge import KnowledgeModule
+
+    # No explicit scope: this task runs before the sector -> global rename in
+    # Task 9, and the dataclass default matches under both spellings.
+    return KnowledgeModule(
+        id="1", slug=slug, title="T", summary="A sensitive summary.",
+        body=None, mode="on_demand", source="gdoc", source_ref="doc-1",
+        doc_audience="acl_mirror",
+    )
+
+
+def _catalog_resolver(provider, module):
+    """Distinct from the module-level _resolver(modules, pins, providers)
+    above -- same shape, different argument order, kept separate rather than
+    forcing this block's call sites to conform to an unrelated signature."""
+    return _resolver([module], {module.slug: True}, [provider])
+
+
+@pytest.mark.asyncio
+async def test_a_denied_on_demand_module_is_absent_from_the_catalog():
+    """Its summary must not leak, and the model must not try to fetch it."""
+    from shared.prompts.providers import ResolutionContext
+    from shared.prompts.types import RequestScope
+
+    module = _on_demand_module()
+    resolver = _catalog_resolver(_GatedProvider(visible=False), module)
+
+    text, used = await resolver.resolve_for_prompt(
+        "customer.system", ResolutionContext(scope=RequestScope(), user_email="a@b.com")
+    )
+
+    assert "secret-doc" not in text
+    assert "A sensitive summary." not in text
+    assert used == []
+
+
+@pytest.mark.asyncio
+async def test_an_allowed_on_demand_module_still_appears():
+    from shared.prompts.providers import ResolutionContext
+    from shared.prompts.types import RequestScope
+
+    module = _on_demand_module()
+    resolver = _catalog_resolver(_GatedProvider(visible=True), module)
+
+    text, used = await resolver.resolve_for_prompt(
+        "customer.system", ResolutionContext(scope=RequestScope(), user_email="a@b.com")
+    )
+
+    assert "secret-doc" in text
+    assert used == ["secret-doc"]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_without_visible_to_is_not_filtered():
+    """graph/directory/episodic do their own filtering inside resolve()."""
+    from shared.prompts.providers import ResolutionContext
+    from shared.prompts.types import RequestScope
+
+    class _Plain:
+        source = "gdoc"
+
+        async def resolve(self, _module, _ctx):
+            return "body"
+
+    module = _on_demand_module()
+    resolver = _catalog_resolver(_Plain(), module)
+
+    text, _used = await resolver.resolve_for_prompt(
+        "customer.system", ResolutionContext(scope=RequestScope(), user_email="a@b.com")
+    )
+
+    assert "secret-doc" in text
+
+
+@pytest.mark.asyncio
+async def test_a_visibility_check_that_raises_fails_closed():
+    from shared.prompts.providers import ResolutionContext
+    from shared.prompts.types import RequestScope
+
+    class _Boom:
+        source = "gdoc"
+
+        async def visible_to(self, _module, _ctx):
+            raise RuntimeError("drive down")
+
+        async def resolve(self, _module, _ctx):
+            return "body"
+
+    module = _on_demand_module()
+    resolver = _catalog_resolver(_Boom(), module)
+
+    text, used = await resolver.resolve_for_prompt(
+        "customer.system", ResolutionContext(scope=RequestScope(), user_email="a@b.com")
+    )
+
+    assert "secret-doc" not in text
+    assert used == []

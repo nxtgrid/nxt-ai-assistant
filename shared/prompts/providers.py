@@ -64,6 +64,12 @@ class ContextProvider(Protocol):
     Returning None means "nothing to contribute" and is normal, not an
     error -- an episodic module for a grid with no distillation yet, for
     instance. Raising is also survivable: the resolver catches it.
+
+    ``visible_to`` is optional. A provider that defines it is asked before
+    its module's on-demand catalog line is rendered, so a caller never sees
+    the name or summary of something they could not fetch. Providers that
+    filter inside resolve() (graph, directory, episodic all filter database
+    rows by permission) simply omit it; the resolver duck-types the call.
     """
 
     source: str
