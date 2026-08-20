@@ -680,6 +680,50 @@ def test_set_skill_schedule_rejects_an_unrecognized_frequency():
     assert "Every full moon" in result["error"]
 
 
+def test_remove_skill_schedule_deactivates_the_row():
+    captured = {}
+
+    class _Table:
+        def update(self, payload, **_k):
+            captured.update(payload)
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            class _R:
+                data = [captured]
+
+            return _R()
+
+    class _Client:
+        def table(self, _n):
+            return _Table()
+
+    result = SkillBuilderService(client=_Client()).remove_skill_schedule(
+        "1", actor="ops@example.com"
+    )
+
+    assert result["success"] is True
+    assert captured["is_active"] is False
+    assert captured["status"] == "cancelled"
+
+
+def test_remove_skill_schedule_without_a_client():
+    result = SkillBuilderService(client=None).remove_skill_schedule("1", actor="x")
+    assert result["success"] is False
+
+
+def test_remove_skill_schedule_survives_a_query_failure():
+    class _Client:
+        def table(self, _n):
+            raise RuntimeError("db down")
+
+    result = SkillBuilderService(client=_Client()).remove_skill_schedule("1", actor="x")
+    assert result["success"] is False
+
+
 def test_set_skill_schedule_rejects_an_unsupported_anchor():
     result = SkillBuilderService(client=None).set_skill_schedule(
         "1", anchor_entity_type="meter", first_run="2026-09-01 08:00",

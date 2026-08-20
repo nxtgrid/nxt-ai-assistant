@@ -411,6 +411,34 @@ class SkillBuilderService:
             return {"success": False, "error": str(e)}
         return {"success": True, "schedule": (response.data or [payload])[0]}
 
+    def remove_skill_schedule(self, skill_id: str, actor: str) -> Dict[str, Any]:
+        """Deactivate a skill's schedule -- the editor modal's "Not
+        scheduled" save path, when a schedule existed before (see
+        nicegui_app/pages/skills.py's _open_editor).
+
+        status="cancelled" distinguishes an operator turning this off from
+        a one-time schedule that simply finished
+        (status="completed", set by _advance_skill_schedule in
+        anansi_app/scripts/broadcast_scheduler.py) -- both end up
+        is_active=False and are equally invisible to
+        process_due_skill_schedules; the status text is only for a human
+        reading the row.
+        """
+        if not self.client:
+            return {"success": False, "error": "Chat DB not configured"}
+        try:
+            response = (
+                self.client.table("user_schedules")
+                .update({"is_active": False, "status": "cancelled"})
+                .eq("skill_id", skill_id)
+                .execute()
+            )
+        except Exception as e:
+            logger.exception("Error removing schedule for skill %s", skill_id)
+            return {"success": False, "error": str(e)}
+        logger.info("Schedule removed for skill %s (by %s)", skill_id, actor)
+        return {"success": True, "schedule": (response.data or [None])[0]}
+
     def _unique_slug(self, title: str) -> str:
         """First free ``slug``, ``slug-2``, ``slug-3``... against existing
         skills -- same collision-handling shape as context_expert's
