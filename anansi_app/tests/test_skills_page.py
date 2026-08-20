@@ -99,6 +99,90 @@ def test_format_schedule_handles_a_missing_cron():
     assert format_schedule({"anchor_entity_type": "grid", "is_active": True}) == "—"
 
 
+def test_schedule_form_defaults_with_no_schedule():
+    from nicegui_app.pages.skills import REPEAT_OPTIONS, schedule_form_defaults
+
+    assert schedule_form_defaults(None) == {
+        "anchor": "", "repeat": REPEAT_OPTIONS[0], "first_run": "",
+    }
+
+
+def test_schedule_form_defaults_with_an_inactive_schedule():
+    """An already-completed one-time run, or one an operator previously
+    removed, must read the same as no schedule at all -- Save's removal
+    branch relies on this same rule to avoid firing a pointless removal
+    call on a workflow that isn't really scheduled (see Task 6)."""
+    from nicegui_app.pages.skills import REPEAT_OPTIONS, schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "grid", "cron_expression": None,
+        "schedule_type": "once", "next_run_at": "2026-09-01T08:00:00+00:00",
+        "is_active": False,
+    }
+    assert schedule_form_defaults(schedule) == {
+        "anchor": "", "repeat": REPEAT_OPTIONS[0], "first_run": "",
+    }
+
+
+def test_schedule_form_defaults_for_a_weekly_schedule():
+    from nicegui_app.pages.skills import schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "grid", "cron_expression": "0 8 * * 1",
+        "schedule_type": "recurring", "next_run_at": "2026-09-01T08:00:00+00:00",
+        "is_active": True,
+    }
+    assert schedule_form_defaults(schedule) == {
+        "anchor": "grid", "repeat": "Weekly", "first_run": "2026-09-01 08:00",
+    }
+
+
+def test_schedule_form_defaults_for_a_biweekly_schedule():
+    from nicegui_app.pages.skills import schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "organization", "cron_expression": "0 8 * * 1",
+        "schedule_type": "biweekly", "next_run_at": "2026-09-01T08:00:00+00:00",
+        "is_active": True,
+    }
+    assert schedule_form_defaults(schedule)["repeat"] == "Every other week"
+
+
+def test_schedule_form_defaults_for_a_monthly_same_date_schedule():
+    from nicegui_app.pages.skills import schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "grid", "cron_expression": "0 8 15 * *",
+        "schedule_type": "recurring", "next_run_at": "2026-09-15T08:00:00+00:00",
+        "is_active": True,
+    }
+    assert schedule_form_defaults(schedule)["repeat"] == "Monthly (same date)"
+
+
+def test_schedule_form_defaults_for_a_monthly_same_weekday_schedule():
+    from nicegui_app.pages.skills import schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "grid", "cron_expression": "0 8 * * 1#3",
+        "schedule_type": "recurring", "next_run_at": "2026-09-15T08:00:00+00:00",
+        "is_active": True,
+    }
+    assert schedule_form_defaults(schedule)["repeat"] == "Monthly (same weekday)"
+
+
+def test_schedule_form_defaults_for_a_one_time_schedule():
+    from nicegui_app.pages.skills import schedule_form_defaults
+
+    schedule = {
+        "anchor_entity_type": "grid", "cron_expression": None,
+        "schedule_type": "once", "next_run_at": "2026-09-01T08:00:00+00:00",
+        "is_active": True,
+    }
+    assert schedule_form_defaults(schedule) == {
+        "anchor": "grid", "repeat": "Does not repeat", "first_run": "2026-09-01 08:00",
+    }
+
+
 def test_every_status_has_a_colour():
     for status in ("draft", "active", "disabled", "unusable"):
         assert status in STATUS_COLORS

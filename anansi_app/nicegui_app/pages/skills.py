@@ -8,16 +8,20 @@ survives navigation as a draft rather than being lost.
 from __future__ import annotations
 
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from nicegui import ui
 
-# Must match nicegui_app.pages.broadcast._build_recurrence's REPEAT_OPTIONS,
-# minus "Does not repeat" -- that produces no recurrence at all (see
-# SkillBuilderService.set_skill_schedule's docstring), so it isn't a
-# meaningful choice here: a one-off skill run doesn't need a persistent cron
-# row, it's just run from the builder.
-REPEAT_OPTIONS = ["Weekly", "Every other week", "Monthly (same date)", "Monthly (same weekday)"]
+# Matches nicegui_app.pages.broadcast._build_recurrence's REPEAT_OPTIONS
+# exactly, including "Does not repeat" -- a real one-time run (see
+# SkillBuilderService.set_skill_schedule), not just "no schedule at all".
+REPEAT_OPTIONS = [
+    "Does not repeat",
+    "Weekly",
+    "Every other week",
+    "Monthly (same date)",
+    "Monthly (same weekday)",
+]
 
 STATUS_COLORS: Dict[str, str] = {
     "draft": "grey",
@@ -37,6 +41,56 @@ def format_schedule(schedule: Dict[str, Any]) -> str:
     if not schedule.get("is_active", True):
         text = f"{text} (paused)"
     return text
+
+
+def schedule_form_defaults(schedule: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """anchor / repeat / first_run string values to preselect when opening
+    Edit on a workflow that may already have a user_schedules row.
+
+    An inactive row (a one-time run that already completed, or one an
+    operator previously removed via remove_skill_schedule) reads identically
+    to no schedule at all -- both here and in _open_editor's Save logic,
+    which must agree on the same "is this really scheduled" question or it
+    will fire a pointless removal call on a workflow that was never actually
+    scheduled to begin with.
+    """
+    if not schedule or not schedule.get("is_active"):
+        return {"anchor": "", "repeat": REPEAT_OPTIONS[0], "first_run": ""}
+
+    anchor = schedule.get("anchor_entity_type") or ""
+
+    first_run = ""
+    next_run_at = schedule.get("next_run_at")
+    if next_run_at:
+        try:
+            from datetime import datetime
+
+            parsed = datetime.fromisoformat(str(next_run_at).replace("Z", "+00:00"))
+            first_run = parsed.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            first_run = ""
+
+    # Only has to round-trip what _build_recurrence itself produces --
+    # skill schedules have exactly one writer -- not arbitrary hand-written
+    # cron.
+    schedule_type = schedule.get("schedule_type")
+    cron = schedule.get("cron_expression") or ""
+    if schedule_type == "biweekly":
+        repeat = "Every other week"
+    elif schedule_type != "recurring" or not cron:
+        repeat = "Does not repeat"
+    else:
+        fields = cron.split()
+        dow = fields[4] if len(fields) > 4 else ""
+        dom = fields[2] if len(fields) > 2 else "*"
+        if "#" in dow:
+            repeat = "Monthly (same weekday)"
+        elif dom != "*":
+            repeat = "Monthly (same date)"
+        else:
+            repeat = "Weekly"
+
+    return {"anchor": anchor, "repeat": repeat, "first_run": first_run}
 
 
 def derive_fallback_title(summary: str) -> str:
