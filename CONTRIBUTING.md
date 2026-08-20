@@ -134,8 +134,8 @@ design (resolution order, knowledge modules, access control).
 ## Code Style
 
 - **Python 3.11+**, formatted with `ruff` (100-char line length)
-- Run `pre-commit install` once to enforce style on every commit
-- Type hints encouraged; `mypy` runs in CI
+- Run `pre-commit install` once to enforce style on every commit — today that means `ruff check` plus the `test-wiring` hook (see `.pre-commit-config.yaml`); `ruff format` and `mypy` are configured (root `pyproject.toml`) but not currently run automatically anywhere, so run them manually
+- Type hints encouraged
 - No `TODO`/`FIXME` comments — complete the work or open an issue
 
 ## Branching & PR Workflow

@@ -4,6 +4,8 @@ In Akan folklore, Anansi the spider tricked the sky-god into giving him every st
 
 Built and run in production by [NXT Grid](https://nxtgrid.co), open-sourced for the wider energy-access community.
 
+The admin app displays the public name Mini-Grids Assistant on the login screen and in UI copy as of PR #115 (2026-08-20); the codebase and repo remain named Anansi.
+
 ## What it does for mini-grid operators
 
 ### Customer support automation for prepaid meters
@@ -62,17 +64,22 @@ Conversations that need a human are routed to the right internal Telegram group 
   </tr>
 </table>
 
+### Skills: operator-authored automations
+
+Skills are multi-step automations that operators author by having a normal conversation with the bot through the admin app's builder UI, with no code or prompt engineering required. Each message becomes one step, and steps can be LLM instructions or pre-built function calls, so existing tool calls can be composed into a flow alongside prose instructions. Saved Skills can be scheduled (recurring or one-off) and run unattended end-to-end with no operator present to resume or confirm mid-run. Skills are the user-buildable counterpart to the hardcoded Expert Subagents, which handle workflows where step ordering is enforced in code.
+
 ## Why "general-purpose underneath" matters
 
 Anansi is a provider-aware LLM chat orchestrator at its core — a prompt library (your ops team edits any prompt from an in-app admin page, no redeploy; a bundled default always ships with the code, and a Google Doc can still be attached per prompt for teams that prefer editing there), MCP tools, RAG, expert workflows. Gemini remains the default generation provider, and the shared LLM gateway can also be pointed at OpenRouter for OpenAI-style chat completions. The mini-grid focus comes from the *tools and embellishments* layered on top, and from the "messenger-first" assumption that field staff and customers live in chat apps, not dashboards. Telegram is the primary surface today; WhatsApp is on the roadmap but not yet supported.
 
 **Project structure:**
 - `chat_orchestrator/` - Main chat orchestration service; Gemini is the default provider
-- `mcp_servers/` - MCP tool servers (Supabase, Timescale, JIRA, logs, codebase)
+- `mcp_servers/` - MCP tool servers (grid design, meters, equipment control/diagnostics, JIRA, Grafana, payments, solar, knowledge, reference, and more — see [MCP Servers](#3-mcp-servers) below)
 - `rag_pipeline/` - Knowledge ingestion from GitHub, Google Drive, Telegram
 - `shared/prompts/` - The prompt library: bundled defaults, DB overrides, Google Doc attachments, and tagged knowledge modules composed into prompt context
 - `shared/` - Common utilities (auth, database, logging, Google Docs fetching, provider-neutral LLM gateways)
-- `anansi_app/` - Streamlit admin UI for chat history, broadcasts, and settings
+- `anansi_app/` - NiceGUI admin UI for chat history, broadcasts, grid design, Skills, and settings
+- `mini_app/` - Vite customer chat widget embedded in operator portals
 - `llms.txt` - Short repo map for LLM-assisted setup and onboarding. Keep it in sync when README setup, provider configuration, or major component paths change.
 
 ## Quick Start
@@ -405,8 +412,8 @@ Telegram / Web Client
 └───────────────────────┘
 
 ┌───────────────────────┐
-│     anansi_app        │  Streamlit admin UI — settings, logs,
-│   (port 8501)         │  MCP server toggles, scheduler
+│     anansi_app        │  NiceGUI admin UI — chat history, grid
+│   (port 8501)         │  design, Skills, settings, scheduler
 └───────────────────────┘
 
 ┌───────────────────────┐
@@ -440,7 +447,7 @@ Telegram / Web Client
    - Google Drive folders (docs, PDFs, spreadsheets)
    - Telegram chats (messages, topics)
 
-2. **Interactive Ingestion** (`/ingest` command) - Individual documents via Telegram
+2. **Interactive Ingestion** (`/learn_rag` command) - Individual documents via Telegram
    - Google Docs → Markdown (preserves formatting)
    - PDFs → `pymupdf4llm` (markdown output, tables)
    - LLM-based document classification
@@ -450,8 +457,10 @@ Telegram / Web Client
 **GraphRAG Features:**
 - Semantic chunking (~512 tokens)
 - Vector embeddings (768-dim, Google AI Studio)
+- Hybrid retrieval (vector similarity + full-text search)
 - Entity extraction
 - Relationship mapping
+- Agentic graph query tools for entity-relationship exploration
 - Procedure tagging for filtered retrieval
 
 **Location:** `rag_pipeline/` (batch), `chat_orchestrator/orchestrator/experts/handlers/ingestion_expert/` (interactive)
@@ -460,12 +469,17 @@ Telegram / Web Client
 **Purpose:** Tool integration via Model Context Protocol
 
 **Available Tools:**
-- **Supabase** - Database CRUD
-- **Timescale** - Time-series data
-- **JIRA** - Issue management
-- **Logs** - System log access
-- **Codebase** - Code search via RAG
-- **Customer** - Grid status and customer info
+- **Customer** - Customer-facing tools for payment and commissioning status
+- **Meters** - Meter management and operations
+- **Equipment Control** - Equipment control operations
+- **Equipment Diagnostics** - Production equipment diagnostics, historical analysis, charts, and monitoring
+- **Grid Design** - Grid design and Bill of Materials generation
+- **Solar** - Solar potential assessment using the Global Solar Atlas API
+- **JIRA** - Jira analysis and comment processing
+- **Grafana** - Grafana dashboard panel rendering
+- **Payment Processor** - Payment processor transaction status checks
+- **Knowledge** - Knowledge base summarization and exploration tools
+- **Reference** - Nigerian import tariff, prohibition list, and standards lookups (staff only)
 - **Schedule** - Command scheduling (staff only)
 - **Meta** - Bot performance analytics (staff only)
 
@@ -486,6 +500,12 @@ Telegram / Web Client
 | `/lpp` | Package Generator | Generate Light Preliminary Packages |
 | `/analyze` | Grid Analyst | Analyze grid performance and faults |
 | `/kpi`, `/report` | Grid Analyst | Generate KPI reports |
+| `/csize` | Community Sizing | Detect community at GPS coordinates and estimate solar sizing |
+| `/sign` | Signing | Request a signature on a Drive PDF from a named person |
+| `/gtr` | Grids Technical Reviewer | Generate monthly technical review for grid(s) |
+| `/codebase`, `/anansi` | Code Investigation | Investigate the platform or Anansi codebase for an issue |
+| `/learn` | Context Ingestion | Teach the bot a fact it should always know (context module) |
+| `/learn_rag` | Ingestion | Add a source document to the searchable knowledge base |
 
 **Expert Definition** (the `experts.definitions` prompt — bundled by default, editable from the Prompts admin page, or a Google Doc via `EXPERT_INSTRUCTIONS_DOC_ID`):
 ```markdown
@@ -515,6 +535,18 @@ You are a specialist in creating Light Preliminary Packages...
 **Per-Expert Model Override:** Add `## Model` section to use a different Gemini model for that expert (e.g., `gemini-3-flash`).
 
 **Location:** `chat_orchestrator/orchestrator/experts/`
+
+#### 5. Skills
+**Purpose:** Operator-authored, code-free multi-step automations that run unattended on a schedule or on demand.
+
+**How It Works:**
+- Authored in the admin app's Skills builder: one user message in a conversation with the bot equals one step
+- Steps are either LLM steps (a plain-language instruction) or function steps (a pre-built function call); authors can compose existing tool calls into a flow, not only prose instructions
+- Saved Skills can be scheduled (recurring or one-off) or triggered like any other command, then run end-to-end unattended with no operator present to confirm or resume mid-run
+- Runtime is `skill_runner.py`, backed by `skill_step_bindings.py`, `skill_schedule_dispatch.py`, `skill_summary.py`, and `skill_validation.py`
+- Several original Expert Subagents (above) with no real step logic are being migrated into Skills; four genuine multi-step Experts (`context_expert`, `grids_technical_reviewer`, `ingestion_expert`, `package_generator`) stay as hardcoded Experts
+
+**Location:** `anansi_app/nicegui_app/pages/skills.py`, `skill_builder.py` (admin app); `chat_orchestrator/orchestrator/experts/skill_runner.py` and supporting files; DB migrations `0011_skills.sql`, `0013_skill_scheduling.sql`, `0025_skill_draft_status.sql`, `0026_user_schedules_skill_unique.sql`
 
 ### Data Flow
 
@@ -849,16 +881,12 @@ RAG is automatically used by the chat orchestrator when `rag.enabled=true` in se
 
 ### DigitalOcean App Platform
 
-**Main App (`anansi`)**:
-| Component | Type | Description |
-|-----------|------|-------------|
-| anansi-bot | Service | Chat orchestration + MCP tools (consolidated; Gemini default) |
-| broadcast-scheduler | Job | Scheduled broadcast processor (8am-7pm UTC) |
+One app, two services (see [`.do/app.example.yaml`](.do/app.example.yaml); the live reference deployment's chat service is named `anansi-bot` — adjust to match your own app spec):
 
-**Admin App (`anansi-app`)**:
 | Component | Type | Description |
 |-----------|------|-------------|
-| anansi-app | Service | Streamlit admin UI |
+| chat-orchestrator | Service | Chat orchestration + MCP tools (consolidated; Gemini default) |
+| anansi-app | Service | NiceGUI admin UI — chat history, grid design, Skills, settings. Also runs the broadcast-scheduler and Grafana-indexer daemons in-process (`anansi_app/start.sh`) — neither is a separate DO Job. |
 
 ```bash
 # Deploy via doctl (SAFE pattern — never update directly from .do/app.yaml which has placeholders)
@@ -1090,17 +1118,19 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-**Enabled checks:**
-- ✅ **ruff** - Linting with auto-fix (replaces flake8 + isort)
-- ✅ **ruff-format** - Code formatting (100 line length, replaces black)
-- ✅ **mypy** - Type checking (`--ignore-missing-imports`)
-- ✅ **detect-secrets** - Credential detection (baseline: `.secrets.baseline`)
-- ✅ **pre-commit-hooks** - Trailing whitespace, EOF, merge conflicts, YAML/JSON syntax
+**Enabled checks** (from `.pre-commit-config.yaml`):
+- ✅ **ruff check** - Linting (rules configured in the root `pyproject.toml`)
+- ✅ **test-wiring** - Fails the commit if a test file under any `tests/` directory isn't tracked and wired into a CI job (see [CONTRIBUTING.md](CONTRIBUTING.md) "Adding a new test file")
+
+**Configured but not currently enforced by pre-commit or CI** — available to run manually, settings live in the root `pyproject.toml`:
+- `ruff format` - Code formatting (100 line length, Black-compatible)
+- `mypy` - Type checking (`ignore_missing_imports = true`)
+
+detect-secrets is not wired in either; there is no `.secrets.baseline` in the repo.
 
 **Configuration:**
 - `.pre-commit-config.yaml` - Hook definitions and pinned versions
-- `chat_orchestrator/pyproject.toml` - ruff and mypy settings
-- `.secrets.baseline` - Known-safe strings excluded from secret scanning
+- `pyproject.toml` - ruff and mypy settings
 
 ### Shared Code
 
@@ -1156,11 +1186,14 @@ anansi/
 │   │   └── clients/        # External API clients
 │   └── local_server.py     # Development server
 │
-├── anansi_app/           # Streamlit admin UI
-│   ├── pages/              # UI pages (chat viewer, settings)
-│   ├── components/         # Reusable UI components
-│   ├── services/           # Business logic (broadcast, scheduling)
-│   └── scripts/            # Background jobs (broadcast_scheduler.py)
+├── anansi_app/            # NiceGUI admin UI
+│   ├── nicegui_app/         # Pages, layout, auth, branding (chat, grid design, Skills, settings, tickets, ...)
+│   ├── grid_app/            # Grid design entities and permission helpers
+│   ├── services/            # Business logic (broadcast, scheduling, Skills builder)
+│   ├── scripts/             # Background jobs (broadcast_scheduler.py, grafana_scheduler.py)
+│   └── db/                  # Admin-app-local schema and migrations
+│
+├── mini_app/               # Vite customer chat widget (embedded in operator portals)
 │
 ├── rag_pipeline/           # Knowledge ingestion
 │   ├── ingestion/          # Source-specific indexers
@@ -1171,8 +1204,11 @@ anansi/
 │   │   ├── jira_server/    # JIRA integration
 │   │   ├── meters_server/  # Meter operations
 │   │   ├── customer_server/# Customer/grid info
+│   │   ├── grid_design_server/ # Grid design & BOM generation
 │   │   ├── schedule_server/# Command scheduling
 │   │   └── meta_server/    # Bot analytics
+│   │       # + equipment_control, equipment_diagnostics, grafana,
+│   │       #   payment_processor, reference, solar, knowledge servers
 │   └── mcp_launcher.py     # Server manager
 │
 └── shared/                 # Common utilities
@@ -1246,6 +1282,8 @@ python3 -c "from shared.utils.google_auth import verify_credentials; verify_cred
 - ✅ Multi-source ingestion
 - ✅ Entity and relationship extraction
 - ✅ Semantic search
+- ✅ Hybrid (vector + full-text) retrieval
+- ✅ Agentic graph query tools
 - ✅ Community detection
 - ✅ Incremental sync
 
