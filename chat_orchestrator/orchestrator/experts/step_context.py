@@ -86,6 +86,21 @@ class StepContext:
     context_message: Optional[str] = None  # Full context message (includes date, enrichment)
     rag_provider: Optional[Any] = None  # RAGProvider instance for on-demand queries
 
+    # dry_run: Phase 5 of docs/superpowers/plans/2026-08-20-expert-steps-as-
+    # skill-tools.md. False (the default -- every context built before this
+    # field existed, and every real Google-Doc expert run today) means every
+    # step runs for real, unchanged from before this field existed. True is
+    # this run's BASELINE mock-mode setting; `ParsedStep.mock`, when set,
+    # overrides it for that one step. Only ever consulted by
+    # WorkflowExecutor._execute_function_step, and only for a step whose
+    # StepContract.mutates is True -- a non-mutating step runs for real
+    # regardless of this flag (see MockSpec's docstring: mock mode exists so
+    # a skill run can rehearse its real side effects without performing
+    # them, not to change read behavior). Nothing in this codebase sets this
+    # True yet outside tests -- Phase 11 is what wires an actual "run this
+    # skill mocked" trigger to it.
+    dry_run: bool = False
+
     @property
     def effective_email(self) -> Optional[str]:
         """Get effective email - use packet requester for consistency.
@@ -506,6 +521,15 @@ class StepResult:
             for `unmet_prerequisite` -- see
             `WorkflowExecutor._soft_failure_before_running_step`, which
             derives this from `PrereqReport.producer_chain`).
+        was_mocked: Set True by `WorkflowExecutor._execute_function_step`
+            (Phase 5 of docs/superpowers/plans/2026-08-20-expert-steps-as-
+            skill-tools.md) when this result came from a `StepContract.mock`
+            `MockSpec`, not a real handler call -- the step's real side
+            effect (Drive write, Telegram send, BOM trigger, ...) did NOT
+            happen. R6's "a mocked run must be labelled mocked everywhere"
+            reads this flag, not `data`/`progress_message` content, so
+            marking survives regardless of what a given `MockSpec` author
+            wrote into those fields.
     """
 
     # Results
@@ -532,6 +556,9 @@ class StepResult:
     soft_failure_code: Optional[str] = None
     soft_failure_message: Optional[str] = None
     remediation: Optional[str] = None
+
+    # Mock mode (see was_mocked's docstring above)
+    was_mocked: bool = False
 
     @classmethod
     def success(

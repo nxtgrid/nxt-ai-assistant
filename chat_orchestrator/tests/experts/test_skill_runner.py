@@ -102,6 +102,47 @@ class TestBuildParsedSteps:
     def test_empty_steps_returns_empty_list(self):
         assert build_parsed_steps([]) == []
 
+    # Phase 5 (docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md):
+    # mock field reading, mirroring the allow_write tests above.
+
+    def test_mock_defaults_none_for_llm_steps(self):
+        steps = build_parsed_steps(self._steps())
+
+        assert all(s.mock is None for s in steps)
+
+    def test_mock_true_preserved_for_llm_steps(self):
+        raw = [{"index": 0, "name": "a", "instruction": "x", "mock": True}]
+
+        steps = build_parsed_steps(raw)
+
+        assert steps[0].mock is True
+
+    def test_mock_false_preserved_for_llm_steps(self):
+        """False is distinct from absent (None) -- an explicit opt-out must
+        survive, not collapse to the same 'no override' value absence gets."""
+        raw = [{"index": 0, "name": "a", "instruction": "x", "mock": False}]
+
+        steps = build_parsed_steps(raw)
+
+        assert steps[0].mock is False
+
+    def test_mock_defaults_none_for_function_steps(self):
+        raw = [{"index": 0, "kind": "function", "handler": "copy_lpp_template"}]
+
+        steps = build_parsed_steps(raw)
+
+        assert steps[0].mock is None
+
+    def test_mock_true_preserved_for_function_steps(self):
+        raw = [
+            {"index": 0, "kind": "function", "handler": "copy_lpp_template", "mock": True}
+        ]
+
+        steps = build_parsed_steps(raw)
+
+        assert steps[0].step_type == "function"
+        assert steps[0].mock is True
+
 
 class TestResponseBuffer:
     @pytest.mark.asyncio
@@ -195,6 +236,59 @@ class TestResponseBuffer:
 
         mock_send.assert_not_awaited()
         assert buffer.messages_sent == 0
+
+    # R6 (docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md,
+    # Task 5.5): the chat response surface must say "mocked" too.
+
+    @pytest.mark.asyncio
+    async def test_dry_run_prefixes_the_delivered_message(self):
+        buffer = _ResponseBuffer("tok", "-100", None, dry_run=True)
+        step = ParsedStep(
+            index=0, step_type="llm", name="a", description="d", is_response_step=True
+        )
+        record = StepExecutionRecord(step_name="a", step_type="llm", description="d")
+
+        with patch(
+            "orchestrator.experts.skill_runner.send_telegram_message", new_callable=AsyncMock
+        ) as mock_send:
+            await buffer.on_step_complete(step, record, "Sent the map.")
+
+        sent_text = mock_send.call_args.args[2]
+        assert "MOCK RUN" in sent_text
+        assert "Sent the map." in sent_text
+
+    @pytest.mark.asyncio
+    async def test_dry_run_false_leaves_the_message_unprefixed(self):
+        buffer = _ResponseBuffer("tok", "-100", None, dry_run=False)
+        step = ParsedStep(
+            index=0, step_type="llm", name="a", description="d", is_response_step=True
+        )
+        record = StepExecutionRecord(step_name="a", step_type="llm", description="d")
+
+        with patch(
+            "orchestrator.experts.skill_runner.send_telegram_message", new_callable=AsyncMock
+        ) as mock_send:
+            await buffer.on_step_complete(step, record, "Sent the map.")
+
+        sent_text = mock_send.call_args.args[2]
+        assert sent_text == "Sent the map."
+
+    @pytest.mark.asyncio
+    async def test_dry_run_defaults_false_for_existing_callers(self):
+        """Back-compat: every construction site before Phase 5 passes no
+        dry_run kwarg at all."""
+        buffer = _ResponseBuffer("tok", "-100", None)
+        step = ParsedStep(
+            index=0, step_type="llm", name="a", description="d", is_response_step=True
+        )
+        record = StepExecutionRecord(step_name="a", step_type="llm", description="d")
+
+        with patch(
+            "orchestrator.experts.skill_runner.send_telegram_message", new_callable=AsyncMock
+        ) as mock_send:
+            await buffer.on_step_complete(step, record, "text")
+
+        assert mock_send.call_args.args[2] == "text"
 
 
 class TestRunSkillPacket:
@@ -353,6 +447,101 @@ class TestRunSkillPacket:
         assert result["expert_executed"] is True
         assert result["final_response"] == "Found 3 tickets."
         assert result["active_work_packet"] == packet
+
+    # Task 5.1/5.5 (docs/superpowers/plans/2026-08-20-expert-steps-as-skill-
+    # tools.md): dry_run read from metadata, threaded to StepContext.dry_run,
+    # and marked on the persisted packet's own title.
+
+    @pytest.mark.asyncio
+    async def test_dry_run_metadata_sets_context_dry_run_and_prefixes_packet_title(self):
+        mock_supabase = MagicMock()
+        mock_supabase.get_skill = AsyncMock(return_value=self._skill())
+        packet = {
+            "id": "uuid-1",
+            "packet_id": "skill_run_20260101_abc",
+            "packet_type": SKILL_PACKET_TYPE,
+            "packet_goal": "Finds open tickets.",
+            "packet_inputs": {},
+            "packet_state": {},
+            "steps_completed": [],
+            "current_step": "find",
+            "organization_id": 7,
+        }
+        packet_service = self._packet_service(packet)
+
+        mock_executor = MagicMock()
+        mock_executor.execute_workflow = AsyncMock(
+            return_value=("Found 3 tickets.", {"accumulated_results": {}})
+        )
+
+        state = self._state()
+        state["metadata"] = {**state["metadata"], "dry_run": True}
+
+        with (
+            patch(
+                "orchestrator.experts.skill_runner.get_supabase_client", return_value=mock_supabase
+            ),
+            patch(
+                "orchestrator.experts.skill_runner.create_chat_llm_client", return_value=MagicMock()
+            ),
+            patch("orchestrator.experts.skill_runner.WorkflowExecutor", return_value=mock_executor),
+        ):
+            await run_skill_packet(
+                state,
+                f"{SKILL_EXPERT_PREFIX}11111111-1111-1111-1111-111111111111",
+                packet_service,
+            )
+
+        create_kwargs = packet_service.create_packet.call_args.kwargs
+        assert create_kwargs["packet_title"].startswith("[MOCK RUN] ")
+
+        execute_kwargs = mock_executor.execute_workflow.call_args.kwargs
+        assert execute_kwargs["context"].dry_run is True
+
+    @pytest.mark.asyncio
+    async def test_dry_run_absent_from_metadata_defaults_false(self):
+        """Back-compat: every scheduled/triggered run today sets no dry_run
+        key at all -- must behave exactly as before Phase 5."""
+        mock_supabase = MagicMock()
+        mock_supabase.get_skill = AsyncMock(return_value=self._skill())
+        packet = {
+            "id": "uuid-1",
+            "packet_id": "skill_run_20260101_abc",
+            "packet_type": SKILL_PACKET_TYPE,
+            "packet_goal": "Finds open tickets.",
+            "packet_inputs": {},
+            "packet_state": {},
+            "steps_completed": [],
+            "current_step": "find",
+            "organization_id": 7,
+        }
+        packet_service = self._packet_service(packet)
+
+        mock_executor = MagicMock()
+        mock_executor.execute_workflow = AsyncMock(
+            return_value=("Found 3 tickets.", {"accumulated_results": {}})
+        )
+
+        with (
+            patch(
+                "orchestrator.experts.skill_runner.get_supabase_client", return_value=mock_supabase
+            ),
+            patch(
+                "orchestrator.experts.skill_runner.create_chat_llm_client", return_value=MagicMock()
+            ),
+            patch("orchestrator.experts.skill_runner.WorkflowExecutor", return_value=mock_executor),
+        ):
+            await run_skill_packet(
+                self._state(),
+                f"{SKILL_EXPERT_PREFIX}11111111-1111-1111-1111-111111111111",
+                packet_service,
+            )
+
+        create_kwargs = packet_service.create_packet.call_args.kwargs
+        assert not create_kwargs["packet_title"].startswith("[MOCK RUN] ")
+
+        execute_kwargs = mock_executor.execute_workflow.call_args.kwargs
+        assert execute_kwargs["context"].dry_run is False
 
     @pytest.mark.asyncio
     async def test_workflow_exception_fails_the_packet(self):

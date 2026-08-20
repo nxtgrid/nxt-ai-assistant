@@ -27,6 +27,12 @@ Four things are covered:
 - `TestOutcomesMergeIntoContext`: every outcome (success, hard failure,
   handler exception) is merged into `context` via `apply_result` and
   reported back as a `ToolCallResult`, never raised to the caller.
+- `TestMockModeThreading` (Phase 5): `mock_override` reaches
+  `_execute_declared_function_step_call`'s synthetic `ParsedStep` intact,
+  so a mutating tool call made from inside an `[llm]` step's loop respects
+  that step's own `ParsedStep.mock`, falling back to `context.dry_run` when
+  `None` -- and a mocked call's `ToolCallResult.output` carries the R6
+  "chat response" marker.
 """
 
 from __future__ import annotations
@@ -36,7 +42,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import ParamSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import get_step_registry
 from orchestrator.experts.workflow_executor import WorkflowExecutor
 from orchestrator.models.schemas import FunctionCall
@@ -448,3 +454,96 @@ class TestOutcomesMergeIntoContext:
         result = await executor._execute_skill_step_tool_call(call, step_context)
 
         assert result.tool_call_id == "call-42"
+
+
+class TestMockModeThreading:
+    """Phase 5: `mock_override` reaches the routed call the same way
+    `allow_write` already does."""
+
+    @pytest.mark.asyncio
+    async def test_mock_override_true_mocks_despite_context_dry_run_false(
+        self, executor, step_context, _cleanup_registry
+    ):
+        was_called = False
+
+        async def handler(ctx):
+            nonlocal was_called
+            was_called = True
+            return StepResult.success()
+
+        contract = StepContract(mutates=True, mock=MockSpec(data={"a": 1}))
+        _cleanup_registry("zzz_test_write", handler, contract=contract)
+        step_context.dry_run = False
+        call = FunctionCall(name="zzz_test_write", arguments={})
+
+        result = await executor._execute_skill_step_tool_call(
+            call, step_context, allow_write=True, mock_override=True
+        )
+
+        assert was_called is False
+        assert result.success is True
+        assert result.output.get("_mocked") is True
+
+    @pytest.mark.asyncio
+    async def test_mock_override_false_runs_real_despite_context_dry_run_true(
+        self, executor, step_context, _cleanup_registry
+    ):
+        was_called = False
+
+        async def handler(ctx):
+            nonlocal was_called
+            was_called = True
+            return StepResult.success(data={"real": True})
+
+        contract = StepContract(mutates=True, mock=MockSpec())
+        _cleanup_registry("zzz_test_write", handler, contract=contract)
+        step_context.dry_run = True
+        call = FunctionCall(name="zzz_test_write", arguments={})
+
+        result = await executor._execute_skill_step_tool_call(
+            call, step_context, allow_write=True, mock_override=False
+        )
+
+        assert was_called is True
+        assert result.output == {"real": True}
+
+    @pytest.mark.asyncio
+    async def test_mock_override_none_defers_to_context_dry_run(
+        self, executor, step_context, _cleanup_registry
+    ):
+        was_called = False
+
+        async def handler(ctx):
+            nonlocal was_called
+            was_called = True
+            return StepResult.success()
+
+        contract = StepContract(mutates=True, mock=MockSpec())
+        _cleanup_registry("zzz_test_write", handler, contract=contract)
+        step_context.dry_run = True
+        call = FunctionCall(name="zzz_test_write", arguments={})
+
+        result = await executor._execute_skill_step_tool_call(
+            call, step_context, allow_write=True, mock_override=None
+        )
+
+        assert was_called is False
+        assert result.output.get("_mocked") is True
+
+    @pytest.mark.asyncio
+    async def test_real_call_output_carries_no_mocked_marker(
+        self, executor, step_context, _cleanup_registry
+    ):
+        contract = StepContract(mutates=True, mock=MockSpec())
+        _cleanup_registry(
+            "zzz_test_write",
+            AsyncMock(return_value=StepResult.success(data={"real": True})),
+            contract=contract,
+        )
+        call = FunctionCall(name="zzz_test_write", arguments={})
+
+        result = await executor._execute_skill_step_tool_call(
+            call, step_context, allow_write=True, mock_override=False
+        )
+
+        assert "_mocked" not in result.output

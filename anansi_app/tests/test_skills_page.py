@@ -441,3 +441,28 @@ def test_derive_steps_payload_preserves_a_function_step_in_the_pending_tail():
 
     assert steps[0]["kind"] == "function"
     assert steps[0]["handler"] == "fetch_grafana_kpis"
+
+
+def test_derive_steps_payload_carries_a_mock_toggle_edit_on_a_pending_step():
+    """Task 5.3 (docs/superpowers/plans/2026-08-20-expert-steps-as-skill-
+    tools.md): _render_pending_step's mock switch mutates the SAME dict
+    object stored in state["initial_steps"] in place (s.__setitem__("mock",
+    ...), not a copy) -- confirms that mutation survives into the payload
+    _derive_steps_payload builds for Save, the same way it already proves
+    for a plain pass-through field above."""
+    from nicegui_app.pages.skill_builder import _derive_steps_payload
+
+    stored_step = {
+        "index": 0, "kind": "function", "handler": "write_review_section",
+        "mutates": True, "is_response_step": True,
+    }
+    state = {"steps": [], "flags": {}, "initial_steps": [stored_step]}
+
+    # Simulate the switch's on_value_change callback -- mutates the ORIGINAL
+    # dict object in place, exactly as the real callback does.
+    stored_step["mock"] = False
+
+    steps = _derive_steps_payload(state)
+
+    assert steps[0]["mock"] is False
+    assert steps[0]["handler"] == "write_review_section"  # untouched fields still ride through

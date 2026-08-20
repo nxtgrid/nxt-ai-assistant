@@ -87,11 +87,23 @@ class _SyntheticExpertConfig:
         return []
 
 
+def _step_mock_override(step: Dict[str, Any]) -> Optional[bool]:
+    """`step["mock"]` (Phase 5 of docs/superpowers/plans/2026-08-20-expert-
+    steps-as-skill-tools.md), preserving the three-way None/True/False
+    distinction -- unlike `allow_write`'s `bool(step.get(..., False))`
+    coercion, absent here must stay `None` ("no per-step override, defer to
+    this run's StepContext.dry_run baseline"), not collapse to `False`
+    ("explicitly always run for real"). See `ParsedStep.mock`'s docstring.
+    """
+    value = step.get("mock")
+    return bool(value) if value is not None else None
+
+
 def build_parsed_steps(skill_steps: List[Dict[str, Any]]) -> List[ParsedStep]:
     """Convert a skill's stored steps (skills.steps jsonb -- see
     skill_validation.py's module docstring for the shape) into ParsedStep
-    objects, preserving is_skill_step/allow_write/is_response_step. Going
-    through expert_config.get_workflow() + parse_workflow()'s doc-text
+    objects, preserving is_skill_step/allow_write/is_response_step/mock.
+    Going through expert_config.get_workflow() + parse_workflow()'s doc-text
     parser instead cannot do this -- see execute_workflow's pre_parsed_steps
     docstring for why.
 
@@ -101,6 +113,10 @@ def build_parsed_steps(skill_steps: List[Dict[str, Any]]) -> List[ParsedStep]:
     step_registry.py's exposed_to_builder). A function step's own handler
     brings its own tool access, so is_skill_step (which unlocks {{var}}
     binding and read-only tool gating for [llm] steps) stays False for it.
+    `mock` (Phase 5) is meaningful for both kinds: it pins a `kind:"function"`
+    step's own mocked-ness directly, and pins an `[llm]` step's OWN mocked-
+    ness for any function-step tool it invokes mid-loop (see
+    WorkflowExecutor._execute_llm_step's mock_override threading).
 
     The final step is always forced is_response_step=True even if not
     explicitly flagged by its author, per the plan's "Run-mode output"
@@ -123,6 +139,7 @@ def build_parsed_steps(skill_steps: List[Dict[str, Any]]) -> List[ParsedStep]:
                     description=step.get("instruction") or "",
                     is_skill_step=False,
                     is_response_step=is_last or bool(step.get("is_response_step", False)),
+                    mock=_step_mock_override(step),
                 )
             )
             continue
@@ -136,6 +153,7 @@ def build_parsed_steps(skill_steps: List[Dict[str, Any]]) -> List[ParsedStep]:
                 is_skill_step=True,
                 allow_write=bool(step.get("allow_write", False)),
                 is_response_step=is_last or bool(step.get("is_response_step", False)),
+                mock=_step_mock_override(step),
             )
         )
     return parsed
@@ -154,12 +172,19 @@ class _ResponseBuffer:
     summary.
     """
 
-    def __init__(self, bot_token: str, chat_id: str, topic_id: Optional[str]) -> None:
+    def __init__(
+        self, bot_token: str, chat_id: str, topic_id: Optional[str], dry_run: bool = False
+    ) -> None:
         self._bot_token = bot_token
         self._chat_id = chat_id
         self._topic_id = topic_id
         self._buffered_summaries: List[str] = []
         self.messages_sent = 0
+        # R6 (docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md):
+        # the chat response surface must say "mocked" too -- a mocked BOM or
+        # signature request reading as real in the delivered Telegram
+        # message is the worst failure that feature can produce.
+        self._dry_run = dry_run
 
     async def on_step_complete(
         self, step: ParsedStep, record: StepExecutionRecord, final_response: Optional[str]
@@ -174,6 +199,9 @@ class _ResponseBuffer:
             text = f"{summary_block}\n\n{response_text}"
         else:
             text = response_text
+
+        if self._dry_run:
+            text = f"🧪 MOCK RUN — mutating steps were mocked, not performed for real.\n\n{text}"
 
         if not self._bot_token:
             LOGGER.warning("Skill run: TELEGRAM_BOT_TOKEN not set, cannot deliver response step")
@@ -244,10 +272,25 @@ async def run_skill_packet(
 
     metadata = state.get("metadata") or {}
     skill_inputs = metadata.get("skill_inputs") or {}
+    # dry_run: Phase 5 of docs/superpowers/plans/2026-08-20-expert-steps-as-
+    # skill-tools.md's run-wide mock-mode baseline (StepContext.dry_run) --
+    # read from metadata rather than a new parameter on this function so
+    # whatever eventually triggers a "run this skill mocked" request (Phase
+    # 11 -- nothing sets this key yet) only needs to add it to the SAME
+    # metadata dict skill_inputs already flows through, with no change
+    # needed here or at this function's one real caller
+    # (expert_handler.py). False (the default -- every request today,
+    # scheduled or triggered) preserves current behavior exactly: every
+    # mutating step runs for real, same as before this field existed.
+    dry_run = bool(metadata.get("dry_run", False))
 
+    title_prefix = "[MOCK RUN] " if dry_run else ""
     packet = await packet_service.create_packet(
         packet_type=SKILL_PACKET_TYPE,
-        packet_title=f"{skill.get('title')}: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}",
+        packet_title=(
+            f"{title_prefix}{skill.get('title')}: "
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+        ),
         packet_goal=skill.get("summary") or skill.get("title") or skill_id,
         assigned_expert=expert_id,
         packet_inputs=skill_inputs,
@@ -293,11 +336,13 @@ async def run_skill_packet(
     step_context = _build_step_context(
         state=state, packet=packet, expert_config=expert_config, tool_executor=tool_executor
     )
+    step_context.dry_run = dry_run
 
     buffer = _ResponseBuffer(
         bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
         chat_id=user_context.chat_id if user_context else "",
         topic_id=user_context.topic_id if user_context else None,
+        dry_run=dry_run,
     )
 
     executor = WorkflowExecutor(

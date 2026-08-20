@@ -63,6 +63,7 @@ from orchestrator.experts.skill_step_bindings import (
     strip_result_line,
 )
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import (
     get_step_contract,
     get_step_handler,
@@ -299,6 +300,20 @@ class ParsedStep:
     # that same section's "final step is always an implicit response step"
     # rule.
     is_response_step: bool = False
+    # mock: Phase 5 of docs/superpowers/plans/2026-08-20-expert-steps-as-
+    # skill-tools.md's per-step mock-mode override. `None` (the default --
+    # every step predating this field) means "defer to this run's baseline
+    # StepContext.dry_run"; True/False pins this ONE step's mocked-ness
+    # regardless of that baseline (e.g. "always mock send_lpp_map_to_telegram,
+    # even on an otherwise-real acceptance run" or the reverse). Consulted by
+    # _execute_function_step for a `kind:"function"` step called directly,
+    # and threaded into the synthetic ParsedStep _execute_declared_function_step_call
+    # builds for a tool call made from inside an `[llm]` step's loop (so an
+    # `[llm]` step's own `mock` setting governs every tool call it makes,
+    # the same way `allow_write` already governs which tools it can see at
+    # all). Meaningless for a non-mutating step -- see StepContract.mutates;
+    # never consulted unless the contract mutates.
+    mock: Optional[bool] = None
 
 
 @dataclass
@@ -1193,6 +1208,12 @@ class WorkflowExecutor:
             # Success - update the already-added record in place
             step_record.status = StepStatus.SUCCESS
             step_record.result_summary = self._summarize_result(result.data)
+            if result.was_mocked:
+                # R6 (docs/superpowers/plans/2026-08-20-expert-steps-as-
+                # skill-tools.md): the run log must say "mocked" regardless
+                # of what a MockSpec's own data/message happen to contain --
+                # never rely on eyeballing values for a "MOCK-" convention.
+                step_record.result_summary = f"[MOCKED] {step_record.result_summary}"
             execution_summary.completed_steps += 1
 
             # Store result in local dict AND sync back to context so that
@@ -2479,7 +2500,7 @@ class WorkflowExecutor:
         context: StepContext,
         accumulated_results: Dict[str, Any],
     ) -> StepResult:
-        """Execute a function step handler.
+        """Execute a function step handler -- or, in mock mode, its MockSpec.
 
         Args:
             step: Parsed step definition
@@ -2487,7 +2508,12 @@ class WorkflowExecutor:
             accumulated_results: Results from previous steps
 
         Returns:
-            StepResult from handler
+            StepResult from the handler, or (Phase 5 of docs/superpowers/
+            plans/2026-08-20-expert-steps-as-skill-tools.md) from
+            `contract.mock` when this step is both mutating and running
+            mock-mode-enabled -- see `_mock_step_result` below. Mock mode
+            never affects a non-mutating step or a step with no contract:
+            both always run for real, exactly as before this phase existed.
         """
         handler = get_step_handler(step.name)
 
@@ -2498,11 +2524,65 @@ class WorkflowExecutor:
         # Update context with accumulated results
         context.accumulated_results = accumulated_results
 
+        contract = get_step_contract(step.name)
+        # step.mock (a per-step override, e.g. "always mock this one
+        # regardless of the run's baseline") wins when set; otherwise this
+        # run's baseline (context.dry_run, False for every context built
+        # before this phase existed) applies. Never consulted for a
+        # non-mutating or contract-less step -- see MockSpec's docstring on
+        # why mock mode exists (rehearsing side effects, not changing reads).
+        effective_dry_run = context.dry_run if step.mock is None else step.mock
+        if contract is not None and contract.mutates and effective_dry_run:
+            return self._mock_step_result(step, contract)
+
         try:
             return await handler(context)
         except Exception as e:
             LOGGER.exception(f"Handler {step.name} raised exception: {e}")
             return StepResult.failure(str(e))
+
+    def _mock_step_result(self, step: ParsedStep, contract: StepContract) -> StepResult:
+        """Build the StepResult a mocked, mutating step returns instead of
+        calling its real handler.
+
+        Never calls the handler -- that is the entire point of mock mode
+        (R2: "mimic execution... run all immutable steps for real and mimic
+        the mutable ones"). Defensively copies `contract.mock`'s dicts:
+        `MockSpec` is a single shared, mutable, module-level-registered
+        instance (see step_contracts.py's docstring on why it isn't
+        frozen) -- handing out the original dicts would let one run's
+        `state_updates.update(...)`-style mutation (e.g. via
+        `StepContext.apply_result`) corrupt every future run's mock data.
+
+        A mutating step running mock-mode-enabled with NO `MockSpec`
+        registered is a hard failure, not a soft one: `_soft_failure_before_
+        running_step`-style soft failures leave `error` unset specifically
+        so `_execute_one_step`'s `if result.error:` halt check never trips
+        -- exactly wrong here, since silently continuing would mean a
+        `kind:"function"` skill step's run sails on to the next step having
+        produced NONE of its promised `produces_state` keys, with nothing
+        telling the user their mocked run didn't actually mock anything.
+        `skill_validation.py`'s save-time check (Task 5.4) is meant to catch
+        this before a run ever starts; this is the runtime backstop for
+        whatever that check doesn't (a contract's mock removed after the
+        skill was saved, an as-yet-unvalidated step).
+        """
+        if contract.mock is None:
+            return StepResult.failure(
+                f"Mock mode is enabled for '{step.name}', which has a real external side "
+                "effect, but no MockSpec is registered for it. Refusing to either perform "
+                "the real side effect or fabricate an unspecified result."
+            )
+
+        mock = contract.mock
+        detail = mock.message or f"Would have run '{step.name}'."
+        LOGGER.info(f"Mock mode: '{step.name}' short-circuited, real handler not called")
+        return StepResult(
+            data=dict(mock.data),
+            state_updates=dict(mock.state_updates),
+            progress_message=f"[MOCKED] {detail}",
+            was_mocked=True,
+        )
 
     async def _soft_failure_before_running_step(
         self, context: StepContext, step_name: str
@@ -2707,6 +2787,7 @@ class WorkflowExecutor:
                 context,
                 execution_summary,
                 allow_write=step.allow_write,
+                mock_override=step.mock,
             )
 
             # Check finishReason for blocked content
@@ -2808,6 +2889,7 @@ class WorkflowExecutor:
         context: StepContext,
         execution_summary: Optional[ExecutionSummary],
         allow_write: bool = False,
+        mock_override: Optional[bool] = None,
     ) -> "GeminiTurnResult":
         """Call the LLM for one step, executing any tool calls it makes.
 
@@ -2830,6 +2912,11 @@ class WorkflowExecutor:
                 everywhere else `allow_write` originates -- callers that
                 don't pass it explicitly get the same "no writes" behavior
                 as any other unmarked step.
+            mock_override: Forwarded to `_execute_skill_step_tool_call`
+                (mirrors `ParsedStep.mock` for the calling step -- Phase 5).
+                `None` (the default) means "no per-step override for any
+                tool call this step makes"; every such call falls back to
+                `context.dry_run`, this run's baseline.
 
         Returns the final round's GeminiTurnResult. If the round cap is hit
         while the model still wants to call tools, that response (whatever
@@ -2855,7 +2942,7 @@ class WorkflowExecutor:
             rounds += 1
             for call in response.tool_calls:
                 tool_result = await self._execute_skill_step_tool_call(
-                    call, context, allow_write=allow_write
+                    call, context, allow_write=allow_write, mock_override=mock_override
                 )
                 messages.append(ConversationMessage(role="model", function_call=call))
                 messages.append(ConversationMessage(role="tool", tool_result=tool_result))
@@ -2870,7 +2957,11 @@ class WorkflowExecutor:
         return response
 
     async def _execute_skill_step_tool_call(
-        self, call: FunctionCall, context: StepContext, allow_write: bool = False
+        self,
+        call: FunctionCall,
+        context: StepContext,
+        allow_write: bool = False,
+        mock_override: Optional[bool] = None,
     ) -> ToolCallResult:
         """Run one tool call a skill step's LLM requested.
 
@@ -2910,9 +3001,18 @@ class WorkflowExecutor:
                 non-allow_write step was never declared, and this check
                 keeps it from being routable even if a call for it arrives
                 anyway.
+            mock_override: The calling skill step's own `ParsedStep.mock`
+                (Phase 5) -- forwarded to `_execute_declared_function_step_call`
+                so a mutating tool call made from this step's loop respects
+                that step's own mock-mode override, falling back to
+                `context.dry_run` when `None`. Not consulted for the MCP
+                path below at all: MCP tools have no `StepContract.mutates`/
+                `mock` to check against, so mock mode never applies to them.
         """
         if is_declared_function_step(call.name, allow_write=allow_write):
-            return await self._execute_declared_function_step_call(call, context)
+            return await self._execute_declared_function_step_call(
+                call, context, mock_override=mock_override
+            )
 
         if not context.mcp_executor:
             return ToolCallResult(
@@ -2942,13 +3042,21 @@ class WorkflowExecutor:
             )
 
     async def _execute_declared_function_step_call(
-        self, call: FunctionCall, context: StepContext
+        self, call: FunctionCall, context: StepContext, mock_override: Optional[bool] = None
     ) -> ToolCallResult:
         """Run one tool call that names a registered step handler.
 
         Caller (`_execute_skill_step_tool_call`) has already confirmed
         `call.name` clears `is_declared_function_step` -- this method trusts
         that and does not re-check contract/permission/allow_write itself.
+
+        Args:
+            mock_override: The calling `[llm]` step's own `ParsedStep.mock`
+                (Phase 5), passed straight into the synthetic `ParsedStep`
+                built below so `_execute_function_step` sees the SAME
+                override it would for a top-level `kind:"function"` step --
+                `None` defers to `context.dry_run`, same as everywhere else
+                `mock` is consulted.
 
         Three things happen, in order:
         1. Caller-supplied arguments are fed into the two seams a handler
@@ -3000,7 +3108,11 @@ class WorkflowExecutor:
         result = await self._soft_failure_before_running_step(context, call.name)
         if result is None:
             step = ParsedStep(
-                index=0, step_type="function", name=call.name, description=contract.description
+                index=0,
+                step_type="function",
+                name=call.name,
+                description=contract.description,
+                mock=mock_override,
             )
             result = await self._execute_function_step(step, context, context.accumulated_results)
 
@@ -3021,8 +3133,20 @@ class WorkflowExecutor:
                 tool_call_id=call.tool_call_id,
             )
 
+        output = result.data
+        if result.was_mocked:
+            # R6: the chat response surface must say "mocked" too -- this is
+            # what the LLM actually sees as this call's return value, so it
+            # can (and, per system instructions, should) tell the user this
+            # step's real side effect did not happen.
+            output = {
+                **result.data,
+                "_mocked": True,
+                "_mock_note": "Mock mode is enabled; this step's real side effect did not happen.",
+            }
+
         return ToolCallResult(
-            name=call.name, success=True, output=result.data, tool_call_id=call.tool_call_id
+            name=call.name, success=True, output=output, tool_call_id=call.tool_call_id
         )
 
     async def _resolve_skill_step_tools(

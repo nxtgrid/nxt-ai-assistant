@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from orchestrator.experts.skill_step_bindings import parse_output_binding
 
@@ -55,6 +55,7 @@ def validate_skill_steps(
     steps: List[Dict[str, Any]],
     declared_inputs: Optional[List[str]] = None,
     exposed_handlers: Optional[List[str]] = None,
+    unmockable_handlers: Optional[Set[str]] = None,
 ) -> List[ValidationError]:
     """Validate a skill's step list. Returns [] when everything checks out.
 
@@ -65,6 +66,9 @@ def validate_skill_steps(
     - A write clause names a valid Python-identifier-shaped variable.
     - (warning, not error) a write that no later step reads.
     - A `kind="function"` step (P3) names a handler in `exposed_handlers`.
+    - (Phase 5 of docs/superpowers/plans/2026-08-20-expert-steps-as-skill-
+      tools.md, Task 5.4) a step explicitly saved with `"mock": true` names
+      a handler NOT in `unmockable_handlers`.
 
     `declared_inputs` are the skill's own input names (Phase 3 concept --
     pass `[]`/omit until that exists; every read then must come from an
@@ -75,6 +79,18 @@ def validate_skill_steps(
     (existing callers that predate function steps, and this module's own
     llm-only test suite, pass no handler list at all and must keep
     working).
+
+    `unmockable_handlers` is the set of handler names for which
+    `StepContract.mutates` is True but `StepContract.mock` is None -- a step
+    naming one of these cannot be saved with `"mock": true`, because a mock
+    run would have nothing to return for it and would either crash (see
+    `WorkflowExecutor._mock_step_result`'s runtime backstop) or, worse,
+    silently produce none of its promised state. A plain `Set[str]` rather
+    than passing `StepContract`s themselves through -- this module stays
+    decoupled from step_contracts.py/step_registry.py entirely (no new
+    import here), matching `exposed_handlers`' own shape and this module's
+    "pure function, no I/O" ethos. Omit (the default, None) to skip this
+    check entirely, same convention as `exposed_handlers`.
     """
     errors: List[ValidationError] = []
     seen_output_vars: Dict[str, int] = {}  # name -> index of the step that wrote it
@@ -117,6 +133,21 @@ def validate_skill_steps(
                     name,
                     f"handler {handler!r} is not available to the skill builder; "
                     f"available: {', '.join(exposed_handlers) or '(none)'}",
+                )
+            )
+
+        if (
+            unmockable_handlers is not None
+            and step.get("mock") is True
+            and handler in unmockable_handlers
+        ):
+            errors.append(
+                ValidationError(
+                    index,
+                    name,
+                    f"step is mock-enabled but handler {handler!r} has a real external "
+                    "side effect with no MockSpec registered -- it cannot be run in mock "
+                    "mode until one is added",
                 )
             )
 

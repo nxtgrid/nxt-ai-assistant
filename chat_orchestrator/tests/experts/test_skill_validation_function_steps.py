@@ -56,3 +56,73 @@ def test_omitting_exposed_handlers_skips_handler_checks():
     assert validate_skill_steps(
         [{"index": 0, "name": "a", "instruction": "do a"}]
     ) == []
+
+
+# Task 5.4 (docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md):
+# a mutating step with no MockSpec cannot be saved mock-enabled.
+
+
+def test_mock_enabled_step_naming_an_unmockable_handler_is_rejected():
+    errors = validate_skill_steps(
+        [{"index": 0, "kind": "function", "handler": "write_review_section", "mock": True}],
+        exposed_handlers=["write_review_section"],
+        unmockable_handlers={"write_review_section"},
+    )
+    assert len(errors) == 1
+    assert "write_review_section" in errors[0].message
+    assert errors[0].severity == "error"
+
+
+def test_mock_disabled_step_naming_an_unmockable_handler_is_fine():
+    """Only an EXPLICIT mock:true is checked -- a step that doesn't opt into
+    mock mode at all isn't blocked by a handler having no MockSpec."""
+    errors = validate_skill_steps(
+        [{"index": 0, "kind": "function", "handler": "write_review_section", "mock": False}],
+        exposed_handlers=["write_review_section"],
+        unmockable_handlers={"write_review_section"},
+    )
+    assert errors == []
+
+
+def test_mock_field_absent_naming_an_unmockable_handler_is_fine():
+    """Same as above -- absence (None, deferring to the run's baseline) is
+    not an explicit mock:true, so it isn't flagged either. The runtime
+    backstop (WorkflowExecutor._mock_step_result) is what catches this case
+    if a future mock run's baseline happens to make it mocked anyway."""
+    errors = validate_skill_steps(
+        [{"index": 0, "kind": "function", "handler": "write_review_section"}],
+        exposed_handlers=["write_review_section"],
+        unmockable_handlers={"write_review_section"},
+    )
+    assert errors == []
+
+
+def test_mock_enabled_step_naming_a_mockable_handler_is_fine():
+    errors = validate_skill_steps(
+        [{"index": 0, "kind": "function", "handler": "copy_lpp_template", "mock": True}],
+        exposed_handlers=["copy_lpp_template"],
+        unmockable_handlers={"write_review_section"},  # a DIFFERENT handler is unmockable
+    )
+    assert errors == []
+
+
+def test_omitting_unmockable_handlers_skips_the_mock_check_entirely():
+    """Back-compat: existing callers (and every call site before Task 5.4)
+    pass no unmockable_handlers set at all."""
+    errors = validate_skill_steps(
+        [{"index": 0, "kind": "function", "handler": "write_review_section", "mock": True}],
+        exposed_handlers=["write_review_section"],
+    )
+    assert errors == []
+
+
+def test_llm_step_is_unaffected_by_the_mock_check():
+    """The mock check only runs in Pass 0's kind=='function' branch -- an
+    [llm] step's own 'mock' field (Phase 5's ParsedStep.mock override for
+    its tool-call loop) is never checked against unmockable_handlers, since
+    an llm step names no single handler to check it against."""
+    errors = validate_skill_steps(
+        [{"index": 0, "name": "a", "instruction": "do a", "mock": True}],
+        unmockable_handlers={"write_review_section"},
+    )
+    assert errors == []

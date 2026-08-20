@@ -337,9 +337,16 @@ class TestStateAcrossToolLoopRounds:
 
         original = WorkflowExecutor._execute_skill_step_tool_call
 
-        async def _spy(self, call, context, allow_write=False):
+        async def _spy(self, call, context, *args, **kwargs):
+            # *args/**kwargs (not enumerated kwargs) deliberately -- this spy
+            # only cares about `context` identity, and pinning every one of
+            # _execute_skill_step_tool_call's other parameters here would
+            # make this test break on each future addition to that
+            # signature (already happened twice: Phase 4's allow_write,
+            # Phase 5's mock_override) for a reason unrelated to what it
+            # actually verifies.
             seen_context_ids.append(id(context))
-            return await original(self, call, context, allow_write=allow_write)
+            return await original(self, call, context, *args, **kwargs)
 
         monkeypatch.setattr(WorkflowExecutor, "_execute_skill_step_tool_call", _spy)
 
