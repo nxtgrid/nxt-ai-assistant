@@ -5,6 +5,7 @@ from nicegui_app.pages.knowledge_modules import (
     ModuleRow,
     body_is_editable,
     build_module_rows,
+    filter_context_rows,
     group_module_rows,
     module_is_deletable,
     preview_module_body,
@@ -16,13 +17,13 @@ from nicegui_app.pages.prompts import KnowledgeTabRow, build_knowledge_tab, filt
 from shared.prompts.knowledge import KnowledgeModule
 
 
-def _module(slug, tags=("grid_ops",), mode="pinned"):
+def _module(slug, tags=("grid_ops",), mode="pinned", summary="s", body="b" * 40):
     return KnowledgeModule(
         id=slug,
         slug=slug,
         title=slug.title(),
-        summary="s",
-        body="b" * 40,
+        summary=summary,
+        body=body,
         tags=list(tags),
         scope="sector",
         mode=mode,
@@ -35,8 +36,50 @@ def test_build_module_rows_reports_size():
         ModuleRow(
             slug="comms", title="Comms", tags=["grid_ops"], scope="sector", mode="pinned",
             chars=40, source="manual", size_label="40 chars",
+            summary="s", body="b" * 40,
         )
     ]
+
+
+def test_filter_context_rows_matches_slug_title_summary_and_body():
+    modules = [
+        _module(
+            "azimuth-calc",
+            summary="How PV azimuth is measured.",
+            body="Uses the sun's position and panel tilt.",
+        ),
+        _module(
+            "victron-led",
+            summary="Decoding inverter LED error states.",
+            body="Flash codes and their fault meanings.",
+        ),
+    ]
+    rows = build_module_rows(modules)
+
+    # slug
+    assert [r.slug for r in filter_context_rows(rows, "azimuth-calc")] == ["azimuth-calc"]
+    # title (slug.title() -> "Victron-Led")
+    assert [r.slug for r in filter_context_rows(rows, "Victron")] == ["victron-led"]
+    # summary
+    assert [r.slug for r in filter_context_rows(rows, "inverter LED")] == ["victron-led"]
+    # body
+    assert [r.slug for r in filter_context_rows(rows, "panel tilt")] == ["azimuth-calc"]
+
+
+def test_filter_context_rows_is_case_insensitive():
+    rows = build_module_rows([_module("azimuth-calc", body="Panel Tilt matters.")])
+    assert [r.slug for r in filter_context_rows(rows, "PANEL tilt")] == ["azimuth-calc"]
+
+
+def test_filter_context_rows_empty_query_returns_everything_unchanged():
+    rows = build_module_rows([_module("a"), _module("b")])
+    assert filter_context_rows(rows, "") == rows
+    assert filter_context_rows(rows, "   ") == rows
+
+
+def test_filter_context_rows_no_match_returns_empty():
+    rows = build_module_rows([_module("azimuth-calc")])
+    assert filter_context_rows(rows, "no such module") == []
 
 
 def test_knowledge_tab_lists_all_modules_with_pinned_state():
