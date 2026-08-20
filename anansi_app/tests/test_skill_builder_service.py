@@ -641,6 +641,45 @@ def test_set_skill_schedule_derives_cron_from_frequency():
     assert captured["next_run_at"] == "2026-09-01T08:00:00+00:00"
 
 
+def test_set_skill_schedule_accepts_does_not_repeat_as_a_one_time_run():
+    captured = {}
+
+    class _Table:
+        def upsert(self, payload, **_k):
+            captured.update(payload)
+            return self
+
+        def execute(self):
+            class _R:
+                data = [captured]
+
+            return _R()
+
+    class _Client:
+        def table(self, _n):
+            return _Table()
+
+    result = SkillBuilderService(client=_Client()).set_skill_schedule(
+        "1", anchor_entity_type="grid", first_run="2026-09-01 08:00",
+        frequency="Does not repeat", actor="ops@example.com",
+    )
+
+    assert result["success"] is True
+    assert captured["cron_expression"] is None
+    assert captured["schedule_type"] == "once"
+    assert captured["next_run_at"] == "2026-09-01T08:00:00+00:00"
+    assert captured["is_active"] is True
+
+
+def test_set_skill_schedule_rejects_an_unrecognized_frequency():
+    result = SkillBuilderService(client=None).set_skill_schedule(
+        "1", anchor_entity_type="grid", first_run="2026-09-01 08:00",
+        frequency="Every full moon", actor="x",
+    )
+    assert result["success"] is False
+    assert "Every full moon" in result["error"]
+
+
 def test_set_skill_schedule_rejects_an_unsupported_anchor():
     result = SkillBuilderService(client=None).set_skill_schedule(
         "1", anchor_entity_type="meter", first_run="2026-09-01 08:00",
