@@ -190,7 +190,7 @@ can have, and it is a reporting problem, not an execution one.
 
 ---
 
-## Feasibility against the two target experts
+## Feasibility against the three target experts
 
 **GTR (9 handlers)** is the realistic first conversion:
 
@@ -216,36 +216,69 @@ convertible once R0–R3 land.
 LPP is the right *proof* that the design holds, and the wrong thing to
 attempt first.
 
+**Grid analysis flow (`grid_analyst`, 7 handlers)** goes last:
+
+- Zero contracts, like GTR.
+- `fetch_month_metrics` and `fetch_multi_grid_metrics` are reads.
+- `create_analysis_doc` and `create_kpi_doc` create Google Docs — two mutations
+  needing `MockSpec`s.
+- `analyze_failures_loop` is a **loop construct**, and whether it maps onto the
+  step model at all is unresolved. That single unknown is why this expert is
+  sequenced third despite being smaller than LPP.
+- P3 recorded `grid_analyst` as struck through (disabled) in the live
+  definitions doc — verify before converting.
+
+---
+
+## Operator decisions
+
+Recorded 2026-08-20, after the ground-truth investigation above.
+
+| question | ruling |
+|---|---|
+| What does a mocked mutating step return? | **Fixed synthetic values.** Each mutating handler declares a declarative `MockSpec` populating its `produces_state` keys with clearly-marked fake values. Not a callable, not a replay of prior real runs — though the seam should permit replay later. |
+| How strictly is step order enforced? | **Contract preconditions only.** The model picks order freely; `unmet_prerequisite` names the producing step so it self-corrects. No pinned-order mechanism — a second ordering system would have to be kept in sync with the recipe. |
+| Which experts are the proof bar? | **Three:** GTR, LPP, and the grid analysis flow (`grid_analyst`, 7 handlers, 0 contracts — a different expert from GTR). All three are to be authored and activated as real skills, not merely made convertible. |
+
+The accepted residual risk on ordering: a step with a side effect but **no**
+state dependency can still fire out of order, because nothing in its contract
+forbids it. Phase 5's mock mode and Phase 6's permission gating are what keep
+that survivable during authoring.
+
 ---
 
 ## Proposed phasing
 
 | phase | work | unblocks |
 |---|---|---|
-| 1 | `StepContract`: `mutates`, category, output spec, permission, latency. Contract lint extended beyond package_generator | everything |
+| 1 | `StepContract`: `mutates`, `mutation_kind`, `outputs`, `mock`, permission, latency | everything |
 | 2 | R0 run-scoped state carrier threaded through the skill tool loop | R1 |
-| 3 | R3 soft failures + prerequisite checking from contracts | ordering safety |
-| 4 | R1 tool-schema derivation + routing handler calls in `_execute_skill_step_tool_call` | steps callable |
+| 3 | R3 soft failures + contract-derived prerequisite checking | ordering safety |
+| 4 | R1 tool-schema derivation + routing handler calls | steps callable |
 | 5 | R2 mock producers + per-step toggle + R6 marking | safe authoring |
 | 6 | R4 permission gating | safe exposure |
-| 7 | GTR: 9 contracts + 1 mock → convert, verify | proof |
-| 8 | LPP: R5 async handling → convert, verify | proof |
+| 7 | lift the converter's `[function:...]` refusal | any conversion |
+| 8 | GTR: 9 contracts + 1 mock | first proof |
+| 9 | LPP: R5 async handling + 17 contract audit + mocks | second proof |
+| 10 | grid_analyst: 7 contracts + 2 mocks | third conversion |
+| 11 | author, mock-run, real-run, activate all three skills | **the deliverable** |
 
-Phases 1–3 are prerequisites with no user-visible change. The converter's
+Phases 1–6 are machinery with no user-visible change. The converter's
 `has_function_steps` refusal stays in place until phase 7.
+
+See `docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md` for the
+task-by-task breakdown.
 
 ---
 
-## Open questions for the operator
+## Still open
 
-1. **Scope.** Convert all 9 experts, or land GTR + LPP and leave the other
-   seven as code until they're actually needed?
-2. **Mock fidelity.** Should mock producers return *fixed* synthetic values,
-   or replay the last real run's outputs for that step? Replay is far more
-   useful for authoring and considerably more work.
-3. **Ordering.** Is contract-derived `unmet_prerequisite` enough, or should
-   a skill be able to pin a hard step order that the model cannot deviate
-   from?
-4. **The live doc.** `experts.definitions` resolves from a DB/Google Doc
+1. **The live doc.** `experts.definitions` resolves from a DB/Google Doc
    override, not the bundled file. Converting an expert means striking it
    through there by hand — confirm who does that and when.
+2. **`grid_analyst` may already be disabled.** P3 recorded it as struck through
+   in the live doc. Converting a disabled expert is the safest possible first
+   conversion, but the operator should know that is what they are getting.
+3. **`analyze_failures_loop` is a loop construct.** Whether it maps onto the
+   step model at all is the one structural unknown in the grid_analyst
+   conversion.
