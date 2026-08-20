@@ -148,7 +148,7 @@ def test_build_module_payload_shape():
         "summary": "s",
         "body": "b",
         "tags": [],
-        "scope": "sector",
+        "scope": "global",
         "mode": "on_demand",
         "source": "manual",
         "updated_by": "ops@example.com",

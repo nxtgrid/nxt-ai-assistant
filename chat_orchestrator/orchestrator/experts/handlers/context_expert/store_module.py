@@ -35,7 +35,7 @@ def build_module_payload(
         "summary": summary,
         "body": body,
         "tags": [],
-        "scope": "sector",
+        "scope": "global",
         "mode": mode,
         "source": "manual",
         "updated_by": actor,

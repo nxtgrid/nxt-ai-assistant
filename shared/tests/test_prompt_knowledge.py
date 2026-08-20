@@ -171,3 +171,28 @@ def test_audience_defaults_to_none_for_a_typed_module():
     module = KnowledgeModule(id="m", slug="m", title="M", summary="s", body="text")
     assert module.doc_audience is None
     assert module.source_tab is None
+
+
+def test_global_scope_matches_every_request():
+    from shared.prompts.types import RequestScope
+
+    assert RequestScope().matches("global") is True
+    assert RequestScope(organization_id="7").matches("global") is True
+
+
+def test_sector_is_still_accepted_as_a_synonym():
+    """matches() fails closed on an unknown scope, so a row the migration
+    missed would go silently dark. Both spellings work, permanently."""
+    from shared.prompts.types import RequestScope
+
+    assert RequestScope().matches("sector") is True
+
+
+def test_an_unknown_scope_still_matches_nothing():
+    from shared.prompts.types import RequestScope
+
+    assert RequestScope().matches("universe") is False
+
+
+def test_a_new_module_defaults_to_global_scope():
+    assert KnowledgeModule(id="m", slug="m", title="M", summary="s", body="b").scope == "global"

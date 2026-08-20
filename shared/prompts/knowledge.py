@@ -37,7 +37,7 @@ class KnowledgeModule:
     summary: str
     body: Optional[str] = None
     tags: List[str] = field(default_factory=list)
-    scope: str = "sector"
+    scope: str = "global"
     mode: str = "pinned"
     source: str = "manual"
     source_ref: Optional[str] = None
