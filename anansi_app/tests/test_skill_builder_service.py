@@ -635,6 +635,10 @@ def test_set_skill_schedule_derives_cron_from_frequency():
     assert captured["anchor_entity_type"] == "grid"
     assert captured["cron_expression"].startswith("0 8 ")
     assert captured["command"] is None
+    # Regression test for the dead-schedule bug: without this, next_run_at
+    # is never written and process_due_skill_schedules's `.lte("next_run_at",
+    # now)` filter never matches the row -- it would never fire.
+    assert captured["next_run_at"] == "2026-09-01T08:00:00+00:00"
 
 
 def test_set_skill_schedule_rejects_an_unsupported_anchor():

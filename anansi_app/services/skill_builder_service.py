@@ -384,6 +384,7 @@ class SkillBuilderService:
             "cron_expression": recurrence["cron_expression"],
             "schedule_type": recurrence.get("schedule_type", "recurring"),
             "timezone": recurrence.get("timezone", "UTC"),
+            "next_run_at": when.isoformat(),
             "is_active": True,
             "status": "active",
         }
