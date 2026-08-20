@@ -198,19 +198,31 @@ answer different questions. `allow_write` threaded through
 **Files:** `step_context.py`, `workflow_executor.py`, `skill_validation.py`,
 `anansi_app/nicegui_app/pages/skill_builder.py`, tests
 
-- [ ] **Task 5.1 — `dry_run: bool` on `StepContext`**, threaded through
+- [x] **Task 5.1 — `dry_run: bool` on `StepContext`**, threaded through
       execution.
-- [ ] **Task 5.2** — when `dry_run` and `contract.mutates`, return the
+- [x] **Task 5.2** — when `dry_run` and `contract.mutates`, return the
       `MockSpec`'s result instead of calling the handler. Non-mutating steps run
       for real in both modes — that is the point of the feature.
-- [ ] **Task 5.3 — per-step toggle in `skills.steps`** (jsonb — **no migration
+- [x] **Task 5.3 — per-step toggle in `skills.steps`** (jsonb — **no migration
       needed**) plus a skill-level default; builder surfaces a switch on each
       mutating step.
-- [ ] **Task 5.4 — save-time validation** in `skill_validation.py`: a mutating
+- [x] **Task 5.4 — save-time validation** in `skill_validation.py`: a mutating
       step with no `MockSpec` cannot be saved mock-enabled.
-- [ ] **Task 5.5 — R6 marking.** A mocked run must be labelled mocked in the run
+- [x] **Task 5.5 — R6 marking.** A mocked run must be labelled mocked in the run
       log, the chat response, and anything persisted. A mocked BOM or signature
       request reading as real is the worst failure this feature can produce.
+
+**Done 2026-08-21** (`b0fab503`). "Skill-level default" turned out not to
+need new persisted state at all: `StepContext.dry_run` is set from
+`metadata.dry_run` at whatever point a run gets triggered (nothing sets
+that key yet -- Phase 11 will be the first). `ParsedStep.mock` is the
+per-step override, read from `skills.steps[].mock` by
+`skill_runner.build_parsed_steps`, mirroring `allow_write` exactly. The
+builder's switch lives in `_render_pending_step` (not `_render_step` --
+this chat-driven widget can't create or re-run a `kind:"function"` step at
+all, only preserve one from a reopened/converted skill), gated on a
+`mutates` key only Phase 7's converter will ever stamp — dormant until then
+by construction, not by an oversight.
 
 ## Phase 6 — Permission gating
 
