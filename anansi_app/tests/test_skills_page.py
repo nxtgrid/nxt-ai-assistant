@@ -1,10 +1,58 @@
 """Skills list page: row building and display rules."""
 
+from types import SimpleNamespace
+
+import pytest
 from nicegui_app.pages.skills import (
     STATUS_COLORS,
     build_skill_rows,
     format_schedule,
 )
+
+
+class _FakeElement:
+    def classes(self, _classes):
+        return self
+
+    def props(self, _props):
+        return self
+
+    def clear(self):
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_workflows_page_renders_requested_icon(monkeypatch):
+    from nicegui import run
+    from nicegui_app import services_access
+    from nicegui_app.pages import skills
+
+    labels = []
+    element = _FakeElement()
+    monkeypatch.setattr(skills.ui, "label", lambda text: labels.append(text) or element, raising=False)
+    monkeypatch.setattr(skills.ui, "column", lambda: element, raising=False)
+    monkeypatch.setattr(skills.ui, "row", lambda: element, raising=False)
+    monkeypatch.setattr(skills.ui, "button", lambda *_args, **_kwargs: element, raising=False)
+    monkeypatch.setattr(
+        services_access,
+        "get_skill_builder_service",
+        lambda: SimpleNamespace(list_skills=lambda: [], schedule_summaries=lambda: {}),
+    )
+
+    async def io_bound(function):
+        return function()
+
+    monkeypatch.setattr(run, "io_bound", io_bound, raising=False)
+
+    await skills.render({"email": "ops@example.com"})
+
+    assert labels[0] == "🎬 Workflows"
 
 
 def _skill(slug="a", status="active", step_count=3, staff_only=True):
