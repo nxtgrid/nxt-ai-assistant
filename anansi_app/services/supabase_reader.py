@@ -1770,7 +1770,13 @@ class SupabaseReader:
 
     @cache_data(ttl=60, show_spinner=False)
     def get_all_user_schedules(_self) -> List[Dict[str, Any]]:
-        """Fetch all user schedules from Supabase, ordered by next_run_at."""
+        """Fetch all user schedules from Supabase, ordered by next_run_at.
+
+        Includes updated_at so the Runs page can tell how recently a
+        cancelled/completed row actually settled into that status (its
+        next_run_at is not reliable for that -- see
+        nicegui_app.pages.agents._split_schedule_rows).
+        """
         if not _self.client:
             return []
         try:
@@ -1779,7 +1785,7 @@ class SupabaseReader:
                 .select(
                     "id, chat_id, topic_id, created_by_email, organization_id, "
                     "command, schedule_type, cron_expression, timezone, "
-                    "next_run_at, is_active, status, friendly_name"
+                    "next_run_at, is_active, status, friendly_name, updated_at"
                 )
                 .order("next_run_at", desc=False)
                 .execute()
