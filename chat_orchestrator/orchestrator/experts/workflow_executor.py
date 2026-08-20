@@ -68,6 +68,10 @@ from orchestrator.experts.step_registry import (
     get_step_handler,
     get_step_registry,
 )
+from orchestrator.experts.step_tool_schema import (
+    function_step_tool_declarations,
+    is_declared_function_step,
+)
 from orchestrator.mini_app.schemas import build_mini_app_url, build_view_state_url
 from orchestrator.models.schemas import ConversationMessage, FunctionCall, ToolCallResult
 from orchestrator.services.user_permissions import get_permissions_service
@@ -2697,7 +2701,12 @@ class WorkflowExecutor:
 
         try:
             response = await self._call_llm_step_with_tools(
-                prompt, expert_config, tools_payload, context, execution_summary
+                prompt,
+                expert_config,
+                tools_payload,
+                context,
+                execution_summary,
+                allow_write=step.allow_write,
             )
 
             # Check finishReason for blocked content
@@ -2798,6 +2807,7 @@ class WorkflowExecutor:
         tools_payload: Optional[List[Dict[str, Any]]],
         context: StepContext,
         execution_summary: Optional[ExecutionSummary],
+        allow_write: bool = False,
     ) -> "GeminiTurnResult":
         """Call the LLM for one step, executing any tool calls it makes.
 
@@ -2811,6 +2821,15 @@ class WorkflowExecutor:
         global default would also raise it for every Google-Doc expert
         step). tools_payload is not None is exactly the is_skill_step
         signal here -- see this method's caller, _execute_llm_step.
+
+        Args:
+            allow_write: Forwarded to `_execute_skill_step_tool_call`
+                (mirrors `ParsedStep.allow_write` for the calling step, see
+                `_resolve_skill_step_tools`/`step_tool_schema.py`'s Phase 4
+                gate). Defaults to False, the safe default already used
+                everywhere else `allow_write` originates -- callers that
+                don't pass it explicitly get the same "no writes" behavior
+                as any other unmarked step.
 
         Returns the final round's GeminiTurnResult. If the round cap is hit
         while the model still wants to call tools, that response (whatever
@@ -2835,7 +2854,9 @@ class WorkflowExecutor:
         while response.tool_calls and tools_payload and rounds < max_rounds:
             rounds += 1
             for call in response.tool_calls:
-                tool_result = await self._execute_skill_step_tool_call(call, context)
+                tool_result = await self._execute_skill_step_tool_call(
+                    call, context, allow_write=allow_write
+                )
                 messages.append(ConversationMessage(role="model", function_call=call))
                 messages.append(ConversationMessage(role="tool", tool_result=tool_result))
 
@@ -2849,14 +2870,21 @@ class WorkflowExecutor:
         return response
 
     async def _execute_skill_step_tool_call(
-        self, call: FunctionCall, context: StepContext
+        self, call: FunctionCall, context: StepContext, allow_write: bool = False
     ) -> ToolCallResult:
-        """Run one tool call a skill step's LLM requested, via the same
-        context.mcp_executor function steps already use -- no second tool-
-        execution path. Never raises: a failed call becomes a ToolCallResult
-        with success=False, fed back to the LLM as a normal function
-        response, matching gtr_analysis_conversation.py's existing pattern
-        for LLM-driven tool loops elsewhere in this codebase.
+        """Run one tool call a skill step's LLM requested.
+
+        Phase 4 of docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md
+        routing: `call.name` naming a contract-bearing, permission-cleared
+        registered step handler (per `step_tool_schema.is_declared_function_step`
+        -- the SAME predicate that decided whether this name was offered to
+        the model at all, see that function's docstring) goes to
+        `_execute_declared_function_step_call`; everything else keeps going
+        to `context.mcp_executor`, exactly as before Phase 4. Never raises
+        either way: a failed call becomes a ToolCallResult with
+        success=False, fed back to the LLM as a normal function response,
+        matching gtr_analysis_conversation.py's existing pattern for
+        LLM-driven tool loops elsewhere in this codebase.
 
         A successful call's output is also merged into `context` via
         `StepContext.apply_result` (Phase 2 of the skills-as-tools plan's
@@ -2867,13 +2895,25 @@ class WorkflowExecutor:
         `_call_llm_step_with_tools`, this method's caller) -- so a later
         call, in this round or a later one, can already read an earlier
         call's output via `context.get_previous_result(call.name)`. MCP
-        tool output carries no `state_updates` (only `data`); once Phase 4
-        routes some calls to registered step handlers instead of MCP, a
-        handler's real `state_updates` become visible the same way via
-        `context.get_state(key)`, satisfying a later handler's
+        tool output carries no `state_updates` (only `data`); a routed
+        function-step call's real `state_updates` become visible the same
+        way via `context.get_state(key)`, satisfying a later call's
         `consumes_state` precondition -- reusing this exact mechanism
         rather than a second one.
+
+        Args:
+            allow_write: Whether the calling skill step is allowed to invoke
+                mutating tools (`ParsedStep.allow_write`). Only affects
+                routing here indirectly, via `is_declared_function_step`
+                using the same flag `_resolve_skill_step_tools` used to
+                decide what to declare -- a mutating step name called from a
+                non-allow_write step was never declared, and this check
+                keeps it from being routable even if a call for it arrives
+                anyway.
         """
+        if is_declared_function_step(call.name, allow_write=allow_write):
+            return await self._execute_declared_function_step_call(call, context)
+
         if not context.mcp_executor:
             return ToolCallResult(
                 name=call.name,
@@ -2901,19 +2941,112 @@ class WorkflowExecutor:
                 tool_call_id=call.tool_call_id,
             )
 
+    async def _execute_declared_function_step_call(
+        self, call: FunctionCall, context: StepContext
+    ) -> ToolCallResult:
+        """Run one tool call that names a registered step handler.
+
+        Caller (`_execute_skill_step_tool_call`) has already confirmed
+        `call.name` clears `is_declared_function_step` -- this method trusts
+        that and does not re-check contract/permission/allow_write itself.
+
+        Three things happen, in order:
+        1. Caller-supplied arguments are fed into the two seams a handler
+           actually reads from -- `contract.params` via the existing
+           `context.set_parameter_override` (the same mechanism the
+           parameter-confirmation flow and `run_single_step`'s
+           `param_overrides` already use), `contract.consumes_state` keys
+           directly into `context.packet_state` (that field's own
+           documented meaning; `context.get_state` reads it straight).
+           Applied for every `consumes_state` key present in `arguments`,
+           not only the subset `step_tool_schema` declares as a tool
+           argument (see that module's docstring, fact 2) -- a caller that
+           already knows a precondition value (e.g. from an earlier read
+           tool, or told directly by the user) can supply it and skip a
+           redundant producer call; nothing is lost by accepting it.
+           Unrecognized argument names are ignored, not rejected -- the
+           precondition check below is what actually decides whether the
+           handler has what it needs.
+        2. `_soft_failure_before_running_step` (Phase 3) runs BEFORE the
+           handler -- a guard-already-satisfied or unmet-precondition call
+           never reaches `_execute_function_step` at all.
+        3. Otherwise the handler runs via `_execute_function_step`, exactly
+           as a top-level recipe step would (same never-raise contract:
+           handler exceptions already become `StepResult.failure`).
+
+        Every outcome (soft failure, hard failure, success) is merged into
+        `context` via `apply_result` before returning, same as the MCP path.
+        """
+        contract = get_step_contract(call.name)
+        if contract is None:
+            # is_declared_function_step already checked this; defensive only
+            # -- e.g. a contract removed from the registry between the
+            # routing check and this call in a hypothetically racy caller.
+            return ToolCallResult(
+                name=call.name,
+                success=False,
+                output=None,
+                error=f"'{call.name}' has no registered contract.",
+                tool_call_id=call.tool_call_id,
+            )
+
+        param_names = {param.name for param in contract.params}
+        for key, value in (call.arguments or {}).items():
+            if key in param_names:
+                context.set_parameter_override(key, value)
+            elif key in contract.consumes_state:
+                context.packet_state[key] = value
+
+        result = await self._soft_failure_before_running_step(context, call.name)
+        if result is None:
+            step = ParsedStep(
+                index=0, step_type="function", name=call.name, description=contract.description
+            )
+            result = await self._execute_function_step(step, context, context.accumulated_results)
+
+        context.apply_result(call.name, result)
+
+        if not result.is_success:
+            if result.is_soft_failure:
+                message = " ".join(
+                    part for part in (result.soft_failure_message, result.remediation) if part
+                )
+            else:
+                message = result.error or f"'{call.name}' failed with no error message."
+            return ToolCallResult(
+                name=call.name,
+                success=False,
+                output=None,
+                error=message,
+                tool_call_id=call.tool_call_id,
+            )
+
+        return ToolCallResult(
+            name=call.name, success=True, output=result.data, tool_call_id=call.tool_call_id
+        )
+
     async def _resolve_skill_step_tools(
         self, step: ParsedStep, context: StepContext
     ) -> List[Dict[str, Any]]:
         """Resolve and filter the tool payload for one skill step.
 
-        Uses the same permissions_service.get_available_tools(user_context)
-        call prepare_tools.py makes for the main chat graph -- no second
-        tool-listing path to keep in sync. Filtered to read-only-prefixed
-        tools unless step.allow_write=True (see skill_step_bindings.py).
+        Two sources, concatenated:
+        - MCP tools, via the same permissions_service.get_available_tools
+          (user_context) call prepare_tools.py makes for the main chat
+          graph -- no second tool-listing path to keep in sync. Filtered to
+          read-only-prefixed tools unless step.allow_write=True (see
+          skill_step_bindings.py).
+        - Registered step handlers with a `StepContract`, via
+          `step_tool_schema.function_step_tool_declarations` (Phase 4) --
+          filtered the same way, but by the contract's actual `mutates`
+          flag rather than a name prefix (see that module's `_is_offerable`
+          docstring for why the two lists use different mutation signals).
         """
         permissions_service = get_permissions_service()
         all_tools = await permissions_service.get_available_tools(context.user_context)
-        return filter_tools_for_step(all_tools or [], allow_write=step.allow_write)
+        mcp_tools = filter_tools_for_step(all_tools or [], allow_write=step.allow_write)
+        function_tools = function_step_tool_declarations(allow_write=step.allow_write)
+        return mcp_tools + function_tools
 
     def _extract_finish_reason(self, response: Dict[str, Any]) -> Optional[str]:
         """Extract finishReason from Gemini response.

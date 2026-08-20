@@ -337,9 +337,9 @@ class TestStateAcrossToolLoopRounds:
 
         original = WorkflowExecutor._execute_skill_step_tool_call
 
-        async def _spy(self, call, context):
+        async def _spy(self, call, context, allow_write=False):
             seen_context_ids.append(id(context))
-            return await original(self, call, context)
+            return await original(self, call, context, allow_write=allow_write)
 
         monkeypatch.setattr(WorkflowExecutor, "_execute_skill_step_tool_call", _spy)
 
