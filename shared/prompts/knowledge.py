@@ -40,6 +40,12 @@ class KnowledgeModule:
     mode: str = "pinned"
     source: str = "manual"
     source_ref: Optional[str] = None
+    source_tab: Optional[str] = None
+    # Only meaningful for source='gdoc'. 'acl_mirror' resolves the body only
+    # for a caller who can read the file in Drive; 'published' resolves for
+    # everyone the prompt serves. None for every other source.
+    doc_audience: Optional[str] = None
+    doc_audience_set_by: Optional[str] = None
 
     @property
     def is_site_scoped(self) -> bool:
@@ -174,7 +180,8 @@ class KnowledgeStore:
             result = (
                 self._client.table("knowledge_modules")
                 .select(
-                    "id, slug, title, summary, body, tags, scope, mode, source, source_ref"
+                    "id, slug, title, summary, body, tags, scope, mode, source, "
+                    "source_ref, source_tab, doc_audience, doc_audience_set_by"
                 )
                 .eq("is_active", True)
                 .execute()

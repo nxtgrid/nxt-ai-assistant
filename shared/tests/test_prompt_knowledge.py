@@ -153,3 +153,19 @@ def test_render_pinned_skips_unresolved_bodies():
         id="g", slug="graph", title="Graph", summary="s", body=None, source="graph"
     )
     assert render_pinned([jit]) is None
+
+
+def test_a_module_carries_its_audience_and_tab():
+    module = KnowledgeModule(
+        id="d", slug="specs", title="Specs", summary="s", body=None,
+        source="gdoc", source_ref="abc123", source_tab="Thresholds",
+        doc_audience="acl_mirror", doc_audience_set_by=None,
+    )
+    assert module.source_tab == "Thresholds"
+    assert module.doc_audience == "acl_mirror"
+
+
+def test_audience_defaults_to_none_for_a_typed_module():
+    module = KnowledgeModule(id="m", slug="m", title="M", summary="s", body="text")
+    assert module.doc_audience is None
+    assert module.source_tab is None

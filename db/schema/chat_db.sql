@@ -1240,28 +1240,41 @@ CREATE TABLE IF NOT EXISTS prompt_doc_bindings (
 );
 
 CREATE TABLE IF NOT EXISTS knowledge_modules (
-    id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    slug         text NOT NULL UNIQUE,
-    title        text NOT NULL,
-    summary      text NOT NULL,
-    body         text,
-    tags         text[] NOT NULL DEFAULT '{}',
-    scope        text NOT NULL DEFAULT 'sector',
-    mode         text NOT NULL DEFAULT 'pinned',
-    source       text NOT NULL DEFAULT 'manual',
-    source_ref   text,
-    edit_groups  text[] NOT NULL DEFAULT '{}',
-    version      integer NOT NULL DEFAULT 1,
-    is_active    boolean NOT NULL DEFAULT true,
-    updated_at   timestamptz NOT NULL DEFAULT now(),
-    updated_by   text,
+    id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug                text NOT NULL UNIQUE,
+    title               text NOT NULL,
+    summary             text NOT NULL,
+    body                text,
+    tags                text[] NOT NULL DEFAULT '{}',
+    scope               text NOT NULL DEFAULT 'global',
+    mode                text NOT NULL DEFAULT 'pinned',
+    source              text NOT NULL DEFAULT 'manual',
+    source_ref          text,
+    -- Sheet tab name. NULL means the first tab (or a Doc, which has none).
+    source_tab          text,
+    -- gdoc only. 'acl_mirror' = resolve only for a caller who can read the
+    -- file in Drive. 'published' = resolve for everyone the prompt serves.
+    doc_audience        text,
+    -- Who chose 'published'. Separate from updated_by, which any later title
+    -- edit clobbers.
+    doc_audience_set_by text,
+    edit_groups         text[] NOT NULL DEFAULT '{}',
+    version             integer NOT NULL DEFAULT 1,
+    is_active           boolean NOT NULL DEFAULT true,
+    updated_at          timestamptz NOT NULL DEFAULT now(),
+    updated_by          text,
     CONSTRAINT knowledge_modules_mode_chk CHECK (mode IN ('pinned', 'on_demand')),
     CONSTRAINT knowledge_modules_source_chk
         CHECK (source IN ('manual', 'gdoc', 'ingested', 'graph', 'directory', 'episodic')),
-    -- A provider-backed module (graph/directory/episodic) stores no body --
-    -- it resolves at render time. See 0017_context_module_providers.sql.
+    -- A gdoc or provider-backed module stores no body -- it resolves at
+    -- request time. See 0018_doc_backed_modules.sql.
     CONSTRAINT knowledge_modules_body_required_chk
-        CHECK (source IN ('graph', 'directory', 'episodic') OR body IS NOT NULL)
+        CHECK (source IN ('gdoc', 'graph', 'directory', 'episodic') OR body IS NOT NULL),
+    CONSTRAINT knowledge_modules_doc_audience_chk
+        CHECK ((source = 'gdoc' AND doc_audience IN ('acl_mirror', 'published'))
+               OR (source <> 'gdoc' AND doc_audience IS NULL)),
+    CONSTRAINT knowledge_modules_gdoc_ref_chk
+        CHECK (source <> 'gdoc' OR source_ref IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS knowledge_modules_tags_idx

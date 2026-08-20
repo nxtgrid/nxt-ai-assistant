@@ -223,3 +223,42 @@ def test_all_modules_reads_source_columns():
     assert "source_ref" in client.table_obj.selected
     assert modules[0].source == "graph"
     assert modules[0].is_jit is True
+
+
+def test_the_store_selects_the_audience_columns():
+    """KnowledgeModule(**row) requires the select and the dataclass to match.
+
+    Miss a column here and every doc module looks unaudienced, which the
+    provider reads as 'not acl_mirror' -- i.e. it would fail *open*.
+    """
+
+    class _Result:
+        data = []
+
+    class _Table:
+        def __init__(self):
+            self.selected = ""
+
+        def select(self, columns):
+            self.selected = columns
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def execute(self):
+            return _Result()
+
+    class _Client:
+        def __init__(self):
+            self.table_obj = _Table()
+
+        def table(self, _name):
+            return self.table_obj
+
+    client = _Client()
+    KnowledgeStore(client=client).all_modules()
+
+    assert "doc_audience" in client.table_obj.selected
+    assert "doc_audience_set_by" in client.table_obj.selected
+    assert "source_tab" in client.table_obj.selected
