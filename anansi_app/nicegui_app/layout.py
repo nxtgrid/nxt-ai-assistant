@@ -24,13 +24,13 @@ PAGE_BG = branding.BRAND_CANVAS
 OPERATIONS_NAV = [
     ("/tickets", "🎫 Tickets"),
     ("/conversations", "💬 Chats"),
-    ("/agents", "📊 Runs"),
+    ("/agents", "🎰 Runs"),
     # Page/route is still "skills" (nicegui_app/pages/skills.py, the skills
     # table) -- only the user-facing language changed. A workflow is the
     # thing you build; saving it so the assistant can offer it by name is
     # the optional "make it a skill" step within that same page (see
     # skills.py's module docstring).
-    ("/skills", "🧩 Workflows"),
+    ("/skills", "🎬 Workflows"),
 ]
 
 

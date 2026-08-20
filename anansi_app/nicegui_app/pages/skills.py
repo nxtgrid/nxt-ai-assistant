@@ -134,7 +134,7 @@ async def render(user: dict[str, Any]) -> None:
     service = get_skill_builder_service()
     user_email = user.get("email", "")
 
-    ui.label("🧩 Workflows").classes("text-h5")
+    ui.label("🎬 Workflows").classes("text-h5")
     ui.label(
         "Reusable step-by-step procedures. Saving one as a /skill so the assistant "
         "can offer it in a conversation is optional -- see the editor. A draft is "
