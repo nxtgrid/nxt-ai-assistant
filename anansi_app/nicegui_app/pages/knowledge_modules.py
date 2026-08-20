@@ -107,6 +107,29 @@ def group_module_rows(rows: List[ModuleRow]) -> List[Tuple[str, List[ModuleRow]]
     return [(MODE_LABELS.get(m, m), by_mode[m]) for m in order]
 
 
+def filter_context_rows(rows: List[ModuleRow], query: str) -> List[ModuleRow]:
+    """Case-insensitive substring match over slug, title, summary and body.
+
+    Mirrors prompts.py's own top-of-page search box and its
+    filter_module_rows helper in spirit, but is deliberately a separate
+    function/name: it filters a different row type (ModuleRow, which has a
+    body field KnowledgeTabRow doesn't), and test_knowledge_modules_page.py
+    already imports from both modules in one file -- reusing the name would
+    force an import alias for no benefit.
+    """
+    needle = query.strip().lower()
+    if not needle:
+        return list(rows)
+    return [
+        r
+        for r in rows
+        if needle in r.slug.lower()
+        or needle in r.title.lower()
+        or needle in r.summary.lower()
+        or needle in r.body.lower()
+    ]
+
+
 def prompt_option_label(prompt_id: str, description: str, max_len: int = 70) -> str:
     """Dropdown label: the id plus a truncated purpose, not the id alone."""
     description = description.strip()
