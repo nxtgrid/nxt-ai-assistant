@@ -210,19 +210,19 @@ async def render(user: dict[str, Any]) -> None:
                 )
                 return
             for row in rows:
-                _render_row(row, service, refresh, user_email)
+                _render_row(row, schedules.get(row["id"]), service, refresh, user_email)
 
     with ui.row().classes("w-full justify-end mb-2"):
         ui.button(
             "New workflow",
             icon="add",
-            on_click=lambda: _open_editor(None, service, refresh, user_email),
+            on_click=lambda: _open_editor(None, None, service, refresh, user_email),
         ).props("color=primary")
 
     await refresh()
 
 
-def _render_row(row, service, refresh, user_email) -> None:
+def _render_row(row, schedule, service, refresh, user_email) -> None:
     with ui.card().classes("w-full"):
         with ui.row().classes("w-full items-center justify-between"):
             with ui.column().classes("gap-0"):
@@ -236,11 +236,13 @@ def _render_row(row, service, refresh, user_email) -> None:
                 ui.badge(row["status"], color=STATUS_COLORS.get(row["status"], "grey"))
                 ui.button(
                     "Edit",
-                    on_click=lambda r=row: _open_editor(r, service, refresh, user_email),
+                    on_click=lambda r=row, s=schedule: _open_editor(
+                        r, s, service, refresh, user_email
+                    ),
                 ).props("flat dense")
 
 
-async def _open_editor(row, service, refresh, user_email) -> None:
+async def _open_editor(row, schedule, service, refresh, user_email) -> None:
     """New workflow (row=None) or edit an existing one's identity/status/schedule.
 
     The Workflow card mounts the same chat-driven builder the standalone
@@ -367,6 +369,7 @@ async def _open_editor(row, service, refresh, user_email) -> None:
                 ui.label(
                     "Schedule -- runs once per entity of the chosen type."
                 ).classes("text-xs text-gray-500")
+                schedule_defaults = schedule_form_defaults(schedule)
                 with ui.row().classes("w-full gap-2"):
                     anchor_select = ui.select(
                         {
@@ -374,15 +377,17 @@ async def _open_editor(row, service, refresh, user_email) -> None:
                             "grid": "Per grid",
                             "organization": "Per organization",
                         },
-                        value="",
+                        value=schedule_defaults["anchor"],
                         label="Fan out across",
                     ).classes("flex-grow")
                     repeat_select = ui.select(
                         REPEAT_OPTIONS,
-                        value=REPEAT_OPTIONS[0],
+                        value=schedule_defaults["repeat"],
                         label="Repeat",
                     ).classes("flex-grow")
-                first_run = ui.input("First run (YYYY-MM-DD HH:MM)").classes("w-full")
+                first_run = ui.input(
+                    "First run (YYYY-MM-DD HH:MM)", value=schedule_defaults["first_run"]
+                ).classes("w-full")
 
             # Guards state_holder["summary_user_edited"] against the
             # programmatic write below setting it -- only a real user edit
