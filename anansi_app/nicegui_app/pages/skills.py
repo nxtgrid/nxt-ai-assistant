@@ -525,6 +525,26 @@ async def _open_editor(row, schedule, service, refresh, user_email) -> None:
                         dialog.close()
                         await refresh()
                         return
+                elif schedule is not None and schedule.get("is_active"):
+                    # Had an ACTIVE schedule; the author explicitly cleared
+                    # it to "Not scheduled" -- remove it rather than
+                    # silently leaving the old row running. is_active gates
+                    # this the same way schedule_form_defaults gates the
+                    # prefill (see its docstring): without it, saving a
+                    # workflow whose one-time run already completed would
+                    # fire a pointless removal call every single time.
+                    removal_result = await run.io_bound(
+                        lambda: service.remove_skill_schedule(skill_id, actor=user_email)
+                    )
+                    if not removal_result.get("success"):
+                        ui.notify(
+                            f"Saved, but removing the schedule failed: "
+                            f"{removal_result.get('error')}",
+                            type="warning",
+                        )
+                        dialog.close()
+                        await refresh()
+                        return
 
                 ui.notify(f"Saved '{title}'.", type="positive")
                 dialog.close()
