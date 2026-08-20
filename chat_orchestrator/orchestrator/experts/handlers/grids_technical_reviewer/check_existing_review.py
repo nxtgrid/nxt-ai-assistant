@@ -20,6 +20,7 @@ from orchestrator.experts.handlers.grids_technical_reviewer.fetch_pending_action
     sheet_range,
 )
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -323,7 +324,51 @@ async def read_existing_review_content(
             return None, f"Error reading sheet: {error_msg}"
 
 
-@register_step("check_existing_review")
+@register_step(
+    "check_existing_review",
+    contract=StepContract(
+        description=(
+            "Checks each grid's Google Sheet for an existing review of the current "
+            "review month. If found, pauses for a user decision: chat about it, "
+            "grey it out and redo, or cancel."
+        ),
+        consumes_state=("grids_to_review",),
+        # awaiting_grey_out_decision: a resume-branch selector (combined with
+        # context.user_input), not an idempotency guard -- True means "waiting on
+        # the user", not "already done". Real fallback (falls through to the
+        # first-run sheet-check path when absent), so optional not required.
+        optional_consumes_state=("awaiting_grey_out_decision",),
+        # Every state key this step can produce, across its several return paths
+        # (resume-with-analysis-choice, resume-with-redo-choice, first-run-found,
+        # first-run-not-found). See the handler body for which path sets which.
+        produces_state=(
+            "analysis_mode",
+            "chat_mode",
+            "month_label",
+            "awaiting_grey_out_decision",
+            "grey_out_existing",
+            "existing_reviews",
+            "grids_with_existing_review",
+        ),
+        outputs=(
+            OutputSpec(
+                name="existing_reviews",
+                value_type="object",
+                description="Grid name -> {row_index, spreadsheet_id} for grids with a review already this month.",
+            ),
+            OutputSpec(
+                name="grey_out_existing",
+                value_type="boolean",
+                description="Whether write_review_section should grey out and replace the existing section.",
+            ),
+        ),
+        side_effects=(
+            "Reads each grid's Google Sheet (first column) to look for an existing "
+            "review row for the current month. No writes. May pause the run "
+            "(needs_user_input) for a chat/redo/cancel decision."
+        ),
+    ),
+)
 async def check_existing_review(context: StepContext) -> StepResult:
     """Check if review for current month already exists in the grid sheets.
 

@@ -7,6 +7,7 @@ Only runs when chat_mode=True is set by check_existing_review.
 from typing import Any, Dict
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -50,7 +51,31 @@ def format_review_for_chat(review_content: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-@register_step("fetch_existing_review")
+@register_step(
+    "fetch_existing_review",
+    contract=StepContract(
+        description=(
+            "Formats existing review content (loaded by an earlier analysis-mode "
+            "step) into markdown for the LLM's chat context. No-ops outside chat mode."
+        ),
+        # Both keys have a real, clean fallback: chat_mode defaults False (skip);
+        # existing_review_content is only required when chat_mode is True (a
+        # conditional requirement the 2-tier consumes_state/optional_consumes_state
+        # vocabulary can't express exactly -- see this step's design notes). No
+        # step among GTR's 9 handlers currently produces existing_review_content;
+        # flagged as a likely gap/dead path, not silently assumed correct.
+        optional_consumes_state=("chat_mode", "existing_review_content"),
+        produces_state=("formatted_reviews", "chat_context"),
+        outputs=(
+            OutputSpec(
+                name="chat_context",
+                value_type="string",
+                description="Combined markdown of every grid's existing review, for the analysis LLM's context.",
+            ),
+        ),
+        side_effects="Pure formatting of already-loaded state; no I/O.",
+    ),
+)
 async def fetch_existing_review(context: StepContext) -> StepResult:
     """Fetch and format existing review content for chat mode.
 

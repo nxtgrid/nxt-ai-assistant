@@ -15,6 +15,7 @@ from orchestrator.experts.handlers.grids_technical_reviewer.fetch_pending_action
     sheet_range,
 )
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import MockSpec, OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -956,7 +957,68 @@ async def write_section_to_sheet(
             return False, f"Error: {error_msg}"
 
 
-@register_step("write_review_section")
+@register_step(
+    "write_review_section",
+    contract=StepContract(
+        description=(
+            "Writes the new month's review section (KPI values + commentary, "
+            "pending issues carried forward, empty rows for new issues/actions) "
+            "to each grid's Google Sheet, tagged 'Not reviewed by engineering'. "
+            "Optionally greys out and replaces an existing section first."
+        ),
+        consumes_state=("grids_to_review", "month_label"),
+        # analyze_kpi's kpi_commentary is read via get_previous_result but has a
+        # real fallback (parsed from the LLM's raw response text, or an empty
+        # dict) -- not declared in consumes_results, which has no "optional" tier.
+        optional_consumes_state=(
+            "chat_mode",
+            "kpi_data",
+            "pending_actions",
+            "grey_out_existing",
+            "existing_reviews",
+        ),
+        produces_state=("write_results",),
+        outputs=(
+            OutputSpec(
+                name="write_results",
+                value_type="object",
+                description="Grid name -> {success, spreadsheet_id, url} or {success: False, error}.",
+            ),
+        ),
+        guard_keys=(),
+        side_effects=(
+            "Writes the new review section to each grid's Google Sheet: cell "
+            "values, the red 'Not reviewed by engineering' tag, row grouping and "
+            "formatting. When grey_out_existing is True, also reformats the "
+            "existing section it's replacing (grey background)."
+        ),
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={
+                "write_results": {
+                    "MOCK-Grid": {
+                        "success": True,
+                        "spreadsheet_id": "MOCK-spreadsheet-id",
+                        "url": "https://docs.google.com/spreadsheets/d/MOCK-spreadsheet-id",
+                    }
+                },
+            },
+            data={
+                "write_results": {
+                    "MOCK-Grid": {
+                        "success": True,
+                        "spreadsheet_id": "MOCK-spreadsheet-id",
+                        "url": "https://docs.google.com/spreadsheets/d/MOCK-spreadsheet-id",
+                    }
+                },
+                "success_count": 1,
+                "error_count": 0,
+            },
+            message="Would have written the review section to each grid's Google Sheet.",
+        ),
+    ),
+)
 async def write_review_section(context: StepContext) -> StepResult:
     """Write the new month's review section to each grid's sheet.
 

@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -562,7 +563,54 @@ def extract_metric_value(
     return None
 
 
-@register_step("fetch_grafana_kpis", exposed_to_builder=True)
+@register_step(
+    "fetch_grafana_kpis",
+    contract=StepContract(
+        description=(
+            "Fetches main KPIs from the Grids KPI dashboard for each grid to "
+            "review, plus the prior month's KPIs for comparison. Panels that fail "
+            "or are unavailable are flagged for manual input (pauses the run)."
+        ),
+        consumes_state=("grids_to_review",),
+        # All four have real fallback/branching: chat_mode defaults False (skip);
+        # awaiting_manual_kpis/missing_kpis/kpi_data only matter on a resume pass
+        # after a needs_user_input pause, and the first-run path works fine
+        # without any of them.
+        optional_consumes_state=(
+            "chat_mode",
+            "awaiting_manual_kpis",
+            "missing_kpis",
+            "kpi_data",
+        ),
+        produces_state=(
+            "kpi_data",
+            "kpi_targets",
+            "previous_month_kpi_data",
+            "previous_month_label",
+            "missing_kpis",
+            "awaiting_manual_kpis",
+        ),
+        outputs=(
+            OutputSpec(
+                name="kpi_data",
+                value_type="object",
+                description="Grid name (lowercase) -> {kpi_name: value}, main dashboard KPIs for the review month.",
+            ),
+            OutputSpec(
+                name="previous_month_kpi_data",
+                value_type="object",
+                description="Same shape as kpi_data, for the comparison month.",
+            ),
+        ),
+        side_effects=(
+            "Calls Grafana MCP tools to read the Grids KPI dashboard per grid, for "
+            "both the review month and the comparison month. No writes. May pause "
+            "the run (needs_user_input) to collect manually-entered values for "
+            "panels that failed."
+        ),
+    ),
+    exposed_to_builder=True,
+)
 async def fetch_grafana_kpis(context: StepContext) -> StepResult:
     """Fetch KPIs from Grids KPI dashboard.
 

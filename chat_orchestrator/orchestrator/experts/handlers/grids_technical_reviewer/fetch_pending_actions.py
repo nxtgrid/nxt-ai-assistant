@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -364,7 +365,32 @@ async def fetch_pending_from_sheet(
             return [], f"Error: {error_msg}"
 
 
-@register_step("fetch_pending_actions", exposed_to_builder=True)
+@register_step(
+    "fetch_pending_actions",
+    contract=StepContract(
+        description=(
+            "Reads pending issues (and everything else in columns E onward) from "
+            "a prior review section to carry forward into the new one -- the "
+            "existing section being replaced when grey_out_existing is True, "
+            "otherwise the previous month's."
+        ),
+        consumes_state=("grids_to_review",),
+        optional_consumes_state=("chat_mode", "grey_out_existing", "month_label"),
+        produces_state=("pending_actions", "source_month_label"),
+        outputs=(
+            OutputSpec(
+                name="pending_actions",
+                value_type="object",
+                description="Grid name -> list of row-value lists (columns E onward) carried forward.",
+            ),
+        ),
+        side_effects=(
+            "Reads Google Sheets to carry forward pending issues from a prior "
+            "review section. No writes."
+        ),
+    ),
+    exposed_to_builder=True,
+)
 async def fetch_pending_actions(context: StepContext) -> StepResult:
     """Fetch pending issues from previous review sections.
 

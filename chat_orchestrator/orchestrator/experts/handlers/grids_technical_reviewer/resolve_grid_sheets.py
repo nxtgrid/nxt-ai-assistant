@@ -8,6 +8,7 @@ import re
 from typing import Dict, List
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -161,7 +162,31 @@ async def get_grid_urls_from_expert_config() -> str:
         return ""
 
 
-@register_step("resolve_grid_sheets")
+@register_step(
+    "resolve_grid_sheets",
+    contract=StepContract(
+        description=(
+            "Resolves grid names to their Google Sheet URLs by reading grid-sheet "
+            "mappings from expert instructions (or RAG context / packet state as "
+            "fallbacks) and fuzzy-matching against requested grid names."
+        ),
+        # parse_gtr_request's grid_names is read via get_previous_result but has a
+        # real fallback (packet_inputs["args"]) -- not declared in consumes_results,
+        # which has no "optional" tier (unlike optional_consumes_state below).
+        produces_state=("grids_to_review",),
+        outputs=(
+            OutputSpec(
+                name="grids_to_review",
+                value_type="array",
+                description="List of {name, url, spreadsheet_id} dicts for each grid to review.",
+            ),
+        ),
+        side_effects=(
+            "Reads expert config raw_sections / RAG context / packet state to resolve "
+            "grid names to Sheet URLs. No external writes."
+        ),
+    ),
+)
 async def resolve_grid_sheets(context: StepContext) -> StepResult:
     """Resolve grid names to their Google Sheet URLs.
 
