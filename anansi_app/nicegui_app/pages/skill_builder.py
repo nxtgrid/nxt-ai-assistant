@@ -231,9 +231,20 @@ def _derive_steps_payload(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     chat_orchestrator/orchestrator/experts/skill_validation.py's module
     docstring for the canonical shape. Used for /skills/validate,
     /skills/summarize, and Save, so all three always see the same steps.
+
+    Appends whatever's left of state["initial_steps"] beyond the live
+    transcript -- the "pending tail" (steps from a reopened workflow not yet
+    re-run this session) -- verbatim, renumbered only. This is what makes
+    "open Edit, Save without touching anything" reproduce the stored steps
+    byte-for-byte, and what lets a step kind this builder can't produce
+    (e.g. a P3 "function" step) survive an edit untouched instead of being
+    dropped.
     """
+    live_count = len(state["steps"])
+    pending_tail = state.get("initial_steps", [])[live_count:]
+    step_count = live_count + len(pending_tail)
+
     steps = []
-    step_count = len(state["steps"])
     for index, step in enumerate(state["steps"]):
         instruction = step["user_message"].get("content") or ""
         _read_text, output_var = _parse_output_binding(instruction)
@@ -246,8 +257,9 @@ def _derive_steps_payload(state: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "instruction": instruction,
                 "output_var": output_var,
                 "allow_write": flags["allow_write"],
-                # The final step is always an implicit response step even if
-                # not flagged -- see the plan's "Run-mode output" section.
+                # The final step (of the combined live + pending sequence)
+                # is always an implicit response step even if not flagged --
+                # see the plan's "Run-mode output" section.
                 "is_response_step": is_last or flags["is_response_step"],
                 "had_tool_error": _step_had_tool_error(step),
                 # Builder-only context for /skills/summarize (item b) -- what
@@ -256,6 +268,15 @@ def _derive_steps_payload(state: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "result_preview": _step_response_text(step)[:_RESULT_PREVIEW_CHARS],
             }
         )
+
+    for offset, stored_step in enumerate(pending_tail):
+        index = live_count + offset
+        is_last = index == step_count - 1
+        kept = dict(stored_step)
+        kept["index"] = index
+        kept["is_response_step"] = is_last or kept.get("is_response_step", False)
+        steps.append(kept)
+
     return steps
 
 

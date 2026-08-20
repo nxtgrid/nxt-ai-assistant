@@ -358,3 +358,86 @@ def test_a_step_with_no_tool_calls_is_not_flagged():
     from nicegui_app.pages.skill_builder import _step_had_tool_error
 
     assert _step_had_tool_error({"response_messages": []}) is False
+
+
+def _make_live_step(content: str) -> dict:
+    return {"user_message": {"content": content, "message_index": 0}, "response_messages": []}
+
+
+def test_derive_steps_payload_with_no_pending_tail_is_unchanged():
+    """New-workflow path (initial_steps=[]) -- must keep behaving exactly as
+    before this change."""
+    from nicegui_app.pages.skill_builder import _derive_steps_payload
+
+    state = {
+        "steps": [_make_live_step("do a")],
+        "flags": {0: {"allow_write": False, "is_response_step": False}},
+        "initial_steps": [],
+    }
+    steps = _derive_steps_payload(state)
+    assert len(steps) == 1
+    assert steps[0]["instruction"] == "do a"
+    assert steps[0]["is_response_step"] is True  # only step -> forced last
+
+
+def test_derive_steps_payload_appends_an_untouched_pending_tail():
+    from nicegui_app.pages.skill_builder import _derive_steps_payload
+
+    stored = [
+        {"index": 0, "name": "a", "instruction": "do a", "allow_write": False,
+         "is_response_step": False, "had_tool_error": False, "result_preview": "got a"},
+        {"index": 1, "name": "b", "instruction": "do b", "allow_write": True,
+         "is_response_step": False, "had_tool_error": False, "result_preview": "got b"},
+        {"index": 2, "name": "c", "instruction": "do c", "allow_write": False,
+         "is_response_step": True, "had_tool_error": False, "result_preview": "got c"},
+    ]
+    state = {"steps": [], "flags": {}, "initial_steps": stored}
+
+    steps = _derive_steps_payload(state)
+
+    assert len(steps) == 3
+    assert [s["instruction"] for s in steps] == ["do a", "do b", "do c"]
+    assert [s["index"] for s in steps] == [0, 1, 2]
+    assert steps[1]["allow_write"] is True  # passed through verbatim
+    assert steps[2]["is_response_step"] is True
+
+
+def test_derive_steps_payload_mixes_live_and_pending():
+    from nicegui_app.pages.skill_builder import _derive_steps_payload
+
+    stored = [
+        {"index": 0, "name": "a", "instruction": "do a (stored)", "allow_write": False,
+         "is_response_step": False, "had_tool_error": False, "result_preview": ""},
+        {"index": 1, "name": "b", "instruction": "do b (stored)", "allow_write": False,
+         "is_response_step": False, "had_tool_error": False, "result_preview": ""},
+    ]
+    state = {
+        "steps": [_make_live_step("do a (re-run)")],
+        "flags": {0: {"allow_write": False, "is_response_step": False}},
+        "initial_steps": stored,
+    }
+
+    steps = _derive_steps_payload(state)
+
+    assert len(steps) == 2
+    assert steps[0]["instruction"] == "do a (re-run)"  # the live re-run wins
+    assert steps[1]["instruction"] == "do b (stored)"  # untouched, preserved verbatim
+    assert steps[1]["index"] == 1
+    assert steps[1]["is_response_step"] is True  # now the combined-last step
+
+
+def test_derive_steps_payload_preserves_a_function_step_in_the_pending_tail():
+    """A P3 function-kind step can't be produced or re-run by this chat
+    builder -- it must ride through untouched, not be dropped or crash."""
+    from nicegui_app.pages.skill_builder import _derive_steps_payload
+
+    stored = [
+        {"index": 0, "kind": "function", "handler": "fetch_grafana_kpis",
+         "output_var": "kpis", "is_response_step": True},
+    ]
+    state = {"steps": [], "flags": {}, "initial_steps": stored}
+
+    steps = _derive_steps_payload(state)
+
+    assert steps[0]["kind"] == "function"
+    assert steps[0]["handler"] == "fetch_grafana_kpis"
