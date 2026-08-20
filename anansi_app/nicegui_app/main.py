@@ -99,9 +99,13 @@ async def ticket_detail_route(ref: str) -> None:
         await tickets.render(user, ref)
 
 
-# NB: the admin chat page is served at /conversations, NOT /chat — the DO ingress
-# routes the /chat prefix to the anansi-bot orchestrator (its Telegram webhook),
-# so a /chat page here 405s. See DEPLOY_NICEGUI.md.
+# NB: the admin chat page is served at /conversations, NOT /chat or /chats —
+# the DO ingress prefix-matches *any* path starting with "/chat" (so "/chats"
+# is caught too, not just the exact string) straight to the anansi-bot
+# orchestrator's Telegram webhook; a page here at either would never be
+# reached. See .do/app.example.yaml's ingress rules and DEPLOY_NICEGUI.md.
+# This is the one nav item (layout.py's OPERATIONS_NAV) whose route can't be
+# made to match its "💬 Chats" label for that reason.
 @ui.page("/conversations")
 async def chat_route() -> None:
     user = auth.current_user()
@@ -118,12 +122,19 @@ async def chat_route() -> None:
 
 
 @ui.page("/documents")
-async def documents_route() -> None:
+async def documents_redirect() -> None:
+    # Old URL stub, kept as a redirect so a bookmark or saved link still
+    # lands somewhere real. See rag_knowledgebase_route below.
+    ui.navigate.to("/rag-knowledgebase")
+
+
+@ui.page("/rag-knowledgebase")
+async def rag_knowledgebase_route() -> None:
     user = auth.current_user()
     if not user:
         ui.navigate.to("/login")
         return
-    with layout.frame(user, "/documents"):
+    with layout.frame(user, "/rag-knowledgebase"):
         if not perms.can_view_bot_admin(user["email"]):
             layout.access_denied()
             return
@@ -133,12 +144,19 @@ async def documents_route() -> None:
 
 
 @ui.page("/agents")
-async def agents_route() -> None:
+async def agents_redirect() -> None:
+    # Old URL stub, kept as a redirect so a bookmark or saved link still
+    # lands somewhere real. See runs_route below.
+    ui.navigate.to("/runs")
+
+
+@ui.page("/runs")
+async def runs_route() -> None:
     user = auth.current_user()
     if not user:
         ui.navigate.to("/login")
         return
-    with layout.frame(user, "/agents"):
+    with layout.frame(user, "/runs"):
         if not perms.can_view_bot_admin(user["email"]):
             layout.access_denied()
             return
@@ -149,22 +167,33 @@ async def agents_route() -> None:
 
 @ui.page("/skill-builder")
 async def skill_builder_route() -> None:
-    # Retired (Task 9): /skills is the entry point now, with the same
+    # Retired (Task 9): /workflows is the entry point now, with the same
     # builder mounted inside its "New workflow" modal. Redirect rather than
     # delete so a bookmark or saved link still lands somewhere real.
-    ui.navigate.to("/skills")
+    ui.navigate.to("/workflows")
 
 
 @ui.page("/skills")
-async def skills_route() -> None:
+async def skills_redirect() -> None:
+    # Old URL stub, kept as a redirect so a bookmark or saved link still
+    # lands somewhere real. See workflows_route below.
+    ui.navigate.to("/workflows")
+
+
+@ui.page("/workflows")
+async def workflows_route() -> None:
     user = auth.current_user()
     if not user:
         ui.navigate.to("/login")
         return
-    with layout.frame(user, "/skills"):
+    with layout.frame(user, "/workflows"):
         if not perms.can_view_bot_admin(user["email"]):
             layout.access_denied()
             return
+        # Route/label now match "Workflows", but the page module underneath
+        # stays nicegui_app/pages/skills.py -- "skill" is still the right
+        # word for the persisted, assistant-callable object; see that
+        # module's docstring for the skill-vs-workflow distinction.
         from nicegui_app.pages import skills
 
         await skills.render(user)
@@ -201,12 +230,19 @@ async def prompts_route() -> None:
 
 
 @ui.page("/knowledge-modules")
-async def knowledge_modules_route() -> None:
+async def knowledge_modules_redirect() -> None:
+    # Old URL stub, kept as a redirect so a bookmark or saved link still
+    # lands somewhere real. See context_route below.
+    ui.navigate.to("/context")
+
+
+@ui.page("/context")
+async def context_route() -> None:
     user = auth.current_user()
     if not user:
         ui.navigate.to("/login")
         return
-    with layout.frame(user, "/knowledge-modules"):
+    with layout.frame(user, "/context"):
         if not perms.can_view_bot_admin(user["email"]):
             layout.access_denied()
             return
