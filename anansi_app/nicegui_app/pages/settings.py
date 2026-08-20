@@ -27,6 +27,7 @@ from typing import Any
 from nicegui import run, ui
 from services.settings_service import ValueSource
 
+from nicegui_app import branding
 from nicegui_app.pages import settings_readiness
 from nicegui_app.pages.settings_widgets import (
     RenderMode,
@@ -286,7 +287,9 @@ def group_is_inert(group_id: str, pending: dict[str, Any]) -> bool:
 
 async def render(log_levels: list[str] | None = None) -> None:
     ui.label("⚙️ Bot Settings").classes("text-h5")
-    ui.label("Configure Anansi bot behavior and features.").classes("text-caption")
+    ui.label(f"Configure {branding.PUBLIC_PRODUCT_NAME} bot behavior and features.").classes(
+        "text-caption"
+    )
 
     svc = get_settings_service()
     current: dict[str, Any] = await run.io_bound(

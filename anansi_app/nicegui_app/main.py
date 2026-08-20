@@ -20,7 +20,7 @@ from fastapi.responses import JSONResponse
 from grid_app.lib import perms
 from nicegui import app, ui
 
-from nicegui_app import auth, layout
+from nicegui_app import auth, branding, layout
 
 ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
 app.add_static_files("/assets", str(ASSETS_DIR))
@@ -43,21 +43,30 @@ def login_page(request: Request) -> None:
     error = request.query_params.get("error", "")
     denied = request.query_params.get("denied", "")
 
-    with ui.column().classes("absolute-center items-center gap-3"):
-        logo_path = ASSETS_DIR / "anansi_logo_nobg.png"
+    ui.query("body").style(f"background-color: {branding.BRAND_NIGHT}")
+    with (
+        ui.column()
+        .classes("absolute-center items-center gap-3 text-center")
+        .style("width: min(92vw, 28rem);")
+    ):
+        logo_path = ASSETS_DIR / branding.LOGO_FILENAME
         if logo_path.exists():
-            ui.image("/assets/anansi_logo_nobg.png").classes("w-24")
-        ui.label("Anansi").classes("text-h4")
-        ui.label("Please sign in with your Google account to access Anansi.")
+            ui.image(branding.LOGO_URL).classes("w-40 h-40").props(
+                'fit=contain alt="Mini-Grids Assistant logo"'
+            )
+        ui.label(branding.PUBLIC_PRODUCT_NAME).classes("text-h4 text-weight-bold").style(
+            f"color: {branding.BRAND_WHITE}"
+        )
+        ui.label(branding.LOGIN_PROMPT).style(f"color: {branding.BRAND_MIST}")
         if denied:
             ui.label(f"Access denied: {denied} is not authorized.").classes("text-negative")
         elif error == "unconfigured":
             ui.label("Google OAuth is not configured on this server.").classes("text-negative")
         elif error:
             ui.label("Sign-in failed. Please try again.").classes("text-negative")
-        ui.button("🔐 Sign in with Google", on_click=lambda: ui.navigate.to("/auth/login")).props(
-            "color=primary"
-        )
+        ui.button("Sign in with Google", on_click=lambda: ui.navigate.to("/auth/login")).props(
+            "unelevated no-caps"
+        ).style(f"background-color: {branding.BRAND_BLUE}; color: {branding.BRAND_WHITE}")
 
 
 @ui.page("/tickets")
@@ -242,8 +251,8 @@ def index_page() -> None:
 def create_app() -> None:
     """Entry point for ``python main.py`` (dev) and the prod launcher."""
     ui.run(
-        title="Anansi",
-        favicon=str(ASSETS_DIR / "favicon-32.png"),
+        title=branding.PUBLIC_PRODUCT_NAME,
+        favicon=str(ASSETS_DIR / branding.FAVICON_32_FILENAME),
         host=os.getenv("HOST", "0.0.0.0"),  # bind all interfaces for the container
         port=int(os.getenv("PORT", "8501")),
         storage_secret=auth.cookie_secret(),
