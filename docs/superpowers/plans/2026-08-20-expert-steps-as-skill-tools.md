@@ -226,15 +226,27 @@ by construction, not by an oversight.
 
 ## Phase 6 — Permission gating
 
-- [ ] **Task 6.1** — check `required_permission` at call time; failure returns
+- [x] **Task 6.1** — check `required_permission` at call time; failure returns
       `not_permitted` (Phase 3). MCP tools filter through
       `permissions_service.get_available_tools(user_context)`; function handlers
       have **no** permission model today — `exposed_to_builder` is a hand-set
       boolean true for 3 of 52. Exposing all 52 without this is privilege
       escalation (`send_lpp_map_to_telegram`, `embed_and_store`, `store_module`).
-- [ ] **Task 6.2** — decide `exposed_to_builder`'s fate: keep as a second gate,
+- [x] **Task 6.2** — decide `exposed_to_builder`'s fate: keep as a second gate,
       or fold into the permission model. Do not leave two overlapping gates
       undocumented.
+
+**Done 2026-08-21** (`9255858c`). `required_permission` names a role
+checked against `UserContext.roles`, with `is_staff=True` always clearing
+(the one boundary this codebase already enforces elsewhere). Declared and
+routable deliberately stopped being the exact same predicate:
+`is_declared_function_step` (routing) stays structural-only, so a
+permission-gated call still reaches `_execute_declared_function_step_call`
+and gets an explicit `not_permitted` there — declaring it hidden but
+routing it rejectable, on purpose, gives a clearer failure than an MCP
+fallthrough would. Task 6.2: kept as two gates, documented on
+`StepHandlerRegistry.expose_to_builder` — design-time authoring curation
+vs. runtime call authorization, answering genuinely different questions.
 
 ## Phase 7 — Lift the converter's refusal
 
