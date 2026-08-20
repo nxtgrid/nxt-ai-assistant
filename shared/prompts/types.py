@@ -40,7 +40,7 @@ class RequestScope:
     def matches(self, scope: str) -> bool:
         """Whether a module declaring ``scope`` applies to this request.
 
-        'sector' is the pre-0018 spelling of 'global' and stays accepted
+        'sector' is the pre-0027 spelling of 'global' and stays accepted
         permanently: this method fails closed on an unknown value, so a row
         the rename missed would stop contributing with no error anywhere.
         """

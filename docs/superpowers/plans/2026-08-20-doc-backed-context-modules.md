@@ -59,7 +59,7 @@ files (Tasks 1 and 3) and every commit step for them uses `-f`.
 |---|---|---|
 | `shared/utils/drive_permissions.py` | Drive ACL checks. Gains `strict` mode + `domain` grants. | 1 |
 | `shared/tests/test_drive_permissions.py` | **New.** Covers the ACL matrix. | 1 |
-| `db/migrations/0018_doc_backed_modules.sql` | **New.** Audience/tab columns, constraint fixes, scope rename. | 2 |
+| `db/migrations/0027_doc_backed_modules.sql` | **New.** Audience/tab columns, constraint fixes, scope rename. | 2 |
 | `db/schema/chat_db.sql` | Schema of record, kept in step with the migration. | 2 |
 | `shared/prompts/knowledge.py` | Module value type, selection, budgeting. Gains fields + `JIT_SOURCES`. | 2, 5, 9 |
 | `shared/utils/gdrive_doc_fetcher.py` | Drive fetch/convert. Gains sheet → markdown. | 3 |
@@ -435,7 +435,7 @@ false-deny most staff."
 ### Task 2: Migration, schema, and module fields
 
 **Files:**
-- Create: `db/migrations/0018_doc_backed_modules.sql`
+- Create: `db/migrations/0027_doc_backed_modules.sql`
 - Modify: `db/schema/chat_db.sql:1242-1265`
 - Modify: `shared/prompts/knowledge.py`
 - Test: `shared/tests/test_prompt_knowledge.py`, `shared/tests/test_prompt_knowledge_store.py`
@@ -533,10 +533,10 @@ Expected: all pass.
 
 - [ ] **Step 6: Write the migration**
 
-Create `db/migrations/0018_doc_backed_modules.sql`:
+Create `db/migrations/0027_doc_backed_modules.sql`:
 
 ```sql
--- 0018_doc_backed_modules.sql
+-- 0027_doc_backed_modules.sql
 --
 -- Apply by hand in the Supabase SQL editor against chat_db. Idempotent.
 --
@@ -627,7 +627,7 @@ CREATE TABLE IF NOT EXISTS knowledge_modules (
     CONSTRAINT knowledge_modules_source_chk
         CHECK (source IN ('manual', 'gdoc', 'ingested', 'graph', 'directory', 'episodic')),
     -- A gdoc or provider-backed module stores no body -- it resolves at
-    -- request time. See 0018_doc_backed_modules.sql.
+    -- request time. See 0027_doc_backed_modules.sql.
     CONSTRAINT knowledge_modules_body_required_chk
         CHECK (source IN ('gdoc', 'graph', 'directory', 'episodic') OR body IS NOT NULL),
     CONSTRAINT knowledge_modules_doc_audience_chk
@@ -649,7 +649,7 @@ Expected: all pass.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add shared/prompts/knowledge.py db/migrations/0018_doc_backed_modules.sql db/schema/chat_db.sql shared/tests/test_prompt_knowledge.py shared/tests/test_prompt_knowledge_store.py
+git add shared/prompts/knowledge.py db/migrations/0027_doc_backed_modules.sql db/schema/chat_db.sql shared/tests/test_prompt_knowledge.py shared/tests/test_prompt_knowledge_store.py
 git commit -m "feat(context): add audience and tab columns for doc-backed modules
 
 A gdoc module stores no body and carries an explicit audience decision.
@@ -2136,7 +2136,7 @@ In `shared/prompts/types.py`:
     def matches(self, scope: str) -> bool:
         """Whether a module declaring ``scope`` applies to this request.
 
-        'sector' is the pre-0018 spelling of 'global' and stays accepted
+        'sector' is the pre-0027 spelling of 'global' and stays accepted
         permanently: this method fails closed on an unknown value, so a row
         the rename missed would stop contributing with no error anywhere.
         """
@@ -3238,7 +3238,7 @@ git commit -m "docs(context): implementation plan for doc-backed context modules
 
 Automated tests cover the logic; these confirm the wiring against real Drive.
 
-- [ ] Apply `db/migrations/0018_doc_backed_modules.sql` by hand against `chat_db`. Confirm the closing `SELECT` reports `0` pre-existing gdoc rows (any non-zero row tightened from "everyone" to ACL-gated — check it was intended).
+- [ ] Apply `db/migrations/0027_doc_backed_modules.sql` by hand against `chat_db`. Confirm the closing `SELECT` reports `0` pre-existing gdoc rows (any non-zero row tightened from "everyone" to ACL-gated — check it was intended).
 - [ ] On `/knowledge-modules`, create a module from a Google Doc you can open. Preview shows the live document.
 - [ ] Create one from a Google Sheet with more than 200 rows. Preview shows a markdown table ending in the truncation footer.
 - [ ] Attach a doc you cannot open. Save is refused.
