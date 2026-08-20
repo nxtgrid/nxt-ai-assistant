@@ -30,13 +30,20 @@ class FakeQueryBuilder:
         self._filters: dict = {}
         self._op = "select"
         self._payload: dict = {}
+        self._select_columns = "*"
 
-    def select(self, *_args, **_kwargs):
+    def select(self, columns="*", **_kwargs):
         self._op = "select"
+        self._select_columns = columns
         return self
 
     def upsert(self, row):
         self._op = "upsert"
+        self._payload = dict(row)
+        return self
+
+    def insert(self, row):
+        self._op = "insert"
         self._payload = dict(row)
         return self
 
@@ -62,6 +69,12 @@ class FakeQueryBuilder:
                 self._table.rows.append(dict(self._payload))
             return FakeResult([self._payload])
 
+        if self._op == "insert":
+            row = dict(self._payload)
+            row.setdefault("id", f"fake-id-{len(self._table.rows)}")
+            self._table.rows.append(row)
+            return FakeResult([row])
+
         if self._op == "delete":
             self._table.rows = [
                 r
@@ -73,6 +86,13 @@ class FakeQueryBuilder:
         rows = [
             r for r in self._table.rows if all(r.get(k) == v for k, v in self._filters.items())
         ]
+        # Real PostgREST only returns the requested columns. Project here too
+        # -- otherwise a row inserted with extra columns (updated_by,
+        # is_active, ...) would hand KnowledgeModule(**row) kwargs it has no
+        # field for, something a real select() could never do.
+        if self._select_columns and self._select_columns != "*":
+            names = [c.strip() for c in self._select_columns.split(",")]
+            rows = [{k: r.get(k) for k in names} for r in rows]
         return FakeResult(rows)
 
 
@@ -262,3 +282,110 @@ def test_the_store_selects_the_audience_columns():
     assert "doc_audience" in client.table_obj.selected
     assert "doc_audience_set_by" in client.table_obj.selected
     assert "source_tab" in client.table_obj.selected
+
+
+# ── ensure_singleton_modules: bootstrap the code-defined provider rows ─────
+# directory/graph/episodic have no UI path to create them (no "add a
+# provider module" control -- see knowledge_modules.py's source_select,
+# which only ever offers manual/gdoc) and no seed script ever inserts them
+# either. Without this, DirectoryProvider/GraphProvider/EpisodicProvider are
+# fully wired but permanently unreachable: nothing ever creates the row an
+# operator would pin to a prompt.
+
+
+def test_ensure_singleton_modules_creates_all_three_when_none_exist(store):
+    results = store.ensure_singleton_modules(actor="ops@example.com")
+
+    assert results == {"directory": "created", "graph": "created", "episodic": "created"}
+    sources = {m.source for m in store.all_modules()}
+    assert sources == {"directory", "graph", "episodic"}
+
+
+def test_ensure_singleton_modules_is_idempotent(store):
+    store.ensure_singleton_modules(actor="ops@example.com")
+    results = store.ensure_singleton_modules(actor="ops@example.com")
+
+    assert results == {"directory": "exists", "graph": "exists", "episodic": "exists"}
+    assert len([m for m in store.all_modules() if m.source == "directory"]) == 1
+
+
+def test_ensure_singleton_modules_only_creates_whats_missing(store):
+    store._client.table("knowledge_modules").insert(
+        {
+            "slug": "graph", "title": "Graph (hand-edited)", "summary": "s",
+            "body": None, "scope": "global", "mode": "pinned", "source": "graph",
+            "is_active": True,
+        }
+    ).execute()
+
+    results = store.ensure_singleton_modules(actor="ops@example.com")
+
+    assert results["graph"] == "exists"
+    assert results["directory"] == "created"
+    assert results["episodic"] == "created"
+    # The pre-existing row survives untouched -- ensure never overwrites.
+    graph_rows = [m for m in store.all_modules() if m.source == "graph"]
+    assert len(graph_rows) == 1
+    assert graph_rows[0].title == "Graph (hand-edited)"
+
+
+def test_ensure_singleton_modules_created_rows_exist_but_are_not_attached_to_any_prompt(store):
+    store.ensure_singleton_modules(actor="ops@example.com")
+
+    directory = next(m for m in store.all_modules() if m.source == "directory")
+    assert directory.slug == "directory"
+    assert directory.mode == "pinned"
+    assert directory.scope == "global"
+    assert directory.body is None
+    assert directory.summary  # on_demand or pinned, a blank summary helps no one
+    # mode='pinned' only shapes a module once a prompt uses it -- existence
+    # is not attachment, and this method never writes prompt_knowledge_overrides.
+    assert store.overrides_for("staff.system") == {}
+
+    graph = next(m for m in store.all_modules() if m.source == "graph")
+    assert graph.slug == "entity-graph"  # matches the P1 seed script / P4 rollout checklist
+
+
+def test_ensure_singleton_modules_fails_open_per_source():
+    """A CHECK-constraint rejection for one source must not sink the others.
+
+    Simulates migration 0017 not yet applied for just 'graph' -- the most
+    likely real-world failure this method exists to survive.
+    """
+
+    class _FlakyTable:
+        def __init__(self):
+            self.rows: "list[dict]" = []
+
+        def select(self, *_a, **_k):
+            return self
+
+        def eq(self, *_a, **_k):
+            return self
+
+        def insert(self, row):
+            if row.get("source") == "graph":
+                raise RuntimeError("knowledge_modules_source_chk violated")
+            self.rows.append(dict(row))
+            return self
+
+        def execute(self):
+            return FakeResult(list(self.rows))
+
+    class _FlakyClient:
+        def __init__(self):
+            self._table = _FlakyTable()
+
+        def table(self, _name):
+            return self._table
+
+    store = KnowledgeStore(client=_FlakyClient())
+    results = store.ensure_singleton_modules(actor="ops@example.com")
+
+    assert results["directory"] == "created"
+    assert results["episodic"] == "created"
+    assert results["graph"].startswith("failed:")
+
+
+def test_unconfigured_store_ensure_singleton_modules_is_a_noop():
+    assert KnowledgeStore(client=None).ensure_singleton_modules(actor="ops@example.com") == {}
