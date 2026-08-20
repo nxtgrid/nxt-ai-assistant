@@ -23,14 +23,18 @@ PAGE_BG = branding.BRAND_CANVAS
 
 OPERATIONS_NAV = [
     ("/tickets", "🎫 Tickets"),
+    # NB: can't be /chats (or /chat) -- DO ingress prefix-routes any path
+    # starting with "/chat" straight to chat-orchestrator's Telegram
+    # webhook, so a page at either would never be reached. See the matching
+    # comment on the /conversations route in main.py.
     ("/conversations", "💬 Chats"),
-    ("/agents", "🎰 Runs"),
-    # Page/route is still "skills" (nicegui_app/pages/skills.py, the skills
-    # table) -- only the user-facing language changed. A workflow is the
-    # thing you build; saving it so the assistant can offer it by name is
-    # the optional "make it a skill" step within that same page (see
-    # skills.py's module docstring).
-    ("/skills", "🎬 Workflows"),
+    ("/runs", "🎰 Runs"),
+    # Route/label match now, but the underlying page module stays
+    # nicegui_app/pages/skills.py (and SkillBuilderService etc.) -- "skill"
+    # is still the right word for the persisted, assistant-callable object;
+    # "workflow" is just what a user calls the thing they're building
+    # before that optional save step. See skills.py's module docstring.
+    ("/workflows", "🎬 Workflows"),
 ]
 
 
@@ -43,8 +47,8 @@ class NavItem:
 
 BOT_ADMIN_NAV = (
     NavItem("/prompts", "📝 Prompts"),
-    NavItem("/knowledge-modules", "🧠 Context"),
-    NavItem("/documents", "📚 RAG Knowledgebase", depth=1),
+    NavItem("/context", "🧠 Context"),
+    NavItem("/rag-knowledgebase", "📚 RAG Knowledgebase", depth=1),
     NavItem("/settings", "⚙️ Settings"),
 )
 

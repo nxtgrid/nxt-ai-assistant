@@ -196,3 +196,46 @@ freshly-checked-out `main` reproduce the exact same "missing expert"
 symptom). Fixed by making the three tests construct/force bundled-only
 resolution instead of touching `prompt_checksums.json` or any bundled
 content — there was no actual drift to reconcile.
+
+## Nav menu items: the URL route must match the displayed label
+
+`anansi_app/nicegui_app/layout.py`'s `OPERATIONS_NAV`/`BOT_ADMIN_NAV` (the
+sidebar) and `anansi_app/nicegui_app/main.py`'s `@ui.page(...)` routes are
+two separate lists that have to move together. It's easy to relabel a nav
+entry (e.g. "Agents" → "Runs") without renaming its route, which leaves the
+URL bar showing the *old* name every time someone clicks that item — and
+the mismatch compounds the next time someone relabels again without
+checking. **Whenever you change a nav label — in this app or any other UI
+in this repo — rename its route/URL stub to match in the same change**
+(kebab-case of the label, dropping the emoji):
+
+1. Rename the route (`@ui.page("/old-path")` → `/new-path`, or the
+   equivalent in whatever router the surface uses), and leave a tiny
+   redirect stub at the old path so existing bookmarks/links don't 404 —
+   see `main.py`'s `/agents`, `/skills`, `/knowledge-modules`, `/documents`
+   for the pattern (each just does `ui.navigate.to("/new-path")`).
+2. Update the nav config (`layout.py`'s tuples/`NavItem`s) to the new
+   target.
+3. Update `anansi_app/tests/test_layout.py`'s target assertions.
+4. Grep the repo for the old path literal before finishing — a hardcoded
+   link elsewhere (e.g. `pages/tickets.py`'s "View in Chats" link) needs to
+   move too if it points at the route you just renamed.
+
+**One standing exception: `/conversations` ("💬 Chats") can never become
+`/chats` or `/chat`.** The DO App Platform ingress spec
+(`.do/app.example.yaml`) prefix-routes *any* path starting with `/chat`
+straight to the `chat-orchestrator` service (the Telegram webhook) — a
+NiceGUI page at `/chats` would never be reached, ingress swallows it first.
+Leave that one route/label mismatch in place; don't "fix" it again. (See
+also `AGENTS.md`, which carries this same note for non-Claude coding
+agents.)
+
+**2026-08-20 incident (reference case):** `/agents`, `/skills`, and
+`/knowledge-modules`/`/documents` had all been relabeled ("🎰 Runs", "🎬
+Workflows", "🧠 Context", "📚 RAG Knowledgebase") in earlier work without
+their routes moving, so every one of those menu clicks landed on a stale
+URL. Fixed on `fix/nav-url-stubs` by renaming the routes to `/runs`,
+`/workflows`, `/context`, `/rag-knowledgebase`, adding a redirect stub at
+each old path, and updating `test_layout.py` to assert the new targets
+(plus a new test pinning the `/conversations` exception so it isn't
+"fixed" by mistake later).
