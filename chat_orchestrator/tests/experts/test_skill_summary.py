@@ -134,3 +134,42 @@ class TestGenerateSkillSummary:
         sent_prompt = mock_gateway.generate.call_args.args[0][0].text
         assert "fetch_grafana_kpis" in sent_prompt
         assert "None" not in sent_prompt
+
+    @pytest.mark.asyncio
+    async def test_prompt_includes_a_steps_result_preview_when_present(self):
+        """The builder captures what a step's tools actually returned
+        (skill_builder.py's _step_response_text) so the summary can name
+        the kind of data retrieved, not just repeat the instruction verbatim."""
+        mock_gateway = SimpleNamespace(
+            generate=AsyncMock(return_value=SimpleNamespace(text="summary"))
+        )
+        steps = [
+            {
+                "index": 0,
+                "instruction": "List all open tickets.",
+                "result_preview": "Found 12 open tickets across 4 grids.",
+            }
+        ]
+        with patch(
+            "orchestrator.experts.skill_summary.get_default_generation_gateway",
+            return_value=mock_gateway,
+        ):
+            await generate_skill_summary(steps)
+
+        sent_prompt = mock_gateway.generate.call_args.args[0][0].text
+        assert "Found 12 open tickets across 4 grids." in sent_prompt
+
+    @pytest.mark.asyncio
+    async def test_a_step_with_no_result_preview_adds_no_result_line(self):
+        mock_gateway = SimpleNamespace(
+            generate=AsyncMock(return_value=SimpleNamespace(text="summary"))
+        )
+        steps = [{"index": 0, "instruction": "List all open tickets."}]
+        with patch(
+            "orchestrator.experts.skill_summary.get_default_generation_gateway",
+            return_value=mock_gateway,
+        ):
+            await generate_skill_summary(steps)
+
+        sent_prompt = mock_gateway.generate.call_args.args[0][0].text
+        assert "Result:" not in sent_prompt

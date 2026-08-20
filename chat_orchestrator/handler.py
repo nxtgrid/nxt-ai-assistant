@@ -2474,6 +2474,14 @@ async def _handle_webhook_async(args: Dict[str, Any]) -> Dict[str, Any]:
             **webhook_req.metadata,
             "original_chat_id": original_chat_id,
             "topic_id": webhook_req.topic_id,  # For schedule tools
+            # Added AFTER the caller's own metadata is spread, so a plain
+            # API_KEY-only caller cannot forge this by setting the same key
+            # in their request body -- identity_trusted above is computed
+            # server-side from IDENTITY_ASSERTION_KEY (app.py's
+            # is_identity_trusted_caller), never caller-supplied. Lets
+            # resolve_auth's skill_builder_staff_auth branch verify this
+            # signal without needing the raw request/headers itself.
+            "_identity_trusted": identity_trusted,
         }
         webhook_req.metadata = enriched_metadata
 

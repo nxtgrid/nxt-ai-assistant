@@ -88,6 +88,35 @@ async def resolve_auth(state: ConversationState) -> Dict[str, Any]:
         )
         LOGGER.info(f"Staff group auth: org={staff_org_id}, user={user_context.user_id}")
 
+    elif metadata.get("skill_builder_staff_auth") and metadata.get("_identity_trusted"):
+        # The skill builder (anansi_app/nicegui_app/pages/skill_builder.py)
+        # is a bot-admin-only NiceGUI surface (RBAC-gated by
+        # perms.can_view_bot_admin, a Google-OAuth allowlist) -- a wholly
+        # different identity system from public.accounts, which the plain
+        # email-lookup branch below would otherwise consult. Most bot-admin
+        # emails were never added there, so that lookup misses and the
+        # session would silently run as an unscoped, non-staff customer
+        # (see this branch's test module's docstring for the full chain --
+        # an org-scoped tool like customer_get_all_grids_status then gets no
+        # organization_id to work with).
+        #
+        # Gated on BOTH signals, not just the opt-in flag: skill_builder_
+        # staff_auth alone would let any caller holding the single shared
+        # API_KEY self-grant staff, since that key is common to every "api"
+        # auth_method caller. "_identity_trusted" is computed server-side
+        # from IDENTITY_ASSERTION_KEY (see app.py's is_identity_trusted_
+        # caller) and merged into metadata AFTER the caller's own metadata
+        # is spread (handler.py's _handle_webhook_async), so a caller
+        # without that key cannot forge it -- today only the skill builder
+        # holds it.
+        user_permissions = UserPermissions(
+            user_id=user_context.user_id or "skill_builder",
+            email=user_context.user_email,
+            organization_ids=[str(STAFF_ORG_ID)],
+            is_staff=True,
+        )
+        LOGGER.info(f"Skill builder staff auth: user={user_context.user_id}")
+
     elif is_scheduled_execution and metadata.get("skill_id"):
         # Skill run (Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md).
         #

@@ -815,6 +815,11 @@ class SkillStepPayload(BaseModel):
     convention (never actually None) for the pre-P3 default kind="llm"
     shape -- skill_validation.py's own field defaults (`step.get("name") or
     ...`) already tolerate their absence either way.
+
+    result_preview is optional and builder-only: what the step's tools
+    actually returned (skill_builder.py's _step_response_text, truncated),
+    used solely to enrich /skills/summarize's prompt (see skill_summary.py's
+    _build_summary_prompt) -- /skills/validate ignores it entirely.
     """
 
     index: int
@@ -825,6 +830,7 @@ class SkillStepPayload(BaseModel):
     is_response_step: bool = False
     kind: Optional[str] = None
     handler: Optional[str] = None
+    result_preview: Optional[str] = None
 
 
 class SkillValidationErrorPayload(BaseModel):

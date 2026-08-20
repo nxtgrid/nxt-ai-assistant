@@ -411,6 +411,43 @@ class SkillBuilderService:
             n += 1
         return f"{base}-{n}"
 
+    def slug_taken(
+        self, raw_name: str, exclude_skill_id: Optional[str] = None
+    ) -> "tuple[bool, str]":
+        """Whether raw_name's derived slug is already used by a DIFFERENT
+        skill. Returns (taken, slug) so the caller can show the exact
+        /slug the name resolves to, not just a yes/no.
+
+        For the skills list editor's optional /skill name box (unlike
+        _unique_slug, which save_skill still uses for a title with no
+        explicit name): when an author deliberately types a name, silently
+        appending "-2" on a clash would save it under a different name than
+        they chose without telling them. This reports the clash instead so
+        the caller can block Save with an explicit message.
+
+        Slugifies raw_name the same way save_skill eventually will
+        (_slugify), so what's checked here is what would actually be
+        saved -- comparing the raw text against stored slugs directly would
+        miss a clash that only appears after normalization (e.g. "Grid
+        Health" vs an existing "grid-health").
+
+        Fails open (not taken) on a missing client or a query error --
+        an unconfirmed clash must never be the reason a save is blocked;
+        the real uniqueness constraint is the database's, this is just a
+        friendlier error a network hiccup shouldn't defeat.
+        """
+        slug = _slugify(raw_name)
+        if not self.client:
+            return False, slug
+        try:
+            existing = self.client.table("skills").select("id, slug").eq("slug", slug).execute()
+        except Exception as e:
+            logger.warning("Slug clash check failed for %r: %s", raw_name, e)
+            return False, slug
+        rows = existing.data or []
+        taken = any(row.get("id") != exclude_skill_id for row in rows)
+        return taken, slug
+
     def save_skill(
         self,
         title: str,

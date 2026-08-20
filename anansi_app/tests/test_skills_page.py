@@ -126,11 +126,52 @@ def test_promotion_blocked_when_a_step_captured_a_tool_error():
     assert "error" in reason.lower()
 
 
-def test_a_draft_can_always_be_saved():
+def test_a_draft_can_be_saved_with_just_a_skill_name():
     from nicegui_app.pages.skills import can_save_as_draft
 
-    assert can_save_as_draft(title="A") is True
-    assert can_save_as_draft(title="  ") is False
+    assert can_save_as_draft(skill_name="grid-health", summary="") is True
+
+
+def test_a_draft_can_be_saved_with_just_a_summary():
+    """The /skill name box is optional (item d) -- an auto-generated
+    summary (item b) is enough to derive a fallback title from."""
+    from nicegui_app.pages.skills import can_save_as_draft
+
+    assert can_save_as_draft(skill_name="", summary="Checks grid health weekly.") is True
+
+
+def test_a_draft_needs_a_name_or_a_summary():
+    from nicegui_app.pages.skills import can_save_as_draft
+
+    assert can_save_as_draft(skill_name="  ", summary="  ") is False
+    assert can_save_as_draft(skill_name="", summary="") is False
+
+
+def test_fallback_title_reuses_a_short_summary_verbatim():
+    from nicegui_app.pages.skills import derive_fallback_title
+
+    assert derive_fallback_title("Checks grid health weekly.") == "Checks grid health weekly."
+
+
+def test_fallback_title_trims_a_long_summary_at_a_word_boundary():
+    from nicegui_app.pages.skills import derive_fallback_title
+
+    summary = (
+        "Retrieves every open ticket across all grids and summarizes them by "
+        "severity and grid for the weekly ops review."
+    )
+    title = derive_fallback_title(summary)
+
+    assert len(title) <= 61  # 60 chars + the ellipsis character
+    assert title.endswith("…")
+    assert not title[:-1].endswith(" ")  # trimmed at a word boundary, not mid-word
+
+
+def test_fallback_title_is_blank_for_a_blank_summary():
+    from nicegui_app.pages.skills import derive_fallback_title
+
+    assert derive_fallback_title("") == ""
+    assert derive_fallback_title("   ") == ""
 
 
 def test_a_step_that_escalated_is_flagged():

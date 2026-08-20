@@ -42,21 +42,32 @@ def _truncate_at_word_boundary(text: str, limit: int) -> str:
 
 
 def _build_summary_prompt(steps: List[Dict[str, Any]], title: str) -> str:
-    # A P3 [function] step has no instruction text (SkillStepPayload's
-    # instruction is Optional and empty/None for it) -- fall back to its
-    # handler name so the line describes something instead of reading
-    # blank or the literal string "None".
-    step_lines = "\n".join(
-        f"{i + 1}. {step.get('instruction') or step.get('handler') or ''}"
-        for i, step in enumerate(steps)
-    )
+    lines = []
+    for i, step in enumerate(steps):
+        # A P3 [function] step has no instruction text (SkillStepPayload's
+        # instruction is Optional and empty/None for it) -- fall back to its
+        # handler name so the line describes something instead of reading
+        # blank or the literal string "None".
+        line = f"{i + 1}. {step.get('instruction') or step.get('handler') or ''}"
+        # result_preview is the builder's own capture of what the step's
+        # tools actually returned (skill_builder.py's _step_response_text,
+        # truncated) -- present only for a live-built step, not one loaded
+        # from validate-only payloads. Folding it in lets the summary name
+        # the kind of data retrieved instead of just paraphrasing intent.
+        result_preview = (step.get("result_preview") or "").strip()
+        if result_preview:
+            line += f"\n   Result: {result_preview}"
+        lines.append(line)
+    step_lines = "\n".join(lines)
     header = f"Skill title: {title}\n\n" if title else ""
     return (
         f"{header}Summarize what this procedure accomplishes, in ONE sentence "
         f"under {MAX_SUMMARY_CHARS} characters. Describe the outcome, not a "
-        f"step-by-step recap. This will be shown to an AI assistant deciding "
-        f"whether the procedure is relevant to a request, not to the person "
-        f"who wrote it.\n\n"
+        f"step-by-step recap. Where a step shows a Result, let it sharpen the "
+        f"summary -- e.g. naming the kind of data actually retrieved, not just "
+        f"the intent. This will be shown to an AI assistant deciding whether "
+        f"the procedure is relevant to a request, not to the person who wrote "
+        f"it.\n\n"
         f"Steps:\n{step_lines}\n\n"
         f"Respond with the summary sentence only -- no preamble, no quotes."
     )
