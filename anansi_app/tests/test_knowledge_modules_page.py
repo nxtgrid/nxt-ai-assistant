@@ -13,6 +13,7 @@ from nicegui_app.pages.knowledge_modules import (
     module_is_deletable,
     preview_module_body,
     prompt_option_label,
+    singleton_creation_warnings,
     validate_module,
 )
 from nicegui_app.pages.prompts import KnowledgeTabRow, build_knowledge_tab, filter_module_rows
@@ -225,9 +226,36 @@ def test_body_is_editable_only_for_manual_modules():
 def test_singleton_providers_cannot_be_deleted():
     assert module_is_deletable("graph") is False
     assert module_is_deletable("directory") is False
+    # episodic is code-defined and bootstrapped the same as graph/directory
+    # (see shared.prompts.knowledge.SINGLETON_SOURCES) -- it belongs in the
+    # same non-deletable guard, not the gdoc/manual bucket below it.
+    assert module_is_deletable("episodic") is False
     assert module_is_deletable("gdoc") is True
-    assert module_is_deletable("episodic") is True
     assert module_is_deletable("manual") is True
+
+
+def test_singleton_creation_warnings_are_empty_when_everything_succeeds():
+    results = {"directory": "created", "graph": "exists", "episodic": "created"}
+    assert singleton_creation_warnings(results) == []
+
+
+def test_singleton_creation_warnings_surface_a_failed_source():
+    results = {
+        "directory": "created",
+        "graph": "failed: violates check constraint",
+        "episodic": "exists",
+    }
+    assert singleton_creation_warnings(results) == [
+        "Couldn't create the 'graph' context module: failed: violates check constraint"
+    ]
+
+
+def test_singleton_creation_warnings_reports_every_failure():
+    results = {"directory": "failed: boom", "graph": "failed: also boom", "episodic": "created"}
+    assert singleton_creation_warnings(results) == [
+        "Couldn't create the 'directory' context module: failed: boom",
+        "Couldn't create the 'graph' context module: failed: also boom",
+    ]
 
 
 def test_validate_module_does_not_require_a_body_when_not_required():

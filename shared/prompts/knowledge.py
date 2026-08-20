@@ -28,6 +28,45 @@ PINNED_BUDGET_CHARS = 20000
 # resolve through JitContextResolver instead.
 JIT_SOURCES: Tuple[str, ...] = ("gdoc", "graph", "directory", "episodic")
 
+# Sources the codebase itself defines and resolves, not something an operator
+# can author -- there is no "add a provider module" control anywhere (see
+# knowledge_modules.py's source_select, which only ever offers manual/gdoc),
+# because there is no way to add a new provider through a text box. Exactly
+# one row of each should exist: code-defined, always visible, non-deletable
+# (see knowledge_modules.py's SINGLETON_SOURCES import) and non-creatable via
+# the admin UI. gdoc is JIT but explicitly excluded here -- many gdoc modules
+# can exist, one per attached document, so it is not a singleton.
+SINGLETON_SOURCES: Tuple[str, ...] = ("directory", "graph", "episodic")
+
+# Slug/title/summary for a freshly-bootstrapped singleton row (see
+# KnowledgeStore.ensure_singleton_modules). directory/episodic's slug matches
+# their source; graph's stays 'entity-graph' -- the name scripts/
+# seed_context_provider_modules.py (P1) and the P4 rollout checklist
+# (docs/superpowers/plans/2026-08-23-p4-hybrid-agentic-retrieval.md) already
+# document, so this doesn't orphan either. Selection is by source, not slug
+# (see ensure_singleton_modules), so the mismatch is cosmetic only.
+_SINGLETON_MODULE_DEFAULTS: Dict[str, Dict[str, str]] = {
+    "directory": {
+        "slug": "directory",
+        "title": "Known Grids, Organizations and People",
+        "summary": "The grids, organizations and team members this caller "
+                    "may see. Use to disambiguate a name mentioned in a message.",
+    },
+    "graph": {
+        "slug": "entity-graph",
+        "title": "Knowledge Graph Overview",
+        "summary": "Entity types, relationship types and example entities in "
+                    "the knowledge graph. Use to decide what to search for "
+                    "before querying the graph.",
+    },
+    "episodic": {
+        "slug": "episodic",
+        "title": "Episodic Memory",
+        "summary": "Distilled lessons from prior conversations for the "
+                    "grid or organization in scope.",
+    },
+}
+
 
 @dataclass(frozen=True)
 class KnowledgeModule:
@@ -255,6 +294,71 @@ class KnowledgeStore:
             self._client.table("prompt_knowledge_overrides").delete().eq(
                 "prompt_id", prompt_id
             ).eq("module_id", module_id).execute()
+
+    def ensure_singleton_modules(self, actor: str) -> Dict[str, str]:
+        """Create any missing code-defined singleton rows (see SINGLETON_SOURCES).
+
+        The admin UI has no path to creating one of these (no source picker
+        offers directory/graph/episodic -- there's no way to add a new
+        provider through a text box) and neither does /learn (hardcodes
+        source='manual'). scripts/seed_context_provider_modules.py covered
+        directory and graph, but only when a human remembered to run it by
+        hand -- it never covered episodic, and per the P4 rollout checklist
+        that expected someone to check for it, nothing confirms anyone ever
+        did. This makes creation automatic instead of a step to remember:
+        called from the Context admin page on every load, cheap (one SELECT
+        already needed for the page's own listing, an INSERT only for
+        whatever's missing) and idempotent, so a newly registered provider
+        just appears next deploy with no manual step at all. The script
+        still exists as a CLI-only alternative and now shares this same
+        source list, so the two can't drift apart the way SINGLETON_SOURCES
+        and this method's row shape once could have.
+
+        Fails open per source, never raises: a CHECK-constraint rejection
+        here (most likely migration 0017_context_module_providers.sql not
+        yet applied against this database) surfaces as "this one module
+        didn't get created", not a broken page. Returns {source: outcome},
+        outcome one of "exists", "created", or "failed: <error>", for the
+        caller to report.
+
+        A created row is mode='pinned' but attached to no prompt -- pinned
+        only decides how a module behaves once a prompt actually uses it;
+        prompt_knowledge_overrides decides whether any prompt does, and this
+        method never touches that table. Bootstrapping existence and
+        attaching it to a prompt stay two separate, deliberate steps.
+        """
+        if not self._client:
+            return {}
+        existing_sources = {m.source for m in self.all_modules()}
+        results: Dict[str, str] = {}
+        created_any = False
+        for source in SINGLETON_SOURCES:
+            if source in existing_sources:
+                results[source] = "exists"
+                continue
+            defaults = _SINGLETON_MODULE_DEFAULTS[source]
+            row = {
+                "slug": defaults["slug"],
+                "title": defaults["title"],
+                "summary": defaults["summary"],
+                "body": None,
+                "tags": [],
+                "scope": "global",
+                "mode": "pinned",
+                "source": source,
+                "updated_by": actor,
+                "is_active": True,
+            }
+            try:
+                self._client.table("knowledge_modules").insert(row).execute()
+                results[source] = "created"
+                created_any = True
+            except Exception as e:
+                LOGGER.warning(f"Could not create the '{source}' singleton module: {e}")
+                results[source] = f"failed: {e}"
+        if created_any:
+            self.invalidate()
+        return results
 
     def set_prompt_modules(self, prompt_id: str, slugs: List[str], actor: str) -> None:
         """Reconcile this prompt's pinned modules to exactly ``slugs``.

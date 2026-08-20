@@ -15,6 +15,8 @@ from typing import Any, List, Tuple
 
 from nicegui import ui
 
+from shared.prompts.knowledge import SINGLETON_SOURCES
+
 VALID_MODES = {"pinned", "on_demand"}
 VALID_SOURCES = {"manual", "gdoc", "ingested"}
 
@@ -125,8 +127,9 @@ DISCLOSURE_ICONS = 'expand-icon="keyboard_arrow_right" expanded-icon="keyboard_a
 PROVIDER_SOURCES = ("gdoc", "graph", "directory", "episodic")
 
 # Exactly one of each exists; deleting it only makes the capability
-# unreachable, so the UI refuses.
-SINGLETON_SOURCES = ("graph", "directory")
+# unreachable, so the UI refuses. Sourced from shared.prompts.knowledge so
+# this list can't drift from the one ensure_singleton_modules bootstraps --
+# that drift is exactly how episodic ended up missing from this guard before.
 
 # Shown under a non-editable body field, keyed by source.
 _READONLY_BODY_EXPLANATIONS = {
@@ -148,6 +151,20 @@ def body_is_editable(source: str) -> bool:
 
 def module_is_deletable(source: str) -> bool:
     return source not in SINGLETON_SOURCES
+
+
+def singleton_creation_warnings(results: "dict[str, str]") -> List[str]:
+    """Human-readable warnings for any singleton row ensure_singleton_modules
+    could not create -- most likely migration 0017_context_module_providers.sql
+    not yet applied against this database. 'exists' and 'created' are both
+    success; anything else is a failure worth surfacing to whoever is looking
+    at this page, since it is the only place that failure would ever appear.
+    """
+    return [
+        f"Couldn't create the '{source}' context module: {outcome}"
+        for source, outcome in sorted(results.items())
+        if outcome not in ("exists", "created")
+    ]
 
 
 @dataclass(frozen=True)
@@ -292,6 +309,13 @@ async def render(user_email: str) -> None:
             "Modules can't be listed or saved."
         ).classes("text-warning")
         return
+
+    # Self-healing bootstrap: directory/graph/episodic have no other way to
+    # come into existence (see SINGLETON_SOURCES above), so every page load
+    # ensures they're there. Cheap once they exist -- ensure_singleton_modules
+    # is a no-op past the first successful run.
+    for message in singleton_creation_warnings(store.ensure_singleton_modules(actor=user_email)):
+        ui.notify(message, type="warning")
 
     # Placed after the readiness check (not right below the caption): with
     # storage unconfigured we return above and never build a list, so a
