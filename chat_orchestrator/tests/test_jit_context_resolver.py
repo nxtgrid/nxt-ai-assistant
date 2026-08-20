@@ -236,3 +236,49 @@ async def test_fetch_jit_context_never_raises(monkeypatch):
     text, used = await pc._fetch_jit_context("staff.system", None)
     assert text == ""
     assert used == []
+
+
+def test_budget_resolved_keeps_everything_that_fits():
+    from orchestrator.services.jit_context_resolver import budget_resolved
+    from shared.prompts.knowledge import KnowledgeModule
+
+    a = KnowledgeModule(id="1", slug="a", title="A", summary="s", source="gdoc")
+    b = KnowledgeModule(id="2", slug="b", title="B", summary="s", source="gdoc")
+
+    kept = budget_resolved([(a, "x" * 10), (b, "y" * 10)], limit=100)
+
+    assert [m.slug for m, _ in kept] == ["a", "b"]
+
+
+def test_budget_resolved_drops_whole_modules_not_fragments():
+    from orchestrator.services.jit_context_resolver import budget_resolved
+    from shared.prompts.knowledge import KnowledgeModule
+
+    a = KnowledgeModule(id="1", slug="a", title="A", summary="s", source="gdoc")
+    b = KnowledgeModule(id="2", slug="b", title="B", summary="s", source="gdoc")
+
+    kept = budget_resolved([(a, "x" * 60), (b, "y" * 60)], limit=100)
+
+    assert len(kept) == 1
+    assert len(kept[0][1]) == 60
+
+
+def test_budget_resolved_keeps_site_scoped_material_first():
+    """Most specific, least replaceable -- same rule as budget_pinned."""
+    from orchestrator.services.jit_context_resolver import budget_resolved
+    from shared.prompts.knowledge import KnowledgeModule
+
+    general = KnowledgeModule(id="1", slug="a", title="A", summary="s", source="gdoc")
+    site = KnowledgeModule(
+        id="2", slug="z", title="Z", summary="s", source="gdoc", scope="site:ABC"
+    )
+
+    kept = budget_resolved([(general, "x" * 60), (site, "y" * 60)], limit=100)
+
+    assert [m.slug for m, _ in kept] == ["z"]
+
+
+def test_budget_resolved_on_an_empty_list_is_empty():
+    from orchestrator.services.jit_context_resolver import budget_resolved
+
+    assert budget_resolved([], limit=100) == []

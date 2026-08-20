@@ -24,6 +24,36 @@ LOGGER = get_logger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
 
+# Matches PromptLibrary's PINNED_BUDGET_CHARS. budget_pinned never sees these
+# bodies -- a provider body has no length until it resolves, which happens
+# here -- so without this one large document uncaps every prompt it is pinned
+# to.
+JIT_BUDGET_CHARS = 20000
+
+
+def budget_resolved(resolved, limit: int = JIT_BUDGET_CHARS):
+    """Fit resolved bodies into the budget by dropping whole modules.
+
+    Site-scoped material is kept first: most specific, least replaceable.
+    Mirrors shared.prompts.knowledge.budget_pinned, including never cutting
+    a document in half.
+    """
+    kept, dropped, used = [], [], 0
+    for module, text in sorted(
+        resolved, key=lambda pair: (not pair[0].is_site_scoped, pair[0].slug)
+    ):
+        if used + len(text) <= limit:
+            kept.append((module, text))
+            used += len(text)
+        else:
+            dropped.append(module)
+    if dropped:
+        LOGGER.warning(
+            f"Live context exceeded the {limit}-char budget; dropped "
+            f"{len(dropped)} module(s): {', '.join(m.slug for m in dropped)}"
+        )
+    return kept
+
 
 class JitContextResolver:
     """Resolves the provider-backed modules a prompt pins."""
@@ -57,7 +87,7 @@ class JitContextResolver:
         pinned = [m for m in chosen if m.mode == "pinned"]
         on_demand = [m for m in chosen if m.mode != "pinned"]
 
-        resolved = await self._resolve_all(pinned, ctx)
+        resolved = budget_resolved(await self._resolve_all(pinned, ctx))
 
         blocks: List[str] = []
         used: List[str] = []
