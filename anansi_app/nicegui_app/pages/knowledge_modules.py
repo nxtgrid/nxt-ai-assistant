@@ -186,12 +186,20 @@ async def render(user_email: str) -> None:
         ).classes("text-warning")
         return
 
+    # Placed after the readiness check (not right below the caption): with
+    # storage unconfigured we return above and never build a list, so a
+    # search box here would have nothing to search -- same placement logic
+    # as the Prompts page's search_input, which only ever filters a list
+    # that's actually going to render.
+    search_input = ui.input(placeholder="Search context modules…").classes("w-full")
     list_container = ui.column().classes("w-full gap-0")
 
     def refresh() -> None:
         list_container.clear()
         store.invalidate()
         rows = build_module_rows(store.all_modules())
+        all_empty = not rows
+        rows = filter_context_rows(rows, search_input.value or "")
         with list_container:
             with ui.row().classes("justify-end w-full"):
                 ui.button(
@@ -199,9 +207,15 @@ async def render(user_email: str) -> None:
                     on_click=lambda: _open_edit_dialog(None, store, refresh, user_email),
                 ).props("color=primary")
             if not rows:
-                ui.label("No context modules yet. Use /learn in Telegram to add one.").classes(
-                    "text-italic"
+                # Two different reasons for an empty list need two different
+                # messages: genuinely no modules yet (keep the /learn hint)
+                # vs. modules exist but this search matched none of them.
+                message = (
+                    "No context modules yet. Use /learn in Telegram to add one."
+                    if all_empty
+                    else "No context modules match your search."
                 )
+                ui.label(message).classes("text-italic")
                 return
             for label, group in group_module_rows(rows):
                 section = ui.expansion(f"{label}  ·  {len(group)}", value=True).classes(
@@ -212,6 +226,7 @@ async def render(user_email: str) -> None:
                     for row in group:
                         _render_row(row, store, refresh, user_email)
 
+    search_input.on_value_change(lambda: refresh())
     refresh()
 
 
