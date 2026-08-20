@@ -201,7 +201,7 @@ JIT would silently remove its budget and let one large document blow out every
 prompt. **The JIT block needs its own budget**, mirroring `budget_pinned`'s
 whole-module-drop behaviour and its warning log.
 
-### 4. Data model — migration `0018`
+### 4. Data model — migration `0027`
 
 Applied by hand against `chat_db`, per the repo's standing practice (merging the
 SQL does not apply it).

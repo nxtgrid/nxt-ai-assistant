@@ -1267,7 +1267,7 @@ CREATE TABLE IF NOT EXISTS knowledge_modules (
     CONSTRAINT knowledge_modules_source_chk
         CHECK (source IN ('manual', 'gdoc', 'ingested', 'graph', 'directory', 'episodic')),
     -- A gdoc or provider-backed module stores no body -- it resolves at
-    -- request time. See 0018_doc_backed_modules.sql.
+    -- request time. See 0027_doc_backed_modules.sql.
     CONSTRAINT knowledge_modules_body_required_chk
         CHECK (source IN ('gdoc', 'graph', 'directory', 'episodic') OR body IS NOT NULL),
     CONSTRAINT knowledge_modules_doc_audience_chk

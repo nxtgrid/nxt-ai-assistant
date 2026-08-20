@@ -1,6 +1,12 @@
--- 0018_doc_backed_modules.sql
+-- 0027_doc_backed_modules.sql
 --
 -- Apply by hand in the Supabase SQL editor against chat_db. Idempotent.
+--
+-- Originally authored as 0018 and renamed to 0027 after a numbering
+-- collision with the already-merged 0018_summarize_entity_graph.sql: this
+-- branch was cut before that file (and 0019-0026) landed on main, so the
+-- next-free-number check that should have run at authoring time never saw
+-- them. Content is unchanged from the original 0018 draft.
 --
 -- docs/superpowers/plans/2026-08-20-doc-backed-context-modules.md.
 -- A gdoc module stores no body and carries an explicit audience decision.
