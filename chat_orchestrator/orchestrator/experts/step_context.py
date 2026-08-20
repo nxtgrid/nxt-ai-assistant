@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from orchestrator.models.schemas import UserContext
@@ -483,8 +483,29 @@ class StepResult:
         progress_message: Optional message to show user during execution
         needs_user_input: If True, pause workflow and wait for user
         user_prompt: Question to ask user if needs_user_input is True
-        error: If set, step failed and workflow should stop
+        error: If set, step failed and workflow should stop. This is a
+            HARD failure -- see `soft_failure_code` below for the
+            must-not-halt alternative.
         skip_remaining: If True, skip remaining steps and complete packet
+        soft_failure_code: Set by `StepResult.soft_failure()` (Phase 3 of
+            docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md)
+            to one of `SOFT_FAILURE_CODES` -- a contract-detectable misuse
+            (wrong/missing argument, an unmet precondition, work already
+            done, a permission gap) rather than a genuine crash. Deliberately
+            NOT surfaced via `error`: `error` is what
+            `WorkflowExecutor._execute_one_step` checks to decide the whole
+            packet run should stop (see that method's `if result.error:`
+            handling) -- a soft failure must never trip that. It is meant to
+            be fed back to an LLM driving a skill step's tool-call loop as an
+            ordinary tool result the model can read and correct, not a fatal
+            error a human has to intervene on.
+        soft_failure_message: Human/LLM-readable explanation of what went
+            wrong, when `soft_failure_code` is set.
+        remediation: What the caller should do about it, when
+            `soft_failure_code` is set (e.g. "call copy_lpp_template first"
+            for `unmet_prerequisite` -- see
+            `WorkflowExecutor._soft_failure_before_running_step`, which
+            derives this from `PrereqReport.producer_chain`).
     """
 
     # Results
@@ -506,6 +527,11 @@ class StepResult:
     # Flow control
     skip_remaining: bool = False
     redirect_to_main_llm: bool = False  # Input doesn't belong to this step, route to main LLM
+
+    # Soft failure (see soft_failure_code's docstring above and soft_failure() below)
+    soft_failure_code: Optional[str] = None
+    soft_failure_message: Optional[str] = None
+    remediation: Optional[str] = None
 
     @classmethod
     def success(
@@ -576,10 +602,80 @@ class StepResult:
             progress_message=reason or "Input appears to be a new request",
         )
 
+    @classmethod
+    def soft_failure(cls, code: str, message: str, remediation: str = "") -> "StepResult":
+        """Create a result for contract-detectable misuse -- must NOT halt the run.
+
+        The whole difference from `failure()`: this leaves `error` unset, so
+        `WorkflowExecutor._execute_one_step`'s `if result.error:` halt check
+        (the thing that stops a packet's whole run) never trips. Meant to be
+        fed back to an LLM driving a skill step's tool-call loop as an
+        ordinary tool result it can read and self-correct from -- a wrong
+        call becomes something to retry differently, not a fatal error.
+
+        `code` should be one of `SOFT_FAILURE_CODES`, though this does not
+        enforce that -- callers outside this module (e.g. a step handler
+        that notices its own required parameter is missing) may need a code
+        this module didn't anticipate, and refusing to construct the result
+        would be worse than a slightly-unvalidated `code` string.
+
+        Args:
+            code: What kind of misuse this is (e.g. "unmet_prerequisite").
+            message: Human/LLM-readable explanation of what went wrong.
+            remediation: What the caller should do about it (e.g. which
+                other step to call first). Empty string, not None, when
+                there's nothing more specific to say -- keeps callers from
+                needing an `or ""` at every read site.
+
+        Returns:
+            StepResult with soft_failure_code/soft_failure_message/
+            remediation set, error left as None.
+        """
+        return cls(
+            soft_failure_code=code,
+            soft_failure_message=message,
+            remediation=remediation,
+        )
+
     @property
     def is_success(self) -> bool:
-        """Check if result indicates success."""
-        return self.error is None
+        """Check if result indicates success.
+
+        False for a soft failure too, despite `error` staying None --
+        `is_success` answers "did this step attempt actually succeed", which
+        a soft failure did not, even though it must not halt the run the way
+        `error` being set would. Callers that specifically need "did this
+        halt the run" should check `error` directly rather than this
+        property.
+        """
+        return self.error is None and self.soft_failure_code is None
+
+    @property
+    def is_soft_failure(self) -> bool:
+        """Whether this result is a soft_failure() -- convenience for callers
+        (e.g. Phase 4's tool-call routing) that need to branch on it
+        specifically, rather than inferring it from is_success being False."""
+        return self.soft_failure_code is not None
 
 
-__all__ = ["StepContext", "StepResult"]
+# Vocabulary for StepResult.soft_failure()'s `code` argument. Phase 3 of
+# docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md builds
+# automatic detection for exactly two of these --
+# WorkflowExecutor._soft_failure_before_running_step derives
+# "unmet_prerequisite" from consumes_state/produces_state and
+# "guard_satisfied" from guard_keys, both from a step's StepContract. The
+# other three are reserved vocabulary for later callers: a step handler
+# itself is the natural caller for "missing_parameter"/"invalid_parameter"
+# (nothing outside a handler can know if a parameter it read via
+# context.get_parameter_value() was well-formed), and "not_permitted" is
+# Phase 6's job (permission gating) in the same plan.
+SOFT_FAILURE_CODES: Tuple[str, ...] = (
+    "missing_parameter",
+    "invalid_parameter",
+    "unmet_prerequisite",
+    "guard_satisfied",
+    "not_permitted",
+)
+
+
+__all__ = ["SOFT_FAILURE_CODES", "StepContext", "StepResult"]

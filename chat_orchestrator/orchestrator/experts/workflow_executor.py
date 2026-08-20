@@ -2500,6 +2500,113 @@ class WorkflowExecutor:
             LOGGER.exception(f"Handler {step.name} raised exception: {e}")
             return StepResult.failure(str(e))
 
+    async def _soft_failure_before_running_step(
+        self, context: StepContext, step_name: str
+    ) -> Optional[StepResult]:
+        """Pre-flight check for calling `step_name` out of its recipe's fixed
+        order -- returns a `StepResult.soft_failure(...)` if it shouldn't run
+        right now, or `None` if it's fine to proceed.
+
+        Phase 3 of docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md.
+        This is the mechanism that lets ordering survive once a skill's tool-
+        call loop can invoke registered step handlers in whatever order an
+        LLM chooses (Phase 4, not yet wired to call this): a wrong-order call
+        gets a clear, actionable soft failure instead of a crash or silently
+        wrong behavior, naming exactly which other step to call first.
+
+        Deliberately NOT called from `_execute_function_step` itself, and
+        deliberately not merged into that method's unconditional "run the
+        handler" path. This mirrors an established pattern already in this
+        file: `run_single_step` (Phase C/D's out-of-order execution for the
+        MAIN chat LLM, further down in this file) gates BEFORE calling
+        `_execute_one_step`/`_execute_function_step`, never inside them --
+        every existing in-recipe-order call to `_execute_function_step`
+        (every production LPP/GTR/etc. run today) stays completely
+        unaffected by this method's existence, and pays none of its extra
+        DB round-trips, unless and until a caller actually invokes it.
+
+        Reuses `validate_step_prerequisites` (this class's own pure,
+        already-tested prerequisite/producer-chain reporting -- see that
+        method's docstring) rather than re-deriving "which other step
+        produces this key" here; this method's only job is translating a
+        `PrereqReport` into the `StepResult.soft_failure` vocabulary Phase 3
+        adds, plus the one check `validate_step_prerequisites` deliberately
+        doesn't do: guard_keys (see below).
+
+        Args:
+            context: The calling run's StepContext -- packet_state/
+                steps_completed/packet_inputs are read from here to build a
+                packet-shaped dict for validate_step_prerequisites, since a
+                skill run's tool-call loop has no real `packet` dict on hand
+                the way `run_single_step`'s caller does.
+            step_name: The registered step about to be called.
+
+        Returns:
+            `StepResult.soft_failure("guard_satisfied", ...)` if the
+            contract's `guard_keys` show this step's work is already done.
+            `StepResult.soft_failure("unmet_prerequisite", ...)` if
+            `consumes_state`/`consumes_results`/required `params` aren't
+            available yet, naming a producer step in `remediation` when
+            `validate_step_prerequisites` found one.
+            `None` if `step_name` has no contract (nothing to check -- same
+            "no contract, treat as satisfied" convention
+            `validate_step_prerequisites` itself uses) or every check passes.
+        """
+        contract = get_step_contract(step_name)
+        if contract is None:
+            return None
+
+        # Guard check first: work already done outranks "is it safe to start"
+        # -- there is no point telling the caller what's missing to (re)do
+        # work that doesn't need doing. Truthiness, not presence (unlike
+        # consumes_state below) -- a guard key's whole point is a flag like
+        # "cells_populated", where an explicit False means "not done yet",
+        # not "present so it's fine".
+        for guard_key in contract.guard_keys:
+            if context.get_state(guard_key):
+                return StepResult.soft_failure(
+                    code="guard_satisfied",
+                    message=(
+                        f"'{step_name}' has already run -- its guard key "
+                        f"'{guard_key}' is already set."
+                    ),
+                    remediation="No action needed; this step's work is already done.",
+                )
+
+        packet_like: Dict[str, Any] = {
+            "packet_state": context.packet_state,
+            "packet_inputs": context.packet_inputs,
+            "steps_completed": context.steps_completed,
+            "organization_id": context.effective_org_id,
+            "packet_type": context.packet_type,
+        }
+        report = await self.validate_step_prerequisites(packet_like, step_name)
+        if report.satisfied:
+            return None
+
+        missing_parts: List[str] = []
+        remediation_parts: List[str] = []
+        for key in report.missing_state:
+            missing_parts.append(key)
+            producers = report.producer_chain.get(key)
+            remediation_parts.append(
+                f"'{key}' is produced by calling {producers[0]!r} first."
+                if producers
+                else f"'{key}' has no known producer step -- it must be supplied another way."
+            )
+        for name in report.missing_results:
+            missing_parts.append(f"result of '{name}'")
+            remediation_parts.append(f"call {name!r} first.")
+        for param_name in report.missing_params:
+            missing_parts.append(f"parameter '{param_name}'")
+            remediation_parts.append(f"supply a value for '{param_name}'.")
+
+        return StepResult.soft_failure(
+            code="unmet_prerequisite",
+            message=f"'{step_name}' is missing: {', '.join(missing_parts)}.",
+            remediation=" ".join(remediation_parts),
+        )
+
     async def _execute_llm_step(
         self,
         step: ParsedStep,
