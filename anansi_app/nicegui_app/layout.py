@@ -22,7 +22,7 @@ PAGE_BG = "#f0f2f6"
 OPERATIONS_NAV = [
     ("/tickets", "🎫 Tickets"),
     ("/conversations", "💬 Chats"),
-    ("/agents", "📊 System Ops"),
+    ("/agents", "📊 Runs"),
     ("/skills", "🧩 Skills"),
 ]
 
@@ -205,14 +205,18 @@ def frame(user: dict[str, Any], current_path: str):
 
         ui.separator().style("background-color: #334155")
 
+        # Grid Design renders first in the sidebar, but which section starts
+        # expanded is still driven purely by current_path below (default
+        # landing is /tickets, so Operations opens by default regardless of
+        # render order here).
+        if can_grid:
+            _render_grid_nav(current_path, expanded=is_grid_page)
+            if can_admin:
+                ui.separator().style("background-color: #334155")
         if can_admin:
             _render_operations_nav(current_path, expanded=is_operations_page)
             ui.separator().style("background-color: #334155")
             _render_bot_admin_nav(current_path, expanded=is_bot_admin_page)
-        if can_grid:
-            if can_admin:
-                ui.separator().style("background-color: #334155")
-            _render_grid_nav(current_path, expanded=is_grid_page)
 
     with ui.column().classes("w-full").style("max-width: 1200px; padding: 1rem 1.5rem;") as content:
         yield content
