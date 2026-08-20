@@ -70,6 +70,7 @@ from orchestrator.experts.step_registry import (
     get_step_registry,
 )
 from orchestrator.experts.step_tool_schema import (
+    caller_holds_permission,
     function_step_tool_declarations,
     is_declared_function_step,
 )
@@ -3047,8 +3048,12 @@ class WorkflowExecutor:
         """Run one tool call that names a registered step handler.
 
         Caller (`_execute_skill_step_tool_call`) has already confirmed
-        `call.name` clears `is_declared_function_step` -- this method trusts
-        that and does not re-check contract/permission/allow_write itself.
+        `call.name` clears `is_declared_function_step` -- the STRUCTURAL
+        half (contract exists, mutation/allow_write gate). This method
+        trusts that and does not re-check it. Permission is the ONE thing
+        it does re-check itself (Phase 6) -- see step_tool_schema.py's
+        module docstring addendum for why that check is deliberately not
+        folded into `is_declared_function_step`.
 
         Args:
             mock_override: The calling `[llm]` step's own `ParsedStep.mock`
@@ -3058,8 +3063,11 @@ class WorkflowExecutor:
                 `None` defers to `context.dry_run`, same as everywhere else
                 `mock` is consulted.
 
-        Three things happen, in order:
-        1. Caller-supplied arguments are fed into the two seams a handler
+        Four things happen, in order:
+        1. `caller_holds_permission` (Phase 6, Task 6.1) -- a caller who
+           doesn't hold `contract.required_permission` gets an explicit
+           `not_permitted` soft failure, never reaching the handler.
+        2. Caller-supplied arguments are fed into the two seams a handler
            actually reads from -- `contract.params` via the existing
            `context.set_parameter_override` (the same mechanism the
            parameter-confirmation flow and `run_single_step`'s
@@ -3075,10 +3083,10 @@ class WorkflowExecutor:
            Unrecognized argument names are ignored, not rejected -- the
            precondition check below is what actually decides whether the
            handler has what it needs.
-        2. `_soft_failure_before_running_step` (Phase 3) runs BEFORE the
+        3. `_soft_failure_before_running_step` (Phase 3) runs BEFORE the
            handler -- a guard-already-satisfied or unmet-precondition call
            never reaches `_execute_function_step` at all.
-        3. Otherwise the handler runs via `_execute_function_step`, exactly
+        4. Otherwise the handler runs via `_execute_function_step`, exactly
            as a top-level recipe step would (same never-raise contract:
            handler exceptions already become `StepResult.failure`).
 
@@ -3098,14 +3106,27 @@ class WorkflowExecutor:
                 tool_call_id=call.tool_call_id,
             )
 
-        param_names = {param.name for param in contract.params}
-        for key, value in (call.arguments or {}).items():
-            if key in param_names:
-                context.set_parameter_override(key, value)
-            elif key in contract.consumes_state:
-                context.packet_state[key] = value
+        result: Optional[StepResult] = None
+        if not caller_holds_permission(contract.required_permission, context.user_context):
+            result = StepResult.soft_failure(
+                code="not_permitted",
+                message=(
+                    f"'{call.name}' requires the {contract.required_permission!r} "
+                    "permission, which this caller does not hold."
+                ),
+                remediation="Ask a user with that permission to run this step instead.",
+            )
 
-        result = await self._soft_failure_before_running_step(context, call.name)
+        if result is None:
+            param_names = {param.name for param in contract.params}
+            for key, value in (call.arguments or {}).items():
+                if key in param_names:
+                    context.set_parameter_override(key, value)
+                elif key in contract.consumes_state:
+                    context.packet_state[key] = value
+
+            result = await self._soft_failure_before_running_step(context, call.name)
+
         if result is None:
             step = ParsedStep(
                 index=0,
@@ -3165,11 +3186,16 @@ class WorkflowExecutor:
           filtered the same way, but by the contract's actual `mutates`
           flag rather than a name prefix (see that module's `_is_offerable`
           docstring for why the two lists use different mutation signals).
+          Also filtered by `context.user_context` against each contract's
+          `required_permission` (Phase 6) -- a step this caller doesn't
+          hold the permission for is never declared to them at all.
         """
         permissions_service = get_permissions_service()
         all_tools = await permissions_service.get_available_tools(context.user_context)
         mcp_tools = filter_tools_for_step(all_tools or [], allow_write=step.allow_write)
-        function_tools = function_step_tool_declarations(allow_write=step.allow_write)
+        function_tools = function_step_tool_declarations(
+            allow_write=step.allow_write, user_context=context.user_context
+        )
         return mcp_tools + function_tools
 
     def _extract_finish_reason(self, response: Dict[str, Any]) -> Optional[str]:

@@ -26,14 +26,35 @@ Two facts from the design spec shape everything below:
    checks before the handler ever runs -- not a tool argument. Declaring it
    as an argument anyway would invite the model to invent a value for
    something only a prior call can legitimately produce.
+
+Phase 6 addendum -- declare-time and route-time permission checking are
+DELIBERATELY two different functions, not one shared predicate the way
+structural offerability (`_is_offerable`) is:
+- `function_step_tool_declarations` calls `caller_holds_permission` itself,
+  so a caller who doesn't hold a step's `required_permission` never even
+  sees it declared -- a UX choice (don't dangle an unusable tool in front
+  of the model) with no security weight of its own.
+- `is_declared_function_step` does NOT check permission at all. A
+  permission-gated call that clears the structural bar still routes to
+  `WorkflowExecutor._execute_declared_function_step_call`, which calls
+  `caller_holds_permission` itself and returns an explicit `not_permitted`
+  soft failure (Task 6.1: "check required_permission at call time"). THIS
+  is the actual enforcement boundary -- re-checked at the moment of
+  execution regardless of what was declared, so a call for a name that
+  looked fine in an earlier tools_payload (e.g. permissions changed
+  mid-run, or the name was never legitimately declared at all) is still
+  caught, rather than trusted because routing let it through.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 
 from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import get_step_contract, get_step_registry
+
+if TYPE_CHECKING:
+    from orchestrator.models.schemas import UserContext
 
 # StepContract/ParamSpec/OutputSpec's value_type strings map to Gemini's
 # function-declaration type enum the same way UserPermissionsService's own
@@ -155,25 +176,22 @@ def derive_tool_declaration(
 
 
 def _is_offerable(contract: Optional[StepContract], *, allow_write: bool) -> bool:
-    """Single predicate for "may this step be offered/called as a tool right now?"
+    """Single STRUCTURAL predicate for "does this step even exist as a
+    routable tool right now?" -- deliberately says nothing about permission;
+    see `caller_holds_permission` below for that, and this module's
+    docstring addendum on why the two are checked separately.
 
     Shared by `function_step_tool_declarations` (what gets offered to the
     model) and `is_declared_function_step` (what
     `WorkflowExecutor._execute_skill_step_tool_call` will actually route to a
-    real handler for) so the two can never drift -- a name never declared
-    can never be routed either, even if a call for it arrives anyway (a
-    hallucinated name, or a stale tools_payload from an earlier, more
-    permissive round). See Task 4.3: "No contract => not offered."
+    real handler for) so the two can never drift on STRUCTURE -- a name with
+    no contract, or a mutating name called from a non-allow_write step, is
+    excluded identically at both surfaces. See Task 4.3: "No contract => not
+    offered."
 
     Two bars, both must clear:
     - No contract at all: excluded outright (nothing to validate an
       unknown-shaped call against).
-    - `required_permission` set: excluded outright for now. This module has
-      no caller/user context to check a specific permission grant against --
-      Phase 6 of the skills plan is chartered to build that. Until it does,
-      the conservative default is to withhold the declaration entirely
-      rather than declare a gated tool and rely on a call-time check that
-      doesn't exist yet.
     - `mutates=True` and `allow_write=False`: excluded. Mirrors
       `skill_step_bindings.filter_tools_for_step`'s existing read-only gate
       for MCP tools -- same intent (a step not explicitly marked
@@ -184,21 +202,63 @@ def _is_offerable(contract: Optional[StepContract], *, allow_write: bool) -> boo
     """
     if contract is None:
         return False
-    if contract.required_permission:
-        return False
     if contract.mutates and not allow_write:
         return False
     return True
 
 
-def function_step_tool_declarations(*, allow_write: bool = False) -> List[Dict[str, Any]]:
-    """All contract-bearing, permission-cleared registered steps, as tool declarations.
+def caller_holds_permission(
+    required_permission: str, user_context: Optional["UserContext"]
+) -> bool:
+    """Whether `user_context` clears `required_permission` (Phase 6 of
+    docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md).
+
+    `required_permission` names a role a caller must hold in
+    `user_context.roles` -- reusing that existing, already-modeled field
+    (see `orchestrator.models.schemas.UserContext`) rather than inventing a
+    second permission-name vocabulary. `is_staff=True` always clears any
+    gate regardless of `roles` content, matching the ONE authorization
+    boundary actually enforced elsewhere in this codebase today
+    (`UserPermissionsService._filter_and_convert_tools`'s customer-visible-
+    tools filter) -- staff already sees everything non-staff doesn't, and a
+    step-level permission gate that staff couldn't clear would be a new,
+    narrower boundary than anything else in the app, not a consistent one.
+
+    An empty `required_permission` always clears (nothing required). No
+    `user_context` at all (None) never clears a non-empty requirement --
+    absence of identity is not a permission grant.
+    """
+    if not required_permission:
+        return True
+    if user_context is None:
+        return False
+    if getattr(user_context, "is_staff", False):
+        return True
+    return required_permission in (getattr(user_context, "roles", None) or [])
+
+
+def function_step_tool_declarations(
+    *, allow_write: bool = False, user_context: Optional["UserContext"] = None
+) -> List[Dict[str, Any]]:
+    """All contract-bearing, structurally-offerable, permission-cleared
+    registered steps this specific caller may see, as tool declarations.
 
     Args:
         allow_write: Mirrors `ParsedStep.allow_write` for the calling skill
             step. `False` (the default, matching every step's own default)
             withholds every `mutates=True` step's declaration entirely --
             see `_is_offerable`.
+        user_context: The calling run's `StepContext.user_context`. `None`
+            (the default) withholds every permission-gated step's
+            declaration entirely -- same conservative default Phase 4 used
+            before this parameter existed, now scoped specifically to
+            "no identity to check" rather than "no permission checking
+            exists yet". A permission-gated step this caller doesn't hold
+            is simply never declared (hidden, not offered-then-rejected --
+            declare-time is a UX choice, unlike the explicit `not_permitted`
+            soft failure `WorkflowExecutor._execute_declared_function_step_call`
+            returns for a call that reaches it anyway; see that method's
+            own permission check, which is the actual enforcement boundary).
 
     Returns:
         Declarations sorted by name for a stable, diffable order (tests and
@@ -218,6 +278,7 @@ def function_step_tool_declarations(*, allow_write: bool = False) -> List[Dict[s
         derive_tool_declaration(name, contract, producible)
         for name, contract in all_contracts.items()
         if _is_offerable(contract, allow_write=allow_write)
+        and caller_holds_permission(contract.required_permission, user_context)
     ]
     declarations.sort(key=lambda d: d["name"])
     return declarations
@@ -227,18 +288,31 @@ def is_declared_function_step(name: str, *, allow_write: bool = False) -> bool:
     """Whether `call.name` should route to a real step handler, not MCP.
 
     Used by `WorkflowExecutor._execute_skill_step_tool_call` for routing.
-    Reuses `_is_offerable` -- the exact predicate that decided whether `name`
-    was declared to the model in the first place -- so routing can never be
-    more permissive than declaration. A name that fails this (no contract,
-    permission-gated, or a mutating step called from a non-`allow_write`
-    step) falls through to the existing `context.mcp_executor` path, which
-    fails it cleanly as an unknown tool via that path's existing never-raise
-    contract -- never silently runs an unvetted or ungated handler.
+    Reuses `_is_offerable` -- the STRUCTURAL half of the predicate that
+    decided whether `name` was declared to the model in the first place --
+    so routing can never be more permissive on contract/mutation shape than
+    declaration. A name that fails this (no contract, or a mutating step
+    called from a non-`allow_write` step) falls through to the existing
+    `context.mcp_executor` path, which fails it cleanly as an unknown tool
+    via that path's existing never-raise contract -- never silently runs an
+    unvetted or ungated handler.
+
+    Deliberately does NOT check permission (unlike Phase 4/5, this is no
+    longer the same predicate `function_step_tool_declarations` uses in
+    full) -- a permission-gated name that clears the structural bar still
+    routes to `_execute_declared_function_step_call`, which checks
+    `caller_holds_permission` itself and returns an explicit
+    `not_permitted` soft failure. Routing a permission-gated call through to
+    a real, actionable rejection (Task 6.1: "check required_permission at
+    call time") is more useful to the model than falling through to MCP,
+    which would fail it as a generic unknown-tool error with no indication
+    of why.
     """
     return _is_offerable(get_step_contract(name), allow_write=allow_write)
 
 
 __all__ = [
+    "caller_holds_permission",
     "derive_tool_declaration",
     "function_step_tool_declarations",
     "is_declared_function_step",

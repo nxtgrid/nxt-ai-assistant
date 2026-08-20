@@ -1,17 +1,20 @@
-"""Tests for step_tool_schema.py (Phase 4 of
+"""Tests for step_tool_schema.py (Phase 4, extended by Phase 6, of
 docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md).
 
-Three things are covered, matching Task 4.4:
+Four things are covered:
 
 - `TestDeriveToolDeclaration` / `TestProducibleStateKeys`: schema shape --
   `derive_tool_declaration` builds a well-formed Gemini-format function
   declaration, `consumes_state` keys with a known producer are excluded
   (fact 2 in the module docstring), `params` and `outputs` are represented.
 - `TestIsOfferable` (via `is_declared_function_step`) /
-  `TestFunctionStepToolDeclarations`: the contract-bearing/permission-
-  cleared/allow_write gate, and that declaration and routing can never
-  disagree about a given name (the single-predicate guarantee
-  `_is_offerable` exists for).
+  `TestFunctionStepToolDeclarations`: the STRUCTURAL contract-bearing/
+  allow_write gate, and that declaration and routing can never disagree
+  about a given name on that structural question (the single-predicate
+  guarantee `_is_offerable` exists for).
+- `TestCallerHoldsPermission` (Phase 6, Task 6.1): the SEPARATE permission
+  check, and `TestIsDeclaredFunctionStep`'s last test for why it is
+  deliberately not folded into the shared structural predicate.
 - `TestUnknownName`: a name with no registered contract at all is never
   offerable -- this is what lets `WorkflowExecutor._execute_skill_step_tool_call`
   fall through to the existing MCP path (and its existing never-raise
@@ -27,6 +30,8 @@ membership checks (`in`), never as exact-list equality.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import pytest
 
 from orchestrator.experts.step_contracts import OutputSpec, ParamSpec, StepContract
@@ -34,6 +39,7 @@ from orchestrator.experts.step_registry import get_step_registry
 from orchestrator.experts.step_tool_schema import (
     _is_offerable,
     _producible_state_keys,
+    caller_holds_permission,
     derive_tool_declaration,
     function_step_tool_declarations,
     is_declared_function_step,
@@ -184,7 +190,10 @@ class TestProducibleStateKeys:
 
 
 class TestIsOfferable:
-    """The gate shared by declaration and routing (Task 4.3)."""
+    """The STRUCTURAL gate shared by declaration and routing (Task 4.3) --
+    contract existence and the mutation/allow_write bar only. Permission
+    (Phase 6) is a separate, later concern -- see TestCallerHoldsPermission
+    and step_tool_schema.py's module docstring addendum."""
 
     def test_no_contract_is_never_offerable(self):
         assert _is_offerable(None, allow_write=True) is False
@@ -192,15 +201,53 @@ class TestIsOfferable:
     def test_plain_non_mutating_contract_is_offerable(self):
         assert _is_offerable(StepContract(), allow_write=False) is True
 
-    def test_required_permission_withholds_regardless_of_allow_write(self):
+    def test_required_permission_alone_does_not_affect_offerability(self):
+        """Phase 6: _is_offerable no longer knows about required_permission
+        at all -- that moved to caller_holds_permission, checked separately
+        at declare-time (function_step_tool_declarations) and call-time
+        (_execute_declared_function_step_call)."""
         contract = StepContract(required_permission="staff_only")
-        assert _is_offerable(contract, allow_write=True) is False
-        assert _is_offerable(contract, allow_write=False) is False
+        assert _is_offerable(contract, allow_write=True) is True
+        assert _is_offerable(contract, allow_write=False) is True
 
     def test_mutating_contract_needs_allow_write(self):
         contract = StepContract(mutates=True)
         assert _is_offerable(contract, allow_write=False) is False
         assert _is_offerable(contract, allow_write=True) is True
+
+
+class TestCallerHoldsPermission:
+    """Phase 6 (docs/superpowers/plans/2026-08-20-expert-steps-as-skill-
+    tools.md), Task 6.1."""
+
+    def test_empty_requirement_always_clears(self):
+        assert caller_holds_permission("", None) is True
+        assert caller_holds_permission("", MagicMock(is_staff=False, roles=[])) is True
+
+    def test_no_user_context_never_clears_a_real_requirement(self):
+        assert caller_holds_permission("staff_only", None) is False
+
+    def test_staff_clears_any_requirement_regardless_of_roles(self):
+        user_context = MagicMock(is_staff=True, roles=[])
+        assert caller_holds_permission("staff_only", user_context) is True
+
+    def test_non_staff_with_the_named_role_clears(self):
+        user_context = MagicMock(is_staff=False, roles=["telegram_send"])
+        assert caller_holds_permission("telegram_send", user_context) is True
+
+    def test_non_staff_without_the_named_role_does_not_clear(self):
+        user_context = MagicMock(is_staff=False, roles=["some_other_role"])
+        assert caller_holds_permission("telegram_send", user_context) is False
+
+    def test_non_staff_with_no_roles_at_all_does_not_clear(self):
+        user_context = MagicMock(is_staff=False, roles=[])
+        assert caller_holds_permission("telegram_send", user_context) is False
+
+    def test_missing_roles_attribute_does_not_crash(self):
+        """A duck-typed user_context (e.g. a test double) with no `roles`
+        attribute at all must not raise -- treated as no roles held."""
+        user_context = MagicMock(spec=["is_staff"], is_staff=False)
+        assert caller_holds_permission("telegram_send", user_context) is False
 
 
 class TestFunctionStepToolDeclarations:
@@ -254,6 +301,46 @@ class TestFunctionStepToolDeclarations:
         by_name = {d["name"]: d for d in function_step_tool_declarations()}
         assert "zzz_test_key" not in by_name["zzz_test_consumer"]["parameters"]["properties"]
 
+    # Phase 6: permission-gated declarations are hidden from a caller who
+    # doesn't hold the required permission, declared to one who does.
+
+    def test_excludes_a_permission_gated_step_with_no_user_context(self, _cleanup_registry):
+        _cleanup_registry(
+            "zzz_test_gated", contract=StepContract(required_permission="staff_only")
+        )
+        names = {d["name"] for d in function_step_tool_declarations()}
+        assert "zzz_test_gated" not in names
+
+    def test_excludes_a_permission_gated_step_for_a_non_qualifying_caller(
+        self, _cleanup_registry
+    ):
+        _cleanup_registry(
+            "zzz_test_gated", contract=StepContract(required_permission="staff_only")
+        )
+        user_context = MagicMock(is_staff=False, roles=[])
+        names = {d["name"] for d in function_step_tool_declarations(user_context=user_context)}
+        assert "zzz_test_gated" not in names
+
+    def test_includes_a_permission_gated_step_for_a_qualifying_staff_caller(
+        self, _cleanup_registry
+    ):
+        _cleanup_registry(
+            "zzz_test_gated", contract=StepContract(required_permission="staff_only")
+        )
+        user_context = MagicMock(is_staff=True, roles=[])
+        names = {d["name"] for d in function_step_tool_declarations(user_context=user_context)}
+        assert "zzz_test_gated" in names
+
+    def test_includes_a_permission_gated_step_for_a_caller_with_the_named_role(
+        self, _cleanup_registry
+    ):
+        _cleanup_registry(
+            "zzz_test_gated", contract=StepContract(required_permission="telegram_send")
+        )
+        user_context = MagicMock(is_staff=False, roles=["telegram_send"])
+        names = {d["name"] for d in function_step_tool_declarations(user_context=user_context)}
+        assert "zzz_test_gated" in names
+
     # No test here asserts a specific REAL production contract name (e.g.
     # "copy_lpp_template") is present in function_step_tool_declarations()'s
     # output. get_step_registry() is a process-wide singleton, and
@@ -271,7 +358,11 @@ class TestFunctionStepToolDeclarations:
 
 
 class TestIsDeclaredFunctionStep:
-    """No-drift guarantee: declared and routable must always agree."""
+    """No-drift guarantee on the STRUCTURAL half (contract exists,
+    mutation/allow_write gate) -- declared and routable must always agree
+    on that. Permission (Phase 6) is DELIBERATELY NOT part of this
+    guarantee any more; see the last test below and step_tool_schema.py's
+    module docstring addendum."""
 
     def test_agrees_with_function_step_tool_declarations_for_a_plain_step(
         self, _cleanup_registry
@@ -291,6 +382,25 @@ class TestIsDeclaredFunctionStep:
             assert ("zzz_test_mutator" in declared_names) == is_declared_function_step(
                 "zzz_test_mutator", allow_write=allow_write
             )
+
+    def test_a_permission_gated_step_is_routable_even_when_not_declared_to_this_caller(
+        self, _cleanup_registry
+    ):
+        """The one deliberate divergence (Phase 6): a permission-gated step
+        is hidden from a non-qualifying caller at declare-time, but STILL
+        structurally routable -- WorkflowExecutor._execute_declared_function_step_call
+        is what actually rejects the call, with an explicit not_permitted
+        soft failure, not a fallthrough to a confusing generic MCP error."""
+        _cleanup_registry(
+            "zzz_test_gated", contract=StepContract(required_permission="staff_only")
+        )
+        user_context = MagicMock(is_staff=False, roles=[])
+        declared_names = {
+            d["name"] for d in function_step_tool_declarations(user_context=user_context)
+        }
+
+        assert "zzz_test_gated" not in declared_names  # hidden from this caller
+        assert is_declared_function_step("zzz_test_gated") is True  # still routable
 
 
 class TestUnknownName:

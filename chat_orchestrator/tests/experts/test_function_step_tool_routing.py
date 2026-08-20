@@ -9,18 +9,23 @@ Drive/Sheets API calls) -- registered and unregistered per-test via
 `_cleanup_registry`, exactly like `test_soft_failures.py` and
 `test_step_tool_schema.py`.
 
-Four things are covered:
+Things covered:
 
 - `TestRoutingByName`: a call only reaches a real handler when
-  `is_declared_function_step` would also have declared it (contract-bearing,
-  permission-cleared, and mutating steps additionally gated by
-  `allow_write`) -- anything else, including a totally unknown name, falls
-  through to `context.mcp_executor` and fails cleanly through ITS existing
-  never-raise contract, never a crash.
+  `is_declared_function_step` would also have declared it -- STRUCTURALLY
+  (contract-bearing, mutating steps additionally gated by `allow_write`;
+  permission is no longer part of this predicate as of Phase 6, see
+  `TestPermissionGating`) -- anything else, including a totally unknown
+  name, falls through to `context.mcp_executor` and fails cleanly through
+  ITS existing never-raise contract, never a crash.
 - `TestArgumentInjection`: caller-supplied arguments reach the handler via
   the two real seams it reads from (`context.set_parameter_override` for
   `params`, `context.packet_state` for `consumes_state`), and an
   unrecognized argument is silently ignored, not rejected.
+- `TestPermissionGating` (Phase 6): `_execute_declared_function_step_call`'s
+  own `caller_holds_permission` check -- a permission-gated step IS
+  structurally routable, but a non-qualifying caller gets an explicit
+  `not_permitted` soft failure before the handler ever runs.
 - `TestPreconditionGating`: `_soft_failure_before_running_step` (Phase 3)
   runs before the handler and can prevent it from running at all --
   guard-already-satisfied and unmet-prerequisite alike.
@@ -195,9 +200,15 @@ class TestRoutingByName:
         assert result.success is True
 
     @pytest.mark.asyncio
-    async def test_permission_gated_step_falls_through_to_mcp_even_with_allow_write(
+    async def test_permission_gated_step_routes_but_the_handler_never_runs(
         self, executor, step_context, _cleanup_registry
     ):
+        """Phase 6: a permission-gated step IS structurally routable (unlike
+        the Phase 4/5 behavior this test used to assert) -- it reaches
+        _execute_declared_function_step_call, which rejects it with an
+        explicit not_permitted soft failure BEFORE the handler runs, rather
+        than falling through to a generic MCP unknown-tool error. See
+        TestPermissionGating below for the full behavior."""
         was_called = False
 
         async def handler(ctx):
@@ -208,12 +219,17 @@ class TestRoutingByName:
         _cleanup_registry(
             "zzz_test_gated", handler, contract=StepContract(required_permission="staff_only")
         )
+        step_context.user_context = MagicMock(is_staff=False, roles=[])
         call = FunctionCall(name="zzz_test_gated", arguments={})
 
-        await executor._execute_skill_step_tool_call(call, step_context, allow_write=True)
+        result = await executor._execute_skill_step_tool_call(
+            call, step_context, allow_write=True
+        )
 
         assert was_called is False
-        step_context.mcp_executor.call_tool.assert_called_once()
+        step_context.mcp_executor.call_tool.assert_not_called()
+        assert result.success is False
+        assert "staff_only" in result.error
 
 
 class TestArgumentInjection:
@@ -293,6 +309,103 @@ class TestArgumentInjection:
         assert was_called is True
         assert result.success is True
         assert step_context.get_state("document_id") == "doc-123"
+
+
+class TestPermissionGating:
+    """Phase 6 (docs/superpowers/plans/2026-08-20-expert-steps-as-skill-
+    tools.md), Task 6.1: _execute_declared_function_step_call's own
+    caller_holds_permission check, re-verified at call time regardless of
+    what routing/declaration already decided."""
+
+    @pytest.mark.asyncio
+    async def test_non_qualifying_caller_gets_not_permitted_without_running_the_handler(
+        self, executor, step_context, _cleanup_registry
+    ):
+        was_called = False
+
+        async def handler(ctx):
+            nonlocal was_called
+            was_called = True
+            return StepResult.success()
+
+        _cleanup_registry(
+            "zzz_test_gated", handler, contract=StepContract(required_permission="staff_only")
+        )
+        step_context.user_context = MagicMock(is_staff=False, roles=[])
+        call = FunctionCall(name="zzz_test_gated", arguments={})
+
+        result = await executor._execute_skill_step_tool_call(call, step_context)
+
+        assert was_called is False
+        assert result.success is False
+        assert "zzz_test_gated" in result.error
+        assert "staff_only" in result.error
+
+    @pytest.mark.asyncio
+    async def test_staff_caller_clears_the_gate_and_the_handler_runs(
+        self, executor, step_context, _cleanup_registry
+    ):
+        async def handler(ctx):
+            return StepResult.success(data={"ok": True})
+
+        _cleanup_registry(
+            "zzz_test_gated", handler, contract=StepContract(required_permission="staff_only")
+        )
+        step_context.user_context = MagicMock(is_staff=True, roles=[])
+        call = FunctionCall(name="zzz_test_gated", arguments={})
+
+        result = await executor._execute_skill_step_tool_call(call, step_context)
+
+        assert result.success is True
+        assert result.output == {"ok": True}
+
+    @pytest.mark.asyncio
+    async def test_caller_with_the_named_role_clears_the_gate(
+        self, executor, step_context, _cleanup_registry
+    ):
+        async def handler(ctx):
+            return StepResult.success()
+
+        _cleanup_registry(
+            "zzz_test_gated", handler, contract=StepContract(required_permission="telegram_send")
+        )
+        step_context.user_context = MagicMock(is_staff=False, roles=["telegram_send"])
+        call = FunctionCall(name="zzz_test_gated", arguments={})
+
+        result = await executor._execute_skill_step_tool_call(call, step_context)
+
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_no_required_permission_is_unaffected(
+        self, executor, step_context, _cleanup_registry
+    ):
+        """Regression: an ungated step must not be swept up by this check at
+        all -- empty required_permission always clears."""
+        async def handler(ctx):
+            return StepResult.success()
+
+        _cleanup_registry("zzz_test_step", handler, contract=StepContract())
+        step_context.user_context = MagicMock(is_staff=False, roles=[])
+        call = FunctionCall(name="zzz_test_step", arguments={})
+
+        result = await executor._execute_skill_step_tool_call(call, step_context)
+
+        assert result.success is True
+
+    @pytest.mark.asyncio
+    async def test_denied_call_does_not_pollute_accumulated_results(
+        self, executor, step_context, _cleanup_registry
+    ):
+        _cleanup_registry(
+            "zzz_test_gated", lambda ctx: None, contract=StepContract(required_permission="x")
+        )
+        step_context.user_context = MagicMock(is_staff=False, roles=[])
+        call = FunctionCall(name="zzz_test_gated", arguments={})
+
+        await executor._execute_skill_step_tool_call(call, step_context)
+
+        assert step_context.get_previous_result("zzz_test_gated") is None
 
 
 class TestPreconditionGating:
