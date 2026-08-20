@@ -1,7 +1,6 @@
 """The on-demand tier's fetch tool."""
 
 import pytest
-
 from servers.knowledge_server.knowledge_mcp_server import fetch_knowledge_module
 
 
