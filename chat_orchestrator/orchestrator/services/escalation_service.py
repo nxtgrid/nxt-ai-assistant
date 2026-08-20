@@ -51,6 +51,17 @@ _DEFAULT_TZ = ZoneInfo(os.getenv("DEFAULT_TIMEZONE", "UTC"))
 # doesn't over-block sessions the legacy check never blocked.
 _NON_BLOCKING_ESCALATION_REASONS = ("safety_escalation", "system_error")
 
+# _record_canonical_escalation's delivery-receipt write is a upsert keyed on
+# (channel, external_chat_id, external_message_id), so re-sending the exact
+# same payload after a transient failure is safe -- it just re-applies the
+# same conflict resolution, no duplicate row risk. That safety is what makes
+# it retry-worthy (unlike the escalations insert just before it, which is
+# not retried: a plain insert is not idempotent, and by the time the
+# delivery write would run, that insert has already either succeeded or the
+# whole dual-write already bailed out).
+_DELIVERY_RECORD_MAX_ATTEMPTS = 3
+_DELIVERY_RECORD_RETRY_DELAY_SECONDS = 0.5
+
 # ---------------------------------------------------------------------------
 # Module-level shared resources
 # ---------------------------------------------------------------------------
@@ -244,11 +255,22 @@ class EscalationService:
         reason: Optional[str] = None,
         ticket_id: Optional[str] = None,
     ) -> None:
-        """Best-effort dual-write: canonical ``escalations`` row + its Telegram
-        delivery receipt, mirroring the legacy ``escalation_mappings`` insert
-        this always follows. A failure here only leaves the canonical mirror
-        incomplete for this escalation -- the legacy row (already written)
-        remains the source of truth until cutover.
+        """Dual-write: canonical ``escalations`` row + its Telegram delivery
+        receipt. There is no cross-table transaction here (two separate
+        PostgREST calls), so this can't be made fully atomic without a
+        database-side RPC -- instead the two halves are handled by their own
+        failure risk. The ``escalations`` insert is not retried (a plain
+        insert is not safely repeatable) -- if it fails, there is no
+        canonical row at all and nothing downstream to fix, so we stop
+        there. The delivery-receipt write below IS retried: it's an upsert
+        keyed on (channel, external_chat_id, external_message_id), so
+        replaying the same payload after a transient failure is safe. Any
+        canonical-reads consumer that needs the Telegram message id (the
+        old-escalations alert's [View] link, staff-reply routing,
+        reactivate_escalation, ...) is unrecoverable for this escalation if
+        the retries are also exhausted -- callers must not let that turn
+        into a customer-facing failure, since the Telegram message really
+        was sent.
 
         ``reason`` is persisted so a canonical-reads consumer (see
         ``is_session_escalated``) can reproduce the legacy "non-blocking
@@ -267,23 +289,58 @@ class EscalationService:
             chat_session_uuid = await self._resolve_chat_session_uuid(session_id)
             if chat_session_uuid is None:
                 return
-            await self._escalations.create(
-                escalation_id, chat_session_uuid, reason=reason, ticket_id=ticket_id
-            )
-            await self._deliveries.record(
-                ticket_id=ticket_id,
-                escalation_id=escalation_id,
-                purpose="escalation",
-                external_chat_id=str(self._escalation_chat_id),
-                external_topic_id=str(topic_id) if topic_id is not None else None,
-                external_message_id=int(message_id),
-            )
         except Exception:
             LOGGER.warning(
-                "Failed to dual-write canonical escalation {} to canonical tables",
+                "Failed to resolve chat session for canonical escalation {}",
                 escalation_id,
                 exc_info=True,
             )
+            return
+
+        try:
+            await self._escalations.create(
+                escalation_id, chat_session_uuid, reason=reason, ticket_id=ticket_id
+            )
+        except Exception:
+            LOGGER.warning(
+                "Failed to write canonical escalation {} -- no canonical row "
+                "will exist for it",
+                escalation_id,
+                exc_info=True,
+            )
+            return
+
+        for attempt in range(1, _DELIVERY_RECORD_MAX_ATTEMPTS + 1):
+            try:
+                await self._deliveries.record(
+                    ticket_id=ticket_id,
+                    escalation_id=escalation_id,
+                    purpose="escalation",
+                    external_chat_id=str(self._escalation_chat_id),
+                    external_topic_id=str(topic_id) if topic_id is not None else None,
+                    external_message_id=int(message_id),
+                )
+                return
+            except Exception:
+                if attempt < _DELIVERY_RECORD_MAX_ATTEMPTS:
+                    LOGGER.warning(
+                        "Delivery-receipt write failed for escalation {} "
+                        "(attempt {}/{}) -- retrying",
+                        escalation_id,
+                        attempt,
+                        _DELIVERY_RECORD_MAX_ATTEMPTS,
+                    )
+                    await asyncio.sleep(_DELIVERY_RECORD_RETRY_DELAY_SECONDS)
+                else:
+                    LOGGER.error(
+                        "Escalation {} was created but its Telegram delivery "
+                        "receipt could not be recorded after {} attempts -- "
+                        "it will be untraceable (no [View] link, no reply "
+                        "routing) until manually reconciled in Supabase",
+                        escalation_id,
+                        _DELIVERY_RECORD_MAX_ATTEMPTS,
+                        exc_info=True,
+                    )
 
     async def escalate_to_support(
         self,
@@ -2598,13 +2655,19 @@ class EscalationService:
             if full:
                 old_escalations.append(full)
         if old_escalations and self._escalation_chat_id:
-            old_count = len(old_escalations)
-            lines = [
-                f"⚠️ *{old_count} escalation{'s' if old_count > 1 else ''} "
-                f"older than {max_age_hours}h with no ticket:*"
-            ]
             chat_id_str = str(self._escalation_chat_id)
             channel_id = chat_id_str[4:] if chat_id_str.startswith("-100") else None
+            # A bare, unlinked bullet isn't actionable — the Track/Close buttons
+            # only exist on the original Telegram message, so staff can't do
+            # anything with a name alone (replying to the alert itself, e.g.
+            # "close", has no handler). Only render entries whose message we can
+            # actually link to; escalations with no resolvable delivery receipt
+            # (see DeliveryRepository.find_by_escalation -- the canonical
+            # dual-write in _record_canonical_escalation is best-effort and can
+            # leave this unresolvable) are counted in a footer instead of shown
+            # as dead bullets, so they stay visible without being clickable.
+            linkable_lines: List[str] = []
+            unlinkable_count = 0
             for esc in old_escalations:
                 username = esc.get("customer_username")
                 email = esc.get("customer_email") or ""
@@ -2615,10 +2678,38 @@ class EscalationService:
                 msg_id = esc.get("escalation_message_id")
                 if msg_id and isinstance(msg_id, int) and channel_id:
                     link = f"https://t.me/c/{channel_id}/{msg_id}"
-                    lines.append(f"• {label}{org_part} — [View]({link})")
+                    linkable_lines.append(f"• {label}{org_part} — [View]({link})")
                 else:
-                    lines.append(f"• {label}{org_part}")
-            if old_count == 20:
+                    unlinkable_count += 1
+                    LOGGER.warning(
+                        "Escalation sweep: old escalation {} has no traceable Telegram "
+                        "message (delivery receipt missing) -- dropping from alert",
+                        esc.get("id"),
+                    )
+
+            shown_count = len(linkable_lines)
+            if shown_count:
+                lines = [
+                    f"⚠️ *{shown_count} escalation{'s' if shown_count > 1 else ''} "
+                    f"older than {max_age_hours}h with no ticket:*",
+                    *linkable_lines,
+                ]
+                if unlinkable_count:
+                    lines.append(
+                        f"_(+{unlinkable_count} more with no traceable Telegram message "
+                        f"— check Supabase)_"
+                    )
+            else:
+                lines = [
+                    f"⚠️ *{unlinkable_count} escalation{'s' if unlinkable_count > 1 else ''} "
+                    f"older than {max_age_hours}h with no ticket and no traceable Telegram "
+                    f"message — check Supabase.*"
+                ]
+            # The query itself is capped (list_unfiled(..., limit=20)) -- at the
+            # cap there may be more old escalations than we fetched at all, on
+            # top of whatever this batch's own unlinkable count already covers.
+            # Applies to both branches above, not just the bulleted one.
+            if len(old_escalations) == 20:
                 lines.append("_(showing first 20 — check Supabase for full list)_")
             await self._send_telegram_message(
                 chat_id=self._escalation_chat_id,

@@ -994,6 +994,91 @@ async def test_new_escalation_skips_legacy_write_once_legacy_writes_stopped(monk
     assert delivery_rows[0]["external_message_id"] == 42
 
 
+async def test_new_escalation_retries_delivery_write_and_recovers_from_a_transient_failure(
+    monkeypatch,
+):
+    """The delivery-receipt half of the dual-write is an idempotent upsert
+    (keyed on channel/chat/message id), so a transient failure (network
+    blip, momentary rate limit) is safe to retry -- unlike the escalations
+    insert just before it, which is not retried. A one-off failure here
+    must not permanently orphan the escalation's Telegram link."""
+    monkeypatch.setattr("orchestrator.services.escalation_service.asyncio.sleep", AsyncMock())
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+    resolved_uuid = uuid.uuid4()
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=resolved_uuid)
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 42}}
+
+    svc._send_telegram_message = fake_send
+
+    real_record = svc._deliveries.record
+    attempts: List[Dict[str, Any]] = []
+
+    async def flaky_record(**kwargs):
+        attempts.append(kwargs)
+        if len(attempts) < 2:
+            raise RuntimeError("simulated transient failure")
+        return await real_record(**kwargs)
+
+    svc._deliveries.record = flaky_record
+
+    result = await svc.escalate_to_support(**_new_escalation_kwargs(reason="could_not_answer"))
+
+    assert result["success"] is True
+    assert len(attempts) == 2  # failed once, then succeeded on retry
+    delivery_rows = raw.tables["message_deliveries"].rows
+    assert len(delivery_rows) == 1
+    assert delivery_rows[0]["external_message_id"] == 42
+
+
+async def test_new_escalation_delivery_write_exhausts_retries_without_failing_the_escalation(
+    monkeypatch,
+):
+    """If the delivery receipt can never be written, escalate_to_support()
+    must still report success: the Telegram message really was sent and
+    staff really were notified, so telling the customer their escalation
+    failed would be wrong. Only this one escalation's [View] link / reply
+    routing is degraded -- which the sweep alert (see
+    test_sweep_old_escalations_alert_drops_entries_with_no_traceable_message)
+    already handles by dropping it instead of showing a dead bullet."""
+    monkeypatch.setattr("orchestrator.services.escalation_service.asyncio.sleep", AsyncMock())
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=uuid.uuid4())
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 42}}
+
+    svc._send_telegram_message = fake_send
+
+    attempts: List[Dict[str, Any]] = []
+
+    async def always_fails(**kwargs):
+        attempts.append(kwargs)
+        raise RuntimeError("simulated permanent failure")
+
+    svc._deliveries.record = always_fails
+
+    result = await svc.escalate_to_support(**_new_escalation_kwargs(reason="could_not_answer"))
+
+    assert result["success"] is True
+    assert len(attempts) == 3  # bounded retry, not infinite and not zero
+    assert raw.table("escalations").rows  # the escalation row itself still exists
+    assert raw.table("message_deliveries").rows == []  # but no delivery receipt
+
+
 async def test_followup_escalation_dual_writes_canonical_escalation_and_delivery():
     raw = _FakeRaw()
     supa = _FakeSupabase(raw)
@@ -1559,6 +1644,114 @@ async def test_sweep_canonical_old_escalations_alert_uses_list_unfiled_upper_bou
 
     assert calls["messages"], "expected an aged-out-orphan alert"
     assert "older than 24h" in calls["messages"][-1]["text"]
+
+
+async def test_sweep_old_escalations_alert_links_each_entry_to_its_telegram_message(
+    monkeypatch,
+):
+    """Characterizes existing behavior: when a Telegram delivery receipt can be
+    resolved for an aged-out escalation, the alert bullet must be a clickable
+    link back to the original escalation message (where the real Track/Close
+    buttons live), not just a bare name."""
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [_canonical_escalation_row("esc-old", age_hours=30)]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-old", "purpose": "escalation", "external_message_id": 777}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    text = calls["messages"][-1]["text"]
+    assert "[View](https://t.me/c/123456/777)" in text
+
+
+async def test_sweep_old_escalations_alert_drops_entries_with_no_traceable_message(
+    monkeypatch,
+):
+    """An aged-out escalation whose Telegram delivery receipt was never
+    recorded (e.g. the canonical dual-write in _record_canonical_escalation
+    partially failed) cannot be linked to anything -- staff have no way to
+    act on a bare name, so it must not be rendered as a dead bullet. It
+    should be dropped from the list (while a linkable sibling in the same
+    alert still renders normally) and surfaced only in an aggregate footer
+    so it isn't silently lost from ops visibility."""
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [
+        _canonical_escalation_row("esc-linked", age_hours=30),
+        _canonical_escalation_row("esc-orphan", age_hours=40),
+    ]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-linked", "purpose": "escalation", "external_message_id": 777}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    text = calls["messages"][-1]["text"]
+    assert "1 escalation older than 24h" in text  # count reflects only the shown entry
+    assert "[View](https://t.me/c/123456/777)" in text  # linkable sibling still shown
+    assert text.count("•") == 1  # exactly one bullet -- the orphan's is gone
+    assert "esc-orphan" not in text
+    assert "1 more" in text and "check Supabase" in text  # dropped entry still traceable
+
+
+async def test_sweep_old_escalations_alert_becomes_a_note_when_none_are_linkable(
+    monkeypatch,
+):
+    """When every aged-out escalation lacks a traceable Telegram message, there
+    is nothing to render as a bulleted, clickable list -- but the alert must
+    still fire (as a short note pointing at Supabase) rather than vanish
+    silently, since that would hide a real backlog from ops."""
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [_canonical_escalation_row("esc-orphan", age_hours=30)]
+    # No message_deliveries row -- nothing to link to.
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    assert calls["messages"], "expected a fallback note even with zero linkable entries"
+    text = calls["messages"][-1]["text"]
+    assert "•" not in text  # no dead, unclickable bullets
+    assert "no traceable Telegram message" in text
+    assert "check Supabase" in text
+
+
+async def test_sweep_old_escalations_alert_notes_batch_cap_even_when_none_are_linkable(
+    monkeypatch,
+):
+    """The 'showing first 20' caveat matters just as much in the all-unlinkable
+    fallback note as in the normal bulleted list -- otherwise a batch capped at
+    the query limit silently reads as a complete, small count instead of a
+    possibly-larger backlog."""
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    raw.table("escalations").rows = [
+        _canonical_escalation_row(f"esc-orphan-{i}", age_hours=30) for i in range(20)
+    ]
+    # No message_deliveries rows at all -- none of the 20 are linkable.
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    text = calls["messages"][-1]["text"]
+    assert "20 escalation" in text
+    assert "showing first 20" in text
 
 
 async def test_sweep_canonical_tracked_reconciliation_resolves_and_skips_legacy_update(
