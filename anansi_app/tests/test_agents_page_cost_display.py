@@ -1,9 +1,43 @@
-"""Tests for agents.py's _cost_display -- the run-cost table's UI-layer
-formatting, paired with SupabaseReader.get_run_usage_by_skill's None-means-
-unknown contract (see test_supabase_reader_run_usage.py for the reader side).
-"""
+"""Runs page display-contract tests."""
 
+from types import SimpleNamespace
+
+import pytest
 from nicegui_app.pages.agents import _cost_display
+
+
+class _FakeElement:
+    def classes(self, _classes):
+        return self
+
+
+@pytest.mark.asyncio
+async def test_runs_page_renders_current_icon(monkeypatch):
+    from nicegui import run
+    from nicegui_app.pages import agents
+
+    labels = []
+    element = _FakeElement()
+    monkeypatch.setattr(
+        agents.ui,
+        "label",
+        lambda text: labels.append(text) or element,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        agents,
+        "get_reader",
+        lambda: SimpleNamespace(is_configured=lambda: False),
+    )
+
+    async def io_bound(function):
+        return function()
+
+    monkeypatch.setattr(run, "io_bound", io_bound, raising=False)
+
+    await agents.render()
+
+    assert labels[0] == "🎰 Runs"
 
 
 def test_none_renders_as_unknown_dash_not_zero():

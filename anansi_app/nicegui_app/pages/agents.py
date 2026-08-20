@@ -129,7 +129,7 @@ def _fetch_system_jobs() -> list[dict]:
 
 
 async def render() -> None:
-    ui.label("System Ops").classes("text-h5")
+    ui.label("🎰 Runs").classes("text-h5")
 
     reader = get_reader()
     if not await run.io_bound(reader.is_configured):
