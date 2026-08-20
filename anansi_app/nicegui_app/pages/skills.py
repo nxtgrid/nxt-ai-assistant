@@ -39,13 +39,39 @@ def format_schedule(schedule: Dict[str, Any]) -> str:
     return text
 
 
-def can_save_as_draft(title: str) -> bool:
-    """A draft needs only a name -- that is what makes the modal viable.
+def derive_fallback_title(summary: str) -> str:
+    """A workflow's stored title when the author left the /skill name box
+    blank (item d) -- falls back to the auto-generated summary (item b),
+    trimmed to a list-friendly length. build_skill_rows shows title as the
+    primary line, so a raw MAX_SUMMARY_CHARS-length (200-char) summary would
+    read oddly there -- same word-boundary-trim shape as
+    skill_summary.py's _truncate_at_word_boundary, duplicated rather than
+    imported since anansi_app and chat_orchestrator are separately deployed
+    packages with no shared import path outside shared/.
 
-    Saving partial, invalid step lists is the point: losing an in-progress
-    build on navigation is the current behaviour this replaces.
+    Returns "" for a blank summary -- can_save_as_draft already refuses to
+    save when both the name and the summary are blank, so callers must not
+    treat "" here as a title to persist.
     """
-    return bool((title or "").strip())
+    text = (summary or "").strip()
+    if not text or len(text) <= 60:
+        return text
+    clipped = text[:60]
+    last_space = clipped.rfind(" ")
+    if last_space > 36:  # ~60% of 60, same heuristic as the chat_orchestrator sibling
+        clipped = clipped[:last_space]
+    return clipped.rstrip(" ,.;:-") + "…"
+
+
+def can_save_as_draft(skill_name: str, summary: str) -> bool:
+    """A draft needs something to derive a title from: an explicit /skill
+    name, or an auto-generated summary to fall back to (derive_fallback_title)
+    -- either makes the modal viable to save.
+
+    Saving partial, invalid step lists is still the point: losing an
+    in-progress build on navigation is the behaviour this replaces.
+    """
+    return bool((skill_name or "").strip()) or bool((summary or "").strip())
 
 
 def can_promote_to_active(
@@ -108,10 +134,11 @@ async def render(user: dict[str, Any]) -> None:
     service = get_skill_builder_service()
     user_email = user.get("email", "")
 
-    ui.label("🧩 Skills").classes("text-h5")
+    ui.label("🧩 Workflows").classes("text-h5")
     ui.label(
-        "Reusable step-by-step procedures. A draft is saved but never offered to "
-        "the assistant; only active skills reach a conversation."
+        "Reusable step-by-step procedures. Saving one as a /skill so the assistant "
+        "can offer it in a conversation is optional -- see the editor. A draft is "
+        "saved but never offered; only active skills reach a conversation."
     ).classes("text-sm text-gray-600 mb-4")
 
     container = ui.column().classes("w-full gap-2")
@@ -124,7 +151,7 @@ async def render(user: dict[str, Any]) -> None:
         container.clear()
         with container:
             if not rows:
-                ui.label("No skills yet. Create one to get started.").classes(
+                ui.label("No workflows yet. Create one to get started.").classes(
                     "text-gray-500 italic"
                 )
                 return
@@ -133,7 +160,7 @@ async def render(user: dict[str, Any]) -> None:
 
     with ui.row().classes("w-full justify-end mb-2"):
         ui.button(
-            "New skill",
+            "New workflow",
             icon="add",
             on_click=lambda: _open_editor(None, service, refresh, user_email),
         ).props("color=primary")
@@ -160,89 +187,221 @@ def _render_row(row, service, refresh, user_email) -> None:
 
 
 async def _open_editor(row, service, refresh, user_email) -> None:
-    """New skill (row=None) or edit an existing one's identity/status/schedule.
+    """New workflow (row=None) or edit an existing one's identity/status/schedule.
 
-    The Steps card mounts the same chat-driven builder the standalone
-    /skill-builder page uses (render_builder, extracted for exactly this
-    reuse) -- but only for a *new* skill. Reopening an existing skill's
+    The Workflow card mounts the same chat-driven builder the standalone
+    /skill-builder page used to (render_builder, extracted for exactly this
+    reuse) -- but only for a *new* workflow. Reopening an existing one's
     steps for further chat-driven editing is a known gap: render_builder's
     initial_steps parameter exists for this and is not wired up yet (see
-    its docstring), so editing an existing skill here covers identity,
+    its docstring), so editing an existing workflow here covers identity,
     status and schedule only, not its step transcript.
+
+    Sized and structured like the rest of the app's editor modals
+    (broadcast.py, knowledge_modules.py, prompts.py: a capped-width card
+    that scrolls internally, not `props("maximized")`, which took over the
+    full browser viewport) -- see this module's git history for the before.
+
+    Saving a workflow as an invocable "/skill" is optional (item d): the
+    Workflow card is the point of this modal and gets the most room, with
+    Identity & schedule -- including the small, optional /skill-name box --
+    combined below it (item e).
     """
     from nicegui import run
 
     from nicegui_app.pages.skill_builder import _derive_steps_payload, render_builder
 
-    with ui.dialog().props("persistent maximized") as dialog, ui.card().classes("w-full"):
-        ui.label("Edit skill" if row else "New skill").classes("text-h6")
+    with ui.dialog() as dialog, ui.card().classes("w-full").style(
+        "max-width: 900px; max-height: calc(100dvh - 32px); overflow-y: auto"
+    ):
+        ui.label("Edit workflow" if row else "New workflow").classes("text-h6")
 
         with ui.column().classes("w-full gap-4"):
-            # 1. Identity
-            with ui.card().classes("w-full"):
-                ui.label("Identity").classes("text-subtitle2")
-                title_input = ui.input("Title", value=(row or {}).get("title", "")).classes(
-                    "w-full"
-                )
+            # 1. Workflow -- the chat-driven builder, the reason this modal
+            # exists. A placeholder now, filled in below once summary_input
+            # exists (a new workflow's auto-summary callback writes into it
+            # as steps come in) -- NiceGUI fills a container from a `with`
+            # block wherever it's opened, regardless of when the container
+            # itself was created, the same deferred-fill pattern render()'s
+            # own `container` above already relies on.
+            steps_card = ui.card().classes("w-full")
+
+            # 2. Identity & schedule, combined (item e) -- secondary to the
+            # workflow itself, so it sits below and takes only the room it
+            # needs.
+            with ui.card().classes("w-full gap-2"):
+                ui.label("Identity & schedule").classes("text-subtitle2")
+
+                # An existing workflow's /name is fixed at creation
+                # (update_skill never writes slug) -- shown read-only rather
+                # than as a box implying an edit that wouldn't stick. Its
+                # title stays separately editable, as before.
+                if row:
+                    title_input = ui.input("Title", value=row.get("title", "")).classes(
+                        "w-full"
+                    )
+                    with ui.row().classes("items-center gap-1"):
+                        ui.label("/").classes("text-body1 text-gray-500")
+                        ui.label(row.get("slug", "")).classes("text-body1 text-gray-600")
+                    ui.label("A workflow's /name can't change after it's created.").classes(
+                        "text-xs text-gray-500"
+                    )
+                    skill_name_input = None
+                else:
+                    title_input = None
+                    with ui.row().classes("items-end gap-1"):
+                        ui.label("/").classes("text-h6 text-gray-500")
+                        skill_name_input = ui.input("Skill name (optional)").classes("w-56")
+                    skill_name_hint = ui.label(
+                        "Optional -- makes this workflow invocable by the assistant "
+                        "as /name. Leave it blank to just save the workflow."
+                    ).classes("text-xs text-gray-500")
+
+                    async def _check_skill_name_clash() -> None:
+                        raw = skill_name_input.value or ""
+                        if not raw.strip():
+                            skill_name_hint.text = (
+                                "Optional -- makes this workflow invocable by the "
+                                "assistant as /name. Leave it blank to just save the "
+                                "workflow."
+                            )
+                            skill_name_hint.classes(
+                                remove="text-negative", add="text-gray-500"
+                            )
+                            return
+                        taken, candidate_slug = await run.io_bound(
+                            lambda: service.slug_taken(raw)
+                        )
+                        if taken:
+                            skill_name_hint.text = (
+                                f"'/{candidate_slug}' is already used by another skill "
+                                f"-- choose a different name."
+                            )
+                            skill_name_hint.classes(
+                                remove="text-gray-500", add="text-negative"
+                            )
+                        else:
+                            skill_name_hint.text = f"Will be invocable as /{candidate_slug}."
+                            skill_name_hint.classes(
+                                remove="text-negative", add="text-gray-500"
+                            )
+
+                    skill_name_input.on_value_change(lambda: _check_skill_name_clash())
+
                 summary_input = (
                     ui.textarea("Summary", value=(row or {}).get("summary", ""))
                     .classes("w-full")
                     .props("autogrow")
                 )
-                staff_switch = ui.switch(
-                    "Staff only", value=(row or {}).get("audience") != "Everyone"
-                )
-                status_select = ui.select(
-                    ["draft", "active", "disabled"],
-                    value=(row or {}).get("status", "draft"),
-                    label="Status",
-                )
-
-            # 2. Steps -- the existing builder, unchanged. New skills only
-            # (see docstring); an existing skill's already-saved steps are
-            # shown nowhere in this modal yet.
-            with ui.card().classes("w-full"):
-                ui.label("Steps").classes("text-subtitle2")
-                if row:
+                if not row:
                     ui.label(
-                        "Editing an existing skill's steps isn't supported here yet -- "
-                        "this save will keep its current steps unchanged."
+                        "Auto-generated from the workflow's steps as you build -- "
+                        "edit freely, your changes stick."
                     ).classes("text-xs text-gray-500")
-                    state_holder: Dict[str, Any] = {"steps": None}
-                else:
-                    builder_user_id = f"{user_email}:{uuid.uuid4()}"
-                    state_holder = await render_builder(user_email, builder_user_id)
 
-            # 3. Schedule
-            with ui.card().classes("w-full"):
-                ui.label("Schedule").classes("text-subtitle2")
+                with ui.row().classes("items-center gap-4"):
+                    staff_switch = ui.switch(
+                        "Staff only", value=(row or {}).get("audience") != "Everyone"
+                    )
+                    status_select = ui.select(
+                        ["draft", "active", "disabled"],
+                        value=(row or {}).get("status", "draft"),
+                        label="Status",
+                    )
+
+                ui.separator()
                 ui.label(
-                    "A scheduled skill runs once per entity of the chosen type."
+                    "Schedule -- runs once per entity of the chosen type."
                 ).classes("text-xs text-gray-500")
-                anchor_select = ui.select(
-                    {"": "Not scheduled", "grid": "Per grid", "organization": "Per organization"},
-                    value="",
-                    label="Fan out across",
-                )
+                with ui.row().classes("w-full gap-2"):
+                    anchor_select = ui.select(
+                        {
+                            "": "Not scheduled",
+                            "grid": "Per grid",
+                            "organization": "Per organization",
+                        },
+                        value="",
+                        label="Fan out across",
+                    ).classes("flex-grow")
+                    repeat_select = ui.select(
+                        REPEAT_OPTIONS,
+                        value=REPEAT_OPTIONS[0],
+                        label="Repeat",
+                    ).classes("flex-grow")
                 first_run = ui.input("First run (YYYY-MM-DD HH:MM)").classes("w-full")
-                repeat_select = ui.select(
-                    REPEAT_OPTIONS,
-                    value=REPEAT_OPTIONS[0],
-                    label="Repeat",
+
+            # Guards state_holder["summary_user_edited"] against the
+            # programmatic write below setting it -- only a real user edit
+            # (guard inactive) should count as "stop auto-updating".
+            _summary_sync_guard = {"active": False}
+
+            def _apply_auto_summary(text: str) -> None:
+                _summary_sync_guard["active"] = True
+                summary_input.value = text
+                _summary_sync_guard["active"] = False
+
+            def _on_summary_edited(_e) -> None:
+                # No-op for an existing workflow (state_holder["steps"] is
+                # None there -- no live builder, nothing auto-updates it
+                # anyway) as well as for the guard-flagged programmatic write.
+                if not _summary_sync_guard["active"] and state_holder.get("steps") is not None:
+                    state_holder["summary_user_edited"] = True
+
+            summary_input.on_value_change(_on_summary_edited)
+
+        # Now fill the Workflow card placeholder created above.
+        if row:
+            with steps_card:
+                ui.label("Workflow").classes("text-subtitle2")
+                ui.label(
+                    "Editing an existing workflow's steps isn't supported here yet -- "
+                    "this save will keep its current steps unchanged."
+                ).classes("text-xs text-gray-500")
+            state_holder: Dict[str, Any] = {"steps": None}
+        else:
+            with steps_card:
+                ui.label("Workflow").classes("text-subtitle2")
+                builder_user_id = f"{user_email}:{uuid.uuid4()}"
+                state_holder = await render_builder(
+                    user_email, builder_user_id, on_summary_update=_apply_auto_summary
                 )
 
         with ui.row().classes("w-full justify-end gap-2"):
             ui.button("Cancel", on_click=dialog.close).props("flat")
 
             async def _save() -> None:
-                title = title_input.value or ""
-                if not can_save_as_draft(title):
-                    ui.notify("A title is required.", type="negative")
+                summary_text = summary_input.value or ""
+                skill_name = (skill_name_input.value or "").strip() if skill_name_input else ""
+
+                if not can_save_as_draft(skill_name, summary_text):
+                    ui.notify(
+                        "Add a /skill name, or send at least one message so a "
+                        "summary can be generated.",
+                        type="negative",
+                    )
                     return
 
+                if row:
+                    title = title_input.value or ""
+                elif skill_name:
+                    taken, candidate_slug = await run.io_bound(
+                        lambda: service.slug_taken(skill_name)
+                    )
+                    if taken:
+                        ui.notify(
+                            f"'/{candidate_slug}' is already used by another skill. "
+                            f"Choose a different name.",
+                            type="negative",
+                        )
+                        return
+                    title = skill_name
+                else:
+                    title = derive_fallback_title(summary_text)
+
                 if state_holder.get("steps") is None:
-                    # Editing an existing skill: the Steps card above didn't
-                    # mount a builder, so nothing to derive -- keep it as is.
+                    # Editing an existing workflow: the Workflow card above
+                    # didn't mount a builder, so nothing to derive -- keep
+                    # it as is.
                     steps = row.get("steps") or []
                 else:
                     steps = _derive_steps_payload(state_holder)
@@ -263,7 +422,7 @@ async def _open_editor(row, service, refresh, user_email) -> None:
                         lambda: service.update_skill(
                             row["id"],
                             title,
-                            summary_input.value or "",
+                            summary_text,
                             staff_switch.value,
                             status_select.value,
                             actor=user_email,
@@ -277,7 +436,7 @@ async def _open_editor(row, service, refresh, user_email) -> None:
                     result = await run.io_bound(
                         lambda: service.save_skill(
                             title,
-                            summary_input.value or "",
+                            summary_text,
                             steps,
                             staff_switch.value,
                             user_email,

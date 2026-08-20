@@ -14,7 +14,7 @@ Save (see _derive_steps_payload).
 render_builder is the reusable piece: it renders the transcript, input,
 send and rewind controls into the current container and returns the
 mutable state dict a caller reads from -- nicegui_app/pages/skills.py's
-"New skill" modal is the only caller now. There is no standalone page or
+"New workflow" modal is the only caller now. There is no standalone page or
 `render` function anymore: /skill-builder (main.py) redirects to /skills
 rather than routing here, and the module-level Save-as-skill dialog that
 used to wrap this for that route was removed with it -- see git history
@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
 from nicegui import run, ui
@@ -95,7 +95,18 @@ def _error_detail(e: requests.HTTPError) -> str:
 
 
 def _send_chat_message(*, message: str, user_id: str, user_email: str) -> Dict[str, Any]:
-    """POST /chat -- see this module's docstring for the auth story."""
+    """POST /chat -- see this module's docstring for the auth story.
+
+    metadata.skill_builder_staff_auth opts this session into
+    resolve_auth.py's skill_builder_staff_auth branch, which grants
+    is_staff + STAFF_ORG_ID scope without consulting public.accounts (the
+    bot's own Telegram/customer-onboarding auth DB -- a different identity
+    system than the Google-OAuth-gated NiceGUI admin app this page lives
+    in, which most bot-admin emails were never added to). Only takes effect
+    when paired with the server-verified _identity_trusted signal
+    IDENTITY_ASSERTION_KEY already proves for this caller -- see
+    resolve_auth.py's branch docstring; the flag alone grants nothing.
+    """
     resp = requests.post(
         f"{_orchestrator_base_url()}/chat",
         headers=_orchestrator_headers(),
@@ -104,7 +115,7 @@ def _send_chat_message(*, message: str, user_id: str, user_email: str) -> Dict[s
             "user_id": user_id,
             "user_email": user_email,
             "source": "api",
-            "metadata": {},
+            "metadata": {"skill_builder_staff_auth": True},
         },
         timeout=120,
     )
@@ -121,6 +132,20 @@ def _validate_steps(steps: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     )
     resp.raise_for_status()
     return resp.json().get("errors", [])
+
+
+def _summarize_steps(steps: List[Dict[str, Any]], title: str = "") -> str:
+    """POST /skills/summarize -- see skill_summary.py. Called automatically
+    after every step change (render_builder's _refresh_transcript) so the
+    Summary field stays current without the author re-triggering it by hand."""
+    resp = requests.post(
+        f"{_orchestrator_base_url()}/skills/summarize",
+        headers=_orchestrator_headers(),
+        json={"steps": steps, "title": title},
+        timeout=30,
+    )
+    resp.raise_for_status()
+    return resp.json().get("summary", "")
 
 
 def _group_into_steps(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -192,6 +217,14 @@ def _step_had_tool_error(step: Dict[str, Any]) -> bool:
     return any(marker in text for marker in _FAILURE_MARKERS)
 
 
+# Cap on how much of a step's response text feeds the auto-summary prompt
+# (skill_summary.py's _build_summary_prompt) -- long enough to name what was
+# actually retrieved, short enough that a handful of steps' worth still fits
+# comfortably in one summarization call. Not a display truncation; the full
+# response stays visible in the transcript via _step_response_text.
+_RESULT_PREVIEW_CHARS = 500
+
+
 def _derive_steps_payload(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Build the skills.steps-shaped payload from the current transcript +
     per-step flags -- see
@@ -217,13 +250,20 @@ def _derive_steps_payload(state: Dict[str, Any]) -> List[Dict[str, Any]]:
                 # not flagged -- see the plan's "Run-mode output" section.
                 "is_response_step": is_last or flags["is_response_step"],
                 "had_tool_error": _step_had_tool_error(step),
+                # Builder-only context for /skills/summarize (item b) -- what
+                # the step's tools actually returned, not just the intent
+                # the instruction states. Ignored by /skills/validate.
+                "result_preview": _step_response_text(step)[:_RESULT_PREVIEW_CHARS],
             }
         )
     return steps
 
 
 async def render_builder(
-    user_email: str, user_id: str, initial_steps: Optional[List[Dict[str, Any]]] = None
+    user_email: str,
+    user_id: str,
+    initial_steps: Optional[List[Dict[str, Any]]] = None,
+    on_summary_update: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, Any]:
     """Render the step builder (transcript, input, send, rewind) into the
     current container.
@@ -247,6 +287,16 @@ async def render_builder(
     this phase nor the modal built on top of it (Task 8) populates it, so a
     skill's steps still can't be reopened for further chat-driven editing
     once saved. Tracked as a known gap, not silently solved here.
+
+    `on_summary_update`, if given, is called with the freshly auto-generated
+    summary (item b) every time it changes -- after every send/rewind, as
+    long as the caller hasn't set `state["summary_user_edited"]` (the
+    caller's job: flip it the moment the author types into the summary
+    field themselves, so this can't clobber a hand edit on the next step).
+    A plain sync callback, not a widget binding: the only caller
+    (nicegui_app/pages/skills.py) just needs to copy a string into its own
+    textarea, which is simpler done directly than through NiceGUI's
+    polling-based bind_value_from.
     """
     db = get_skill_builder_service()
 
@@ -256,6 +306,8 @@ async def render_builder(
         "flags": {},  # step index -> {"allow_write": bool, "is_response_step": bool}
         "validation_errors": [],
         "sending": False,
+        "summary": "",
+        "summary_user_edited": False,
     }
 
     if not _identity_configured():
@@ -294,6 +346,19 @@ async def render_builder(
             except Exception as e:
                 state["validation_errors"] = []
                 ui.notify(f"Could not validate steps: {e}", type="warning")
+
+            # Auto-regenerate the summary (item b) unless the author has
+            # already taken over editing it by hand -- see this function's
+            # docstring on on_summary_update. Skipped entirely (no network
+            # call) once summary_user_edited, not just left unapplied.
+            if not state["summary_user_edited"]:
+                try:
+                    state["summary"] = await run.io_bound(lambda: _summarize_steps(derived))
+                except Exception as e:
+                    ui.notify(f"Could not auto-generate summary: {e}", type="warning")
+                else:
+                    if on_summary_update:
+                        on_summary_update(state["summary"])
         else:
             state["validation_errors"] = []
 

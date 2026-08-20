@@ -150,7 +150,7 @@ async def agents_route() -> None:
 @ui.page("/skill-builder")
 async def skill_builder_route() -> None:
     # Retired (Task 9): /skills is the entry point now, with the same
-    # builder mounted inside its "New skill" modal. Redirect rather than
+    # builder mounted inside its "New workflow" modal. Redirect rather than
     # delete so a bookmark or saved link still lands somewhere real.
     ui.navigate.to("/skills")
 

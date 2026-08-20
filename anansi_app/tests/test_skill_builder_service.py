@@ -341,6 +341,66 @@ class TestSaveSkill:
         assert "published" in result["error"]
 
 
+class TestSlugTaken:
+    """Item (d): the /skill name box must warn on a clash instead of the
+    silent '-2' suffix _unique_slug applies for an auto-derived title."""
+
+    def test_taken_when_another_skill_already_uses_the_derived_slug(self):
+        service = _service([], [], skills=[{"id": "other-id", "slug": "grid-health"}])
+
+        taken, slug = service.slug_taken("Grid Health")
+
+        assert taken is True
+        assert slug == "grid-health"
+
+    def test_not_taken_when_no_skill_uses_it(self):
+        service = _service([], [], skills=[])
+
+        taken, slug = service.slug_taken("Grid Health")
+
+        assert taken is False
+        assert slug == "grid-health"
+
+    def test_excludes_the_skill_currently_being_edited(self):
+        """Re-saving a skill under its own unchanged name must not flag
+        itself as a clash."""
+        service = _service([], [], skills=[{"id": "self-id", "slug": "grid-health"}])
+
+        taken, _ = service.slug_taken("Grid Health", exclude_skill_id="self-id")
+
+        assert taken is False
+
+    def test_a_different_skill_at_the_same_slug_still_clashes_during_edit(self):
+        service = _service(
+            [], [], skills=[{"id": "other-id", "slug": "grid-health"}]
+        )
+
+        taken, _ = service.slug_taken("Grid Health", exclude_skill_id="self-id")
+
+        assert taken is True
+
+    def test_with_no_client_reports_not_taken(self):
+        service = SkillBuilderService.__new__(SkillBuilderService)
+        service.client = None
+
+        taken, slug = service.slug_taken("Grid Health")
+
+        assert taken is False
+        assert slug == "grid-health"
+
+    def test_a_query_failure_reports_not_taken_rather_than_blocking_save(self):
+        class _Client:
+            def table(self, _n):
+                raise RuntimeError("db down")
+
+        service = SkillBuilderService(client=_Client())
+
+        taken, slug = service.slug_taken("Grid Health")
+
+        assert taken is False
+        assert slug == "grid-health"
+
+
 def test_list_skills_returns_every_status():
     """The admin list shows drafts and disabled skills; the catalog does not."""
     rows = [
