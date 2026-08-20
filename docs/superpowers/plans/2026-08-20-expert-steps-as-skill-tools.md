@@ -254,17 +254,26 @@ Machinery, and a prerequisite for every conversion below.
 
 **Files:** `scripts/convert_expert_to_skill.py` (gitignored — `git add -f`)
 
-- [ ] **Task 7.1** — replace `has_function_steps`' blanket refusal with a check
+- [x] **Task 7.1** — replace `has_function_steps`' blanket refusal with a check
       that every named `[function:...]` handler is contract-bearing and
       permission-cleared. Refuse only handlers that are not, naming them.
-- [ ] **Task 7.2** — carry `[function:...]` markers through
+- [x] **Task 7.2** — carry `[function:...]` markers through
       `split_instructions_into_steps` as `kind: "function"` steps instead of
       flattening them into prose. **This is the bug the whole plan exists to
       fix**: today a conversion would silently drop the orchestration and leave
       a prose wrapper with none of the real work attached.
-- [ ] **Task 7.3** — keep the dry-run default and the "read the step text before
+- [x] **Task 7.3** — keep the dry-run default and the "read the step text before
       `--apply`" warning. The script's own docstring is right that a green exit
       code is necessary but not sufficient.
+
+**Done 2026-08-21** (`a26482f7`). "Permission-cleared" landed as "does not
+block conversion at all" rather than a hard gate: `required_permission` is
+a runtime, per-caller check (Phase 6), and this script has no caller to
+check it against — refusing on it here would be pre-judging something only
+meaningful at run time. Surfaced in the printed output instead. Function
+steps whose contract mutates are stamped `mutates`/`mock: True` on
+conversion, closing the loop with Phase 5's builder switch and
+`unmockable_handlers` check.
 
 ## Phase 8 — GTR (`grids_technical_reviewer`) — first proof
 
