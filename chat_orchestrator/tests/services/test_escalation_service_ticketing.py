@@ -1676,10 +1676,13 @@ async def test_sweep_old_escalations_alert_drops_entries_with_no_traceable_messa
     """An aged-out escalation whose Telegram delivery receipt was never
     recorded (e.g. the canonical dual-write in _record_canonical_escalation
     partially failed) cannot be linked to anything -- staff have no way to
-    act on a bare name, so it must not be rendered as a dead bullet. It
-    should be dropped from the list (while a linkable sibling in the same
-    alert still renders normally) and surfaced only in an aggregate footer
-    so it isn't silently lost from ops visibility."""
+    act on a bare name, so it must not be rendered as a dead, clickable-
+    looking bullet. It should be dropped from the main list (while a
+    linkable sibling in the same alert still renders normally) and surfaced
+    in an aggregate footer that carries its id -- the same lookup key
+    scripts/resolve_stale_swept_escalations.py uses -- so ops can actually
+    find the conversation in chat history instead of guessing from a bare
+    count."""
     monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
     raw = _FakeRaw()
     raw.table("escalations").rows = [
@@ -1700,8 +1703,9 @@ async def test_sweep_old_escalations_alert_drops_entries_with_no_traceable_messa
     assert "1 escalation older than 24h" in text  # count reflects only the shown entry
     assert "[View](https://t.me/c/123456/777)" in text  # linkable sibling still shown
     assert text.count("•") == 1  # exactly one bullet -- the orphan's is gone
-    assert "esc-orphan" not in text
-    assert "1 more" in text and "check Supabase" in text  # dropped entry still traceable
+    assert "1 more" in text and "check chat history" in text  # dropped entry still traceable
+    assert "esc-orphan" in text  # ...and its id is there too if chat history isn't enough
+    assert "#acme" in text  # org breadcrumb travels with the id
 
 
 async def test_sweep_old_escalations_alert_becomes_a_note_when_none_are_linkable(
@@ -1709,8 +1713,11 @@ async def test_sweep_old_escalations_alert_becomes_a_note_when_none_are_linkable
 ):
     """When every aged-out escalation lacks a traceable Telegram message, there
     is nothing to render as a bulleted, clickable list -- but the alert must
-    still fire (as a short note pointing at Supabase) rather than vanish
-    silently, since that would hide a real backlog from ops."""
+    still fire (as a short note pointing at chat history) rather than vanish
+    silently, since that would hide a real backlog from ops. The note must
+    carry each escalation's id (not just a bare count) so ops can actually
+    look the row up instead of a cold "check chat history" with nothing to
+    search for."""
     monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
     raw = _FakeRaw()
     raw.table("escalations").rows = [_canonical_escalation_row("esc-orphan", age_hours=30)]
@@ -1726,7 +1733,9 @@ async def test_sweep_old_escalations_alert_becomes_a_note_when_none_are_linkable
     text = calls["messages"][-1]["text"]
     assert "•" not in text  # no dead, unclickable bullets
     assert "no traceable Telegram message" in text
-    assert "check Supabase" in text
+    assert "check chat history" in text
+    assert "esc-orphan" in text  # id is the actual lookup key -- must be present
+    assert "#acme" in text  # org breadcrumb helps ops recognize it at a glance
 
 
 async def test_sweep_old_escalations_alert_notes_batch_cap_even_when_none_are_linkable(

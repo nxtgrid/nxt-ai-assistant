@@ -2668,6 +2668,14 @@ class EscalationService:
             # as dead bullets, so they stay visible without being clickable.
             linkable_lines: List[str] = []
             unlinkable_count = 0
+            # Each dropped entry keeps its human-searchable name/org plus its
+            # raw id in backticks: name/org is what "check chat history"
+            # actually means (the Chats admin page searches conversations by
+            # title and content), while the id is the same lookup key
+            # scripts/resolve_stale_swept_escalations.py uses if this needs
+            # an engineer. Surface both instead of leaving ops with nothing
+            # to search for.
+            unlinkable_breadcrumbs: List[str] = []
             for esc in old_escalations:
                 username = esc.get("customer_username")
                 email = esc.get("customer_email") or ""
@@ -2681,6 +2689,7 @@ class EscalationService:
                     linkable_lines.append(f"• {label}{org_part} — [View]({link})")
                 else:
                     unlinkable_count += 1
+                    unlinkable_breadcrumbs.append(f"{label}{org_part} — `{esc['id']}`")
                     LOGGER.warning(
                         "Escalation sweep: old escalation {} has no traceable Telegram "
                         "message (delivery receipt missing) -- dropping from alert",
@@ -2697,20 +2706,21 @@ class EscalationService:
                 if unlinkable_count:
                     lines.append(
                         f"_(+{unlinkable_count} more with no traceable Telegram message "
-                        f"— check Supabase)_"
+                        f"— check chat history: {'; '.join(unlinkable_breadcrumbs)})_"
                     )
             else:
                 lines = [
                     f"⚠️ *{unlinkable_count} escalation{'s' if unlinkable_count > 1 else ''} "
                     f"older than {max_age_hours}h with no ticket and no traceable Telegram "
-                    f"message — check Supabase.*"
+                    f"message — check chat history:*",
+                    *[f"– {b}" for b in unlinkable_breadcrumbs],
                 ]
             # The query itself is capped (list_unfiled(..., limit=20)) -- at the
             # cap there may be more old escalations than we fetched at all, on
             # top of whatever this batch's own unlinkable count already covers.
             # Applies to both branches above, not just the bulleted one.
             if len(old_escalations) == 20:
-                lines.append("_(showing first 20 — check Supabase for full list)_")
+                lines.append("_(showing first 20 — check chat history for the full list)_")
             await self._send_telegram_message(
                 chat_id=self._escalation_chat_id,
                 text="\n".join(lines),
