@@ -1155,6 +1155,8 @@ async def _deliver_notification(
         )
     elif live_output_line:
         raw_text = f"{raw_text.rstrip()}\n{live_output_line}"
+    if delivery is not None and delivery.site_status:
+        raw_text = f"{raw_text.rstrip()}\n{_render_alert_site_status(delivery.site_status)}"
     text = raw_text
     if parse_mode and parse_mode.lower().startswith("markdown"):
         text = convert_github_to_telegram_markdown(raw_text)
@@ -1230,6 +1232,26 @@ async def _deliver_notification(
     await _log_notification_to_chat_db(
         body, target.chat_id, target.topic_id, message_id, ticket_ref=ticket_ref
     )
+    try:
+        from orchestrator.services.ticketing.notify_alert_delivery_repository import (
+            NotifyAlertDeliveryRepository,
+        )
+
+        ticket = delivery.ticket if delivery is not None else None
+        await NotifyAlertDeliveryRepository(get_client=_raw_supabase_client).record_success(
+            grid_name=target.grid_name,
+            external_chat_id=target.chat_id,
+            external_topic_id=target.topic_id,
+            external_message_id=message_id,
+            source=body.source,
+            dedup_key=body.dedup_key,
+            ticket_id=ticket.ticket_id if ticket is not None else None,
+            ticket_ref=ticket_ref,
+            rendered_text=text,
+            alert=body.alert.model_dump() if body.alert is not None else {"text": body.text},
+        )
+    except Exception:
+        logger.warning("Notify: successful-delivery ledger write failed", exc_info=True)
 
     if delivery is not None and delivery.ticket is not None and delivery.ticket.ticket_id:
         try:
@@ -1621,6 +1643,15 @@ class NotificationDelivery:
     alert_context: Optional[UrgentAlertContext] = None
     ticket_summary: str = ""
     stored_ticket_severity: str = ""
+    site_status: str = ""
+
+
+def _render_alert_site_status(status: str) -> str:
+    return {
+        "on": "🟢 Site status: On",
+        "isolated": "🔌 Site status: Isolated",
+        "off": "🔴 Site status: Off",
+    }.get(status, "Ⅹ Site status: Unknown")
 
 
 def _build_notify_alert_context(
@@ -2290,7 +2321,16 @@ async def _resolve_notify_ticket_llm_judgment(
     extra = extra or {}
     extra.update({"judgment_valid": judgment.valid, "send_decision": "send" if send_decision.send else "suppress", "send_force_reasons": send_decision.forced_by})
     if delivery is not None:
-        delivery = dataclasses.replace(delivery, suppress=not send_decision.send)
+        status = (
+            judgment.judgment.grid_impact.current_assessed_status.value
+            if judgment.valid and judgment.judgment is not None
+            else context.telemetry.site_status.value
+        )
+        if "all_phase_zero_reminder" in send_decision.forced_by:
+            status = "off"
+        delivery = dataclasses.replace(
+            delivery, suppress=not send_decision.send, site_status=status
+        )
     return ref, response, extra, delivery
 
 
