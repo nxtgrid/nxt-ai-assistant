@@ -25,7 +25,7 @@ from orchestrator.experts.handlers.package_generator.generate_map import (
     _lookup_site_by_name,
 )
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import MockSpec, OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.drive_upload import DEFAULT_LPP_OUTPUT_FOLDER_ID
 from shared.utils.gdrive_template_creator import create_from_template
@@ -91,10 +91,38 @@ def _resolve_template_id(context: StepContext) -> str:
             "site_folder_id",
         ),
         produces_state=("template_copied", "document_id", "document_url", "document_title"),
+        outputs=(
+            OutputSpec(
+                name="document_id",
+                value_type="string",
+                description="Google Drive file ID of the new LPP document -- every later LPP step's precondition.",
+            ),
+        ),
         guard_keys=("template_copied",),
         side_effects=(
             "Copies a Google Drive template document and registers it with the Apps "
             "Script document tracker."
+        ),
+        mutates=True,
+        mutation_kind="external_write",
+        # Task 9.3/1.5: this mock MUST populate document_id -- every other LPP
+        # step's consumes_state=("document_id",) precondition (and, per
+        # step_tool_schema.py's fact 2, every other step's tool-argument
+        # exclusion for it) depends on this exact key being present, or a
+        # mocked LPP run collapses at the very next step.
+        mock=MockSpec(
+            state_updates={
+                "template_copied": True,
+                "document_id": "MOCK-document-id",
+                "document_url": "https://docs.google.com/spreadsheets/d/MOCK-document-id",
+                "document_title": "MOCK LPP Document",
+            },
+            data={
+                "document_id": "MOCK-document-id",
+                "document_url": "https://docs.google.com/spreadsheets/d/MOCK-document-id",
+                "document_title": "MOCK LPP Document",
+            },
+            message="Would have copied the LPP template and created a new document.",
         ),
     ),
 )

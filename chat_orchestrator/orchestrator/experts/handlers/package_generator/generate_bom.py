@@ -8,7 +8,7 @@ energy specs.
 import json
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import MockSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
@@ -59,6 +59,24 @@ LOGGER = get_logger(__name__)
         side_effects=(
             "Calls the grid_design_trigger_bom MCP tool, which runs the BOM generation "
             "engine and recomputes component costs from the purchase ledger."
+        ),
+        mutates=True,
+        mutation_kind="control_action",
+        mock=MockSpec(
+            state_updates={
+                "bom_generated": True,
+                "cost_summary": {"total_cost": 0.0},
+                "total_kwp": 100.0,
+                "total_kwh": 200.0,
+                "total_kva": 110.0,
+                "num_subsystems": 1,
+                "num_inverters": 1,
+                "num_batteries": 1,
+                "num_panels": 100,
+                "editable_total_kwp": 100.0,
+                "editable_total_kwh": 200.0,
+            },
+            message="Would have triggered BOM generation and cost recomputation.",
         ),
     ),
 )

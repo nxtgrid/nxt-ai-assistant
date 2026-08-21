@@ -14,7 +14,7 @@ import re
 from shapely.geometry import Polygon
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import ParamSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
@@ -92,6 +92,25 @@ LOGGER = get_logger(__name__)
         side_effects=(
             "Runs geometry-packing plus PNG/Draw.io rendering (up to 120s); uploads "
             "the site layout PNG and Draw.io XML to Google Drive."
+        ),
+        mutates=True,
+        mutation_kind="external_write",
+        # R5 (Task 9.1): geometry-packing + rendering can run up to 120s, per
+        # this step's own side_effects text above. See generate_distribution_
+        # layout.py's identical note on why a poll/resume mechanism isn't
+        # built for this yet, and what declaring this at least buys callers.
+        expected_latency_seconds=120.0,
+        mock=MockSpec(
+            state_updates={
+                "site_layout_png_drive_id": "MOCK-site-layout-png-drive-id",
+                "site_layout_drawio_drive_id": "MOCK-site-layout-drawio-drive-id",
+                "editable_panel_config": "20S2P",
+                "editable_site_type": "ess",
+                "earth_pit_count": 4,
+                "avg_pv_combiner_distance_m": 10.0,
+                "feeder_pillar_distance_m": 15.0,
+            },
+            message="Would have generated and uploaded the site layout PNG/Draw.io files.",
         ),
     ),
 )

@@ -9,7 +9,7 @@ import asyncio
 import os
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import MockSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.drive_upload import DEFAULT_LPP_OUTPUT_FOLDER_ID
 from shared.utils.logging import get_logger
@@ -30,6 +30,13 @@ LOGGER = get_logger(__name__)
         produces_state=("site_folder_id",),
         guard_keys=("site_folder_id",),
         side_effects="Creates a Google Drive subfolder for site outputs.",
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={"site_folder_id": "MOCK-folder-id"},
+            data={"site_folder_id": "MOCK-folder-id"},
+            message="Would have created a Google Drive subfolder for this site.",
+        ),
     ),
 )
 async def create_site_folder(context: StepContext) -> StepResult:

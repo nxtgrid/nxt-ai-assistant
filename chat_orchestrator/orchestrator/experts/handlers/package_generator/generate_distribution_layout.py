@@ -13,7 +13,7 @@ import os
 from orchestrator.experts.handlers.package_generator.generate_map import _get_db_config
 from orchestrator.experts.handlers.package_generator.site_geo_source import load_site_row_data
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import ParamSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.mapping.data_reader import _ensure_dict
 from shared.utils.error_messages import sanitize_error_for_user
@@ -170,6 +170,28 @@ def _existing_layout_state(
             "download_drive_file()) happen via the shared load_site_row_data() helper "
             "(site_geo_source.py) only when geo_source == 'community'; "
             "surveyed_buildings_geojson is read on both routes."
+        ),
+        mutates=True,
+        mutation_kind="external_write",
+        # R5 (Task 9.1): the road-network extraction + placement algorithm can
+        # run up to 180s, per this step's own side_effects text above.
+        # Declared so callers (and, once built, a poll/resume path for the
+        # skill-tool-call surface -- see the plan's Phase 9 notes on why that
+        # deeper mechanism isn't built yet) know not to treat a slow response
+        # as a failure.
+        expected_latency_seconds=180.0,
+        mock=MockSpec(
+            state_updates={
+                "layout_generated": True,
+                "layout_coverage_pct": 95.0,
+                "site_options_drive_id": "MOCK-site-options-drive-id",
+                "site_candidates": [{"rank": 1, "lat": 0.0, "lon": 0.0}],
+                "editable_pole_spacing_m": 45.0,
+                "editable_max_drop_distance_m": 40.0,
+                "editable_target_coverage_pct": 90.0,
+                "editable_number_of_phases": "1",
+            },
+            message="Would have run the road-network layout algorithm and uploaded a site-options map.",
         ),
     ),
 )

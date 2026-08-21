@@ -13,7 +13,7 @@ from typing import Any, List, Tuple
 from googleapiclient.discovery import build
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import MockSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.google_auth import get_sheets_write_credentials
 from shared.utils.logging import get_logger
@@ -42,6 +42,12 @@ LOGGER = get_logger(__name__)
         ),
         produces_state=("values_dumped",),
         side_effects="Writes reference key/value pairs to Google Sheets via the Sheets API.",
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={"values_dumped": True},
+            message="Would have written reference key/value pairs to the Main Input sheet.",
+        ),
     ),
 )
 async def dump_lpp_values(context: StepContext) -> StepResult:

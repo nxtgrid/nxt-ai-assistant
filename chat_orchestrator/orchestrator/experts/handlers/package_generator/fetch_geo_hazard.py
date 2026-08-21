@@ -83,6 +83,7 @@ def _candidate_summary(candidate: Dict[str, Any]) -> str:
         ),
         guard_keys=("geo_hazard_fetched",),
         side_effects="Calls the solar_get_site_geo_hazard MCP tool once per site candidate.",
+        mutates=False,
     ),
 )
 async def fetch_geo_hazard(context: StepContext) -> StepResult:

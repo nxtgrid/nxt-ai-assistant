@@ -14,7 +14,7 @@ import psycopg
 
 from orchestrator.experts.handlers.package_generator.site_geo_source import load_site_row_data
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import MockSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.layout import generate_layout
 from shared.mapping import generate_site_map
@@ -542,6 +542,28 @@ def _lookup_site_by_id(site_id: int, db_config: Dict[str, Any]) -> Optional[str]
             "download_drive_file()) happen via the shared load_site_row_data() helper "
             "(site_geo_source.py) only when geo_source == 'community'; "
             "surveyed_buildings_geojson is read on both routes."
+        ),
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={
+                "map_generated": True,
+                "map_image_drive_id": "MOCK-map-image-drive-id",
+                "power_heatmap_drive_id": "MOCK-power-heatmap-drive-id",
+                "site_id": "MOCK-site-id",
+                "site_name": "MOCK Site",
+                "awaiting_site_selection": False,
+                "awaiting_site_name": False,
+                "site_options": [],
+                "site_state": {},
+                "site_candidates": [{"rank": 1, "lat": 0.0, "lon": 0.0}],
+                "editable_total_buildings": 10,
+                "editable_served_building_count": 10,
+                "editable_total_kwp": 100.0,
+                "editable_total_kwh": 200.0,
+                "site_options_drive_id": "MOCK-site-options-drive-id",
+            },
+            message="Would have generated and uploaded the site map.",
         ),
     ),
 )

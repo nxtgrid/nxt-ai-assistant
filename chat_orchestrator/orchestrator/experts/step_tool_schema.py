@@ -56,6 +56,13 @@ from orchestrator.experts.step_registry import get_step_contract, get_step_regis
 if TYPE_CHECKING:
     from orchestrator.models.schemas import UserContext
 
+# R5 / Task 9.1: a step whose expected_latency_seconds is at or above this
+# gets a latency warning folded into its tool description (see
+# derive_tool_declaration) -- chosen well below the 60-180s the three known
+# long-running LPP steps actually declare, so it also catches anything
+# smaller-but-still-tool-round-risky a future contract might declare.
+LONG_RUNNING_THRESHOLD_SECONDS = 30.0
+
 # StepContract/ParamSpec/OutputSpec's value_type strings map to Gemini's
 # function-declaration type enum the same way UserPermissionsService's own
 # _convert_property_type maps raw MCP JSON-Schema types -- mirrored here so a
@@ -151,6 +158,18 @@ def derive_tool_declaration(
     description = contract.description or f"Run the '{step_name}' step."
     if contract.mutates:
         description += " This step has a real external side effect."
+    if contract.expected_latency_seconds >= LONG_RUNNING_THRESHOLD_SECONDS:
+        # R5 / Task 9.1 (docs/superpowers/plans/2026-08-20-expert-steps-as-
+        # skill-tools.md): the honest, safe subset of "steps above a
+        # threshold get different handling" that's actually built -- no
+        # poll/resume execution path exists (see update_design_distances.py's
+        # contract for why), so the call still blocks synchronously for the
+        # full duration. This at least keeps the caller from mistaking a
+        # slow response for a failure or a hang.
+        description += (
+            f" This step can take up to ~{int(contract.expected_latency_seconds)}s to "
+            "complete -- a slow response is normal, not a failure."
+        )
     if contract.outputs:
         # Gemini's function-declaration format has no separate "response
         # schema" slot the way e.g. OpenAPI does -- description is the only
@@ -312,6 +331,7 @@ def is_declared_function_step(name: str, *, allow_write: bool = False) -> bool:
 
 
 __all__ = [
+    "LONG_RUNNING_THRESHOLD_SECONDS",
     "caller_holds_permission",
     "derive_tool_declaration",
     "function_step_tool_declarations",

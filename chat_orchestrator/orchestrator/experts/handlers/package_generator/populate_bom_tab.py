@@ -9,7 +9,7 @@ from typing import Any, Dict, List
 from googleapiclient.discovery import build
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import MockSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.google_auth import get_sheets_write_credentials
 from shared.utils.logging import get_logger
@@ -334,6 +334,12 @@ def create_bom_sheet(
         consumes_results=("generate_site_bom", "generate_powerplant_design"),
         produces_state=("bom_tab_populated",),
         side_effects="Writes a 'Full BOM' sheet tab via the Sheets API, with cell formatting.",
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={"bom_tab_populated": True},
+            message="Would have created and populated the Full BOM sheet tab.",
+        ),
     ),
 )
 async def populate_bom_tab(context: StepContext) -> StepResult:
