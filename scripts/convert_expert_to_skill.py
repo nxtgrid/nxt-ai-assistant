@@ -54,6 +54,27 @@ passing --apply, for any expert, not just trust a green exit code.
 Everything that does convert lands as status='draft': reviewed and promoted
 by a human, never activated by this script.
 
+Phase 11 fix (2026-08-21): step-boundary detection used to be this script's
+OWN numbered-list regex (matching a leading "1. ", "2. ", etc.), with "no
+numbered lines found" falling back to treating the ENTIRE doc section -- system
+instructions, tool list, cell-mapping tables, inputs/state/outputs, all of
+it -- as one single opaque step. That fallback fired for every real,
+currently-live expert actually dry-run against production
+(grids_technical_reviewer, package_generator): neither uses numbered list
+syntax at all, because `WorkflowExecutor._parse_step_line`/
+`ExpertInstructionsProvider._extract_workflow` have ALWAYS treated numbering
+as optional -- one workflow LINE is one step, "1. [llm] x" and "[llm] x"
+parse identically. A second, drifted reimplementation of that same
+line-splitting-and-packet-scoping logic here was the wrong fix (it would
+have to independently keep matching `_extract_workflow`'s comment-stripping,
+merged-line-splitting, and `## Packet: name` boundary detection forever).
+Instead this script now calls the real `ExpertInstructionsProvider` and
+converts its already-correctly-parsed `ExpertConfig.workflows[packet_type]`
+list -- the exact step strings real expert execution would run -- so the
+two can never drift apart again. See `build_steps_from_workflow_lines`
+(the `_step_dict_for_body` per-line classification below it is unchanged;
+only how the list of lines is produced has changed).
+
 Usage:
     python scripts/convert_expert_to_skill.py grid_analyst
     python scripts/convert_expert_to_skill.py grid_analyst --apply
@@ -66,11 +87,11 @@ and `orchestrator.*` respectively) -- e.g. from repo root:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import re
 import sys
 from typing import Any, Dict, List
 
-_NUMBERED = re.compile(r"^\s*(\d+)\.\s+(.+)$", re.MULTILINE)
 _FUNCTION_MARKER_RE = re.compile(r"\[function:[a-zA-Z0-9_]+\]")
 # Same marker, but anchored to the start of a step body with a capture group
 # for the bare handler name -- what _step_dict_for_body/
@@ -106,7 +127,7 @@ def has_function_steps(instructions: str) -> bool:
     return bool(_FUNCTION_MARKER_RE.search(instructions or ""))
 
 
-def _unconvertible_function_handlers(instructions: str) -> List[str]:
+def _unconvertible_function_handlers(step_lines: List[str]) -> List[str]:
     """[function:name] markers naming a handler with no registered
     `StepContract` -- Phase 1-6's tool machinery (schema derivation,
     precondition checking, mock mode, permission gating) has nothing to
@@ -114,6 +135,14 @@ def _unconvertible_function_handlers(instructions: str) -> List[str]:
     silently produce a step that looks real but can't actually be checked
     or safely run. Sorted, de-duplicated names for a stable, readable error
     message.
+
+    Takes the already-isolated workflow step lines (e.g.
+    `ExpertConfig.workflows[packet_type]`), not raw doc text -- a
+    commented-out `// [function:...]` line never reaches this function in
+    the first place (`ExpertInstructionsProvider._extract_workflow` drops
+    those before `workflows` is populated), so a disabled step naming a
+    contractless handler correctly does NOT block conversion of the steps
+    that actually run.
 
     Deliberately does NOT check `required_permission` -- see
     `expert_to_skill`'s docstring for why a runtime, per-caller check isn't
@@ -128,15 +157,16 @@ def _unconvertible_function_handlers(instructions: str) -> List[str]:
     """
     from orchestrator.experts.step_registry import get_step_contract
 
-    names = sorted(set(_FUNCTION_NAME_ANYWHERE_RE.findall(instructions or "")))
+    joined = "\n".join(step_lines or [])
+    names = sorted(set(_FUNCTION_NAME_ANYWHERE_RE.findall(joined)))
     return [name for name in names if get_step_contract(name) is None]
 
 
-def _step_dict_for_body(
-    index: int, body: str, is_last: bool, preamble: str = ""
-) -> Dict[str, Any]:
-    """One skill step dict for a single numbered-list item's body text (or
-    the whole instruction block, for text with no numbering at all).
+def _step_dict_for_body(index: int, body: str, is_last: bool, preamble: str = "") -> Dict[str, Any]:
+    """One skill step dict for a single already-isolated workflow line (see
+    `build_steps_from_workflow_lines` -- one entry of
+    `ExpertConfig.workflows[packet_type]`, numbering/bullets/comments
+    already stripped by `ExpertInstructionsProvider._extract_workflow`).
 
     Task 7.2: a body starting with `[function:name]` becomes a
     `kind:"function"` step naming that handler, carried through intact --
@@ -195,43 +225,43 @@ def _step_dict_for_body(
     }
 
 
-def split_instructions_into_steps(instructions: str) -> List[Dict[str, Any]]:
-    """Split an expert's instruction block into skill steps.
+def build_steps_from_workflow_lines(
+    step_lines: List[str], preamble: str = ""
+) -> List[Dict[str, Any]]:
+    """One skill step per already-isolated workflow line.
 
-    A numbered list becomes one step per item -- a `kind:"function"` step
-    (Task 7.2) for an item whose text is a `[function:name]` marker, a
-    `kind:"llm"` step (the pre-existing behavior, unchanged) for everything
-    else. Anything with no numbering at all becomes a single step of
-    whichever kind its text implies.
+    `step_lines` is expected to already be what
+    `ExpertInstructionsProvider._extract_workflow` produces: one string per
+    step, numbering/bullets stripped, commented-out (`//`/`--`) lines
+    already excluded, merged Google-Docs lines already re-split. This
+    function's only remaining job is Task 7.2's per-line classification
+    (`_step_dict_for_body`) -- a `kind:"function"` step for a
+    `[function:name]` line, `kind:"llm"` for everything else -- plus
+    prepending `preamble` to step one.
 
-    Text before the first numbered item is the persona and is prepended to
-    step one regardless of that step's kind; dropping it would lose the
-    expert's identity entirely.
+    `preamble` (the expert's system instructions) is prepended to step one
+    regardless of that step's kind; dropping it would lose the expert's
+    identity entirely -- see `_step_dict_for_body`'s docstring for why this
+    is safe even when step one is a function step.
     """
-    text = (instructions or "").strip()
-    if not text:
+    lines = [line.strip() for line in (step_lines or []) if (line or "").strip()]
+    if not lines:
         return []
 
-    matches = list(_NUMBERED.finditer(text))
-    if not matches:
-        return [_step_dict_for_body(0, text, is_last=True)]
-
-    preamble = text[: matches[0].start()].strip()
-    steps: List[Dict[str, Any]] = []
-    for i, match in enumerate(matches):
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        body = text[match.start() : end].strip()
-        body = _NUMBERED.sub(r"\2", body, count=1).strip()
-        steps.append(
-            _step_dict_for_body(
-                i, body, is_last=(i == len(matches) - 1), preamble=preamble if i == 0 else ""
-            )
+    preamble = (preamble or "").strip()
+    return [
+        _step_dict_for_body(
+            i, line, is_last=(i == len(lines) - 1), preamble=preamble if i == 0 else ""
         )
-    return steps
+        for i, line in enumerate(lines)
+    ]
 
 
-def expert_to_skill(expert_name: str, instructions: str) -> Dict[str, Any]:
-    """Build a draft skills row from an expert's doc section.
+def expert_to_skill(
+    expert_name: str, system_instructions: str, step_lines: List[str]
+) -> Dict[str, Any]:
+    """Build a draft skills row from one expert/packet-type's already-parsed
+    workflow.
 
     Refuses (ValueError) only when a `[function:...]` marker names a
     handler with no registered `StepContract` (Task 7.1) -- see
@@ -249,7 +279,7 @@ def expert_to_skill(expert_name: str, instructions: str) -> Dict[str, Any]:
     pre-judge at conversion time. `main()` still surfaces it in the printed
     dry-run output so whoever reviews the draft before `--apply` knows.
     """
-    unconvertible = _unconvertible_function_handlers(instructions)
+    unconvertible = _unconvertible_function_handlers(step_lines)
     if unconvertible:
         plural = len(unconvertible) != 1
         raise ValueError(
@@ -258,9 +288,9 @@ def expert_to_skill(expert_name: str, instructions: str) -> Dict[str, Any]:
             f"tool machinery can't run or validate. Add a StepContract for "
             f"{'them' if plural else 'it'} first."
         )
-    steps = split_instructions_into_steps(instructions)
+    steps = build_steps_from_workflow_lines(step_lines, preamble=system_instructions)
     if not steps:
-        raise ValueError(f"'{expert_name}' has no instruction text to convert")
+        raise ValueError(f"'{expert_name}' has no workflow steps to convert")
     title = expert_name.replace("_", " ").title()
     return {
         "slug": expert_name.replace("_", "-"),
@@ -297,22 +327,45 @@ def main() -> int:
     body, source, _version = PROMPTS.resolve("experts.definitions")
     print(f"experts.definitions resolved from {source.value}, {len(body)} chars\n")
 
-    section = re.search(
-        rf"^# Expert: {re.escape(args.expert)}\s*$(.*?)(?=^# Expert: |\Z)",
-        PROMPTS.text("experts.definitions"),
-        re.MULTILINE | re.DOTALL,
-    )
-    if not section:
+    # Real parsing, not a second reimplementation of it -- see this module's
+    # docstring ("Phase 11 fix"). Uses the same ExpertInstructionsProvider
+    # (and therefore the same cached PROMPTS.resolve("experts.definitions")
+    # call above) real expert execution uses, so "what this script converts"
+    # and "what the expert actually runs" can never drift apart again.
+    from orchestrator.services.expert_instructions_provider import ExpertInstructionsProvider
+
+    config = asyncio.run(ExpertInstructionsProvider().get_expert_config(args.expert))
+    if config is None:
         print(f"No '# Expert: {args.expert}' section found.", file=sys.stderr)
         return 1
 
+    if not config.workflows:
+        print(
+            f"'{args.expert}' has no '## Packet: <type>' / '### Workflow' section to "
+            "convert -- nothing to do.",
+            file=sys.stderr,
+        )
+        return 1
+    if len(config.workflows) > 1:
+        print(
+            f"'{args.expert}' has {len(config.workflows)} packet types "
+            f"({', '.join(config.workflows)}) -- converting more than one into a single "
+            "flat skill isn't supported yet. Convert manually or extend this script.",
+            file=sys.stderr,
+        )
+        return 1
+    ((packet_type, step_lines),) = config.workflows.items()
+
     try:
-        skill = expert_to_skill(args.expert, section.group(1))
+        skill = expert_to_skill(args.expert, config.system_instructions, step_lines)
     except ValueError as e:
         print(f"Cannot convert: {e}", file=sys.stderr)
         return 1
 
-    print(f"{skill['title']} -> {len(skill['steps'])} step(s), status={skill['status']}\n")
+    print(
+        f"{skill['title']} -> {len(skill['steps'])} step(s), status={skill['status']} "
+        f"(packet type: {packet_type})\n"
+    )
     for step in skill["steps"]:
         print(_describe_step_for_preview(step))
 
@@ -326,10 +379,7 @@ def main() -> int:
         and contract.required_permission
     ]
     if permission_notes:
-        print(
-            "\nPermission-gated step(s) -- checked per-caller at run time, "
-            "not blocked here:"
-        )
+        print("\nPermission-gated step(s) -- checked per-caller at run time, not blocked here:")
         print("\n".join(permission_notes))
 
     if not args.apply:

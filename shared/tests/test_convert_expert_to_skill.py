@@ -10,6 +10,19 @@ scaffolding for the other two -- see that module's docstring for the full
 finding). Eligibility here is a mechanical, per-handler check instead (Phase
 7 of docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md).
 
+Phase 11 fix (2026-08-21): `build_steps_from_workflow_lines`/`expert_to_skill`
+now take an already-split `List[str]` of workflow step lines (what
+`ExpertInstructionsProvider.get_expert_config(...).workflows[packet_type]`
+produces for real expert execution) instead of one raw, un-split doc-section
+string. The OLD signature's own numbered-list splitter silently collapsed
+every currently-live expert's doc (none use numbered list syntax -- see
+`main()`'s docstring note) into a single opaque step; these tests exercise
+the NEW, narrower unit (per-line classification only -- `_step_dict_for_body`
+via `build_steps_from_workflow_lines`) directly with already-split lines,
+matching what `main()` actually feeds it now. Numbered-vs-unnumbered line
+splitting and `## Packet: name` boundary detection are
+ExpertInstructionsProvider's job and are tested there, not duplicated here.
+
 Every handler these tests register (via `_cleanup_registry`, mirroring the
 same-named fixture chat_orchestrator/tests/experts/test_soft_failures.py and
 friends use) is synthetic, `zzz_test_*`-prefixed -- never a real production
@@ -25,9 +38,9 @@ import pytest
 from orchestrator.experts.step_contracts import MockSpec, StepContract
 from orchestrator.experts.step_registry import get_step_registry
 from scripts.convert_expert_to_skill import (
+    build_steps_from_workflow_lines,
     expert_to_skill,
     has_function_steps,
-    split_instructions_into_steps,
 )
 
 
@@ -59,20 +72,24 @@ def test_a_function_marker_is_detected():
     assert has_function_steps("Step one.\n\n[function:fetch_month_metrics]\n\nStep two.") is True
 
 
-def test_a_single_block_becomes_a_one_step_skill():
-    steps = split_instructions_into_steps("You are the Grid Analyst. Do the thing.")
+def test_a_single_line_becomes_a_one_step_skill():
+    steps = build_steps_from_workflow_lines(["You are the Grid Analyst. Do the thing."])
     assert len(steps) == 1
     assert "Grid Analyst" in steps[0]["instruction"]
 
 
-def test_numbered_instructions_become_separate_steps():
-    text = (
-        "You are the Grid Analyst.\n\n"
-        "1. Analyze performance data\n"
-        "2. Identify anomalies\n"
-        "3. Generate recommendations\n"
-    )
-    steps = split_instructions_into_steps(text)
+def test_unnumbered_lines_each_become_their_own_step():
+    """The real, currently-live shape: ExpertInstructionsProvider._extract_
+    workflow strips numbering before these lines ever reach this module (see
+    main()'s docstring note) -- neither grids_technical_reviewer's nor
+    package_generator's live doc uses numbered list syntax at all. One
+    already-split line in, one step out, numbering never re-examined here."""
+    lines = [
+        "Analyze performance data",
+        "Identify anomalies",
+        "Generate recommendations",
+    ]
+    steps = build_steps_from_workflow_lines(lines)
     assert len(steps) == 3
     assert "Analyze performance data" in steps[0]["instruction"]
     assert "Generate recommendations" in steps[2]["instruction"]
@@ -80,18 +97,20 @@ def test_numbered_instructions_become_separate_steps():
 
 def test_the_preamble_is_prepended_to_the_first_step():
     """Dropping 'You are the Grid Analyst' would lose the whole persona."""
-    text = "You are the Grid Analyst.\n\n1. Analyze data\n2. Report\n"
-    steps = split_instructions_into_steps(text)
+    steps = build_steps_from_workflow_lines(
+        ["Analyze data", "Report"], preamble="You are the Grid Analyst."
+    )
     assert "Grid Analyst" in steps[0]["instruction"]
+    assert "Grid Analyst" not in steps[1]["instruction"]  # only step one
 
 
 def test_steps_are_indexed_from_zero():
-    steps = split_instructions_into_steps("1. A\n2. B\n")
+    steps = build_steps_from_workflow_lines(["A", "B"])
     assert [s["index"] for s in steps] == [0, 1]
 
 
 def test_every_llm_step_defaults_to_read_only():
-    steps = split_instructions_into_steps("1. A\n2. B\n")
+    steps = build_steps_from_workflow_lines(["A", "B"])
     assert all(s["allow_write"] is False for s in steps)
 
 
@@ -100,19 +119,24 @@ def test_a_leading_llm_marker_is_stripped():
     parser (WorkflowExecutor._parse_step_line) strips [llm] too; this
     converter never did, leaving the literal marker text in a converted
     step's instruction."""
-    steps = split_instructions_into_steps("1. [llm] understand_request - Parse intent\n")
+    steps = build_steps_from_workflow_lines(["[llm] understand_request - Parse intent"])
     assert steps[0]["instruction"] == "understand_request - Parse intent"
 
 
+def test_blank_lines_are_ignored():
+    steps = build_steps_from_workflow_lines(["A", "", "  ", "B"])
+    assert len(steps) == 2
+
+
 def test_converted_skill_starts_as_a_draft():
-    skill = expert_to_skill("grid_analyst", "You are the Grid Analyst. Do the thing.")
+    skill = expert_to_skill("grid_analyst", "You are the Grid Analyst.", ["Do the thing."])
     assert skill["status"] == "draft"
     assert skill["staff_only"] is True
 
 
-def test_a_skill_with_no_instruction_text_is_refused():
-    with pytest.raises(ValueError, match="no instruction text"):
-        expert_to_skill("empty_expert", "")
+def test_a_skill_with_no_workflow_lines_is_refused():
+    with pytest.raises(ValueError, match="no workflow steps"):
+        expert_to_skill("empty_expert", "", [])
 
 
 # Task 7.1: refuse only per-handler, on a real contract check -- not the old
@@ -121,8 +145,8 @@ def test_a_skill_with_no_instruction_text_is_refused():
 
 def test_a_contract_bearing_function_marker_converts(_cleanup_registry):
     _cleanup_registry("zzz_test_step", contract=StepContract(description="Does a thing."))
-    steps = split_instructions_into_steps(
-        "You are a test expert.\n\n1. [function:zzz_test_step] - Do the thing\n"
+    steps = build_steps_from_workflow_lines(
+        ["[function:zzz_test_step] - Do the thing"], preamble="You are a test expert."
     )
     assert len(steps) == 1
     assert steps[0]["kind"] == "function"
@@ -132,14 +156,11 @@ def test_a_contract_bearing_function_marker_converts(_cleanup_registry):
 
 
 def test_expert_to_skill_converts_a_contract_bearing_function_step(_cleanup_registry):
-    """Realistic recipe shape: a [function:name] marker leads a numbered
-    step, matching WorkflowExecutor._parse_step_line's own convention --
-    NOT a marker floating in unnumbered prose (see the docstring on
-    _step_dict_for_body/split_instructions_into_steps for why an unnumbered
-    block is treated as one opaque LLM step regardless of its content)."""
+    """Realistic recipe shape: a [function:name] marker leads a workflow
+    line, matching WorkflowExecutor._parse_step_line's own convention."""
     _cleanup_registry("zzz_test_step", contract=StepContract())
     skill = expert_to_skill(
-        "zzz_test_expert", "1. [function:zzz_test_step] - Get approval\n2. Confirm sent\n"
+        "zzz_test_expert", "", ["[function:zzz_test_step] - Get approval", "Confirm sent"]
     )
     assert skill["steps"][0]["kind"] == "function"
     assert skill["steps"][0]["handler"] == "zzz_test_step"
@@ -152,7 +173,9 @@ def test_expert_to_skill_refuses_a_handler_with_no_contract():
     registered at all, standing in for a handler with no StepContract."""
     with pytest.raises(ValueError, match="zzz_test_unregistered"):
         expert_to_skill(
-            "signing", "Get approval.\n\n[function:zzz_test_unregistered]\n\nConfirm sent."
+            "signing",
+            "Get approval.",
+            ["[function:zzz_test_unregistered]", "Confirm sent."],
         )
 
 
@@ -161,11 +184,25 @@ def test_refusal_message_names_every_unconvertible_handler(_cleanup_registry):
     with pytest.raises(ValueError) as exc_info:
         expert_to_skill(
             "zzz_test_expert",
-            "1. [function:zzz_test_has_contract]\n2. [function:zzz_test_missing]\n",
+            "",
+            ["[function:zzz_test_has_contract]", "[function:zzz_test_missing]"],
         )
     message = str(exc_info.value)
     assert "zzz_test_missing" in message
     assert "zzz_test_has_contract" not in message  # only the bad one is named
+
+
+def test_a_commented_out_step_never_reaches_the_contract_check(_cleanup_registry):
+    """ExpertInstructionsProvider._extract_workflow drops `//`/`--`-prefixed
+    lines before workflows is populated -- a disabled step naming a
+    contractless handler must NOT block conversion of the steps that
+    actually run. This module has no `//`-stripping of its own (deliberately
+    -- see _unconvertible_function_handlers's docstring); this test pins
+    that the CALLER is expected to have already excluded such lines, by
+    simply never passing one."""
+    _cleanup_registry("zzz_test_has_contract", contract=StepContract())
+    skill = expert_to_skill("zzz_test_expert", "", ["[function:zzz_test_has_contract] - Real step"])
+    assert len(skill["steps"]) == 1
 
 
 def test_registered_but_contractless_handler_is_also_refused(_cleanup_registry):
@@ -174,16 +211,14 @@ def test_registered_but_contractless_handler_is_also_refused(_cleanup_registry):
     4's tool machinery needs the contract either way."""
     _cleanup_registry("zzz_test_no_contract", contract=None)
     with pytest.raises(ValueError, match="zzz_test_no_contract"):
-        expert_to_skill("zzz_test_expert", "1. [function:zzz_test_no_contract]\n")
+        expert_to_skill("zzz_test_expert", "", ["[function:zzz_test_no_contract]"])
 
 
 def test_required_permission_alone_does_not_refuse_conversion(_cleanup_registry):
     """Task 6's permission gate is a runtime, per-caller check -- this
     design-time script must not pre-judge it."""
-    _cleanup_registry(
-        "zzz_test_gated", contract=StepContract(required_permission="staff_only")
-    )
-    skill = expert_to_skill("zzz_test_expert", "1. [function:zzz_test_gated]\n")
+    _cleanup_registry("zzz_test_gated", contract=StepContract(required_permission="staff_only"))
+    skill = expert_to_skill("zzz_test_expert", "", ["[function:zzz_test_gated]"])
     assert skill["steps"][0]["handler"] == "zzz_test_gated"
 
 
@@ -192,16 +227,14 @@ def test_required_permission_alone_does_not_refuse_conversion(_cleanup_registry)
 
 
 def test_a_mutating_handler_is_stamped_mutates_and_defaults_mock_on(_cleanup_registry):
-    _cleanup_registry(
-        "zzz_test_write", contract=StepContract(mutates=True, mock=MockSpec())
-    )
-    steps = split_instructions_into_steps("1. [function:zzz_test_write]\n")
+    _cleanup_registry("zzz_test_write", contract=StepContract(mutates=True, mock=MockSpec()))
+    steps = build_steps_from_workflow_lines(["[function:zzz_test_write]"])
     assert steps[0]["mutates"] is True
     assert steps[0]["mock"] is True
 
 
 def test_a_non_mutating_handler_is_not_stamped(_cleanup_registry):
     _cleanup_registry("zzz_test_read", contract=StepContract(mutates=False))
-    steps = split_instructions_into_steps("1. [function:zzz_test_read]\n")
+    steps = build_steps_from_workflow_lines(["[function:zzz_test_read]"])
     assert "mutates" not in steps[0]
     assert "mock" not in steps[0]
