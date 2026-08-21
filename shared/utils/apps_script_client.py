@@ -323,19 +323,30 @@ async def replace_sheet_image(
     worksheet_name: str,
     image_base64: str,
     min_height_px: Optional[int] = None,
+    target: Optional[str] = None,
+    fit_range: Optional[str] = None,
 ) -> AppsScriptResult:
     """
     Replace an over-cell image in a Google Sheet.
 
-    Finds the first image with height >= min_height_px and replaces it
-    with the provided image, preserving vertical position and centering
-    horizontally.
+    Without target, finds the first image with height >= min_height_px and
+    replaces it -- the legacy heuristic every existing caller relies on.
+    With target, selects by anchor-cell A1 address or alt text instead.
+
+    fit_range sizes the replacement to an A1 range's pixel box rather than
+    the replaced image's own dimensions.
 
     Args:
         sheet_id: Google Sheets spreadsheet ID
         worksheet_name: Name of the worksheet/tab containing the image
         image_base64: Base64-encoded PNG image data (no data URI prefix)
-        min_height_px: Minimum image height to match (default: 100)
+        min_height_px: Minimum image height to match (default: 100).
+            Ignored when target is given.
+        target: Anchor cell (A1) or alt text identifying which image to
+            replace. Omit to use the min_height_px heuristic.
+        fit_range: A1 range (e.g. "B6:F20") the image should be sized to
+            fit inside. Omit to size from the replaced image's own
+            dimensions (or 400px height when inserting fresh).
 
     Returns:
         AppsScriptResult with dimension info in data
@@ -366,8 +377,30 @@ async def replace_sheet_image(
     }
     if min_height_px is not None:
         params["min_height"] = min_height_px
+    if target:
+        params["target"] = target
+    if fit_range:
+        params["fit_range"] = fit_range
 
     return await client.call_action("replace_sheet_image", params)
+
+
+async def get_range_pixels(sheet_id: str, worksheet_name: str, range_a1: str) -> AppsScriptResult:
+    """Pixel width/height of an A1 range, for image sizing."""
+    client = AnansiAppsScriptClient()
+    return await client.call_action(
+        "get_range_pixels",
+        {"sheet_id": sheet_id, "worksheet_name": worksheet_name, "range": range_a1},
+    )
+
+
+async def get_merged_range_at(sheet_id: str, worksheet_name: str, cell: str) -> AppsScriptResult:
+    """The merged range containing a cell, or {"merged": False}."""
+    client = AnansiAppsScriptClient()
+    return await client.call_action(
+        "get_merged_range_at",
+        {"sheet_id": sheet_id, "worksheet_name": worksheet_name, "cell": cell},
+    )
 
 
 async def write_doc_markdown(
