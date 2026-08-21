@@ -39,6 +39,7 @@ from orchestrator.services.ticketing.correlator import (
     CandidateSummary,
     _apply_guardrails,
     _parse_llm_response,
+    collect_deterministic_findings,
     effective_candidate_severity,
 )
 
@@ -110,6 +111,53 @@ def _candidate(ref="TKT-1", **overrides) -> CandidateSummary:
     )
     defaults.update(overrides)
     return CandidateSummary(**defaults)
+
+
+class TestDeterministicFindings:
+    def test_collects_exact_match_and_severity_as_factual_evidence(self):
+        candidate = _candidate(
+            severity="warning",
+            root_cause_kind="component",
+            affected_keys=[{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+        )
+        alert = AlertFacts(
+            subject="! Urgent: MPPT A3 in Kudi seems to perform lower !",
+            signature="sig-a",
+            component_kind="mppt",
+            component_key="A3",
+            component_label="MPPT A3",
+            severity="urgent",
+        )
+
+        findings = collect_deterministic_findings([candidate], alert)
+
+        assert [(finding.candidate_ref, finding.kind) for finding in findings] == [
+            ("TKT-1", "exact_signature_component"),
+            ("TKT-1", "urgent_severity_increase"),
+            ("TKT-1", "root_cause_kind"),
+        ]
+        assert findings[0].facts == {"signature": "sig-a", "component_key": "A3"}
+
+    def test_collects_new_component_signature_without_a_ticket_action(self):
+        candidate = _candidate(
+            affected_keys=[{"kind": "mppt", "key": "A3", "label": "MPPT A3"}]
+        )
+        alert = AlertFacts(
+            subject="! Warning: MPPT A7 in Kudi seems to perform lower !",
+            signature="sig-a",
+            component_kind="mppt",
+            component_key="A7",
+            component_label="MPPT A7",
+            severity="warning",
+        )
+
+        findings = collect_deterministic_findings([candidate], alert)
+
+        assert [finding.kind for finding in findings] == [
+            "signature_match_new_component",
+            "component_kind_match",
+        ]
+        assert all("create" not in finding.explanation.lower() for finding in findings)
 
 
 class TestApplyGuardrails:

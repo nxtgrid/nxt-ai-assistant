@@ -310,7 +310,7 @@ class CorrelationStore:
         try:
             ticket_response = (
                 client.table("tickets")
-                .select("id, ticket_ref, backend, summary, status")
+                .select("id, ticket_ref, backend, summary, description, status")
                 .eq("grid_name", grid_name)
                 .in_("status", list(_OPEN_TICKET_STATUSES))
                 .eq("provisioning_state", "active")
@@ -352,6 +352,7 @@ class CorrelationStore:
                     "ticket_ref": ticket.get("ticket_ref"),
                     "ticket_backend": ticket.get("backend"),
                     "summary_current": ticket.get("summary"),
+                    "description": ticket.get("description") or "",
                     "status": ticket.get("status"),
                     "grid_name": grid_name,
                 }

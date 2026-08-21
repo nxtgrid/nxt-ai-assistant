@@ -55,6 +55,7 @@ from shared.utils.logging import get_logger
 
 from . import correlation_rules
 from .alert_facts import AlertFacts, derive_severity, same_component
+from .alert_judgment import DeterministicFinding
 
 if TYPE_CHECKING:
     from .backend import TicketStatus
@@ -99,6 +100,7 @@ class CandidateSummary(BaseModel):
     ticket_id: Optional[str] = None
     backend: str = ""
     summary: str = ""
+    description: str = ""
     age_hours: Optional[float] = None
     root_cause_kind: Optional[str] = None
     affected_keys: List[Dict[str, Any]] = Field(default_factory=list)
@@ -390,6 +392,94 @@ def _find_signature_amend(
         if not already_present:
             return candidate
     return None
+
+
+def collect_deterministic_findings(
+    candidates: List[CandidateSummary], alert: AlertFacts
+) -> List[DeterministicFinding]:
+    """Return correlation-rule evidence without selecting a ticket action.
+
+    The v2 LLM path receives every applicable record. The legacy deterministic
+    ladder remains below for feature-off compatibility until the rollout flags
+    enable the judgment path.
+    """
+    findings: List[DeterministicFinding] = []
+    for candidate in candidates:
+        signature_matches = bool(alert.signature and alert.signature in candidate.signatures)
+        exact_component = bool(
+            alert.component_kind
+            and any(
+                same_component(entry, alert.component_kind, alert.component_key)
+                for entry in candidate.affected_keys
+            )
+        )
+
+        if signature_matches and exact_component:
+            findings.append(
+                DeterministicFinding(
+                    candidate_ref=candidate.ref,
+                    kind="exact_signature_component",
+                    facts={"signature": alert.signature, "component_key": alert.component_key},
+                    explanation="The candidate records this alert signature on the same component.",
+                )
+            )
+        elif signature_matches and not alert.component_kind:
+            findings.append(
+                DeterministicFinding(
+                    candidate_ref=candidate.ref,
+                    kind="exact_signature_keyless",
+                    facts={"signature": alert.signature},
+                    explanation="The candidate records this grid-level alert signature without a component key.",
+                )
+            )
+        elif signature_matches:
+            findings.append(
+                DeterministicFinding(
+                    candidate_ref=candidate.ref,
+                    kind="signature_match_new_component",
+                    facts={"signature": alert.signature, "component_key": alert.component_key},
+                    explanation="The candidate records the same alert signature on a different component.",
+                )
+            )
+            candidate_kinds = {
+                str(entry.get("kind") or "").strip()
+                for entry in candidate.affected_keys
+                if isinstance(entry, dict)
+            }
+            if alert.component_kind in candidate_kinds:
+                findings.append(
+                    DeterministicFinding(
+                        candidate_ref=candidate.ref,
+                        kind="component_kind_match",
+                        facts={"component_kind": alert.component_kind},
+                        explanation="The candidate already affects the same kind of equipment.",
+                    )
+                )
+
+        if _is_urgent_severity_increase(alert.severity, effective_candidate_severity(candidate)):
+            findings.append(
+                DeterministicFinding(
+                    candidate_ref=candidate.ref,
+                    kind="urgent_severity_increase",
+                    facts={
+                        "incoming_severity": alert.severity,
+                        "candidate_severity": effective_candidate_severity(candidate),
+                    },
+                    explanation="The incoming alert is urgent while the candidate is not recorded as urgent.",
+                )
+            )
+
+        if candidate.root_cause_kind:
+            findings.append(
+                DeterministicFinding(
+                    candidate_ref=candidate.ref,
+                    kind="root_cause_kind",
+                    facts={"root_cause_kind": candidate.root_cause_kind},
+                    explanation="The candidate has a recorded root-cause classification.",
+                )
+            )
+
+    return findings
 
 
 def find_deterministic_decision(
@@ -791,6 +881,7 @@ class AlertCorrelator:
                 ticket_id=ticket_id,
                 backend=row.get("ticket_backend") or "",
                 summary=row.get("summary_current") or row.get("summary_base") or "",
+                description=row.get("description") or "",
                 age_hours=_age_hours(row.get("created_at"), now),
                 root_cause_kind=row.get("root_cause_kind"),
                 affected_keys=row.get("affected_keys") or [],
@@ -824,6 +915,7 @@ class AlertCorrelator:
                 ticket_id=adopted.id,
                 backend=summary.backend,
                 summary=summary.summary,
+                description=summary.description,
                 age_hours=_age_hours(getattr(summary, "created_at", None), now),
                 status=summary.status,
             )
