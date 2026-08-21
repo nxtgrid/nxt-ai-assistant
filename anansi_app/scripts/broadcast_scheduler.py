@@ -50,6 +50,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 # API key for authenticating with chat orchestrator
 API_KEY = os.getenv("API_KEY", "")
 
+# Additional key required when the scheduler asserts the stored user's email.
+IDENTITY_ASSERTION_KEY = os.getenv("IDENTITY_ASSERTION_KEY", "")
+
 
 def process_pending_broadcasts(processor_id: str, verbose: bool = True) -> int:
     """
@@ -563,6 +566,8 @@ def _execute_user_command(
     headers = {}
     if API_KEY:
         headers["X-Api-Key"] = API_KEY
+    if IDENTITY_ASSERTION_KEY:
+        headers["X-Identity-Assertion-Key"] = IDENTITY_ASSERTION_KEY
 
     with httpx.Client(timeout=120.0) as client:
         response = client.post(

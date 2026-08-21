@@ -139,7 +139,10 @@ class TestProcessDueSkillSchedules:
         with (
             patch("supabase.create_client", return_value=fake_supabase),
             patch("httpx.Client", return_value=mock_client),
-            patch("broadcast_scheduler.advance_recurrence", return_value=datetime.now(timezone.utc) + timedelta(days=1)),
+            patch(
+                "broadcast_scheduler.advance_recurrence",
+                return_value=datetime.now(timezone.utc) + timedelta(days=1),
+            ),
         ):
             result = bs.process_due_skill_schedules(verbose=False)
 
@@ -167,7 +170,10 @@ class TestProcessDueSkillSchedules:
         with (
             patch("supabase.create_client", return_value=fake_supabase),
             patch("httpx.Client", return_value=mock_client),
-            patch("broadcast_scheduler.advance_recurrence", return_value=datetime.now(timezone.utc) + timedelta(days=1)),
+            patch(
+                "broadcast_scheduler.advance_recurrence",
+                return_value=datetime.now(timezone.utc) + timedelta(days=1),
+            ),
         ):
             bs.process_due_skill_schedules(verbose=False)
 
@@ -180,7 +186,12 @@ class TestProcessDueSkillSchedules:
 
         fake_supabase = _FakeSupabase([_schedule_row(schedule_type="once")])
         mock_response = MagicMock()
-        mock_response.json.return_value = {"dispatched": 1, "skipped": 0, "failed": 0, "reason": None}
+        mock_response.json.return_value = {
+            "dispatched": 1,
+            "skipped": 0,
+            "failed": 0,
+            "reason": None,
+        }
         mock_response.raise_for_status = MagicMock()
         mock_client = MagicMock()
         mock_client.__enter__.return_value = mock_client
@@ -194,3 +205,40 @@ class TestProcessDueSkillSchedules:
 
         assert fake_supabase.table_obj.updates[0]["status"] == "completed"
         assert fake_supabase.table_obj.updates[0]["is_active"] is False
+
+
+class TestExecuteUserCommand:
+    def test_sends_identity_assertion_with_stored_user_email(self, monkeypatch):
+        monkeypatch.setattr(bs, "API_KEY", "api-key")
+        monkeypatch.setattr(bs, "IDENTITY_ASSERTION_KEY", "identity-key", raising=False)
+        monkeypatch.setattr(bs, "CHAT_ORCHESTRATOR_URL", "http://orchestrator.test")
+
+        mock_response = MagicMock()
+        mock_response.json.return_value = {
+            "success": True,
+            "message": "scheduled result",
+        }
+        mock_response.raise_for_status = MagicMock()
+        mock_client = MagicMock()
+        mock_client.__enter__.return_value = mock_client
+        mock_client.post.return_value = mock_response
+
+        with patch("broadcast_scheduler.httpx.Client", return_value=mock_client):
+            result = bs._execute_user_command(
+                command="/tickets",
+                chat_id="1570892239",
+                topic_id=None,
+                user_context={
+                    "user_id": "operator@example.com",
+                    "user_email": "operator@example.com",
+                    "organization_ids": ["2"],
+                },
+                verbose=False,
+            )
+
+        assert result == "scheduled result"
+        request = mock_client.post.call_args
+        assert request.kwargs["headers"] == {
+            "X-Api-Key": "api-key",
+            "X-Identity-Assertion-Key": "identity-key",
+        }
