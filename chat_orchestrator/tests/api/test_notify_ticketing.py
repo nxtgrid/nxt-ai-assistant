@@ -23,6 +23,7 @@ from orchestrator.api.app import (
     _resolve_notify_ticket_full,
     handle_notify,
 )
+from orchestrator.services.ticketing.alert_facts import AlertFacts
 from orchestrator.services.ticketing.backend import (
     TicketBackendError,
     TicketCreateOutcome,
@@ -133,6 +134,35 @@ def _notify_body(**overrides: Any) -> NotifyRequest:
     defaults: Dict[str, Any] = dict(source="grafana", grid_name="Acme Grid", text="Meter offline")
     defaults.update(overrides)
     return NotifyRequest(**defaults)
+
+
+@pytest.mark.asyncio
+async def test_auto_routes_to_llm_judgment_resolver_when_enabled(monkeypatch):
+    """The rollout flag changes only the auto-correlation resolver boundary."""
+    from orchestrator.api import app as app_module
+
+    monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+    monkeypatch.setenv("ALERT_LLM_JUDGMENT_ENABLED", "true")
+    captured: dict[str, Any] = {}
+    expected = ("OPS-1234", None, {"send_decision": "send"}, NotificationDelivery())
+
+    async def fake_llm_resolver(*args: Any):
+        captured["args"] = args
+        return expected
+
+    monkeypatch.setattr(app_module, "_resolve_notify_ticket_llm_judgment", fake_llm_resolver)
+    body = _notify_body(
+        ticket_id="auto",
+        alert=AlertFacts(subject="! Warning: inverter communication lost"),
+    )
+
+    result = await app_module._resolve_notify_ticket_auto(
+        body, _target(), "internal", _live_context(None)
+    )
+
+    assert result == expected
+    assert captured["args"][0] is body
+    assert captured["args"][1].grid_name == "Acme Grid"
 
 
 def _live_context(output_kw: Optional[float], battery_voltage_v: Optional[float] = None):
