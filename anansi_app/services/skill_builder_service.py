@@ -138,22 +138,34 @@ class SkillBuilderService:
         skill_id: str,
         title: str,
         summary: str,
+        steps: List[Dict[str, Any]],
         staff_only: bool,
         status: str,
         actor: str,
     ) -> Dict[str, Any]:
-        """Update an existing skill's identity and status together.
+        """Update an existing skill's identity, steps and status together.
 
         The editor modal's Identity card always shows title/summary/staff
         and status together (nicegui_app/pages/skills.py's _open_editor),
         so a single write matches what the UI actually offers -- there is
-        no separate "just rename it" affordance today. Does not touch
-        steps: this modal has no way to re-edit an existing skill's saved
-        steps yet (see render_builder's initial_steps docstring), so a
-        steps column would have nothing new to write.
+        no separate "just rename it" affordance today.
+
+        `steps` is required rather than optional on purpose. The modal now
+        mounts the step builder for an existing workflow too, so every save
+        has a full step sequence to write -- `_derive_steps_payload` appends
+        the un-re-run "pending tail" verbatim, meaning "open Edit, Save
+        without touching anything" round-trips the stored steps rather than
+        truncating them. Making the parameter required keeps the caller from
+        quietly dropping that payload the way `build_skill_rows` once dropped
+        it on the read side; same stored shape as `save_skill` (see
+        skill_validation.py's module docstring). An empty list is rejected
+        for the same reason `save_skill` rejects one -- it would blank a
+        working workflow.
         """
         if not title.strip():
             return {"success": False, "error": "Title is required"}
+        if not steps:
+            return {"success": False, "error": "A skill needs at least one step"}
         if status not in self.VALID_STATUSES:
             return {
                 "success": False,
@@ -169,6 +181,7 @@ class SkillBuilderService:
                     {
                         "title": title.strip(),
                         "summary": summary.strip(),
+                        "steps": steps,
                         "staff_only": staff_only,
                         "status": status,
                     }
@@ -178,7 +191,10 @@ class SkillBuilderService:
             )
             if not response.data:
                 return {"success": False, "error": "Update returned no row"}
-            logger.info("Skill %s updated (status -> %s) by %s", skill_id, status, actor)
+            logger.info(
+                "Skill %s updated (%d steps, status -> %s) by %s",
+                skill_id, len(steps), status, actor,
+            )
             return {"success": True, "skill": response.data[0]}
         except Exception as e:
             logger.exception("Error updating skill %s", skill_id)

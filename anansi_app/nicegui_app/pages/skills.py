@@ -161,7 +161,16 @@ def can_promote_to_active(
 def build_skill_rows(
     skills: List[Dict[str, Any]], schedules: Dict[str, Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
-    """Table rows for the list. Pure -- all formatting decisions live here."""
+    """Table rows for the list. Pure -- all formatting decisions live here.
+
+    `steps` is carried through even though the list itself only ever shows
+    `step_count`: the row this builds is the same object `_render_row` hands
+    to `_open_editor`, which seeds the builder from `row["steps"]`. Dropping
+    it here is invisible on the list (step_count is computed upstream in
+    SkillBuilderService.list_skills, so the count stays right) but silently
+    opens every workflow with zero steps. Don't prune it as an unused
+    display field.
+    """
     rows = []
     for skill in skills:
         rows.append(
@@ -170,6 +179,7 @@ def build_skill_rows(
                 "title": skill["title"],
                 "summary": skill.get("summary") or "",
                 "step_count": skill.get("step_count", 0),
+                "steps": skill.get("steps") or [],
                 "status": skill.get("status", "draft"),
                 "audience": "Staff only" if skill.get("staff_only") else "Everyone",
                 "schedule": format_schedule(schedules.get(skill["id"], {})),
@@ -482,6 +492,7 @@ async def _open_editor(row, schedule, service, refresh, user_email) -> None:
                             row["id"],
                             title,
                             summary_text,
+                            steps,
                             staff_switch.value,
                             status_select.value,
                             actor=user_email,
