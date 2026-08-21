@@ -33,6 +33,7 @@ from servers.equipment_diagnostics_server.platforms.vrm_platform import Inverter
 
 from shared.auth import get_auth_service
 from shared.auth.auth_service import MANAGED_GENERATION_COLUMN
+from shared.grid_status import GridStatus, SiteStatus, classify_grid_status, normalize_site_status
 from shared.utils.geo import parse_location_geom
 
 
@@ -42,14 +43,36 @@ def _fresh_inverter_output_kw(voltage: Any) -> Optional[float]:
     staleness rule applies directly to it."""
     if isinstance(voltage, BaseException) or not voltage or getattr(voltage, "error", None):
         return None
-    data_timestamp = getattr(voltage, "data_timestamp", None)
-    if not data_timestamp:
-        return None
-    now = datetime.now(data_timestamp.tzinfo) if data_timestamp.tzinfo else datetime.utcnow()
-    if now - data_timestamp > timedelta(minutes=30):
+    if _inverter_voltage_is_stale(voltage):
         return None
     output_kw = getattr(voltage, "total_power_kw", None)
     return float(output_kw) if output_kw is not None else None
+
+
+def _inverter_voltage_is_stale(voltage: Any) -> bool:
+    """Whether a usable VRM voltage reading is missing or over 30 minutes old."""
+    if isinstance(voltage, BaseException) or not voltage or getattr(voltage, "error", None):
+        return True
+    data_timestamp = getattr(voltage, "data_timestamp", None)
+    if not data_timestamp:
+        return True
+    now = datetime.now(data_timestamp.tzinfo) if data_timestamp.tzinfo else datetime.utcnow()
+    return now - data_timestamp > timedelta(minutes=30)
+
+
+def _unavailable_live_telemetry(management: str = "unknown") -> dict[str, Any]:
+    return {
+        "generation_management": management,
+        "grid_status": GridStatus.UNKNOWN.value,
+        "site_status": SiteStatus.UNKNOWN.value,
+        "output_kw": None,
+        "battery_voltage_v": None,
+        "l1_voltage_v": None,
+        "l2_voltage_v": None,
+        "l3_voltage_v": None,
+        "observed_at": None,
+        "fresh": False,
+    }
 
 
 def _current_battery_voltage_v(battery: Any) -> Optional[float]:
@@ -66,7 +89,7 @@ def _current_battery_voltage_v(battery: Any) -> Optional[float]:
 
 
 class ClientGridStatusMixin:
-    async def get_live_telemetry(self, grid_name: str) -> Dict[str, Optional[float]]:
+    async def get_live_telemetry(self, grid_name: str) -> Dict[str, Any]:
         """Return fresh VRM inverter output (kW) and current battery voltage
         (V) for one grid, resolving the site once and fetching both widgets
         in parallel. Each field is ``None`` independently of the other when
@@ -83,8 +106,9 @@ class ClientGridStatusMixin:
             pool = await auth_service._get_db_pool()
             async with pool.acquire() as conn:
                 grid_row = await conn.fetchrow(
-                    """
-                    SELECT generation_external_site_id
+                    f"""
+                    SELECT generation_external_site_id, {MANAGED_GENERATION_COLUMN},
+                           is_hps_on, is_fs_on, is_hps_on_threshold_kw
                     FROM grids
                     WHERE LOWER(name) = LOWER($1)
                       AND is_hidden_from_reporting IS NOT TRUE
@@ -93,9 +117,20 @@ class ClientGridStatusMixin:
                     """,
                     grid_name,
                 )
-            if not grid_row or not grid_row["generation_external_site_id"]:
+            if not grid_row:
                 logger.info("No VRM site configured for urgent alert grid %r", grid_name)
-                return {"output_kw": None, "battery_voltage_v": None}
+                return _unavailable_live_telemetry()
+
+            if grid_row.get(MANAGED_GENERATION_COLUMN) is False:
+                return _unavailable_live_telemetry("unmanaged")
+
+            if grid_row.get(MANAGED_GENERATION_COLUMN) is not True:
+                logger.warning("Managed-generation state unavailable for urgent alert grid %r", grid_name)
+                return _unavailable_live_telemetry()
+
+            if not grid_row["generation_external_site_id"]:
+                logger.info("No VRM site configured for urgent alert grid %r", grid_name)
+                return _unavailable_live_telemetry()
 
             site_id = str(grid_row["generation_external_site_id"])
             vrm_platform = VRMPlatform()
@@ -106,17 +141,40 @@ class ClientGridStatusMixin:
                 return_exceptions=True,
             )
 
+            fresh = not _inverter_voltage_is_stale(voltage)
             output_kw = _fresh_inverter_output_kw(voltage)
             if output_kw is None and not isinstance(voltage, BaseException):
                 logger.info("Stale or unavailable VRM output for urgent alert grid %r", grid_name)
 
+            data_timestamp = getattr(voltage, "data_timestamp", None) if fresh else None
+            raw_status = classify_grid_status(
+                vrm_is_on=getattr(voltage, "is_producing", None) if fresh else None,
+                vrm_data_stale=not fresh,
+                vrm_power_kw=output_kw,
+                hps_threshold_kw=grid_row.get("is_hps_on_threshold_kw"),
+                fs_on=grid_row.get("is_fs_on"),
+                hps_on=grid_row.get("is_hps_on"),
+            )
+
+            def fresh_voltage(phase: str) -> Optional[float]:
+                value = getattr(voltage, phase, None) if fresh else None
+                return float(value) if value is not None else None
+
             return {
+                "generation_management": "managed",
+                "grid_status": raw_status.value,
+                "site_status": normalize_site_status(raw_status).value,
                 "output_kw": output_kw,
                 "battery_voltage_v": _current_battery_voltage_v(battery),
+                "l1_voltage_v": fresh_voltage("l1_voltage_v"),
+                "l2_voltage_v": fresh_voltage("l2_voltage_v"),
+                "l3_voltage_v": fresh_voltage("l3_voltage_v"),
+                "observed_at": data_timestamp.isoformat() if data_timestamp else None,
+                "fresh": fresh,
             }
         except Exception:
             logger.warning("Live VRM telemetry fetch failed for %s", grid_name, exc_info=True)
-            return {"output_kw": None, "battery_voltage_v": None}
+            return _unavailable_live_telemetry()
 
     async def get_live_inverter_output(self, grid_name: str) -> Optional[float]:
         """Return fresh VRM inverter output in kW, or ``None`` when unavailable.
@@ -1223,52 +1281,22 @@ class ClientGridStatusMixin:
                     # Get total inverter power (all phases) from VRM
                     vrm_power_kw = vrm_voltage.total_power_kw if vrm_voltage else None
 
-                    # Check if VRM data is stale (gateway hasn't reported in 30+ min)
-                    # data_timestamp is UTC-based (utcnow - secondsAgo)
-                    vrm_data_stale = False
-                    if vrm_voltage and vrm_voltage.data_timestamp:
-                        vrm_age = datetime.utcnow() - vrm_voltage.data_timestamp
-                        vrm_data_stale = vrm_age > timedelta(minutes=30)
-
-                    # Determine category and icon using new logic:
-                    # - VRM voltage determines ON/OFF (if available)
-                    # - TimescaleDB majority vote determines HPS/FS (if ON)
-                    # - "Likely Isolated" = ON but power below HPS threshold
-                    # - Stale VRM data (>30 min) = unknown
-                    if vrm_is_on is None or vrm_data_stale:
-                        # No VRM data — honest answer is "unknown"
-                        category = "unknown"
-                        icon = "Ⅹ"
-                    elif vrm_is_on is False:
-                        # VRM says grid is OFF (no inverter voltage)
-                        category = "off"
-                        icon = "🔴"
-                    else:
-                        # VRM says grid is ON - check HPS/FS status
-                        hps_threshold_kw = grid.get("is_hps_on_threshold_kw")
-
-                        # Determine HPS on using VRM power vs threshold
-                        if vrm_power_kw is not None and hps_threshold_kw is not None:
-                            vrm_hps_on = vrm_power_kw >= float(hps_threshold_kw)
-                        else:
-                            # Fallback to TimescaleDB if VRM power unavailable
-                            vrm_hps_on = hps_on
-
-                        if vrm_hps_on is False:
-                            # Power below HPS threshold = Isolated, regardless of meter FS state
-                            # (meters may report FS while inverter is actually below threshold)
-                            category = "likely_isolated"
-                            icon = "🔌"
-                        elif fs_on is True:
-                            category = "fs_on"
-                            icon = "🟢"
-                        elif vrm_hps_on is True:
-                            category = "hps_on"
-                            icon = "🟡"
-                        else:
-                            # vrm_hps_on is None (no power data, no TimescaleDB fallback)
-                            category = "unknown"
-                            icon = "Ⅹ"
+                    raw_status = classify_grid_status(
+                        vrm_is_on=vrm_is_on,
+                        vrm_data_stale=_inverter_voltage_is_stale(vrm_voltage),
+                        vrm_power_kw=vrm_power_kw,
+                        hps_threshold_kw=grid.get("is_hps_on_threshold_kw"),
+                        fs_on=fs_on,
+                        hps_on=hps_on,
+                    )
+                    category = raw_status.value
+                    icon = {
+                        GridStatus.FS_ON: "🟢",
+                        GridStatus.HPS_ON: "🟡",
+                        GridStatus.LIKELY_ISOLATED: "🔌",
+                        GridStatus.OFF: "🔴",
+                        GridStatus.UNKNOWN: "Ⅹ",
+                    }[raw_status]
 
                     # Build DCU status with counts
                     dcu_counts = dcu_counts_map.get(grid_id, {"online": 0, "total": 0})

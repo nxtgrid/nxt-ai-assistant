@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from orchestrator.services.ticketing.alert_facts import derive_severity
 from shared.config import flag_registry as fr
@@ -12,9 +12,20 @@ from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-LiveTelemetry = Dict[str, Optional[float]]
+LiveTelemetry = Dict[str, Any]
 LiveTelemetryReader = Callable[[str], Awaitable[LiveTelemetry]]
-_UNAVAILABLE: LiveTelemetry = {"output_kw": None, "battery_voltage_v": None}
+_UNAVAILABLE: LiveTelemetry = {
+    "generation_management": "unknown",
+    "grid_status": "unknown",
+    "site_status": "unknown",
+    "output_kw": None,
+    "battery_voltage_v": None,
+    "l1_voltage_v": None,
+    "l2_voltage_v": None,
+    "l3_voltage_v": None,
+    "observed_at": None,
+    "fresh": False,
+}
 
 
 class LiveTelemetryLookup:
@@ -45,9 +56,10 @@ class LiveTelemetryLookup:
 
     async def _read_once(self) -> LiveTelemetry:
         try:
-            return await asyncio.wait_for(
+            telemetry = await asyncio.wait_for(
                 self._read_telemetry(self._grid_name), timeout=self._timeout_seconds
             )
+            return {**_UNAVAILABLE, **telemetry}
         except asyncio.TimeoutError:
             LOGGER.warning("Urgent alert live telemetry timed out for grid {!r}", self._grid_name)
         except Exception:
@@ -77,6 +89,10 @@ class UrgentAlertContext:
     async def battery_voltage_v(self) -> Optional[float]:
         telemetry = await self._telemetry_lookup.get()
         return telemetry.get("battery_voltage_v")
+
+    async def telemetry(self) -> LiveTelemetry:
+        """Return the cached complete observation for judgment context assembly."""
+        return dict(await self._telemetry_lookup.get())
 
     async def llm_facts(self) -> dict[str, object]:
         telemetry = await self._telemetry_lookup.get()
