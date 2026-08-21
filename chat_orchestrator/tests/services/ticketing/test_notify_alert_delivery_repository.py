@@ -45,6 +45,10 @@ class _Table:
         self.predicates.append(("gte", field, value))
         return self
 
+    def is_(self, field: str, value: Any) -> "_Table":
+        self.predicates.append(("is", field, value))
+        return self
+
     def contains(self, field: str, value: Any) -> "_Table":
         self.predicates.append(("contains", field, value))
         return self
@@ -81,6 +85,12 @@ class _Table:
                 matches = [row for row in matches if row.get(field) == value]
             elif operation == "gte":
                 matches = [row for row in matches if (row.get(field) or "") >= value]
+            elif operation == "is":
+                matches = [
+                    row
+                    for row in matches
+                    if (row.get(field) is None if value == "null" else row.get(field) == value)
+                ]
             else:
                 matches = [
                     row
@@ -195,3 +205,66 @@ async def test_write_failure_marks_history_degraded(monkeypatch) -> None:
 
     assert result is None
     assert delivery_history_failures_last_hour() == 1
+
+
+@pytest.mark.asyncio
+async def test_recent_om_messages_is_scoped_to_one_active_topic_and_excludes_alerts() -> None:
+    repo, client = _repo()
+    client.tables["chat_messages"].extend(
+        [
+            {
+                "group_id": "-1001",
+                "telegram_topic_id": "42",
+                "created_at": "2026-08-21T10:00:00+00:00",
+                "role": "user",
+                "content": "Please check inverter 3",
+                "sender_telegram_id": "100",
+                "from_chat_id": "-1001",
+                "metadata": {},
+                "archived_at": None,
+            },
+            {
+                "group_id": "-1001",
+                "telegram_topic_id": "42",
+                "created_at": "2026-08-21T10:01:00+00:00",
+                "role": "assistant",
+                "content": "notify copy",
+                "metadata": {"channel": "notify_endpoint"},
+                "archived_at": None,
+            },
+            {
+                "group_id": "-1001",
+                "telegram_topic_id": "43",
+                "created_at": "2026-08-21T10:02:00+00:00",
+                "role": "user",
+                "content": "sibling topic",
+                "metadata": {},
+                "archived_at": None,
+            },
+            {
+                "group_id": "-1002",
+                "telegram_topic_id": "42",
+                "created_at": "2026-08-21T10:03:00+00:00",
+                "role": "user",
+                "content": "other chat",
+                "metadata": {},
+                "archived_at": None,
+            },
+            {
+                "group_id": "-1001",
+                "telegram_topic_id": "42",
+                "created_at": "2026-08-21T10:04:00+00:00",
+                "role": "user",
+                "content": "archived",
+                "metadata": {},
+                "archived_at": "2026-08-21T10:05:00+00:00",
+            },
+        ]
+    )
+
+    rows = await repo.recent_om_messages(
+        chat_id="-1001", topic_id="42", since="2026-08-21T00:00:00+00:00"
+    )
+
+    assert [row.content for row in rows] == ["Please check inverter 3"]
+    assert rows[0].created_at == "2026-08-21T10:00:00+00:00"

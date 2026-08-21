@@ -6,7 +6,7 @@ import time
 from collections import defaultdict
 from typing import Any, Callable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from shared.utils.logging import get_logger
 
@@ -25,7 +25,7 @@ class PriorAlertMessage(_ContextRecord):
     external_topic_id: str | None = None
     external_message_id: int
     sent_at: str
-    content: str = Field(default="", max_length=500)
+    content: str = ""
     ticket_ref: str | None = None
     source: str | None = None
 
@@ -33,7 +33,7 @@ class PriorAlertMessage(_ContextRecord):
 class OMChatMessage(_ContextRecord):
     created_at: str
     role: str = ""
-    content: str = Field(default="", max_length=500)
+    content: str = ""
     sender_telegram_id: str | None = None
     from_chat_id: str | None = None
 
@@ -199,3 +199,63 @@ class NotifyAlertDeliveryRepository:
     async def latest_for_grid(self, grid_name: str) -> PriorAlertMessage | None:
         records = await self.recent_for_grid(grid_name, "1970-01-01T00:00:00+00:00", limit=1)
         return records[0] if records else None
+
+    async def recent_om_messages(
+        self,
+        *,
+        chat_id: str,
+        topic_id: str | None,
+        since: str,
+        limit: int = 50,
+    ) -> list[OMChatMessage]:
+        """Return bounded human/O&M evidence from exactly one active Telegram topic."""
+        client = self._raw_client()
+        if client is None:
+            _record_failure("recent_om_messages", RuntimeError("database client unavailable"))
+            return []
+        try:
+            query = (
+                client.table("chat_messages")
+                .select(
+                    "created_at,role,content,sender_telegram_id,from_chat_id,metadata"
+                )
+                .eq("group_id", str(chat_id))
+                .is_("archived_at", "null")
+            )
+            if topic_id is not None:
+                query = query.eq("telegram_topic_id", str(topic_id))
+            response = (
+                query.gte("created_at", since)
+                .order("created_at", desc=False)
+                .limit(max(limit * 2, limit))
+                .execute()
+            )
+            messages: list[OMChatMessage] = []
+            for row in getattr(response, "data", None) or []:
+                metadata = row.get("metadata") or {}
+                content = str(row.get("content") or "").strip()
+                if not content or metadata.get("channel") == "notify_endpoint":
+                    continue
+                messages.append(
+                    OMChatMessage(
+                        created_at=str(row.get("created_at") or ""),
+                        role=str(row.get("role") or ""),
+                        content=content[:500],
+                        sender_telegram_id=(
+                            str(row["sender_telegram_id"])
+                            if row.get("sender_telegram_id") is not None
+                            else None
+                        ),
+                        from_chat_id=(
+                            str(row["from_chat_id"])
+                            if row.get("from_chat_id") is not None
+                            else None
+                        ),
+                    )
+                )
+                if len(messages) == limit:
+                    break
+            return messages
+        except Exception as exc:
+            _record_failure("recent_om_messages", exc)
+            return []
