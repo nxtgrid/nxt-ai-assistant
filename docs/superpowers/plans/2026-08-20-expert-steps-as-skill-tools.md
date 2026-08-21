@@ -306,19 +306,32 @@ reachable within GTR itself — no allowlist entries needed.
 17 handlers, **17 contracts** (best coverage in the repo), but the deepest state
 chains, the most mutations, and the AppSheet wait.
 
-- [ ] **Task 9.1 — R5 long-running steps.** `update_design_distances` waits on
+- [x] **Task 9.1 — R5 long-running steps.** `update_design_distances` waits on
       the design system and the pipeline sleeps ~60s on AppSheet — exactly the
       behaviour P3 cited as disqualifying. Blocking inside a tool call burns a
       round of `settings.skill_max_tool_rounds`. Declare
       `expected_latency_seconds`; steps above a threshold get a poll/resume path
       instead of sleeping in-call.
-- [ ] **Task 9.2** — audit all 17 existing contracts for the Phase 1 fields
+- [x] **Task 9.2** — audit all 17 existing contracts for the Phase 1 fields
       (they predate `mutates` / `outputs` / `mock`).
-- [ ] **Task 9.3** — `MockSpec`s for every mutating step (Drive, Sheets,
+- [x] **Task 9.3** — `MockSpec`s for every mutating step (Drive, Sheets,
       Telegram, BOM triggers). `copy_lpp_template`'s mock must populate
       `document_id` or the whole chain collapses — see Task 1.5.
-- [ ] **Task 9.4** — `generate_powerplant_design` declares 22 params; check the
+- [x] **Task 9.4** — `generate_powerplant_design` declares 22 params; check the
       derived schema is coherent at that size.
+
+**Done 2026-08-21** (`670837c1`). Task 9.1 only partly built as originally
+worded: `expected_latency_seconds` is declared on all three steps that
+actually sleep in-call (180s/120s/60s), and the derived tool description
+now warns above a threshold — but no real poll/resume EXECUTION path
+exists. Building one would need a durable background-task/scheduling
+subsystem this codebase doesn't have; a process-local `asyncio.Task`
+wouldn't survive past the request that started it in this deployment, and
+scoping a new one to a single handler risked being fragile for real
+production LPP runs. Flagged explicitly in `update_design_distances.py`'s
+own contract as deferred, not silently dropped. Every one of the 14
+mutating contracts' `MockSpec`s verified via `validate_mock_covers_outputs`
+to cover 100% of its own `produces_state` — zero findings.
 
 ## Phase 10 — Grid analysis flow (`grid_analyst`) — third conversion
 
