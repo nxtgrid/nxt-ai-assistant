@@ -236,6 +236,32 @@ consequences: value filling scales to a full template cheaply, the existing
 `MAX_EDITS_PER_RUN = 10` cap applies only to generative rewrites, and a
 dry-run preview of the entire mapping comes for free.
 
+**Correction (2026-08-21, found during Phase 1 implementation):** the lookup
+above, `accumulated_results[step][spec.name]`, is a *literal* key lookup —
+confirmed as the established convention by `grids_technical_reviewer`'s
+existing `OutputSpec` usage, where `OutputSpec(name="pending_actions", ...)`
+matches a real top-level `StepResult.data["pending_actions"]` key. But the
+four LPP producer steps this section's `_collect_all_available_values()`
+reads from don't return flat data — `generate_distribution_map` nests
+`meta.*`/`location.*` inside `statistics`/`center` sub-dicts,
+`generate_site_bom` nests `bom.*`/`energy.*` inside `cost_summary`/
+`energy_specs`, and `energy.Wp_per_conn` is computed on the fly from *two*
+steps' results and exists under no key at all. A direct lookup would have
+silently returned nothing for nearly every entry — invisibly, since every
+planned test (Phase 1's included) either checks declared names only or hand
+-constructs pre-shaped fixtures, never real handler output.
+
+Fixed by having each of the four steps additively publish the exact dotted
+`OutputSpec` names alongside their existing keys (zero existing keys
+renamed or removed, so LPP's own `_collect_all_available_values` and any
+other reader is unaffected). `site.state`'s `OutputSpec` moved off
+`resolve_sites` (which never produces it) onto `generate_distribution_map`
+(which does, as `site_state`). This section's design — the lookup mechanism
+itself, `CatalogueEntry`, single-call resolution — is otherwise unchanged;
+only where the four LPP steps' data comes from needed correcting. See
+`fix(experts): publish flat catalogue-path keys the OutputSpecs actually
+need` for the full diff.
+
 ### Layer 3 — three generic, contract-carrying steps
 
 All three declare `StepContract`s, so they are tool-callable from chat via the
