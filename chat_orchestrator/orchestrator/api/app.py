@@ -2314,6 +2314,27 @@ async def _resolve_notify_ticket_llm_judgment(
         judgment, context, latest_prior_alert=context.prior_alerts[0] if context.prior_alerts else None,
         enforcement_enabled=bool(fr.get("ALERT_LLM_SUPPRESSION_ENFORCED")),
     )
+    try:
+        await store.record_event(
+            ticket_id=decision.ticket_id,
+            grid_name=target.grid_name,
+            source=alert.rule_id or None,
+            signature=alert.signature or None,
+            dedup_key=body.dedup_key,
+            decision=decision.decision,
+            decided_by=decision.decided_by,
+            confidence=decision.confidence,
+            reason=decision.reason,
+            candidate_refs=[candidate.ref for candidate in candidates],
+            alert=alert.model_dump(),
+            llm_raw=judgment.raw,
+            judgment=(judgment.judgment.model_dump(mode="json") if judgment.judgment else None),
+            context_availability=context.availability_payload(),
+            send_decision=send_decision.send,
+            send_forced_by=send_decision.forced_by,
+        )
+    except Exception:
+        logger.warning("Notify: LLM judgment audit write failed", exc_info=True)
     if decision.decision == "new" or not decision.ticket_ref or not decision.ticket_id:
         ref, response, extra, delivery = await _file_uncorrelated_ticket(body, target, backend_override, alert, alert_context, store, "llm_judgment")
     else:

@@ -167,6 +167,10 @@ class CorrelationStore:
         candidate_refs: List[str],
         alert: Dict[str, Any],
         llm_raw: Optional[str],
+        judgment: Optional[Dict[str, Any]] = None,
+        context_availability: Optional[Dict[str, Any]] = None,
+        send_decision: Optional[bool] = None,
+        send_forced_by: Optional[List[str]] = None,
     ) -> bool:
         """Insert an audit row for one correlation decision. Never raises --
         a race on the ``dedup_key`` unique index is a benign double-write
@@ -190,6 +194,10 @@ class CorrelationStore:
                     "candidate_refs": candidate_refs,
                     "alert": alert,
                     "llm_raw": llm_raw,
+                    "judgment": judgment,
+                    "context_availability": context_availability,
+                    "send_decision": send_decision,
+                    "send_forced_by": send_forced_by or [],
                 }
             ).execute()
             return True
