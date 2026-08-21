@@ -55,7 +55,13 @@ from shared.utils.logging import get_logger
 
 from . import correlation_rules
 from .alert_facts import AlertFacts, derive_severity, same_component
-from .alert_judgment import DeterministicFinding
+from .alert_judgment import (
+    AlertJudgmentResult,
+    DeterministicFinding,
+    TicketAction,
+    parse_alert_judgment,
+)
+from .alert_judgment_context import AlertJudgmentContext
 
 if TYPE_CHECKING:
     from .backend import TicketStatus
@@ -650,6 +656,61 @@ def _build_prompt(
     return "\n".join(lines)
 
 
+def _build_judgment_prompt(context: AlertJudgmentContext, alert: AlertFacts) -> str:
+    """Serialize every judgment input as separately labeled, untrusted JSON data."""
+    sections = {
+        "context_availability": context.availability_payload(),
+        "deterministic_findings": [finding.model_dump(mode="json") for finding in context.deterministic_findings],
+        "open_tickets": [ticket.model_dump(mode="json") for ticket in context.open_tickets],
+        "live_telemetry": context.telemetry.model_dump(mode="json"),
+        "prior_delivered_alerts": [alert.model_dump(mode="json") for alert in context.prior_alerts],
+        "om_topic_messages": [message.model_dump(mode="json") for message in context.om_messages],
+        "incoming_alert": alert.model_dump(mode="json"),
+    }
+    return "\n\n".join(
+        f"## {name}\n{json.dumps(value, default=str)}" for name, value in sections.items()
+    )
+
+
+def to_legacy_correlation_decision(
+    result: AlertJudgmentResult, candidates: List[CandidateSummary]
+) -> CorrelationDecision:
+    """Adapt a validated LLM judgment for legacy ticket execution only."""
+    candidate_refs = [candidate.ref for candidate in candidates]
+    if not result.valid or result.judgment is None:
+        return _fallback_decision(
+            result.error_detail or "invalid alert judgment", candidate_refs, result.raw
+        )
+    ticket = result.judgment.ticket
+    if ticket.action is TicketAction.CREATE_NEW:
+        decision = "new"
+        target = None
+    elif ticket.action is TicketAction.UPDATE_EXISTING:
+        decision = "amend"
+        target = next((candidate for candidate in candidates if candidate.ref == ticket.target_ticket_ref), None)
+    else:
+        decision = "duplicate"
+        target = next((candidate for candidate in candidates if candidate.ref == ticket.target_ticket_ref), None)
+    if decision != "new" and target is None:
+        return _fallback_decision("judgment target no longer offered", candidate_refs, result.raw)
+    return CorrelationDecision(
+        decision=decision,
+        ticket_ref=target.ref if target else None,
+        ticket_id=target.ticket_id if target else None,
+        confidence=ticket.confidence,
+        decided_by="llm_judgment",
+        reason=ticket.reason,
+        affected_key=None,
+        root_cause_kind=ticket.root_cause_kind.value,
+        update_message="",
+        amended_summary=ticket.proposed_title if ticket.change_title and ticket.proposed_title else "",
+        candidate_refs=candidate_refs,
+        llm_raw=result.raw,
+        needs_root_cause_ticket=False,
+        ticket_severity=effective_candidate_severity(target) if target else "",
+    )
+
+
 class AlertCorrelator:
     """Decides new/amend/duplicate for one incoming alert on one grid.
 
@@ -798,6 +859,12 @@ class AlertCorrelator:
                 _fallback_decision(f"LLM call failed: {e}", candidate_refs),
             )
 
+        judgment = parse_alert_judgment(raw, set(candidate_refs), self._min_confidence)
+        if judgment.valid:
+            return await self._finalize(
+                grid_name, alert, dedup_key, to_legacy_correlation_decision(judgment, candidates)
+            )
+
         parsed = _parse_llm_response(raw)
         if parsed is None:
             return await self._finalize(
@@ -816,6 +883,44 @@ class AlertCorrelator:
             alert_severity=alert.severity,
         )
         return await self._finalize(grid_name, alert, dedup_key, decision)
+
+    async def judge(
+        self, grid_name: str, alert: AlertFacts, context: AlertJudgmentContext
+    ) -> AlertJudgmentResult:
+        """Ask the correlation model exactly once; parsing failure remains fail-open input."""
+        del grid_name
+        instructions = self._get_correlation_instructions()
+        system_instructions = (
+            instructions.get("system_instructions", "")
+            if isinstance(instructions, dict)
+            else str(instructions)
+        )
+        try:
+            response = await asyncio.wait_for(
+                self._gateway.generate(
+                    [
+                        LLMMessage(role="system", text=system_instructions),
+                        LLMMessage(role="user", text=_build_judgment_prompt(context, alert)),
+                    ],
+                    GenerationOptions(
+                        model=self._model, temperature=0.0, response_format="json"
+                    ),
+                ),
+                timeout=self._timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return AlertJudgmentResult(
+                valid=False, error_code="timed_out", error_detail="LLM judgment timed out"
+            )
+        except Exception as exc:
+            return AlertJudgmentResult(
+                valid=False, error_code="llm_failed", error_detail=type(exc).__name__
+            )
+        return parse_alert_judgment(
+            getattr(response, "text", None),
+            {ticket.ref for ticket in context.open_tickets},
+            self._min_confidence,
+        )
 
     async def _finalize(
         self,
