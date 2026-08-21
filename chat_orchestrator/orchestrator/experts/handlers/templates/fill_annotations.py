@@ -17,6 +17,7 @@ outstanding.
 """
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -30,8 +31,21 @@ from orchestrator.experts.step_contracts import MockSpec, OutputSpec, ParamSpec,
 from orchestrator.experts.step_registry import register_step
 from shared.prompts import PROMPTS
 from shared.utils.logging import get_logger
+from shared.utils.sheet_editing import offset_a1
 
 LOGGER = get_logger(__name__)
+
+_TOKEN_RE = re.compile(r"^\{\{[^{}]+\}\}$")
+
+
+def is_placeholder_token(quoted_text: str) -> bool:
+    """Whether a comment's quoted text is a {{token}} rather than a label.
+
+    A token is filled in place; a label is filled in the cell beside it. This
+    is the whole difference between the primary and degraded paths, and it is
+    decided by what the template author typed, not by configuration.
+    """
+    return bool(_TOKEN_RE.match((quoted_text or "").strip()))
 
 
 @dataclass
@@ -53,6 +67,7 @@ def plan_writes(
     matches_by_request: dict[int, list],
     catalogue: list[CatalogueEntry],
     comment_ids_by_request: Optional[dict[int, str]] = None,
+    quoted_by_request: Optional[dict[int, str]] = None,
 ) -> FillPlan:
     """Turn LLM resolutions plus cell matches into a concrete write plan."""
     comment_ids_by_request = comment_ids_by_request or {}
@@ -86,8 +101,12 @@ def plan_writes(
             continue
 
         entry = by_path[path]
+        quoted = (quoted_by_request or {}).get(request_no, "")
+        # A token is the slot itself; a label names the slot beside it.
+        fill_in_place = is_placeholder_token(quoted) if quoted else True
         for match in matches:
-            plan.writes.append((match.tab, match.a1, entry.value))
+            target_a1 = match.a1 if fill_in_place else offset_a1(match, 1)
+            plan.writes.append((match.tab, target_a1, entry.value))
         plan.replies.append(f"Done: {entry.path} = {entry.value}")
         plan.reply_comment_ids.append(comment_id)
 
@@ -245,14 +264,18 @@ async def fill_annotations(context: StepContext) -> StepResult:
 
     matches_by_request: dict[int, list] = {}
     comment_ids_by_request: dict[int, str] = {}
+    quoted_by_request: dict[int, str] = {}
     instructions: list[str] = []
     for i, ann in enumerate(annotations, start=1):
         instructions.append(ann.instruction)
         comment_ids_by_request[i] = ann.comment_id
+        quoted_by_request[i] = ann.quoted_text
         matches_by_request[i] = find_cells_in_grids(grids, ann.quoted_text)
 
     resolutions = await _resolve_against_catalogue(instructions, catalogue)
-    plan = plan_writes(resolutions, matches_by_request, catalogue, comment_ids_by_request)
+    plan = plan_writes(
+        resolutions, matches_by_request, catalogue, comment_ids_by_request, quoted_by_request
+    )
 
     if dry_run:
         return StepResult(

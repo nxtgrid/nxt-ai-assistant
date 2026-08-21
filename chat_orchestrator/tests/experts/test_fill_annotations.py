@@ -77,3 +77,38 @@ def test_no_cell_match_leaves_the_thread_open_with_an_explanation():
     )
     assert plan.writes == []
     assert "no longer appears" in plan.unresolved[0][1]
+
+
+def test_a_token_fills_its_own_cell():
+    from orchestrator.experts.handlers.templates.fill_annotations import is_placeholder_token
+
+    assert is_placeholder_token("{{total_kwp}}") is True
+    assert is_placeholder_token("  {{site_map}}  ") is True
+    assert is_placeholder_token("Total kWp") is False
+    assert is_placeholder_token("") is False
+
+
+def test_a_label_fills_the_cell_to_its_right():
+    from orchestrator.experts.handlers.templates.fill_annotations import plan_writes
+    from shared.utils.sheet_editing import CellMatch
+
+    plan = plan_writes(
+        resolutions=[{"request": 1, "path": "energy.total_kwp", "confidence": 0.9}],
+        matches_by_request={1: [CellMatch(tab="Main Input", a1="A1", row=1, column=1)]},
+        catalogue=CATALOGUE,
+        quoted_by_request={1: "Total kWp"},
+    )
+    assert plan.writes == [("Main Input", "B1", 42.5)]
+
+
+def test_a_token_match_is_not_offset():
+    from orchestrator.experts.handlers.templates.fill_annotations import plan_writes
+    from shared.utils.sheet_editing import CellMatch
+
+    plan = plan_writes(
+        resolutions=[{"request": 1, "path": "energy.total_kwp", "confidence": 0.9}],
+        matches_by_request={1: [CellMatch(tab="Main Input", a1="B1", row=1, column=2)]},
+        catalogue=CATALOGUE,
+        quoted_by_request={1: "{{total_kwp}}"},
+    )
+    assert plan.writes == [("Main Input", "B1", 42.5)]
