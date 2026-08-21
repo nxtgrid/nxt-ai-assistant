@@ -399,7 +399,7 @@ def main() -> int:
     skill["created_by"] = "convert_expert_to_skill.py"
     client.table("skills").insert(skill).execute()
     print(
-        f"\nCreated draft skill '{skill['slug']}'. Review it in /skills, promote to "
+        f"\nCreated draft skill '{skill['slug']}'. Review it in /workflows, promote to "
         f"active, verify, then strike through '# Expert: {args.expert}' in the "
         f"experts.definitions source."
     )
