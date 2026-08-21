@@ -171,6 +171,22 @@ def _make_store(client: Optional[FakeRawClient] = None) -> tuple[CorrelationStor
     return store, fake
 
 
+@pytest.mark.asyncio
+async def test_append_description_evidence_preserves_base_and_rejects_blank() -> None:
+    store, client = _make_store()
+    client.tables["ticket_correlations"].append(
+        {"ticket_id": "ticket-1", "description_base": "Original ticket description"}
+    )
+
+    assert await store.append_description_evidence(
+        "ticket-1", "Inverter shut down after BMS communication loss."
+    ) is True
+    assert client.tables["ticket_correlations"][0]["description_base"] == (
+        "Original ticket description\n\nInverter shut down after BMS communication loss."
+    )
+    assert await store.append_description_evidence("ticket-1", "  ") is False
+
+
 # The exact ten columns 0005b dropped from ticket_correlations, plus
 # ticket_ref from ticket_correlation_events -- no write payload in this
 # module may ever contain one of these again. See
@@ -233,9 +249,9 @@ class TestOpenCandidatesForGrid:
         store, fake = _make_store()
         fake.tables["tickets"] = [
             {"id": "t-1", "ticket_ref": "TKT-1", "backend": "internal", "grid_name": "Kudi",
-             "status": "open", "provisioning_state": "active", "summary": "s1"},
+             "status": "open", "provisioning_state": "active", "summary": "s1", "description": "d1"},
             {"id": "t-2", "ticket_ref": "TKT-2", "backend": "internal", "grid_name": "Kudi",
-             "status": "open", "provisioning_state": "active", "summary": "s2"},
+             "status": "open", "provisioning_state": "active", "summary": "s2", "description": "d2"},
             {"id": "t-3", "ticket_ref": "TKT-3", "backend": "internal", "grid_name": "Other",
              "status": "open", "provisioning_state": "active", "summary": "s3"},
             {"id": "t-4", "ticket_ref": "TKT-4", "backend": "internal", "grid_name": "Kudi",
@@ -256,6 +272,7 @@ class TestOpenCandidatesForGrid:
         assert results[0]["grid_name"] == "Kudi"
         assert results[0]["status"] == "open"
         assert results[0]["summary_current"] == "s2"
+        assert results[0]["description"] == "d2"
 
     @pytest.mark.asyncio
     async def test_excludes_tickets_in_other_states(self):

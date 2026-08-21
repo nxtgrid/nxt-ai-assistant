@@ -57,6 +57,15 @@ class TestRegistryIntegrity:
     def test_urgent_live_output_timeout_defaults_to_three_seconds(self):
         assert fr.get("URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS", env={}) == 3
 
+    def test_llm_alert_judgment_flags_default_off_and_chain_dependencies(self):
+        assert fr.get("ALERT_LLM_JUDGMENT_ENABLED", env={}) is False
+        assert fr.get("ALERT_LLM_SUPPRESSION_ENFORCED", env={}) is False
+        assert fr.FLAGS["ALERT_LLM_JUDGMENT_ENABLED"].depends_on == "ALERT_CORRELATION_ENABLED"
+        assert (
+            fr.FLAGS["ALERT_LLM_SUPPRESSION_ENFORCED"].depends_on
+            == "ALERT_LLM_JUDGMENT_ENABLED"
+        )
+
     def test_always_file_escalation_as_ticket_defaults_to_false(self):
         assert fr.get("ALWAYS_FILE_ESCALATION_AS_TICKET", env={}) is False
 

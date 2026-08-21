@@ -167,6 +167,10 @@ class CorrelationStore:
         candidate_refs: List[str],
         alert: Dict[str, Any],
         llm_raw: Optional[str],
+        judgment: Optional[Dict[str, Any]] = None,
+        context_availability: Optional[Dict[str, Any]] = None,
+        send_decision: Optional[bool] = None,
+        send_forced_by: Optional[List[str]] = None,
     ) -> bool:
         """Insert an audit row for one correlation decision. Never raises --
         a race on the ``dedup_key`` unique index is a benign double-write
@@ -190,6 +194,10 @@ class CorrelationStore:
                     "candidate_refs": candidate_refs,
                     "alert": alert,
                     "llm_raw": llm_raw,
+                    "judgment": judgment,
+                    "context_availability": context_availability,
+                    "send_decision": send_decision,
+                    "send_forced_by": send_forced_by or [],
                 }
             ).execute()
             return True
@@ -284,6 +292,39 @@ class CorrelationStore:
             _record_failure("record_amendment", e)
             return False
 
+    async def append_description_evidence(self, ticket_id: str, addition: str) -> bool:
+        """Durably append a bounded factual addition without replacing ticket prose."""
+        text = addition.strip()
+        if not text:
+            return False
+        client = self._client()
+        if client is None:
+            return False
+        try:
+            response = (
+                client.table("ticket_correlations")
+                .select("description_base")
+                .eq("ticket_id", ticket_id)
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(response, "data", None) or []
+            if not rows:
+                return False
+            base = str(rows[0].get("description_base") or "").rstrip()
+            if text in base:
+                return True
+            updated = (
+                client.table("ticket_correlations")
+                .update({"description_base": f"{base}\n\n{text}" if base else text})
+                .eq("ticket_id", ticket_id)
+                .execute()
+            )
+            return bool(getattr(updated, "data", None))
+        except Exception as e:
+            _record_failure("append_description_evidence", e)
+            return False
+
     async def open_candidates_for_grid(
         self, grid_name: str, since_iso: str, limit: int = 15
     ) -> List[Dict[str, Any]]:
@@ -310,7 +351,7 @@ class CorrelationStore:
         try:
             ticket_response = (
                 client.table("tickets")
-                .select("id, ticket_ref, backend, summary, status")
+                .select("id, ticket_ref, backend, summary, description, status")
                 .eq("grid_name", grid_name)
                 .in_("status", list(_OPEN_TICKET_STATUSES))
                 .eq("provisioning_state", "active")
@@ -352,6 +393,7 @@ class CorrelationStore:
                     "ticket_ref": ticket.get("ticket_ref"),
                     "ticket_backend": ticket.get("backend"),
                     "summary_current": ticket.get("summary"),
+                    "description": ticket.get("description") or "",
                     "status": ticket.get("status"),
                     "grid_name": grid_name,
                 }

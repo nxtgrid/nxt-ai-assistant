@@ -599,6 +599,24 @@ _FLAGS: List[Flag] = [
         label="Group related alerts onto one ticket",
     ),
     _b(
+        "ALERT_LLM_JUDGMENT_ENABLED",
+        False,
+        "Call the correlation LLM for every unique auto-correlated alert and use its "
+        "typed ticket judgment.",
+        group="ticketing",
+        label="Use LLM judgment for every alert",
+        depends_on="ALERT_CORRELATION_ENABLED",
+    ),
+    _b(
+        "ALERT_LLM_SUPPRESSION_ENFORCED",
+        False,
+        "Allow a valid complete-context LLM judgment to suppress a Telegram alert. "
+        "Off keeps shadow mode send-all.",
+        group="ticketing",
+        label="Enforce LLM alert suppression",
+        depends_on="ALERT_LLM_JUDGMENT_ENABLED",
+    ),
+    _b(
         "ALERT_CASCADE_MERGE_ENABLED",
         False,
         "Merge a cascading equipment failure (e.g. battery/BMS communication loss "

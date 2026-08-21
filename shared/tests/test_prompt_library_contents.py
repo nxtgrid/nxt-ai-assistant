@@ -68,10 +68,10 @@ def test_staff_system_still_has_a_system_instructions_section():
     assert PROMPTS.render("staff.system").system_text.strip()
 
 
-def test_ticketing_correlation_isolates_only_the_system_instructions_block():
-    """The correlator only ever reads the 'system_instructions' key: the
-    original file's Root Cause Rules / Component Taxonomy / Examples H1
-    sections were parsed but never sent to the LLM. Preserve that."""
+def test_ticketing_correlation_keeps_all_policy_in_system_instructions():
     rendered = PROMPTS.render("ticketing.correlation")
-    assert "Root Cause Rules" not in rendered.system_text
-    assert "grouping an incoming infrastructure alert" in rendered.system_text
+    assert "Root Cause Rules" in rendered.system_text
+    assert "Failure Topology" in rendered.system_text
+    assert "Component Taxonomy" in rendered.system_text
+    assert "assess an incoming infrastructure alert" in rendered.system_text
+    assert rendered.context_text is None
