@@ -1,0 +1,45 @@
+---
+id: annotations.resolve_values
+description: Matches free-text template comments to entries in the run's value catalogue, in one batch call.
+owner: eng
+component: shared
+overridable: true
+model: fast
+output: json
+schema:
+  type: array
+  items:
+    type: object
+    required: [request, path, confidence]
+    properties:
+      request: {type: integer}
+      path: {type: [string, "null"]}
+      confidence: {type: number}
+sections: []
+variables: [catalogue_block, requests_block]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+You are filling slots in a document template. Each numbered request below is a
+comment someone left on a specific cell or section, saying what value belongs
+there. Match each request to exactly one entry in the value catalogue.
+
+VALUE CATALOGUE — the only values available. Match on the description.
+{catalogue_block}
+
+REQUESTS
+{requests_block}
+
+Rules:
+- Match on meaning, not on wording. "the total peak capacity" matches an entry
+  described as "Total installed solar peak capacity in kWp".
+- If no catalogue entry plausibly answers a request, return null for its path.
+  Do NOT invent a path, and do NOT pick a loosely related entry — a wrong value
+  written into a document is far worse than an unfilled slot.
+- Never invent a value. Values come only from the catalogue.
+
+Return ONLY a JSON array, one object per request, in the same order:
+[{{"request": 1, "path": "energy.total_kwp", "confidence": 0.95}},
+ {{"request": 2, "path": null, "confidence": 0.0}}]
