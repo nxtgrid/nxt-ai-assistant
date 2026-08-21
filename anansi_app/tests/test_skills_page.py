@@ -55,10 +55,22 @@ async def test_workflows_page_renders_requested_icon(monkeypatch):
     assert labels[0] == "🎬 Workflows"
 
 
-def _skill(slug="a", status="active", step_count=3, staff_only=True):
+_STORED_STEPS = [
+    {"index": 0, "name": "find", "instruction": "List all open tickets.",
+     "output_var": "find", "allow_write": False, "is_response_step": False},
+    {"index": 1, "name": "summarize", "instruction": "Summarize {{find}}.",
+     "output_var": None, "allow_write": False, "is_response_step": True},
+]
+
+
+def _skill(slug="a", status="active", step_count=3, staff_only=True, steps=None):
+    # list_skills returns both: `steps` straight from the DB column and
+    # `step_count` computed from it. A fixture carrying only step_count
+    # would hide exactly the bug the steps assertions below pin.
     return {
         "id": slug, "slug": slug, "title": slug.upper(), "summary": "Does a thing.",
         "step_count": step_count, "staff_only": staff_only, "status": status,
+        "steps": _STORED_STEPS if steps is None else steps,
         "created_by": "ops@example.com", "updated_at": "2026-08-22T10:00:00Z",
     }
 
@@ -69,6 +81,26 @@ def test_rows_carry_the_display_fields():
     assert row["step_count"] == 3
     assert row["status"] == "active"
     assert row["audience"] == "Staff only"
+
+
+def test_rows_carry_the_stored_steps_for_the_editor():
+    """The row build_skill_rows returns is the same object _render_row hands
+    to _open_editor, which seeds the step builder from row["steps"]. Leaving
+    steps out of the projection opened every workflow with zero steps while
+    the list still showed the right count (step_count is computed upstream),
+    which is what made the regression so quiet.
+    """
+    row = build_skill_rows([_skill()], schedules={})[0]
+    assert row["steps"] == _STORED_STEPS
+
+
+def test_rows_fall_back_to_no_steps_when_the_column_is_absent():
+    skill = _skill()
+    del skill["steps"]
+
+    row = build_skill_rows([skill], schedules={})[0]
+
+    assert row["steps"] == []
 
 
 def test_customer_visible_skills_say_so():

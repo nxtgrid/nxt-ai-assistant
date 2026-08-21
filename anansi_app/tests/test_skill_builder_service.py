@@ -472,9 +472,11 @@ def test_update_skill_status_accepts_the_four_valid_values():
         assert result["success"] is True, status
 
 
-def test_update_skill_writes_identity_and_status_together():
-    captured = {}
+def _update_steps():
+    return [{"index": 0, "name": "find", "instruction": "List all open tickets."}]
 
+
+def _capturing_client(captured):
     class _Table:
         def update(self, payload):
             captured.update(payload)
@@ -493,9 +495,15 @@ def test_update_skill_writes_identity_and_status_together():
         def table(self, _n):
             return _Table()
 
-    result = SkillBuilderService(client=_Client()).update_skill(
-        "1", title="New Title", summary="New summary.", staff_only=False,
-        status="active", actor="ops@example.com",
+    return _Client()
+
+
+def test_update_skill_writes_identity_steps_and_status_together():
+    captured = {}
+
+    result = SkillBuilderService(client=_capturing_client(captured)).update_skill(
+        "1", title="New Title", summary="New summary.", steps=_update_steps(),
+        staff_only=False, status="active", actor="ops@example.com",
     )
 
     assert result["success"] is True
@@ -505,9 +513,41 @@ def test_update_skill_writes_identity_and_status_together():
     assert captured["status"] == "active"
 
 
+def test_update_skill_persists_the_step_sequence():
+    """The write half of the editor round trip: re-running or appending a
+    step in the Edit modal has to reach skills.steps. Before this,
+    update_skill wrote identity only and the derived payload was discarded,
+    so every edit to an existing workflow's steps was silently lost.
+    """
+    captured = {}
+    steps = _update_steps() + [
+        {"index": 1, "name": "summarize", "instruction": "Summarize {{find}}."}
+    ]
+
+    SkillBuilderService(client=_capturing_client(captured)).update_skill(
+        "1", title="T", summary="S", steps=steps, staff_only=True,
+        status="draft", actor="x",
+    )
+
+    assert captured["steps"] == steps
+
+
+def test_update_skill_rejects_an_empty_step_list():
+    """Guards the same blanking that save_skill guards -- an empty payload
+    reaching this method would wipe a working workflow's steps.
+    """
+    result = SkillBuilderService(client=None).update_skill(
+        "1", title="T", summary="S", steps=[], staff_only=True,
+        status="draft", actor="x",
+    )
+    assert result["success"] is False
+    assert "step" in result["error"].lower()
+
+
 def test_update_skill_rejects_an_unknown_status():
     result = SkillBuilderService(client=None).update_skill(
-        "1", title="T", summary="S", staff_only=True, status="published", actor="x"
+        "1", title="T", summary="S", steps=_update_steps(), staff_only=True,
+        status="published", actor="x",
     )
     assert result["success"] is False
     assert "published" in result["error"]
@@ -515,7 +555,8 @@ def test_update_skill_rejects_an_unknown_status():
 
 def test_update_skill_rejects_a_blank_title():
     result = SkillBuilderService(client=None).update_skill(
-        "1", title="   ", summary="S", staff_only=True, status="draft", actor="x"
+        "1", title="   ", summary="S", steps=_update_steps(), staff_only=True,
+        status="draft", actor="x",
     )
     assert result["success"] is False
     assert "title" in result["error"].lower()
@@ -526,7 +567,8 @@ def test_update_skill_with_no_client_returns_failure():
     service.client = None
 
     result = service.update_skill(
-        "1", title="T", summary="S", staff_only=True, status="draft", actor="x"
+        "1", title="T", summary="S", steps=_update_steps(), staff_only=True,
+        status="draft", actor="x",
     )
     assert result["success"] is False
 
