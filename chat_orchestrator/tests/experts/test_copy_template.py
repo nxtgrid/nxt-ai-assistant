@@ -20,6 +20,21 @@ class _Ctx:
     def get_state(self, k, d=None):
         return self._state.get(k, d)
 
+    def get_parameter_value(self, k, d=None):
+        # Mirrors the real StepContext.get_parameter_value resolution order
+        # (overrides > packet_inputs > packet_state > default) closely
+        # enough for this file's purposes -- see step_context.py for the
+        # production version this is a fake of.
+        overrides = self._state.get("pending_param_overrides", {})
+        if k in overrides:
+            return overrides[k]
+        if k in self._inputs:
+            return self._inputs[k]
+        return self._state.get(k, d)
+
+    def set_parameter_override(self, k, v):
+        self._state.setdefault("pending_param_overrides", {})[k] = v
+
     async def send_progress_to_user(self, *a, **k):
         return True
 
@@ -82,3 +97,89 @@ def test_submission_route_still_validates_site():
     assert result.error is not None
     assert "not found in site submissions" in result.error
     create.assert_not_called()
+
+
+class TestExtractDriveFileId:
+    """A caller (LLM tool call, Skill Builder step default, or the
+    LPP_TEMPLATE_ID Settings-UI field) can supply either a bare Drive file
+    ID or a real doc link -- both must resolve to the same bare ID
+    create_from_template needs."""
+
+    def test_bare_id_passes_through_unchanged(self):
+        assert ct._extract_drive_file_id("1AbCdEfGhIjKlMnOpQrSt") == "1AbCdEfGhIjKlMnOpQrSt"
+
+    def test_docs_url_extracts_id(self):
+        url = "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt/edit"
+        assert ct._extract_drive_file_id(url) == "1AbCdEfGhIjKlMnOpQrSt"
+
+    def test_sheets_url_with_gid_fragment_extracts_id(self):
+        url = "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt/edit#gid=0"
+        assert ct._extract_drive_file_id(url) == "1AbCdEfGhIjKlMnOpQrSt"
+
+    def test_drive_open_url_with_id_query_param_extracts_id(self):
+        url = "https://drive.google.com/open?id=1AbCdEfGhIjKlMnOpQrSt"
+        assert ct._extract_drive_file_id(url) == "1AbCdEfGhIjKlMnOpQrSt"
+
+    def test_drive_uc_url_with_trailing_params_extracts_id(self):
+        url = "https://drive.google.com/uc?id=1AbCdEfGhIjKlMnOpQrSt&export=download"
+        assert ct._extract_drive_file_id(url) == "1AbCdEfGhIjKlMnOpQrSt"
+
+    def test_blank_input_returns_empty_string(self):
+        assert ct._extract_drive_file_id("") == ""
+        assert ct._extract_drive_file_id(None) == ""
+
+
+class TestResolveTemplateIdPrecedence:
+    """Task (template-as-a-chat-parameter fix): a caller-supplied template_id
+    -- via a parameter override (what an LLM tool call sets) or a plain
+    packet input -- must win over the operator-wide LPP_TEMPLATE_ID env var,
+    and a URL in any of those tiers must resolve the same as a bare ID."""
+
+    def test_parameter_override_wins_over_env_var(self, monkeypatch):
+        monkeypatch.setenv("LPP_TEMPLATE_ID", "env-default-id")
+        ctx = _Ctx()
+        ctx.set_parameter_override("template_id", "override-id")
+        assert ct._resolve_template_id(ctx) == "override-id"
+
+    def test_packet_input_wins_over_env_var(self, monkeypatch):
+        monkeypatch.setenv("LPP_TEMPLATE_ID", "env-default-id")
+        ctx = _Ctx(inputs={"template_id": "input-id"})
+        assert ct._resolve_template_id(ctx) == "input-id"
+
+    def test_falls_back_to_env_var_when_nothing_else_supplied(self, monkeypatch):
+        monkeypatch.setenv("LPP_TEMPLATE_ID", "env-default-id")
+        ctx = _Ctx()
+        assert ct._resolve_template_id(ctx) == "env-default-id"
+
+    def test_falls_back_to_empty_default_when_nothing_configured(self, monkeypatch):
+        monkeypatch.delenv("LPP_TEMPLATE_ID", raising=False)
+        ctx = _Ctx()
+        assert ct._resolve_template_id(ctx) == ""
+
+    def test_a_pasted_doc_link_normalizes_the_same_as_a_bare_id(self, monkeypatch):
+        monkeypatch.delenv("LPP_TEMPLATE_ID", raising=False)
+        ctx = _Ctx()
+        ctx.set_parameter_override(
+            "template_id",
+            "https://docs.google.com/spreadsheets/d/1AbCdEfGhIjKlMnOpQrSt/edit",
+        )
+        assert ct._resolve_template_id(ctx) == "1AbCdEfGhIjKlMnOpQrSt"
+
+    def test_env_var_itself_may_also_be_a_doc_link(self, monkeypatch):
+        # The Settings UI field is free text too -- an operator pasting a
+        # link there (instead of digging out the bare ID) must work the
+        # same way.
+        monkeypatch.setenv(
+            "LPP_TEMPLATE_ID", "https://docs.google.com/document/d/1AbCdEfGhIjKlMnOpQrSt/edit"
+        )
+        ctx = _Ctx()
+        assert ct._resolve_template_id(ctx) == "1AbCdEfGhIjKlMnOpQrSt"
+
+
+def test_contract_declares_template_id_as_an_optional_param():
+    from orchestrator.experts.step_registry import get_step_contract
+
+    contract = get_step_contract("copy_lpp_template")
+    param_names = {p.name: p for p in contract.params}
+    assert "template_id" in param_names
+    assert param_names["template_id"].required is False
