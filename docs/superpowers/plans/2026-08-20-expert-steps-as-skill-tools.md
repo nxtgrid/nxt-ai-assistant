@@ -279,16 +279,27 @@ conversion, closing the loop with Phase 5's builder switch and
 
 9 handlers, **0 contracts**, 3 already builder-exposed. The easiest of the three.
 
-- [ ] **Task 8.1** — contracts for all 9 handlers.
-- [ ] **Task 8.2** — `write_review_section` is the only real mutation: mark
+- [x] **Task 8.1** — contracts for all 9 handlers.
+- [x] **Task 8.2** — `write_review_section` is the only real mutation: mark
       `mutates=True` and give it a `MockSpec`.
-- [ ] **Task 8.3** — `gtr_analysis_conversation` is already an LLM tool-loop —
+- [x] **Task 8.3** — `gtr_analysis_conversation` is already an LLM tool-loop —
       map it onto an `llm` step, not a `function` step.
-- [ ] **Task 8.4** — extend the contract lint beyond `package_generator`
+- [x] **Task 8.4** — extend the contract lint beyond `package_generator`
       (`test_contract_lint.py`'s `_PACKAGE_GENERATOR_MODULE_PREFIX`) to cover GTR.
-- [ ] **Task 8.5** — the 3 exposed fetches (`fetch_chat_chronology`,
+- [x] **Task 8.5** — the 3 exposed fetches (`fetch_chat_chronology`,
       `fetch_grafana_kpis`, `fetch_pending_actions`) are read-only and need no
       mocks — confirm they stay real in mock mode.
+
+**Done 2026-08-21** (`3a180691`). Real finding, left as-is (not silently
+"fixed"): `fetch_chat_chronology` reads `resolved_grids`, but
+`resolve_grid_sheets` produces `grids_to_review` — no producer for
+`resolved_grids` among GTR's 9 handlers, so that step's grid-chronology
+fetch looks like dead code today. `gtr_analysis_conversation` still got a
+contract (so it isn't invisible to the lint), with its `side_effects` text
+itself carrying the "represent as `[llm]`, not `[function:...]`" note for
+whoever reviews Phase 11's converted draft. Contract lint generalized to a
+per-expert `_CONTRACTED_EXPERTS` dict; GTR's `consumes_state` keys were all
+reachable within GTR itself — no allowlist entries needed.
 
 ## Phase 9 — LPP (`package_generator`) — second proof
 
