@@ -80,6 +80,63 @@ freshly-copied template is unique by construction and cannot drift between
 annotation and fill. **Tokens are what make the locator deterministic;
 labels are an explicitly-degraded fallback.**
 
+### Spike 1 — round trip (live, on a template-shaped scratch sheet)
+
+Spike 0 was read-only, against files with real prose already in them. This
+spike round-tripped a real `@anansi-chatbot` comment on a fresh two-tab
+scratch spreadsheet with `{{token}}`-style placeholders — read, locate,
+write, reply, resolve — confirming the write side Spike 0 never touched.
+Nothing here contradicts the design; every finding confirms an assumption
+already load-bearing above.
+
+**1. The multi-tab locator behaves exactly as Spike 0's `AAABnuBYGB4` case
+implied.** `{{total_kwp}}` was placed in two tabs on purpose; the locator
+returned both:
+
+```
+comment (quoting "{{total_kwp}}"): matches = ["'Main Input'!B1", "'Second'!A1"]
+comment (quoting "{{site_name}}"): matches = ["'Main Input'!B2"]
+```
+
+**2. `anchor` is exactly as useless on a template as it was on real prose.**
+Both comments carried `{"type":"workbook-range","uid":0,"range":"<opaque
+numeric id>"}` — same shape as Spike 0, confirms this isn't an artifact of
+commenting on already-populated cells.
+
+**3. The write and the resolve are two different Google APIs with two
+different OAuth scopes, and only one of them is forgiving.** A cell value
+write via `spreadsheets().values().update()` (the `spreadsheets` scope —
+what `get_sheets_write_credentials()` in `shared/utils/google_auth.py`
+already grants) landed cleanly on the first try. Resolving the comment
+(`drive.replies().create(..., body={"action": "resolve"})`) 403'd on the
+first attempt — `"Request had insufficient authentication scopes"` — because
+the probe script (following this plan's own literal Step 2) built the Drive
+client from `get_drive_credentials()`, which is deliberately **read-only**
+(`drive.readonly` + `drive.metadata.readonly`). Retrying with
+`get_drive_write_credentials()` (full `drive` scope) succeeded immediately
+and stayed succeeded on a follow-up read:
+
+```
+reply created: {'id': 'AAACF1CPfcA', 'action': 'resolve'}
+comment now:   {'id': 'AAACF1CPfb8', 'resolved': True}
+```
+
+This was a bug in the plan's own probe script, not in the shipped
+implementation: `shared/utils/file_annotations.py`'s `_get_drive_service()`
+already calls `get_drive_write_credentials()`, not the read-only function —
+confirmed by grep before concluding anything, then confirmed live by rerunning
+just the resolve step with the correct credential. **The lesson worth
+keeping for any future ad-hoc script against this API: `get_drive_credentials()`
+can read comments but cannot reply to or resolve them — reaching for it for
+any comment-mutating call is a silent scope trap that only surfaces at
+request time, not at import or credential-construction time.**
+
+**4. The value lands in the cell the locator named, and the reply is visible
+on the thread.** Follow-up reads confirmed both independently of the write
+call's own success flag: `'Main Input'!B2'` contained the written value, and
+the comment's `replies` array carried the resolve reply's content and author
+(the service account).
+
 ### Contract coverage in the registry
 
 ```
