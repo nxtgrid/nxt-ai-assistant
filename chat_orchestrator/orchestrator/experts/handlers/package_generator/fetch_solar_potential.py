@@ -8,7 +8,7 @@ import json
 from typing import Any, Dict
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -33,6 +33,24 @@ LOGGER = get_logger(__name__)
         ),
         consumes_results=("generate_distribution_map",),
         produces_state=("solar_potential_fetched", "gsa_daily_potential", "gsa_yearly_potential"),
+        outputs=(
+            OutputSpec(name="energy.gsa_daily_potential_kwhperkwp", value_type="number", where="data",
+                       description="Global Solar Atlas daily yield, kWh per installed kWp."),
+            OutputSpec(name="energy.gsa_yearly_potential_kwhperkwp", value_type="number", where="data",
+                       description="Global Solar Atlas annual yield, kWh per installed kWp."),
+            OutputSpec(name="solar.optimal_tilt_deg", value_type="number", where="data",
+                       description="Panel tilt angle that maximises annual yield, in degrees."),
+            OutputSpec(name="solar.ghi_kwh_m2", value_type="number", where="data",
+                       description="Global horizontal irradiation, kWh per square metre."),
+            OutputSpec(name="solar.gti_kwh_m2", value_type="number", where="data",
+                       description="Global tilted irradiation at optimal tilt, kWh per square metre."),
+            OutputSpec(name="solar.dni_kwh_m2", value_type="number", where="data",
+                       description="Direct normal irradiation, kWh per square metre."),
+            OutputSpec(name="solar.avg_temp_c", value_type="number", where="data",
+                       description="Average ambient air temperature at the site, in Celsius."),
+            OutputSpec(name="solar.elevation_m", value_type="number", where="data",
+                       description="Site elevation above sea level, in metres."),
+        ),
         guard_keys=("solar_potential_fetched",),
         side_effects="Calls the solar_get_solar_potential MCP tool (Global Solar Atlas).",
         mutates=False,
@@ -65,6 +83,11 @@ async def fetch_solar_potential(context: StepContext) -> StepResult:
                 "solar_potential_fetched": True,
                 "daily_kwh_per_kwp": context.get_state("gsa_daily_potential"),
                 "yearly_kwh_per_kwp": context.get_state("gsa_yearly_potential"),
+                # Flat catalogue-path duplicates -- see this step's
+                # OutputSpec declarations and generate_bom.py's identical
+                # comment for why this duplication exists.
+                "energy.gsa_daily_potential_kwhperkwp": context.get_state("gsa_daily_potential"),
+                "energy.gsa_yearly_potential_kwhperkwp": context.get_state("gsa_yearly_potential"),
             },
             state_updates={},
             progress_message="Solar potential already fetched.",
@@ -151,6 +174,16 @@ async def fetch_solar_potential(context: StepContext) -> StepResult:
             "avg_temp_c": result.get("avg_temp_c"),
             "elevation_m": result.get("elevation_m"),
             "location": {"lat": lat, "lon": lon},
+            # Flat catalogue-path duplicates -- see this step's OutputSpec
+            # declarations.
+            "energy.gsa_daily_potential_kwhperkwp": daily_kwh,
+            "energy.gsa_yearly_potential_kwhperkwp": yearly_kwh,
+            "solar.optimal_tilt_deg": optimal_tilt,
+            "solar.ghi_kwh_m2": ghi,
+            "solar.gti_kwh_m2": result.get("gti_kwh_m2"),
+            "solar.dni_kwh_m2": result.get("dni_kwh_m2"),
+            "solar.avg_temp_c": result.get("avg_temp_c"),
+            "solar.elevation_m": result.get("elevation_m"),
         },
         state_updates={
             "solar_potential_fetched": True,

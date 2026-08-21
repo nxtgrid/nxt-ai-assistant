@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timezone
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import MockSpec, ParamSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, OutputSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.grid_design.artifact_log import sweep_state_for_artifacts
 from shared.utils.error_messages import sanitize_error_for_user
@@ -226,6 +226,12 @@ def _get_requester_name(context: StepContext) -> str:
             "editable_total_kwh",
         ),
         consumes_results=("generate_distribution_map",),
+        outputs=(
+            OutputSpec(name="design.design_id", value_type="string", where="data",
+                       description="Identifier of the generated power plant design."),
+            OutputSpec(name="design.design_name", value_type="string", where="data",
+                       description="Human-readable name of the generated design."),
+        ),
         params=(
             ParamSpec(
                 name="site_name",
@@ -295,7 +301,14 @@ async def generate_powerplant_design(context: StepContext) -> StepResult:
         design_id = context.get_state("design_id")
         LOGGER.info(f"generate_powerplant_design: already done (design_id={design_id}), skipping")
         return StepResult(
-            data={"design_id": design_id, "design_generated": True},
+            data={
+                "design_id": design_id,
+                "design_generated": True,
+                # Flat catalogue-path duplicate -- see the OutputSpec on this
+                # step's contract and output_catalogue.build_catalogue_from's
+                # direct accumulated_results[step][spec.name] lookup.
+                "design.design_id": design_id,
+            },
             state_updates={},
             progress_message="Design already created.",
         )
@@ -481,6 +494,10 @@ async def generate_powerplant_design(context: StepContext) -> StepResult:
                 "design_name": design_data.get("Name"),
                 "energy_specs": energy_specs,
                 "design_parameters": design_parameters,
+                # Flat catalogue-path duplicates -- see this step's
+                # OutputSpec declarations.
+                "design.design_id": design_id,
+                "design.design_name": design_data.get("Name"),
             },
             state_updates=state_updates,
             progress_message=(

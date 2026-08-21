@@ -895,6 +895,48 @@ async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
 
     # Pin revision once before editing, then execute via Apps Script
     try:
+        from shared.utils.file_annotations import MIME_SHEET, get_file_mime_type
+
+        mime = await get_file_mime_type(doc_id)
+
+        if mime == MIME_SHEET:
+            from shared.utils.file_annotations import reply_and_resolve, reply_without_resolving
+            from shared.utils.sheet_editing import (
+                fetch_all_grids,
+                find_cells_in_grids,
+                write_cells,
+            )
+
+            grids = await fetch_all_grids(doc_id)
+            matches = find_cells_in_grids(grids, target_text)
+            if not matches:
+                error = (
+                    "That text does not appear in the spreadsheet. It may have "
+                    "been edited since the comment was made."
+                )
+                if comment_id:
+                    await reply_without_resolving(doc_id, comment_id, error)
+                return [types.TextContent(type="text", text=error)]
+
+            written = await write_cells(
+                doc_id, [(m.tab, m.a1, replacement_markdown) for m in matches]
+            )
+            if comment_id:
+                await reply_and_resolve(doc_id, comment_id, f"Done: {replacement_markdown[:200]}")
+
+            return [
+                types.TextContent(
+                    type="text",
+                    text=json.dumps(
+                        {
+                            "success": True,
+                            "cells_written": written,
+                            "message": f"Updated {written} cell(s) in the spreadsheet.",
+                        }
+                    ),
+                )
+            ]
+
         from shared.utils.doc_editing import edit_section, pin_revision
 
         await pin_revision(doc_id)

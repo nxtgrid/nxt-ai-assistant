@@ -615,6 +615,58 @@ async def populate_lpp_cells(context: StepContext) -> StepResult:
     if not document_id:
         return StepResult.failure("No document_id in state - run copy_lpp_template first")
 
+    fill = await fill_main_input_cells(context, document_id)
+    if fill.get("error"):
+        return StepResult.failure(fill["error"])
+    if fill.get("stop"):
+        return StepResult(
+            data=fill["data"],
+            state_updates={"cells_populated": True},
+            progress_message=fill["progress_message"],
+        )
+
+    sheet_name = fill.pop("sheet_name")
+
+    image = await replace_map_image(context, document_id)
+    bom = await build_bom_tab(context, document_id)
+
+    return StepResult(
+        data={**fill, **image, **bom},
+        state_updates={
+            "cells_populated": True,
+            "map_image_replaced": image["map_image_replaced"],
+            "bom_tab_populated": bom["bom_tab_populated"],
+        },
+        progress_message=f"Populated {fill['cells_populated']} cells in {sheet_name}"
+        + (", map image updated" if image["map_image_replaced"] else "")
+        + (f", BOM tab with {bom['bom_item_count']} items" if bom["bom_tab_populated"] else ""),
+    )
+
+
+async def fill_main_input_cells(context: StepContext, document_id: str) -> Dict[str, Any]:
+    """Populate the Main Input sheet from the expert's ## Cell Mapping table.
+
+    The LPP-specific path fill_annotations generalises. It stays as-is on
+    purpose: cutting LPP over to the comment-driven mechanism also needs ~40
+    comments added to a live production template, which is a separate,
+    scheduled change.
+
+    Returns one of:
+    - {"error": "..."} when the sheet read or write fails -- the caller turns
+      this into StepResult.failure.
+    - {"stop": True, "progress_message": "...", "data": {...}} when there is
+      nothing to write -- no keys found in the sheet, or no label matched an
+      explicit Cell Mapping entry. Mirrors the original handler's early
+      return from these two branches, which never reached the map-image or
+      BOM steps below; the caller returns StepResult(data=fill["data"],
+      state_updates={"cells_populated": True},
+      progress_message=fill["progress_message"]) directly from this shape.
+    - Otherwise, the real per-call keys the final StepResult already
+      publishes: cells_populated, matched_keys, unmatched_keys, mapping,
+      key_columns, debug_writes -- plus sheet_name, which the caller pops
+      before building `data` (sheet_name itself was never a `data` key; it
+      only ever fed the progress message).
+    """
     # Get sheet name from input or use default
     sheet_name = context.get_input("sheet_name") or DEFAULT_SHEET_NAME
 
@@ -651,7 +703,7 @@ async def populate_lpp_cells(context: StepContext) -> StepResult:
             all_values[data_key] = override_value
 
     if not all_values:
-        return StepResult.failure("No data available from previous workflow steps")
+        return {"error": "No data available from previous workflow steps"}
 
     # 2. Get sheet keys from specified columns
     try:
@@ -660,15 +712,15 @@ async def populate_lpp_cells(context: StepContext) -> StepResult:
         )
     except Exception as e:
         LOGGER.exception(f"Error fetching sheet keys: {e}")
-        return StepResult.failure(f"Error reading sheet: {str(e)}")
+        return {"error": f"Error reading sheet: {str(e)}"}
 
     if not key_entries:
         LOGGER.warning(f"No keys found in columns {key_columns} of {sheet_name}")
-        return StepResult(
-            data={"cells_populated": 0, "message": f"No keys found in columns {key_columns}"},
-            state_updates={"cells_populated": True},
-            progress_message="No cells to populate",
-        )
+        return {
+            "stop": True,
+            "progress_message": "No cells to populate",
+            "data": {"cells_populated": 0, "message": f"No keys found in columns {key_columns}"},
+        }
 
     # 3. Parse explicit mappings from expert config (overrides)
     # explicit_mapping uses lowercase keys for case-insensitive matching
@@ -721,16 +773,16 @@ async def populate_lpp_cells(context: StepContext) -> StepResult:
 
     # 6. Write to sheet (adjacent column = value, next column = data key in grey)
     if not write_operations:
-        return StepResult(
-            data={
+        return {
+            "stop": True,
+            "progress_message": "No matching cells found to populate",
+            "data": {
                 "cells_populated": 0,
                 "matched_keys": matched_keys,
                 "unmatched_keys": unmatched_keys,
                 "mapping": explicit_mapping,
             },
-            state_updates={"cells_populated": True},
-            progress_message="No matching cells found to populate",
-        )
+        }
 
     try:
         result = await asyncio.to_thread(
@@ -738,15 +790,34 @@ async def populate_lpp_cells(context: StepContext) -> StepResult:
         )
     except Exception as e:
         LOGGER.exception(f"Error writing sheet values: {e}")
-        return StepResult.failure(f"Error writing to sheet: {str(e)}")
+        return {"error": f"Error writing to sheet: {str(e)}"}
 
     if not result["success"]:
-        return StepResult.failure(f"Failed to write values: {result.get('error', 'Unknown error')}")
+        return {"error": f"Failed to write values: {result.get('error', 'Unknown error')}"}
 
     cells_written = result.get("cells_written", len(write_operations))
     LOGGER.info(f"Successfully populated {cells_written} cells in {sheet_name}")
 
-    # 9. Replace map image in "Proposed Budget" sheet
+    return {
+        "cells_populated": cells_written,
+        "matched_keys": matched_keys,
+        "unmatched_keys": unmatched_keys,
+        "mapping": explicit_mapping,
+        "key_columns": key_columns,
+        "debug_writes": debug_writes,  # Detailed write operations for debugging
+        "sheet_name": sheet_name,
+    }
+
+
+async def replace_map_image(context: StepContext, document_id: str) -> Dict[str, Any]:
+    """Swap the distribution map into the 'Proposed Budget' sheet.
+
+    Still calls replace_sheet_image with neither target nor fit_range, so it
+    resolves through the legacy min_height heuristic and its behaviour is
+    unchanged. replace_file_image is the generic version for new flows.
+
+    Returns {"map_image_replaced": bool, "map_image_error": str | None}.
+    """
     # The map image from generate_distribution_map needs to be inserted into the budget sheet
     map_image_replaced = False
     map_image_error = None
@@ -797,7 +868,15 @@ async def populate_lpp_cells(context: StepContext) -> StepResult:
     else:
         LOGGER.warning("No map image available to insert into 'Proposed Budget' sheet")
 
-    # 10. Create Full BOM tab with items grouped by Component Type
+    return {"map_image_replaced": map_image_replaced, "map_image_error": map_image_error}
+
+
+async def build_bom_tab(context: StepContext, document_id: str) -> Dict[str, Any]:
+    """Create the Full BOM tab from the run's BOM items.
+
+    Returns {"bom_tab_populated": bool, "bom_tab_error": str | None,
+    "bom_item_count": int}.
+    """
     bom_tab_populated = False
     bom_tab_error = None
     bom_item_count = 0
@@ -828,26 +907,8 @@ async def populate_lpp_cells(context: StepContext) -> StepResult:
     else:
         LOGGER.info("No BOM items available - skipping BOM tab creation")
 
-    return StepResult(
-        data={
-            "cells_populated": cells_written,
-            "matched_keys": matched_keys,
-            "unmatched_keys": unmatched_keys,
-            "mapping": explicit_mapping,
-            "key_columns": key_columns,
-            "debug_writes": debug_writes,  # Detailed write operations for debugging
-            "map_image_replaced": map_image_replaced,
-            "map_image_error": map_image_error,
-            "bom_tab_populated": bom_tab_populated,
-            "bom_tab_error": bom_tab_error,
-            "bom_item_count": bom_item_count,
-        },
-        state_updates={
-            "cells_populated": True,
-            "map_image_replaced": map_image_replaced,
-            "bom_tab_populated": bom_tab_populated,
-        },
-        progress_message=f"Populated {cells_written} cells in {sheet_name}"
-        + (", map image updated" if map_image_replaced else "")
-        + (f", BOM tab with {bom_item_count} items" if bom_tab_populated else ""),
-    )
+    return {
+        "bom_tab_populated": bom_tab_populated,
+        "bom_tab_error": bom_tab_error,
+        "bom_item_count": bom_item_count,
+    }

@@ -30,6 +30,10 @@ SNAPSHOT = pathlib.Path(__file__).parent / "prompt_checksums.json"
 # Prompts whose bodies need variables to render; supply representative values
 # so every prompt actually renders end-to-end, not just parses.
 SAMPLE_VARS = {
+    "annotations.resolve_values": {
+        "catalogue_block": "- energy.total_kwp (number): Peak capacity. [current value: 42.5]",
+        "requests_block": '1. "the total peak capacity"',
+    },
     "context_filter.relevance": {
         "incoming_message": "sample incoming message",
         "formatted_candidates": "0: user - hello",

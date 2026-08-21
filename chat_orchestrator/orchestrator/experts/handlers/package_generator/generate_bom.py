@@ -8,12 +8,48 @@ energy specs.
 import json
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import MockSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+
+
+def _flat_bom_catalogue_keys(cost_summary: dict, energy_specs: dict, served_buildings) -> dict:
+    """Flat catalogue-path duplicates of cost_summary/energy_specs.
+
+    Additive only -- the existing nested "cost_summary"/"energy_specs" keys
+    are unchanged; this just also publishes the same values under the exact
+    names this step's OutputSpecs declare, since
+    output_catalogue.build_catalogue_from does a direct
+    accumulated_results[step][spec.name] lookup, not a nested one.
+
+    energy.Wp_per_conn is the one value with no home of its own: it is
+    total_kwp scaled by served_buildings, a figure only
+    generate_distribution_map produces, so callers pass it in explicitly.
+    """
+    total_kwp = energy_specs.get("total_kwp") or None
+    wp_per_conn = None
+    if total_kwp and served_buildings:
+        try:
+            wp_per_conn = round(float(total_kwp) * 1000 / float(served_buildings), 1)
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    return {
+        "bom.total_cost": cost_summary.get("total_cost"),
+        "bom.main_energy_asset_cost": cost_summary.get("main_energy_asset_cost"),
+        "bom.metering_cost": cost_summary.get("metering_cost"),
+        "bom.bos_cost": cost_summary.get("bos_cost"),
+        "energy.total_kwp": total_kwp,
+        "energy.total_kwh": energy_specs.get("total_kwh") or None,
+        "energy.total_kva": energy_specs.get("total_kva") or None,
+        "energy.Wp_per_conn": wp_per_conn,
+        "energy.num_subsystems": energy_specs.get("num_subsystems") or None,
+        "energy.num_inverters": energy_specs.get("num_inverters") or None,
+        "energy.num_batteries": energy_specs.get("num_batteries") or None,
+        "energy.num_panels": energy_specs.get("num_panels") or None,
+    }
 
 
 @register_step(
@@ -54,6 +90,32 @@ LOGGER = get_logger(__name__)
             "num_panels",
             "editable_total_kwp",
             "editable_total_kwh",
+        ),
+        outputs=(
+            OutputSpec(name="bom.total_cost", value_type="number", where="data",
+                       description="Total bill-of-materials cost for the site."),
+            OutputSpec(name="bom.main_energy_asset_cost", value_type="number", where="data",
+                       description="Cost of generation and storage assets only."),
+            OutputSpec(name="bom.metering_cost", value_type="number", where="data",
+                       description="Cost of meters and metering infrastructure."),
+            OutputSpec(name="bom.bos_cost", value_type="number", where="data",
+                       description="Balance-of-system cost: mounting, cabling, protection."),
+            OutputSpec(name="energy.total_kwp", value_type="number", where="data",
+                       description="Total installed solar peak capacity in kWp."),
+            OutputSpec(name="energy.total_kwh", value_type="number", where="data",
+                       description="Total battery storage capacity in kWh."),
+            OutputSpec(name="energy.total_kva", value_type="number", where="data",
+                       description="Total inverter apparent power rating in kVA."),
+            OutputSpec(name="energy.Wp_per_conn", value_type="number", where="data",
+                       description="Installed peak watts per served connection."),
+            OutputSpec(name="energy.num_subsystems", value_type="integer", where="data",
+                       description="Number of independent generation subsystems."),
+            OutputSpec(name="energy.num_inverters", value_type="integer", where="data",
+                       description="Number of inverters in the design."),
+            OutputSpec(name="energy.num_batteries", value_type="integer", where="data",
+                       description="Number of battery units in the design."),
+            OutputSpec(name="energy.num_panels", value_type="integer", where="data",
+                       description="Number of solar panels in the design."),
         ),
         guard_keys=("bom_generated",),
         side_effects=(
@@ -112,6 +174,21 @@ async def generate_site_bom(context: StepContext) -> StepResult:
                 },
                 "bom_items": [],
                 "bom_item_count": 0,
+                **_flat_bom_catalogue_keys(
+                    context.get_state("cost_summary") or {},
+                    {
+                        "total_kwp": context.get_state("total_kwp"),
+                        "total_kwh": context.get_state("total_kwh"),
+                        "total_kva": context.get_state("total_kva"),
+                        "num_subsystems": context.get_state("num_subsystems"),
+                        "num_inverters": context.get_state("num_inverters"),
+                        "num_batteries": context.get_state("num_batteries"),
+                        "num_panels": context.get_state("num_panels"),
+                    },
+                    (context.get_previous_result("generate_distribution_map") or {})
+                    .get("statistics", {})
+                    .get("served_buildings"),
+                ),
             },
             state_updates={},
             progress_message="BOM already generated.",
@@ -183,6 +260,13 @@ async def generate_site_bom(context: StepContext) -> StepResult:
                 "design_parameters": design_parameters,
                 "bom_item_count": len(bom_items),
                 "bom_items": bom_items,
+                **_flat_bom_catalogue_keys(
+                    cost_summary,
+                    energy_specs,
+                    (context.get_previous_result("generate_distribution_map") or {})
+                    .get("statistics", {})
+                    .get("served_buildings"),
+                ),
             },
             state_updates=state_updates,
             progress_message=(

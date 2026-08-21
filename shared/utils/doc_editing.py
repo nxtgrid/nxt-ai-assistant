@@ -6,17 +6,12 @@ handlers and the doc_editor expert step.
 """
 
 import asyncio
-import functools
 import json
 import logging
-import re
 from typing import Any
-
-from googleapiclient.discovery import build
 
 from shared.prompts import PROMPTS
 from shared.utils.apps_script_client import write_doc_markdown
-from shared.utils.google_auth import get_drive_write_credentials
 
 LOGGER = logging.getLogger(__name__)
 
@@ -27,13 +22,27 @@ from shared.utils.drive_resolver import (
     resolve_document,
 )
 
-
-@functools.lru_cache(maxsize=1)
-def _get_drive_service():
-    """Cached Drive v3 service (write credentials). Built once per process."""
-    creds = get_drive_write_credentials()
-    return build("drive", "v3", credentials=creds)
-
+# The file-type-agnostic half (scanning, reply+resolve, revision pinning)
+# moved to file_annotations.py so sheet_editing.py can reuse it. BOT_MENTION,
+# pin_revision and strip_bot_mention have no internal caller left in this
+# file -- they are re-exported (the redundant "as X" alias is ruff/mypy's
+# recognized marker for an intentional re-export, exempt from F401) because
+# knowledge_mcp_server.py and process_doc_edits.py import them from here.
+from shared.utils.file_annotations import (
+    BOT_MENTION as BOT_MENTION,
+)
+from shared.utils.file_annotations import (
+    _get_drive_service,
+    build_thread_instruction,
+    reply_and_resolve,
+    scan_annotations,
+)
+from shared.utils.file_annotations import (
+    pin_revision as pin_revision,
+)
+from shared.utils.file_annotations import (
+    strip_bot_mention as strip_bot_mention,
+)
 
 # Keys from packet_state that are safe to pass to the LLM for context
 _ALLOWED_STATE_KEYS = {
@@ -53,102 +62,23 @@ _ALLOWED_STATE_KEYS = {
     "classification_confidence",
 }
 
-# Partial match for the service account email in comments
-BOT_MENTION = "@anansi-chatbot"
-
 
 async def scan_comments(doc_id: str) -> list[dict]:
-    """Scan a Google Doc for pending @anansibot comments.
-
-    Includes reply threads — if a comment has replies from multiple users,
-    they are concatenated into the instruction with author attribution.
+    """Docs-shaped view of scan_annotations, kept for existing callers.
 
     Returns a list of comment dicts with:
         comment_id, instruction, highlighted_text, author_email, created_time
     """
-    drive_service = _get_drive_service()
-
-    comments_resp = await asyncio.to_thread(
-        lambda: drive_service.comments()
-        .list(
-            fileId=doc_id,
-            fields="comments(id,content,resolved,quotedFileContent,createdTime,"
-            "author(emailAddress,displayName),"
-            "replies(content,author(emailAddress,displayName)))",
-            includeDeleted=False,
-        )
-        .execute()
-    )
-
-    pending = [
-        c
-        for c in comments_resp.get("comments", [])
-        if not c.get("resolved") and BOT_MENTION in (c.get("content", "").lower())
+    return [
+        {
+            "comment_id": a.comment_id,
+            "instruction": a.instruction,
+            "highlighted_text": a.quoted_text,
+            "author_email": a.author_email,
+            "created_time": a.created_time,
+        }
+        for a in await scan_annotations(doc_id)
     ]
-
-    results = []
-    for c in pending:
-        highlighted = c.get("quotedFileContent", {}).get("value", "")
-        author_email = c.get("author", {}).get("emailAddress", "")
-        author_name = c.get("author", {}).get("displayName", "")
-
-        # Build instruction from the comment + all replies
-        instruction = _build_thread_instruction(c, author_name)
-
-        results.append(
-            {
-                "comment_id": c["id"],
-                "instruction": instruction,
-                "highlighted_text": highlighted,
-                "author_email": author_email,
-                "created_time": c.get("createdTime", ""),
-            }
-        )
-
-    return results
-
-
-def _strip_bot_mention(text: str) -> str:
-    """Remove @anansibot mentions from comment text."""
-    text = text.replace(BOT_MENTION, "")
-    return re.sub(r"@?anansi-chatbot[-\w.@]*", "", text, flags=re.IGNORECASE).strip()
-
-
-def _build_thread_instruction(comment: dict, initial_author: str) -> str:
-    """Build a single instruction string from a comment and its reply thread.
-
-    If all messages are from the same author, concatenates plainly.
-    If multiple authors, prefixes each reply with the author's name.
-    """
-    initial_text = _strip_bot_mention(comment.get("content", ""))
-    replies = comment.get("replies", [])
-
-    if not replies:
-        return initial_text
-
-    # Check if all replies are from the same author as the initial comment
-    initial_email = comment.get("author", {}).get("emailAddress", "")
-    all_same_author = all(
-        r.get("author", {}).get("emailAddress", "") == initial_email for r in replies
-    )
-
-    if all_same_author:
-        # Same person — just concatenate
-        parts = [initial_text]
-        for r in replies:
-            reply_text = _strip_bot_mention(r.get("content", ""))
-            if reply_text:
-                parts.append(reply_text)
-        return "\n".join(parts)
-    else:
-        # Multiple authors — attribute each message
-        parts = [f"[{initial_author or 'Author'}]: {initial_text}"]
-        for r in replies:
-            reply_text = _strip_bot_mention(r.get("content", ""))
-            if reply_text:
-                reply_author = r.get("author", {}).get("displayName", "Someone")
-                parts.append(f"[{reply_author}]: {reply_text}")
-        return "\n".join(parts)
 
 
 async def edit_section(
@@ -209,7 +139,7 @@ async def edit_section(
 
     # Resolve comment only AFTER confirming elements were written
     if comment_id and elements_written > 0:
-        await _resolve_comment(doc_id, comment_id, replacement_markdown)
+        await reply_and_resolve(doc_id, comment_id, f"Done: {replacement_markdown[:200]}")
     elif comment_id:
         LOGGER.warning(f"Skipping comment resolution — 0 elements written for comment {comment_id}")
 
@@ -240,7 +170,7 @@ async def get_comment_by_id(doc_id: str, comment_id: str) -> dict | None:
 
         highlighted = comment.get("quotedFileContent", {}).get("value", "")
         author_name = comment.get("author", {}).get("displayName", "")
-        instruction = _build_thread_instruction(comment, author_name)
+        instruction = build_thread_instruction(comment, author_name)
 
         return {
             "highlighted_text": highlighted,
@@ -250,31 +180,6 @@ async def get_comment_by_id(doc_id: str, comment_id: str) -> dict | None:
     except Exception as e:
         LOGGER.warning(f"Could not fetch comment {comment_id} from doc {doc_id}: {e}")
         return None
-
-
-async def pin_revision(doc_id: str) -> bool:
-    """Pin the current revision before editing for rollback safety.
-
-    Creates a permanent revision entry in Google Docs version history.
-    Note: Google API does not support naming versions on Docs — this
-    only pins the revision to prevent auto-deletion.
-    """
-    try:
-        service = _get_drive_service()
-        await asyncio.to_thread(
-            lambda: service.revisions()
-            .update(
-                fileId=doc_id,
-                revisionId="head",
-                body={"keepForever": True},
-            )
-            .execute()
-        )
-        LOGGER.info(f"Pinned pre-edit revision for doc {doc_id}")
-        return True
-    except Exception as e:
-        LOGGER.warning(f"Could not pin revision for {doc_id}: {e}")
-        return False  # Non-fatal
 
 
 async def _fetch_reference_docs(instruction: str, user_email: str | None = None) -> str:
@@ -392,22 +297,3 @@ async def generate_replacement_markdown(
     )
 
     return str(response.text).strip()
-
-
-async def _resolve_comment(doc_id: str, comment_id: str, replacement_preview: str) -> None:
-    """Reply to and resolve a Google Doc comment after a successful edit."""
-    try:
-        drive_service = _get_drive_service()
-        preview = replacement_preview[:200]
-        await asyncio.to_thread(
-            lambda: drive_service.replies()
-            .create(
-                fileId=doc_id,
-                commentId=comment_id,
-                fields="id",
-                body={"action": "resolve", "content": f"Done: {preview}"},
-            )
-            .execute()
-        )
-    except Exception as e:
-        LOGGER.warning(f"Could not resolve comment {comment_id}: {e}")

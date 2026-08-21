@@ -142,29 +142,34 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                   'required': ['document_id']},
   'visible_to_customer': False},
  {'name': 'scan_doc_comments',
-  'description': '[READ-ONLY] Scan a Google Doc for pending @anansibot comments. Returns a list of comments '
-                 'with their highlighted text, instruction, and comment ID. Use this before '
-                 'edit_doc_section to see what edits are requested in a document.',
+  'description': '[READ-ONLY] Scan a Google Doc or Google Sheet for pending @anansibot '
+                 'comments. Returns each comment\'s highlighted text (for a Sheet, the '
+                 'commented cell\'s content), instruction, and comment ID. Use before '
+                 'edit_doc_section to see what edits a file is asking for. A comment on '
+                 'an empty cell cannot be located and is returned with empty text.',
   'inputSchema': {'type': 'object',
                   'properties': {'document_id': {'type': 'string',
-                                                 'description': 'Google Doc file ID (required — '
-                                                                'not a document name). If the user '
-                                                                'gives a name, use find_document '
-                                                                'first to resolve the ID.'}},
+                                                 'description': 'Google Doc or Sheet file ID '
+                                                                '(required — not a name). If '
+                                                                'the user gives a name, use '
+                                                                'find_document first to '
+                                                                'resolve the ID.'}},
                   'required': ['document_id']},
   'visible_to_customer': False},
  {'name': 'edit_doc_section',
-  'description': '[ACTION - DESTRUCTIVE GOOGLE DOC WRITE] Edit a section of a Google Doc with '
-                 'formatted markdown, overwriting the existing section text. Before calling: '
-                 '(1) confirm with the user which document and section will be edited, (2) '
-                 'never assume a document ID from context — require an explicit file ID. If '
-                 'the user provides a name, use find_document first. If find_document returns '
-                 '2+ results, ask the user which one. Supports: **bold**, *italic*, ## '
-                 'headings, - bullets, 1. numbered lists, | tables |, [links](url).',
+  'description': '[ACTION - DESTRUCTIVE WRITE] Edit a section of a Google Doc or a cell of a '
+                 'Google Sheet, overwriting the existing content. Before calling: (1) confirm '
+                 'with the user which file and section will be edited, (2) never assume a '
+                 'file ID from context — require an explicit file ID. If the user provides a '
+                 'name, use find_document first. If find_document returns 2+ results, ask the '
+                 'user which one. For a Doc, replacement_markdown supports **bold**, *italic*, '
+                 '## headings, - bullets, 1. numbered lists, | tables |, [links](url) — for a '
+                 'Sheet, it is written as the cell\'s literal text with no markdown rendering.',
   'inputSchema': {'type': 'object',
                   'properties': {'document_id': {'type': 'string',
-                                                 'description': 'Google Doc file ID (required — '
-                                                                'not a document name)'},
+                                                 'description': 'Google Doc or Sheet file ID '
+                                                                '(required — not a document '
+                                                                'name)'},
                                  'comment_id': {'type': 'string',
                                                 'description': 'Comment ID from scan_doc_comments '
                                                                '(for comment-driven editing)'},

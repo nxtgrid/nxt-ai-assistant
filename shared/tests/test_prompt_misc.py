@@ -10,6 +10,7 @@ IDS = [
     "ticketing.jira_issue_types",
     "gtr.analysis_conversation",
     "grafana.panel_description",
+    "annotations.resolve_values",
 ]
 
 
@@ -110,3 +111,13 @@ def test_gtr_analysis_conversation_is_fully_static():
     assert spec.variables == []
     text = PROMPTS.text("gtr.analysis_conversation")
     assert "grid technical reviewer" in text
+
+
+def test_annotations_prompt_renders_with_a_catalogue_and_requests():
+    text = PROMPTS.text(
+        "annotations.resolve_values",
+        catalogue_block="- energy.total_kwp (number): Peak capacity. [current value: 42.5]",
+        requests_block='1. "the total peak capacity"',
+    )
+    assert "energy.total_kwp" in text
+    assert "the total peak capacity" in text

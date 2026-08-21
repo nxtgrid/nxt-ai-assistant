@@ -23,6 +23,7 @@ from orchestrator.experts.handlers import (
     ingestion_expert,
     package_generator,
     signing,
+    templates,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "ingestion_expert",
     "package_generator",
     "signing",
+    "templates",
 ]

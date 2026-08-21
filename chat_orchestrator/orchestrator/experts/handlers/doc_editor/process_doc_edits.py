@@ -14,6 +14,7 @@ import logging
 from typing import Any, Dict
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import MockSpec, OutputSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.prompts import PROMPTS
 
@@ -68,7 +69,50 @@ async def _identify_section(markdown: str, instruction: str) -> Dict[str, Any]:
         return {"text": "", "confidence": 0.0, "reasoning": f"Parse error: {e}"}
 
 
-@register_step("process_doc_edits")
+@register_step(
+    "process_doc_edits",
+    contract=StepContract(
+        description=(
+            "Applies @anansi-chatbot comment requests to a Google Doc, or edits one "
+            "section identified from a chat instruction."
+        ),
+        params=(
+            ParamSpec(
+                name="document_id",
+                param_type="string",
+                description="The Google Doc to edit -- a doc link or a bare Drive file ID.",
+                synonyms=("doc_id", "document", "file_id"),
+                required=True,
+            ),
+            ParamSpec(
+                name="instruction",
+                param_type="string",
+                description=(
+                    "What to change. Omit to process every unresolved "
+                    "@anansi-chatbot comment in the document instead."
+                ),
+                required=False,
+            ),
+        ),
+        produces_state=("doc_edits_processed",),
+        outputs=(
+            OutputSpec(
+                name="succeeded",
+                value_type="integer",
+                where="data",
+                description="Number of sections successfully edited.",
+            ),
+        ),
+        side_effects="Rewrites sections of a Google Doc and resolves the comments requesting them.",
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={"doc_edits_processed": True},
+            data={"edits": 0, "succeeded": 0, "failed": 0},
+            message="Would have applied the document's pending comment edits.",
+        ),
+    ),
+)
 async def process_doc_edits(context: StepContext) -> StepResult:
     """Process Google Doc edits from comments or instructions.
 
