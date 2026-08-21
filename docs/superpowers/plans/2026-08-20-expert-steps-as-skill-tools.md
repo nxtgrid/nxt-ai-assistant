@@ -349,14 +349,36 @@ to cover 100% of its own `produces_state` — zero findings.
       work. P3 recorded it as struck through. Converting a disabled expert is
       fine — it is the safest possible first conversion — but the operator
       should know that is what they are getting.
-- [ ] **Task 10.2** — contracts for all 7 handlers.
-- [ ] **Task 10.3** — `create_analysis_doc` and `create_kpi_doc` create Google
+
+      **Not verifiable from this worktree** (`e2e3cd12`) — no `.env`/live
+      `CHAT_DB_URL`/Google credentials available here, and `shared.prompts.
+      PROMPTS` resolves the bundled file with no override configured (see
+      CLAUDE.md's "local `.env` makes tests non-hermetic" note — the
+      inverse problem here: no local override at all to check against).
+      P3's prior recording (struck through) is the only evidence on hand.
+      **Needs the operator to confirm before Phase 11 promotes this skill**,
+      so there's never a stretch with neither the expert nor the skill live.
+- [x] **Task 10.2** — contracts for all 7 handlers.
+- [x] **Task 10.3** — `create_analysis_doc` and `create_kpi_doc` create Google
       Docs: `mutates=True`, `mutation_kind="external_write"`, each with a
       `MockSpec` returning a synthetic doc id. The two `fetch_*` steps are reads.
-- [ ] **Task 10.4** — `analyze_failures_loop` is a loop construct — confirm it
+- [x] **Task 10.4** — `analyze_failures_loop` is a loop construct — confirm it
       maps onto the step model at all before assuming it converts cleanly. This
       is the one structural unknown in this phase.
-- [ ] **Task 10.5** — extend the contract lint to cover `grid_analyst`.
+- [x] **Task 10.5** — extend the contract lint to cover `grid_analyst`.
+
+**Done 2026-08-21** (`e2e3cd12`), except Task 10.1 (see above). Task 10.4's
+"structural unknown" resolved cleanly: the loop is entirely internal to
+`analyze_failures_loop`'s own body, the same "call an MCP tool once per
+item" shape as GTR's `fetch_cuf_sub_values`/`check_existing_review` —
+nothing about it required a new mechanism. Design decision worth noting:
+every `grid_analyst` handler reads its inputs via `context.get_input(...)`
+only, never falling back to `context.get_state(...)` the way LPP/GTR
+commonly do — so every caller-suppliable value here is a `param`
+(`ParamSpec`), never `consumes_state`, since `validate_step_prerequisites`'
+`consumes_state` check never consults `packet_inputs` (only `params`
+does). Declaring these as `consumes_state` would have silently broken the
+precondition check for legitimately-supplied values.
 
 ## Phase 11 — Author, verify and activate the three skills
 
