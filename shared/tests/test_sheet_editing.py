@@ -55,3 +55,27 @@ def test_returns_empty_for_empty_needle():
     """An empty cell quotes nothing — never match everything."""
     assert find_cells_in_grids(GRIDS, "") == []
     assert find_cells_in_grids(GRIDS, "   ") == []
+
+
+# Recorded from Spike 0 against NXT-3235 - Okpokunou Technical Review.
+# Comment AAAB0jIG6Kc quoted text that had since been edited (73% similar);
+# comment AAABnuBYGB4 matched 14 cells.
+STALE_QUOTE = (
+    "HPS Hours were 18.6h, falling short of the 22h target and slightly down "
+    "from 20.1h the previous month."
+)
+CURRENT_CELL = (
+    "HPS Hours were 19.2h, falling short of the 22h target and slightly down "
+    "from 20.2h the previous month."
+)
+
+
+def test_a_stale_quote_finds_nothing_rather_than_the_closest_cell():
+    grids = {"2025 Review": [[CURRENT_CELL]]}
+    assert find_cells_in_grids(grids, STALE_QUOTE) == []
+
+
+def test_a_repeated_value_returns_every_match_not_the_first():
+    grids = {"Meter Issues": [["To be checked"] for _ in range(14)]}
+    matches = find_cells_in_grids(grids, "To be checked")
+    assert len(matches) == 14
