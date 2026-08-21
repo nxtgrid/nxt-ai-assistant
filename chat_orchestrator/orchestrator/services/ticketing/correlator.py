@@ -138,6 +138,8 @@ class CorrelationDecision:
     needs_root_cause_ticket: bool = False
     ticket_severity: str = ""
     ticket_id: Optional[str] = None
+    description_addition: str = ""
+    title_change_requested: bool = False
 
 
 def _parse_llm_response(raw: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -708,6 +710,15 @@ def to_legacy_correlation_decision(
         llm_raw=result.raw,
         needs_root_cause_ticket=False,
         ticket_severity=effective_candidate_severity(target) if target else "",
+        description_addition=(
+            ticket.description_addition
+            if ticket.action is TicketAction.UPDATE_EXISTING and ticket.change_description
+            and ticket.description_addition
+            else ""
+        ),
+        title_change_requested=(
+            ticket.action is TicketAction.UPDATE_EXISTING and ticket.change_title
+        ),
     )
 
 

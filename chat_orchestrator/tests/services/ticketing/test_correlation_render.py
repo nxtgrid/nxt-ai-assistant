@@ -415,6 +415,16 @@ class _FakeStore:
     async def get_correlation(self, ticket_id: str) -> Optional[Dict[str, Any]]:
         return self.correlation
 
+    async def append_description_evidence(self, ticket_id: str, addition: str) -> bool:
+        if self.correlation is None or not addition.strip():
+            return False
+        base = str(self.correlation.get("description_base") or "").rstrip()
+        if addition.strip() not in base:
+            self.correlation["description_base"] = (
+                f"{base}\n\n{addition.strip()}" if base else addition.strip()
+            )
+        return True
+
     async def upsert_correlation(
         self,
         *,
@@ -511,6 +521,35 @@ def _amend_decision(**overrides: Any) -> CorrelationDecision:
 
 
 class TestApplyAmendmentAmend:
+    @pytest.mark.asyncio
+    async def test_judged_title_and_description_change_preserve_existing_content(self):
+        correlation = _correlation(description_base="Original ticket description")
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService()
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            ticket_id="ticket-1",
+            alert=AlertFacts(subject="! Warning: MPPT A7 in Kudi !", severity="warning"),
+            decision=_amend_decision(
+                amended_summary="Grid outage following BMS loss",
+                title_change_requested=True,
+                description_addition=(
+                    "Inverter shut down nine minutes after BMS communication was lost."
+                ),
+            ),
+            raw_text="raw notify text",
+            grid_name="Kudi",
+        )
+
+        assert result is not None
+        assert ticket_service.update_calls[0]["summary"] == "Grid outage following BMS loss"
+        assert "[anansi:affected-start]" in ticket_service.update_calls[0]["description"]
+        assert "Original ticket description" in ticket_service.update_calls[0]["description"]
+        assert "Inverter shut down nine minutes" in ticket_service.update_calls[0]["description"]
+
     @pytest.mark.asyncio
     async def test_new_affected_equipment_updates_ticket_without_count_escalation(self):
         correlation = _correlation(

@@ -171,6 +171,22 @@ def _make_store(client: Optional[FakeRawClient] = None) -> tuple[CorrelationStor
     return store, fake
 
 
+@pytest.mark.asyncio
+async def test_append_description_evidence_preserves_base_and_rejects_blank() -> None:
+    store, client = _make_store()
+    client.tables["ticket_correlations"].append(
+        {"ticket_id": "ticket-1", "description_base": "Original ticket description"}
+    )
+
+    assert await store.append_description_evidence(
+        "ticket-1", "Inverter shut down after BMS communication loss."
+    ) is True
+    assert client.tables["ticket_correlations"][0]["description_base"] == (
+        "Original ticket description\n\nInverter shut down after BMS communication loss."
+    )
+    assert await store.append_description_evidence("ticket-1", "  ") is False
+
+
 # The exact ten columns 0005b dropped from ticket_correlations, plus
 # ticket_ref from ticket_correlation_events -- no write payload in this
 # module may ever contain one of these again. See

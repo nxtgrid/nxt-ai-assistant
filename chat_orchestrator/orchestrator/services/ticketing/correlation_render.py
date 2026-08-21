@@ -83,7 +83,12 @@ def _apply_incoming_severity(summary: str, severity: str) -> str:
 
 
 def render_summary(
-    correlation: Dict[str, Any], alert: AlertFacts, llm_summary: str, grid_name: str
+    correlation: Dict[str, Any],
+    alert: AlertFacts,
+    llm_summary: str,
+    grid_name: str,
+    *,
+    title_change_requested: bool = False,
 ) -> str:
     """Recompute a ticket's summary from its current affected-keys state.
 
@@ -108,6 +113,13 @@ def render_summary(
     """
     affected_keys = correlation.get("affected_keys") or []
     total_keys = len(affected_keys)
+
+    # Legacy decisions use the aggregate/cascade renderers below. A validated
+    # explicit LLM title amendment is distinct: it intentionally changes the
+    # operator-facing title while preserving severity and the description's
+    # affected-component marker block.
+    if title_change_requested and llm_summary.strip():
+        return _apply_incoming_severity(llm_summary, alert.severity)
 
     entries_by_kind: Dict[str, List[Dict[str, Any]]] = {}
     for entry in affected_keys:
@@ -344,6 +356,17 @@ async def apply_amendment(
             )
             return None
 
+    if decision.decision == "amend" and decision.description_addition:
+        appended = await store.append_description_evidence(
+            ticket_id, decision.description_addition
+        )
+        if not appended:
+            LOGGER.warning(
+                "apply_amendment: failed to persist judged description evidence for {!r}",
+                ticket_ref,
+            )
+            return None
+
     component_added = False
     affected_key = decision.affected_key or {}
     kind = str(affected_key.get("kind") or "").strip()
@@ -382,7 +405,13 @@ async def apply_amendment(
             occurrence_count=int(correlation.get("occurrence_count") or 1),
         )
 
-    new_summary = render_summary(correlation, alert, decision.amended_summary, grid_name)
+    new_summary = render_summary(
+        correlation,
+        alert,
+        decision.amended_summary,
+        grid_name,
+        title_change_requested=decision.title_change_requested,
+    )
     new_description = render_description(correlation)
 
     affected_count = len(correlation.get("affected_keys") or [])

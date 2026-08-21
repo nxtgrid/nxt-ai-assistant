@@ -284,6 +284,39 @@ class CorrelationStore:
             _record_failure("record_amendment", e)
             return False
 
+    async def append_description_evidence(self, ticket_id: str, addition: str) -> bool:
+        """Durably append a bounded factual addition without replacing ticket prose."""
+        text = addition.strip()
+        if not text:
+            return False
+        client = self._client()
+        if client is None:
+            return False
+        try:
+            response = (
+                client.table("ticket_correlations")
+                .select("description_base")
+                .eq("ticket_id", ticket_id)
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(response, "data", None) or []
+            if not rows:
+                return False
+            base = str(rows[0].get("description_base") or "").rstrip()
+            if text in base:
+                return True
+            updated = (
+                client.table("ticket_correlations")
+                .update({"description_base": f"{base}\n\n{text}" if base else text})
+                .eq("ticket_id", ticket_id)
+                .execute()
+            )
+            return bool(getattr(updated, "data", None))
+        except Exception as e:
+            _record_failure("append_description_evidence", e)
+            return False
+
     async def open_candidates_for_grid(
         self, grid_name: str, since_iso: str, limit: int = 15
     ) -> List[Dict[str, Any]]:
