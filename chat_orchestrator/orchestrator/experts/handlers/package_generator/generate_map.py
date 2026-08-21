@@ -561,6 +561,8 @@ def _lookup_site_by_id(site_id: int, db_config: Dict[str, Any]) -> Optional[str]
                        description="Site centre longitude, 6 decimal places."),
             OutputSpec(name="location.gps", value_type="string", where="data",
                        description="Site centre as a single 'lat, lon' string."),
+            OutputSpec(name="site.state", value_type="string", where="data",
+                       description="Administrative state or region the site sits in."),
         ),
         guard_keys=("map_generated",),
         side_effects=(
@@ -1123,6 +1125,39 @@ async def _render_map_from_row_data(
     if site_options_newly_uploaded:
         state_updates["site_options_drive_id"] = site_options_drive_id
 
+    # Flat catalogue-path duplicates of the nested fields above, so
+    # output_catalogue.build_catalogue_from's direct
+    # accumulated_results[step][spec.name] lookup finds them -- see this
+    # step's OutputSpec declarations. Mirrors
+    # populate_cells._collect_all_available_values's field mapping exactly.
+    catalogue_raw_lat = center.get("lat")
+    catalogue_raw_lon = center.get("lon")
+    catalogue_lat = f"{float(catalogue_raw_lat):.6f}" if catalogue_raw_lat is not None else None
+    catalogue_lon = f"{float(catalogue_raw_lon):.6f}" if catalogue_raw_lon is not None else None
+    catalogue_gps = (
+        f"{catalogue_lat}, {catalogue_lon}"
+        if catalogue_raw_lat is not None and catalogue_raw_lon is not None
+        else None
+    )
+    flat_catalogue_keys = {
+        "meta.pole_count": statistics.get("poles"),
+        "meta.served_building_count": statistics.get("served_buildings"),
+        "meta.unserved_building_count": statistics.get("unserved_buildings"),
+        "meta.coverage_percentage": statistics.get("coverage_percentage"),
+        "meta.backbone_cable_length_m": statistics.get("backbone_cable_length_m"),
+        "meta.drop_cable_length_m": statistics.get("drop_cable_length_m"),
+        "meta.backbone_cable_count": statistics.get("backbone_cable_count"),
+        "meta.drop_cable_count": statistics.get("drop_cable_count"),
+        "meta.average_span_length_m": statistics.get("average_span_length_m"),
+        "meta.max_drop_cable_length_m": statistics.get("max_drop_cable_length_m"),
+        "computed.total_buildings": statistics.get("total_buildings"),
+        "computed.cable_length_m": statistics.get("cable_length_m"),
+        "location.lat": catalogue_lat,
+        "location.lon": catalogue_lon,
+        "location.gps": catalogue_gps,
+        "site.state": site_state,
+    }
+
     return StepResult(
         data={
             "map_image_b64": result["image"],
@@ -1136,6 +1171,7 @@ async def _render_map_from_row_data(
             "site_state": site_state,
             "power_heatmap_b64": power_heatmap_b64,
             "site_options_drive_id": site_options_drive_id,
+            **flat_catalogue_keys,
         },
         state_updates=state_updates,
         progress_message=f"Generated map for {site_name}",

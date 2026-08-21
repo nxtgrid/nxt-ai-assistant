@@ -301,7 +301,14 @@ async def generate_powerplant_design(context: StepContext) -> StepResult:
         design_id = context.get_state("design_id")
         LOGGER.info(f"generate_powerplant_design: already done (design_id={design_id}), skipping")
         return StepResult(
-            data={"design_id": design_id, "design_generated": True},
+            data={
+                "design_id": design_id,
+                "design_generated": True,
+                # Flat catalogue-path duplicate -- see the OutputSpec on this
+                # step's contract and output_catalogue.build_catalogue_from's
+                # direct accumulated_results[step][spec.name] lookup.
+                "design.design_id": design_id,
+            },
             state_updates={},
             progress_message="Design already created.",
         )
@@ -487,6 +494,10 @@ async def generate_powerplant_design(context: StepContext) -> StepResult:
                 "design_name": design_data.get("Name"),
                 "energy_specs": energy_specs,
                 "design_parameters": design_parameters,
+                # Flat catalogue-path duplicates -- see this step's
+                # OutputSpec declarations.
+                "design.design_id": design_id,
+                "design.design_name": design_data.get("Name"),
             },
             state_updates=state_updates,
             progress_message=(

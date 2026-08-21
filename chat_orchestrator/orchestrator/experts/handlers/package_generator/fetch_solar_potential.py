@@ -83,6 +83,11 @@ async def fetch_solar_potential(context: StepContext) -> StepResult:
                 "solar_potential_fetched": True,
                 "daily_kwh_per_kwp": context.get_state("gsa_daily_potential"),
                 "yearly_kwh_per_kwp": context.get_state("gsa_yearly_potential"),
+                # Flat catalogue-path duplicates -- see this step's
+                # OutputSpec declarations and generate_bom.py's identical
+                # comment for why this duplication exists.
+                "energy.gsa_daily_potential_kwhperkwp": context.get_state("gsa_daily_potential"),
+                "energy.gsa_yearly_potential_kwhperkwp": context.get_state("gsa_yearly_potential"),
             },
             state_updates={},
             progress_message="Solar potential already fetched.",
@@ -169,6 +174,16 @@ async def fetch_solar_potential(context: StepContext) -> StepResult:
             "avg_temp_c": result.get("avg_temp_c"),
             "elevation_m": result.get("elevation_m"),
             "location": {"lat": lat, "lon": lon},
+            # Flat catalogue-path duplicates -- see this step's OutputSpec
+            # declarations.
+            "energy.gsa_daily_potential_kwhperkwp": daily_kwh,
+            "energy.gsa_yearly_potential_kwhperkwp": yearly_kwh,
+            "solar.optimal_tilt_deg": optimal_tilt,
+            "solar.ghi_kwh_m2": ghi,
+            "solar.gti_kwh_m2": result.get("gti_kwh_m2"),
+            "solar.dni_kwh_m2": result.get("dni_kwh_m2"),
+            "solar.avg_temp_c": result.get("avg_temp_c"),
+            "solar.elevation_m": result.get("elevation_m"),
         },
         state_updates={
             "solar_potential_fetched": True,

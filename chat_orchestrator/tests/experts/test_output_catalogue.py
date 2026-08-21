@@ -73,3 +73,56 @@ def test_solar_potential_declares_its_irradiation_values():
         "solar.avg_temp_c",
         "solar.elevation_m",
     } <= names
+
+
+def test_resolve_sites_declares_the_site_identity_values():
+    names = _output_names("resolve_sites")
+    assert {"site.site_name", "site.site_id"} <= names
+
+
+def test_site_state_is_declared_on_the_map_step_not_resolve_sites():
+    """site_state is only ever populated by generate_distribution_map --
+    declaring it on resolve_sites would make it permanently unmatchable,
+    since that step never produces a value for it."""
+    assert "site.state" in _output_names("generate_distribution_map")
+    assert "site.state" not in _output_names("resolve_sites")
+
+
+def test_every_declared_output_name_is_a_literal_top_level_data_or_state_key():
+    """Guards the actual bug this file was written to catch.
+
+    OutputSpec.name is looked up as a *literal* key -- accumulated_results
+    [step][spec.name] for where="data", packet_state[spec.name] for
+    where="state" (see output_catalogue.build_catalogue_from, once it
+    exists in Phase 4). A step whose real StepResult only nests that value
+    inside a sub-dict (e.g. "statistics") satisfies this test's sibling
+    name-only tests above while silently returning nothing at runtime --
+    this test instead inspects each handler's actual source for a
+    string literal matching the declared name, which is a cheap proxy for
+    "this key is really published flat somewhere in this function".
+    """
+    import inspect
+
+    from orchestrator.experts.handlers.package_generator import (
+        fetch_solar_potential,
+        generate_bom,
+        generate_design,
+        generate_map,
+        resolve_sites,
+    )
+
+    module_by_step = {
+        "generate_distribution_map": generate_map,
+        "generate_powerplant_design": generate_design,
+        "generate_site_bom": generate_bom,
+        "fetch_solar_potential": fetch_solar_potential,
+        "resolve_sites": resolve_sites,
+    }
+    for step_name, module in module_by_step.items():
+        source = inspect.getsource(module)
+        for spec in get_step_contract(step_name).outputs:
+            needle = f'"{spec.name}"'
+            assert needle in source, (
+                f"{step_name}'s module has no literal {needle} -- "
+                f"{spec.name} is declared but never actually published flat"
+            )
