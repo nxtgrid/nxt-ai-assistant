@@ -14,7 +14,7 @@ import psycopg
 
 from orchestrator.experts.handlers.package_generator.site_geo_source import load_site_row_data
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import MockSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.layout import generate_layout
 from shared.mapping import generate_site_map
@@ -530,6 +530,38 @@ def _lookup_site_by_id(site_id: int, db_config: Dict[str, Any]) -> Optional[str]
             "site_options_drive_id",
         ),
         consumes_results=("generate_distribution_layout", "resolve_community_site"),
+        outputs=(
+            OutputSpec(name="meta.pole_count", value_type="integer", where="data",
+                       description="Number of distribution poles in the generated layout."),
+            OutputSpec(name="meta.served_building_count", value_type="integer", where="data",
+                       description="Buildings connected by the distribution network."),
+            OutputSpec(name="meta.unserved_building_count", value_type="integer", where="data",
+                       description="Buildings inside the site boundary left unconnected."),
+            OutputSpec(name="meta.coverage_percentage", value_type="number", where="data",
+                       description="Percentage of buildings served by the network."),
+            OutputSpec(name="meta.backbone_cable_length_m", value_type="number", where="data",
+                       description="Total backbone (trunk) cable length in metres."),
+            OutputSpec(name="meta.drop_cable_length_m", value_type="number", where="data",
+                       description="Total drop (service) cable length in metres."),
+            OutputSpec(name="meta.backbone_cable_count", value_type="integer", where="data",
+                       description="Number of backbone cable spans."),
+            OutputSpec(name="meta.drop_cable_count", value_type="integer", where="data",
+                       description="Number of drop cable runs."),
+            OutputSpec(name="meta.average_span_length_m", value_type="number", where="data",
+                       description="Mean distance between adjacent poles, in metres."),
+            OutputSpec(name="meta.max_drop_cable_length_m", value_type="number", where="data",
+                       description="Longest single drop cable run, in metres."),
+            OutputSpec(name="computed.total_buildings", value_type="integer", where="data",
+                       description="All buildings detected inside the site boundary."),
+            OutputSpec(name="computed.cable_length_m", value_type="number", where="data",
+                       description="Backbone plus drop cable length combined, in metres."),
+            OutputSpec(name="location.lat", value_type="string", where="data",
+                       description="Site centre latitude, 6 decimal places."),
+            OutputSpec(name="location.lon", value_type="string", where="data",
+                       description="Site centre longitude, 6 decimal places."),
+            OutputSpec(name="location.gps", value_type="string", where="data",
+                       description="Site centre as a single 'lat, lon' string."),
+        ),
         guard_keys=("map_generated",),
         side_effects=(
             "Queries Auth DB pd_site_submissions via psycopg; may run the distribution "
