@@ -67,6 +67,7 @@ def _assembler(**overrides: object) -> AlertJudgmentContextAssembler:
         "telemetry_provider": lambda: _resolved(_telemetry()),
         "prior_alerts_provider": lambda: _resolved([_prior(index) for index in range(21)]),
         "om_messages_provider": lambda: _resolved([_om(index) for index in range(51)]),
+        "delivery_failures_provider": lambda: 0,
     }
     providers.update(overrides)
     return AlertJudgmentContextAssembler(**providers)  # type: ignore[arg-type]

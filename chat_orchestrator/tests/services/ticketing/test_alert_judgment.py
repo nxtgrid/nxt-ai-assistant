@@ -2,7 +2,6 @@ import json
 
 from orchestrator.services.ticketing.alert_judgment import parse_alert_judgment
 
-
 VALID = {
     "grid_impact": {
         "prior_known_status": "on",

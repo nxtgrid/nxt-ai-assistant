@@ -263,6 +263,10 @@ CREATE TABLE IF NOT EXISTS ticket_correlation_events (
     candidate_refs  jsonb NOT NULL DEFAULT '[]',
     alert           jsonb,
     llm_raw         text,
+    judgment        jsonb,
+    context_availability  jsonb,
+    send_decision         boolean,
+    send_forced_by        jsonb NOT NULL DEFAULT '[]',
     created_at      timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS ticket_correlation_events_grid_idx
