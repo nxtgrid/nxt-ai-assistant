@@ -4,9 +4,21 @@ This handler copies a Google Slides/Docs template to the output folder
 and registers it with the Apps Script document tracker to get a doc code (e.g., "DOC-0042").
 
 Template ID resolution order:
-1. Workflow input: template_id
-2. Environment variable: LPP_TEMPLATE_ID
-3. Default: (empty — LPP_TEMPLATE_ID env var is required)
+1. Parameter override: template_id (set via `context.set_parameter_override`,
+   e.g. an `[llm]` step's tool call, or a Skill Builder step-level default) --
+   see `_resolve_template_id`'s docstring for why this must be
+   `get_parameter_value`, not `get_input`.
+2. Packet input: template_id (a caller that supplied it directly at trigger time)
+3. Environment variable: LPP_TEMPLATE_ID (operator-configured, editable via the
+   Settings UI -- see shared/config/flag_registry.py's "documents" group --
+   without a code change, but is one global default for every run)
+4. Default: (empty — one of the above is required)
+
+Any of the above may be a full Google Docs/Sheets/Slides/Drive URL (e.g.
+pasted straight from the browser address bar) instead of a bare file ID --
+`_extract_drive_file_id` normalizes either form. This is what lets a skill
+author or the LLM offer "paste the template doc link" instead of requiring
+an opaque Drive file ID.
 
 Output Folder ID resolution order:
 1. Workflow input: output_folder_id
@@ -18,6 +30,7 @@ and subsequent steps continue. User can rename the document later.
 """
 
 import os
+import re
 from datetime import datetime
 
 from orchestrator.experts.handlers.package_generator.generate_map import (
@@ -25,7 +38,7 @@ from orchestrator.experts.handlers.package_generator.generate_map import (
     _lookup_site_by_name,
 )
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import MockSpec, OutputSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, OutputSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.drive_upload import DEFAULT_LPP_OUTPUT_FOLDER_ID
 from shared.utils.gdrive_template_creator import create_from_template
@@ -36,14 +49,59 @@ LOGGER = get_logger(__name__)
 # Default LPP template ID — must be set via LPP_TEMPLATE_ID env var or workflow input
 DEFAULT_LPP_TEMPLATE_ID = ""
 
+# Every Google Docs/Sheets/Slides/Drive URL shape puts the file ID in one of
+# two places: a "/d/<id>" path segment (docs.google.com/*/d/..., drive.google.
+# com/file/d/...) or an "id=<id>" query parameter (drive.google.com/open?id=...,
+# drive.google.com/uc?id=...). {10,} keeps this from matching some unrelated
+# short "id=" query string elsewhere; real Drive file IDs run far longer than
+# that in practice, but there's no single official fixed length to assert.
+_DRIVE_URL_ID_PATTERNS = (
+    re.compile(r"/d/([a-zA-Z0-9_-]{10,})"),
+    re.compile(r"[?&]id=([a-zA-Z0-9_-]{10,})"),
+)
+
+
+def _extract_drive_file_id(value: str) -> str:
+    """Normalize a template reference to a bare Google Drive file ID.
+
+    Accepts either a full Google Docs/Sheets/Slides/Drive URL (pulls the ID
+    out of the URL's "/d/<id>" or "id=<id>" segment -- whichever the
+    specific URL shape uses) or an already-bare file ID (returned
+    unchanged, since it matches neither pattern). Letting a real doc link
+    work here -- not just an opaque Drive ID -- is what makes "paste the
+    template you want to use" a workable chat/tool-call answer instead of
+    requiring the caller to already know how to extract a Drive ID.
+    """
+    value = (value or "").strip()
+    for pattern in _DRIVE_URL_ID_PATTERNS:
+        match = pattern.search(value)
+        if match:
+            return match.group(1)
+    return value
+
 
 def _resolve_template_id(context: StepContext) -> str:
-    """Resolve template ID from input, env var, or default.
+    """Resolve template ID from a parameter override, packet input, env var, or default.
 
     Resolution order:
-    1. Workflow input: template_id
-    2. Environment variable: LPP_TEMPLATE_ID
-    3. Default constant
+    1. `context.get_parameter_value("template_id")` -- checks, in order,
+       a pending parameter override (what `_execute_declared_function_step_call`
+       sets from an LLM tool-call argument named `template_id`, since this
+       step's contract declares it as a `ParamSpec` -- see the `@register_step`
+       call below), then packet inputs, then packet state.
+       Deliberately NOT `context.get_input(...)`: `get_input` never consults
+       `pending_param_overrides` at all (see StepContext.get_input's own
+       resolution order), so a caller-supplied `template_id` tool-call
+       argument would be silently ignored if this checked `get_input`
+       instead -- `get_parameter_value` is the one read path `ParamSpec`
+       values are documented to use (see step_contracts.py's `ParamSpec`
+       docstring).
+    2. Environment variable: LPP_TEMPLATE_ID (operator-wide default; see
+       this module's docstring)
+    3. Default constant (empty)
+
+    Either of the first two may be a full Drive URL instead of a bare file
+    ID -- normalized via `_extract_drive_file_id` before returning.
 
     Args:
         context: Step execution context
@@ -51,17 +109,19 @@ def _resolve_template_id(context: StepContext) -> str:
     Returns:
         Template ID string (always returns a valid string)
     """
-    # Check workflow input first
-    template_id = context.get_input("template_id")
+    # Check parameter override / packet input first
+    template_id = context.get_parameter_value("template_id")
     if template_id:
-        LOGGER.info(f"Using template_id from workflow input: {template_id}")
-        return str(template_id)
+        resolved = _extract_drive_file_id(str(template_id))
+        LOGGER.info(f"Using template_id from parameter/input: {resolved}")
+        return resolved
 
     # Check environment variable
     template_id = os.getenv("LPP_TEMPLATE_ID")
     if template_id:
-        LOGGER.info(f"Using LPP_TEMPLATE_ID from environment: {template_id}")
-        return str(template_id)
+        resolved = _extract_drive_file_id(template_id)
+        LOGGER.info(f"Using LPP_TEMPLATE_ID from environment: {resolved}")
+        return resolved
 
     # Use default
     LOGGER.info(f"Using default LPP template ID: {DEFAULT_LPP_TEMPLATE_ID}")
@@ -74,6 +134,24 @@ def _resolve_template_id(context: StepContext) -> str:
         description=(
             "Copies the LPP Google Sheets/Slides template into the output folder and "
             "registers it with the Apps Script document tracker for a doc code."
+        ),
+        # Optional: lets a caller (LLM tool call or skill-step default) pick
+        # which template to copy, instead of always falling back to the
+        # single operator-wide LPP_TEMPLATE_ID setting -- see this module's
+        # docstring and _resolve_template_id.
+        params=(
+            ParamSpec(
+                name="template_id",
+                param_type="string",
+                description=(
+                    "Google Docs/Sheets/Slides template to copy -- a full doc link "
+                    "(paste the URL from the browser address bar) or a bare Drive "
+                    "file ID both work. Omit to use the operator-configured default "
+                    "template."
+                ),
+                synonyms=("template", "template_url", "template_link"),
+                required=False,
+            ),
         ),
         # site_name is a hard requirement: `if not site_name: return
         # StepResult.failure(...)` -- there's no LPP document without one.
@@ -136,7 +214,8 @@ async def copy_lpp_template(context: StepContext) -> StepResult:
 
     Accepts inputs:
     - site_name: Name of the site (required)
-    - template_id: Google Drive ID of the template (optional, has default)
+    - template_id: Google Doc/Sheet/Slide template -- a full doc URL or a bare
+      Drive file ID, either works (optional, falls back to LPP_TEMPLATE_ID)
     - output_folder_id: Google Drive folder ID (optional, falls back to env var)
 
     Environment variables (fallbacks):
@@ -200,7 +279,7 @@ async def copy_lpp_template(context: StepContext) -> StepResult:
     else:
         LOGGER.warning("Database not configured, skipping site validation")
 
-    # Resolve template ID (input > env > default)
+    # Resolve template ID (parameter/input > env > default)
     template_id = _resolve_template_id(context)
 
     # Resolve output folder ID: site subfolder > input > env > default
