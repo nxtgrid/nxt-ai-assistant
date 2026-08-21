@@ -34,6 +34,11 @@ explicit ticket-reference comment/close requests keep their current contract.
    older than eight hours, or no prior delivery exists.
 9. The existing `ticketing.correlation` prompt is edited in place. No second
    prompt ID or parallel correlation prompt is introduced.
+10. Site status uses the same classifier and vocabulary as `/grids`. The raw
+    `/grids` states `fs_on` and `hps_on` collapse to `on` for alert judgment;
+    `likely_isolated`, `off`, and `unknown` become `isolated`, `off`, and
+    `unknown`. Every Telegram message sent by this path shows that normalized
+    status. FS/HPS mode changes are not material status changes.
 
 ## Current behavior and gaps
 
@@ -78,7 +83,8 @@ The auto-correlation path becomes:
 
 1. resolve the canonical grid target;
 2. acquire the existing per-grid correlation lock;
-3. assemble a typed, best-effort `AlertJudgmentContext`;
+3. assemble a typed, best-effort `AlertJudgmentContext`, including the
+   normalized status produced by the shared `/grids` classifier;
 4. call the LLM once with that context and the incoming alert;
 5. parse and validate a typed `AlertJudgment`;
 6. apply the requested ticket action, subject to structural safety checks;
@@ -172,6 +178,8 @@ second VRM fetch. The customer client's live operation returns:
 ```python
 class LiveAlertTelemetry(TypedDict):
     generation_management: Literal["managed", "unmanaged", "unknown"]
+    grid_status: Literal["fs_on", "hps_on", "likely_isolated", "off", "unknown"]
+    site_status: Literal["on", "isolated", "off", "unknown"]
     output_kw: float | None
     battery_voltage_v: float | None
     l1_voltage_v: float | None
@@ -197,6 +205,41 @@ voltage retains its current independent availability semantics.
 The request-local lookup remains cached: prompt assembly, Jira issue-type
 selection, Telegram rendering, and the delivery override consume the same
 observation without duplicate VRM calls.
+
+### Shared `/grids` site-status contract
+
+Extract the fleet-status classification currently embedded in
+`list_all_grids_status()` into one pure shared classifier. `/grids` and alert
+telemetry must both call this function; the alert path must not copy its
+conditions into a second implementation. The classifier retains the current
+raw `/grids` states and precedence:
+
+1. missing or stale VRM voltage is `unknown`;
+2. fresh VRM voltage showing no production is `off`;
+3. fresh production with power below the configured HPS threshold is
+   `likely_isolated`, regardless of FS state;
+4. otherwise FS active is `fs_on`, then HPS active is `hps_on`;
+5. if the on-mode cannot be established, the result is `unknown`.
+
+Alert judgment uses a normalized status enum:
+
+| Raw `/grids` status | Alert site status |
+|---|---|
+| `fs_on` | `on` |
+| `hps_on` | `on` |
+| `likely_isolated` | `isolated` |
+| `off` | `off` |
+| `unknown` | `unknown` |
+
+The LLM receives both the raw observed status and normalized observed site
+status as evidence. It independently reports `prior_known_status`, inferred
+from the bounded correlation history, and `current_assessed_status`, after
+considering the incoming alert and all available evidence. A change between
+known normalized states (`on`, `isolated`, and `off`) is material; an FS/HPS
+change is `on` to `on` and is not material. When both statuses are known, the
+material boolean must agree with equality of the normalized states or the
+response is invalid and delivery fails open. If either assessed status is
+`unknown`, suppression is unsafe and the message sends.
 
 ### Open-ticket context and ticket actions
 
@@ -238,12 +281,13 @@ in place to describe the richer context and require exactly this shape:
 ```json
 {
   "grid_impact": {
-    "status": "no_change|at_risk|degraded|outage|recovering|unknown",
+    "prior_known_status": "on|isolated|off|unknown",
+    "current_assessed_status": "on|isolated|off|unknown",
+    "material_status_change": true,
     "summary": "What the reported failure means for this grid",
     "confidence": 0.0
   },
   "notification": {
-    "material_grid_status_change": true,
     "send_telegram": true,
     "reason": "Why this alert should or should not be sent"
   },
@@ -267,10 +311,14 @@ in place to describe the richer context and require exactly this shape:
 }
 ```
 
-All four requested answers remain individually addressable. The additional
-`send_telegram` field makes the suppression intent explicit instead of
-inferring it from prose. `material_grid_status_change=true` combined with
-`send_telegram=false` is invalid and forces delivery.
+All four requested answers remain individually addressable. The status pair
+and `material_status_change` answer the impact/materiality questions using
+the `/grids` vocabulary, while `send_telegram` makes suppression intent
+explicit instead of inferring it from prose. A material change combined with
+`send_telegram=false` is invalid and forces delivery. A known status
+transition marked non-material, an unchanged known status marked material,
+or any suppression involving an `unknown` assessed status is also invalid
+for suppression and forces delivery.
 
 Parse the response into Pydantic models after the gateway's existing JSON
 response mode. Reject missing required objects, unknown enum values, invalid
@@ -369,7 +417,8 @@ Suppression is an allow-list operation. Define `DeliveryDecision` with
 2. the full response parsed and validated;
 3. deterministic findings, open-ticket context, managed-generation/telemetry,
    prior-alert history, and O&M history have no `failed`/`timed_out` status;
-4. `material_grid_status_change` is false;
+4. `grid_impact.material_status_change` is false and both assessed statuses
+   are known normalized statuses;
 5. `send_telegram` is false;
 6. the zero-voltage/eight-hour override is false.
 
@@ -389,6 +438,20 @@ The zero-voltage override is true only when all of these hold:
 If telemetry or history lookup fails, the general fail-open rule already
 sends. A missing phase does not independently prove an all-phase outage.
 
+Every Telegram message sent by the new auto-correlation path includes one
+code-rendered status line using the normalized vocabulary:
+
+- `🟢 Site status: On`
+- `🔌 Site status: Isolated`
+- `🔴 Site status: Off`
+- `Ⅹ Site status: Unknown`
+
+For a valid judgment, the line uses `current_assessed_status`. If the LLM
+fails or its output is invalid, it falls back to telemetry's deterministic
+`site_status`; if status collection also fails, it renders `Unknown`. A
+fresh all-phase-zero/eight-hour forced message renders `Off`. Rendering never
+uses model-provided icons or arbitrary status prose.
+
 When a judgment requests `update_existing`, every sent message includes that
 ticket as a code-generated link. A newly created ticket is linked as today.
 For `record_occurrence`, the selected ticket may be linked when a message is
@@ -407,6 +470,8 @@ Add structured counters/log fields for:
 
 - LLM called, succeeded, timed out, malformed, or replayed;
 - context source status and latency;
+- observed raw/normalized status and the LLM's prior/current normalized
+  statuses;
 - ticket action requested, accepted, rejected, or failed;
 - Telegram intended send/suppress and force reason;
 - Telegram transport success/failure;
@@ -422,6 +487,7 @@ must not expose O&M content, raw prompts, credentials, or VRM payloads.
 |---|---|---|
 | Valid judgment, `send_telegram=true` | Apply validated ticket action | Send |
 | Valid judgment, material change | Apply validated ticket action | Send |
+| Invalid/inconsistent normalized status transition | Create new ticket if needed | Send with deterministic status fallback |
 | Valid judgment, explicit suppression, all context healthy | Apply validated ticket action | Suppress unless outage override |
 | All phases fresh zero and last send >8h/none | Apply validated ticket action | Send |
 | One context provider fails/times out | Continue; apply only a still-valid action | Send |
@@ -470,15 +536,17 @@ Tests must prove:
 2. deterministic matches appear as findings and never short-circuit or become
    final decisions on their own;
 3. open ticket descriptions, live output, battery voltage, phase voltages,
-   prior alerts, and timestamped O&M messages reach the existing prompt;
+   raw/normalized `/grids` status, prior alerts, and timestamped O&M messages
+   reach the existing prompt;
 4. unmanaged generation is represented explicitly and does not count as a
    failed context provider;
 5. each context provider can independently fail or time out while the LLM and
    ticket pipeline continue;
 6. any provider failure, LLM failure, schema failure, low-confidence
    suppression, or inconsistent material/send combination forces delivery;
-7. only a valid `material=false` plus `send=false` judgment with healthy
-   context suppresses;
+7. only a valid known-status `material=false` plus `send=false` judgment with
+   healthy context suppresses; FS/HPS transitions normalize to `on`/`on`,
+   while transitions among `on`, `isolated`, and `off` are material;
 8. fresh L1=L2=L3 zero overrides that suppression after eight hours or with no
    prior send, but not before eight hours, with stale data, a missing phase, or
    a non-zero phase;
@@ -492,6 +560,9 @@ Tests must prove:
     O&M content from escaping its data section;
 14. the existing correlation, ticket rendering, notify endpoint, telemetry,
     prompt-library, and schema-contract suites remain green.
+15. `/grids` and alert telemetry call the same raw classifier, and every sent
+    auto-correlated Telegram alert renders the normalized assessed status or
+    its deterministic/`Unknown` fallback.
 
 ## Out of scope
 
