@@ -2072,6 +2072,11 @@ async def _resolve_notify_ticket_auto(
         ticket_service = TicketService(get_supabase_client=get_supabase_client)
         correlator = AlertCorrelator(store=store, ticket_service=ticket_service)
 
+        if fr.get("ALERT_LLM_JUDGMENT_ENABLED"):
+            return await _resolve_notify_ticket_llm_judgment(
+                body, target, backend_override, alert_context, alert, store, ticket_service, correlator
+            )
+
         try:
             decision = await correlator.decide(
                 target.grid_name,
@@ -2091,6 +2096,7 @@ async def _resolve_notify_ticket_auto(
             return await _file_uncorrelated_ticket(
                 body, target, backend_override, alert, alert_context, store, "fallback"
             )
+
 
         try:
             from orchestrator.services.ticketing.correlator import _is_urgent_severity_increase
@@ -2233,6 +2239,59 @@ async def _resolve_notify_ticket_auto(
             return await _file_uncorrelated_ticket(
                 body, target, backend_override, alert, alert_context, store, "fallback"
             )
+
+
+async def _resolve_notify_ticket_llm_judgment(
+    body: "NotifyRequest", target: "GridNotificationTarget", backend_override: str,
+    alert_context: UrgentAlertContext, alert: AlertFacts, store: Any,
+    ticket_service: Any, correlator: Any,
+) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
+    """LLM-first auto path: gather bounded evidence, judge once, then fail open."""
+    from orchestrator.services.ticketing.alert_delivery_policy import decide_alert_delivery
+    from orchestrator.services.ticketing.alert_judgment_context import AlertJudgmentContextAssembler
+    from orchestrator.services.ticketing.correlator import (
+        collect_deterministic_findings,
+        to_legacy_correlation_decision,
+    )
+    from orchestrator.services.ticketing.notify_alert_delivery_repository import (
+        NotifyAlertDeliveryRepository,
+    )
+    from shared.config import flag_registry as fr
+
+    try:
+        candidates = await correlator._assemble_candidates(target.grid_name, backend_override=backend_override)
+    except Exception:
+        logger.warning("Notify: judgment candidate assembly failed", exc_info=True)
+        candidates = []
+    since = (datetime.now(timezone.utc) - timedelta(hours=168)).isoformat()
+    history = NotifyAlertDeliveryRepository(get_client=_raw_supabase_client)
+
+    async def findings_provider(): return collect_deterministic_findings(candidates, alert)
+    async def tickets_provider(): return [candidate.model_dump() for candidate in candidates]
+    async def telemetry_provider(): return await alert_context.telemetry()
+    async def prior_provider(): return await history.recent_for_grid(target.grid_name, since, limit=20)
+    async def om_provider(): return await history.recent_om_messages(chat_id=target.chat_id, topic_id=target.topic_id, since=since, limit=50)
+
+    context = await AlertJudgmentContextAssembler(
+        deterministic_findings_provider=findings_provider, open_tickets_provider=tickets_provider,
+        telemetry_provider=telemetry_provider, prior_alerts_provider=prior_provider,
+        om_messages_provider=om_provider,
+    ).assemble(grid_name=target.grid_name, chat_id=target.chat_id, topic_id=target.topic_id, alert=alert)
+    judgment = await correlator.judge(target.grid_name, alert, context)
+    decision = to_legacy_correlation_decision(judgment, candidates)
+    send_decision = decide_alert_delivery(
+        judgment, context, latest_prior_alert=context.prior_alerts[0] if context.prior_alerts else None,
+        enforcement_enabled=bool(fr.get("ALERT_LLM_SUPPRESSION_ENFORCED")),
+    )
+    if decision.decision == "new" or not decision.ticket_ref or not decision.ticket_id:
+        ref, response, extra, delivery = await _file_uncorrelated_ticket(body, target, backend_override, alert, alert_context, store, "llm_judgment")
+    else:
+        ref, response, extra, delivery = await _finalize_correlation_decision(body, target, alert, alert_context, store, ticket_service, decision)
+    extra = extra or {}
+    extra.update({"judgment_valid": judgment.valid, "send_decision": "send" if send_decision.send else "suppress", "send_force_reasons": send_decision.forced_by})
+    if delivery is not None:
+        delivery = dataclasses.replace(delivery, suppress=not send_decision.send)
+    return ref, response, extra, delivery
 
 
 async def _resolve_notify_ticket_full(
