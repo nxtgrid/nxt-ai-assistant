@@ -50,7 +50,9 @@ var ACTIONS = {
   'replace_sheet_image': replaceSheetImage,
   'get_sheet_images': getSheetImages,
   'list_worksheets': listWorksheets,
-  'write_doc_markdown': writeDocMarkdown
+  'write_doc_markdown': writeDocMarkdown,
+  'get_range_pixels': getRangePixels,
+  'get_merged_range_at': getMergedRangeAt
 };
 
 // === ENTRY POINT ===
@@ -243,6 +245,51 @@ function getSheetImages(params) {
  * 4. Set height to match original
  * 5. Calculate new X offset to center horizontally
  */
+/**
+ * Pixel dimensions of an A1 range, for sizing an image to fit inside it.
+ * Params: sheet_id, worksheet_name, range (A1, e.g. "B6:F20")
+ */
+function getRangePixels(params) {
+  if (!params.sheet_id) { return { error: 'Missing sheet_id' }; }
+  if (!params.worksheet_name) { return { error: 'Missing worksheet_name' }; }
+  if (!params.range) { return { error: 'Missing range' }; }
+
+  var sheet = SpreadsheetApp.openById(params.sheet_id)
+                            .getSheetByName(params.worksheet_name);
+  if (!sheet) { return { error: 'Worksheet not found: ' + params.worksheet_name }; }
+
+  var r = sheet.getRange(params.range);
+  var width = 0, height = 0;
+  for (var c = r.getColumn(); c < r.getColumn() + r.getNumColumns(); c++) {
+    width += sheet.getColumnWidth(c);
+  }
+  for (var w = r.getRow(); w < r.getRow() + r.getNumRows(); w++) {
+    height += sheet.getRowHeight(w);
+  }
+  return {
+    range: params.range, width: width, height: height,
+    anchor_row: r.getRow(), anchor_column: r.getColumn()
+  };
+}
+
+/**
+ * Pixel dimensions of the merged range containing a cell, or null if the
+ * cell is not merged. Layer 1 of the image sizing precedence.
+ */
+function getMergedRangeAt(params) {
+  if (!params.sheet_id || !params.worksheet_name || !params.cell) {
+    return { error: 'Missing sheet_id, worksheet_name or cell' };
+  }
+  var sheet = SpreadsheetApp.openById(params.sheet_id)
+                            .getSheetByName(params.worksheet_name);
+  if (!sheet) { return { error: 'Worksheet not found: ' + params.worksheet_name }; }
+
+  var merges = sheet.getRange(params.cell).getMergedRanges();
+  if (!merges || merges.length === 0) { return { merged: false }; }
+  var m = merges[0];
+  return { merged: true, range: m.getA1Notation() };
+}
+
 function replaceSheetImage(params) {
   // Validate required parameters
   if (!params.sheet_id) {
@@ -293,12 +340,24 @@ function replaceSheetImage(params) {
   // Get all over-grid images
   var images = sheet.getImages();
 
-  // Find first image with height >= minHeight
+  // Find the image to replace.
+  // Precedence: explicit anchor cell or alt text (params.target) > height
+  // heuristic (legacy default, what the untargeted LPP call site relies on).
   var targetImage = null;
-  for (var i = 0; i < images.length; i++) {
-    if (images[i].getHeight() >= minHeight) {
-      targetImage = images[i];
-      break;
+  var target = params.target || null;
+
+  if (target) {
+    for (var i = 0; i < images.length; i++) {
+      var anchorA1 = images[i].getAnchorCell().getA1Notation();
+      var alt = images[i].getAltTextTitle() || images[i].getAltTextDescription() || '';
+      if (anchorA1 === target || alt === target) { targetImage = images[i]; break; }
+    }
+    if (!targetImage) {
+      return { error: 'No image matched target: ' + target };
+    }
+  } else {
+    for (var i = 0; i < images.length; i++) {
+      if (images[i].getHeight() >= minHeight) { targetImage = images[i]; break; }
     }
   }
 
@@ -330,6 +389,25 @@ function replaceSheetImage(params) {
     oldHeight = 400;  // Default height for new images
   }
 
+  // fit_range overrides the box used for sizing (sizing layers 1-2). Not
+  // applied when it fails to resolve -- fitToRangeBox stays false and
+  // sizing falls back to whatever oldWidth/oldHeight already hold.
+  var fitToRangeBox = false;
+  if (params.fit_range) {
+    var box = getRangePixels({
+      sheet_id: sheetId, worksheet_name: worksheetName, range: params.fit_range
+    });
+    if (!box.error) {
+      oldWidth = box.width;
+      oldHeight = box.height;
+      anchorCol = box.anchor_column;
+      anchorRow = box.anchor_row;
+      offsetX = 0;
+      offsetY = 0;
+      fitToRangeBox = true;
+    }
+  }
+
   try {
     // Re-fetch sheet after any modifications (V8 stability)
     var freshSheet = SpreadsheetApp.openById(sheetId).getSheetByName(worksheetName);
@@ -341,11 +419,18 @@ function replaceSheetImage(params) {
     var insertedWidth = newImage.getWidth();
     var insertedHeight = newImage.getHeight();
 
-    // Scale to target height (original image's height or 400px), maintaining aspect ratio
+    // Scale to target height (original image's height or 400px), maintaining
+    // aspect ratio -- UNLESS fitToRangeBox, in which case fit inside the
+    // box on both axes instead of matching height and letting width run
+    // past the box.
     var scale = oldHeight / insertedHeight;
+    if (fitToRangeBox && oldWidth) {
+      scale = Math.min(scale, oldWidth / insertedWidth);
+    }
     var scaledWidth = Math.round(insertedWidth * scale);
-    newImage.setHeight(oldHeight);
+    var scaledHeight = Math.round(insertedHeight * scale);
     newImage.setWidth(scaledWidth);
+    newImage.setHeight(scaledHeight);
 
     // Get final dimensions after scaling
     var finalWidth = newImage.getWidth();
@@ -982,6 +1067,25 @@ function testGetSheetImages() {
   var result = getSheetImages({
     sheet_id: testSheetId,
     worksheet_name: 'Sheet1'
+  });
+  Logger.log(JSON.stringify(result, null, 2));
+}
+
+/**
+ * Test get range pixels
+ * Requires setting TEST_SHEET_ID in Script Properties
+ */
+function testGetRangePixels() {
+  var testSheetId = PropertiesService.getScriptProperties().getProperty('TEST_SHEET_ID');
+  if (!testSheetId) {
+    Logger.log('Set TEST_SHEET_ID in Script Properties to run test');
+    return;
+  }
+
+  var result = getRangePixels({
+    sheet_id: testSheetId,
+    worksheet_name: 'Sheet1',
+    range: 'B6:F20'
   });
   Logger.log(JSON.stringify(result, null, 2));
 }
