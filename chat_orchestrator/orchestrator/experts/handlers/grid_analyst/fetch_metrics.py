@@ -7,13 +7,51 @@ It collects battery, solar, and alert data for the specified time range.
 from typing import Any, Dict
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
 
-@register_step("fetch_month_metrics")
+@register_step(
+    "fetch_month_metrics",
+    contract=StepContract(
+        description=(
+            "Fetches battery, solar, and alert metrics from Grafana for one grid "
+            "over a time range."
+        ),
+        # Both read via context.get_input(...), NOT context.get_state(...) --
+        # this expert's handlers take their inputs from packet_inputs/params,
+        # never packet_state (unlike LPP/GTR's common get_input-then-get_state
+        # dual-path pattern). Declaring these as consumes_state would be WRONG:
+        # validate_step_prerequisites' _available() only ever inspects
+        # packet_state, never packet_inputs, for consumes_state keys -- only
+        # `params` gets checked against packet_inputs too (see that method's
+        # own missing_params comment). Modeling these as params is what keeps
+        # the precondition check (and the Phase 4 tool schema this contract
+        # feeds) actually correct for how this handler really reads its data.
+        params=(
+            ParamSpec(
+                name="grid",
+                param_type="object",
+                description="Grid reference dict with a grid_name key.",
+                required=True,
+            ),
+            ParamSpec(
+                name="time_range",
+                param_type="object",
+                description="Time range dict with start_date/end_date keys (ISO 8601).",
+            ),
+        ),
+        produces_state=("metrics_fetched", "alerts_fetched"),
+        side_effects=(
+            "Calls the grafana_query MCP tool three times (battery_soc, pv_power, "
+            "alerts) for the given grid and time range. No writes."
+        ),
+        mutates=False,
+    ),
+)
 async def fetch_month_metrics(context: StepContext) -> StepResult:
     """Fetch the last month of metrics from Grafana.
 
@@ -123,7 +161,38 @@ async def fetch_month_metrics(context: StepContext) -> StepResult:
     )
 
 
-@register_step("fetch_multi_grid_metrics")
+@register_step(
+    "fetch_multi_grid_metrics",
+    contract=StepContract(
+        description="Fetches summary metrics from Grafana for multiple grids (for KPI reports).",
+        # See fetch_month_metrics' contract for why get_input-sourced values
+        # are modeled as params, not consumes_state/optional_consumes_state,
+        # for this expert's handlers specifically.
+        params=(
+            ParamSpec(
+                name="grids",
+                param_type="array",
+                description="List of grid reference dicts, each with a grid_name key.",
+            ),
+            ParamSpec(
+                name="time_range",
+                param_type="object",
+                description="Time range dict with start_date/end_date keys (ISO 8601).",
+            ),
+            ParamSpec(
+                name="raw_request",
+                description=(
+                    "Original raw user request text -- grids/time_range are parsed "
+                    "from this when not supplied directly (e.g. '/report weekly grids "
+                    "GridA, GridB')."
+                ),
+            ),
+        ),
+        produces_state=("grids_processed",),
+        side_effects="Calls the grafana_query MCP tool (metric=summary) once per grid. No writes.",
+        mutates=False,
+    ),
+)
 async def fetch_multi_grid_metrics(context: StepContext) -> StepResult:
     """Fetch metrics for multiple grids (for KPI reports).
 

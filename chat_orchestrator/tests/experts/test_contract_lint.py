@@ -25,13 +25,12 @@ list of experts whose steps this lint actually checks -- Phase 8 of
 docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md (Task 8.4)
 extended it from package_generator-only to also cover
 grids_technical_reviewer (GTR), generalizing what was originally a single
-hardcoded `_PACKAGE_GENERATOR_MODULE_PREFIX`. Experts NOT in this dict
-(`ingestion_expert`, `community_detector`, `signing`, `grid_analyst` as of
-this phase, etc.) have registered steps with NO contracts at all -- this is
-expected and correct for the current phase, not a bug. Add an expert to
-`_CONTRACTED_EXPERTS` only when a phase actually annotates its steps (Phase 9:
-package_generator's count may need updating if Task 9.2 changes it; Phase 10:
-grid_analyst).
+hardcoded `_PACKAGE_GENERATOR_MODULE_PREFIX`; Phase 10 (Task 10.5) added
+grid_analyst. Experts NOT in this dict (`ingestion_expert`,
+`community_detector`, `signing`, etc.) have registered steps with NO
+contracts at all -- this is expected and correct for the current phase, not
+a bug. Add an expert to `_CONTRACTED_EXPERTS` only when a phase actually
+annotates its steps.
 """
 
 from __future__ import annotations
@@ -54,6 +53,7 @@ _CONTRACTED_EXPERTS: dict[str, tuple[str, int]] = {
         "orchestrator.experts.handlers.grids_technical_reviewer",
         9,
     ),
+    "grid_analyst": ("orchestrator.experts.handlers.grid_analyst", 7),
 }
 
 

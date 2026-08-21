@@ -7,13 +7,50 @@ calling the analyze_failures MCP tool for detailed failure analysis.
 from typing import Any, Dict, List
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
 
-@register_step("analyze_failures_loop")
+@register_step(
+    "analyze_failures_loop",
+    contract=StepContract(
+        description=(
+            "Calls the analyze_failures MCP tool once per alert found in "
+            "fetch_month_metrics's results, aggregating one analysis per alert."
+        ),
+        # grid is only used to label each per-alert tool call, never checked
+        # for absence -- a genuine optional param, unlike fetch_month_metrics'
+        # required one. fetch_month_metrics's result is read via
+        # get_previous_result with a real graceful fallback (`if not
+        # fetch_result: return StepResult(data={"failures_analyzed": [],
+        # ...})` -- a legitimate "nothing to analyze yet" outcome, not a
+        # crash) -- not declared in consumes_results, which has no optional
+        # tier (see step_contracts.py).
+        params=(
+            ParamSpec(
+                name="grid",
+                param_type="object",
+                description="Grid reference dict with a grid_name key, used to label each analyze_failures call.",
+            ),
+        ),
+        produces_state=("faults_analyzed", "key_findings"),
+        side_effects=(
+            "Calls the analyze_failures MCP tool once per alert. No writes. "
+            "STRUCTURAL NOTE (Task 10.4): the 'loop' this handler's name refers to "
+            "is entirely internal to its own body (iterates a Python list of "
+            "alerts) -- it is one ordinary step, one ordinary StepResult, exactly "
+            "the same shape as e.g. GTR's fetch_cuf_sub_values or "
+            "check_existing_review (call an MCP tool once per item, aggregate one "
+            "result). No special recipe-level loop construct is needed for this "
+            "to map onto the step/skill model; the structural unknown the plan "
+            "flagged for this phase turned out not to be one."
+        ),
+        mutates=False,
+    ),
+)
 async def analyze_failures_loop(context: StepContext) -> StepResult:
     """Repeatedly call analyze_failures MCP tool for each alert.
 
@@ -112,7 +149,22 @@ async def analyze_failures_loop(context: StepContext) -> StepResult:
     )
 
 
-@register_step("categorize_issues")
+@register_step(
+    "categorize_issues",
+    contract=StepContract(
+        description=(
+            "Groups analyze_failures_loop's results by category (battery/solar/grid/"
+            "communication/other) and counts by severity, for reporting."
+        ),
+        # analyze_failures_loop's result is read via get_previous_result with
+        # a real graceful fallback (`if not analysis_result: return
+        # StepResult(data={"categories": {}}, ...)`) -- not declared in
+        # consumes_results, which has no optional tier.
+        produces_state=("issues_categorized",),
+        side_effects="Pure in-memory categorization; no I/O.",
+        mutates=False,
+    ),
+)
 async def categorize_issues(context: StepContext) -> StepResult:
     """Categorize analyzed failures by type and severity.
 

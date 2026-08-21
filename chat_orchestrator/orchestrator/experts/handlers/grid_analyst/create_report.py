@@ -6,13 +6,66 @@ This handler creates a Google Doc report with the analysis results.
 from typing import Any, Dict, List
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import MockSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
 
-@register_step("create_analysis_doc")
+@register_step(
+    "create_analysis_doc",
+    contract=StepContract(
+        description=(
+            "Compiles fetch_month_metrics/analyze_failures_loop's results into a "
+            "structured Google Doc report."
+        ),
+        # grid/time_range: get_input-sourced, see fetch_month_metrics' contract
+        # for why these are params here, not consumes_state. Both have inline
+        # defaults in this handler specifically (`grid_ref.get("grid_name",
+        # "Unknown Grid")`), so neither is required=True the way
+        # fetch_month_metrics' grid is.
+        params=(
+            ParamSpec(
+                name="grid",
+                param_type="object",
+                description="Grid reference dict with a grid_name key.",
+            ),
+            ParamSpec(
+                name="time_range",
+                param_type="object",
+                description="Time range dict with start_date/end_date keys.",
+            ),
+        ),
+        # key_findings: `context.get_state("key_findings", [])` -- real
+        # default, not a hard requirement. fetch_month_metrics/
+        # analyze_failures_loop results are read via `get_previous_result(...)
+        # or {}` -- graceful fallback, not declared in consumes_results (no
+        # optional tier there).
+        optional_consumes_state=("key_findings",),
+        # report_error is only ever set on the exception path (real handler
+        # failure to create the doc) -- included here for accuracy (produces_
+        # state means "can write", not "always writes on success"), with the
+        # mock below setting it to None (a mocked run has no error).
+        produces_state=("report_created", "report_error"),
+        side_effects=(
+            "Calls the google_docs_create MCP tool to create a Google Doc with the "
+            "analysis report. Degrades gracefully (report_created=False, not a hard "
+            "failure) if doc creation raises."
+        ),
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={"report_created": True, "report_error": None},
+            data={
+                "document_title": "MOCK Analysis Report",
+                "document_id": "MOCK-doc-id",
+                "document_url": "https://docs.google.com/document/d/MOCK-doc-id",
+            },
+            message="Would have created the analysis report Google Doc.",
+        ),
+    ),
+)
 async def create_analysis_doc(context: StepContext) -> StepResult:
     """Generate Google Doc with full analysis report.
 
@@ -212,7 +265,50 @@ def _format_metrics(metrics: Any) -> str:
     return str(metrics)[:500]
 
 
-@register_step("create_kpi_doc")
+@register_step(
+    "create_kpi_doc",
+    contract=StepContract(
+        description="Creates a Google Doc KPI report for multiple grids.",
+        # See fetch_month_metrics' contract for why get_input-sourced values
+        # are modeled as params here, not consumes_state. fetch_multi_grid_
+        # metrics' result is read via `get_previous_result(...) or {}` --
+        # graceful fallback, not declared in consumes_results.
+        params=(
+            ParamSpec(
+                name="grids",
+                param_type="array",
+                description="List of grid reference dicts, each with a grid_name key.",
+            ),
+            ParamSpec(
+                name="time_range",
+                param_type="object",
+                description="Time range dict with start_date/end_date keys.",
+            ),
+            ParamSpec(
+                name="report_type",
+                description="Report cadence label (e.g. 'weekly', 'monthly'), used in the doc title.",
+                default="weekly",
+            ),
+        ),
+        produces_state=("report_created",),
+        side_effects=(
+            "Calls the google_docs_create MCP tool to create a Google Doc with the "
+            "KPI report. Degrades gracefully (report_created=False, not a hard "
+            "failure) if doc creation raises."
+        ),
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={"report_created": True},
+            data={
+                "document_title": "MOCK KPI Report",
+                "document_id": "MOCK-doc-id",
+                "document_url": "https://docs.google.com/document/d/MOCK-doc-id",
+            },
+            message="Would have created the KPI report Google Doc.",
+        ),
+    ),
+)
 async def create_kpi_doc(context: StepContext) -> StepResult:
     """Create a KPI report document for multiple grids.
 
@@ -302,7 +398,21 @@ async def create_kpi_doc(context: StepContext) -> StepResult:
         )
 
 
-@register_step("calculate_kpi_values")
+@register_step(
+    "calculate_kpi_values",
+    contract=StepContract(
+        description=(
+            "Computes per-grid and aggregate KPIs (uptime, avg SoC, generation, "
+            "alert counts) from fetch_multi_grid_metrics' results."
+        ),
+        # fetch_multi_grid_metrics' result is read via `get_previous_result(...)
+        # or {}` -- graceful fallback (an empty grid_metrics dict just yields
+        # empty KPIs, not a crash), not declared in consumes_results.
+        produces_state=("kpis_calculated",),
+        side_effects="Pure in-memory KPI computation; no I/O.",
+        mutates=False,
+    ),
+)
 async def calculate_kpi_values(context: StepContext) -> StepResult:
     """Calculate KPI values from fetched metrics.
 
