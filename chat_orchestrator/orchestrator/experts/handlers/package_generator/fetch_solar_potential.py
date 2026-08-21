@@ -8,7 +8,7 @@ import json
 from typing import Any, Dict
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -33,6 +33,24 @@ LOGGER = get_logger(__name__)
         ),
         consumes_results=("generate_distribution_map",),
         produces_state=("solar_potential_fetched", "gsa_daily_potential", "gsa_yearly_potential"),
+        outputs=(
+            OutputSpec(name="energy.gsa_daily_potential_kwhperkwp", value_type="number", where="data",
+                       description="Global Solar Atlas daily yield, kWh per installed kWp."),
+            OutputSpec(name="energy.gsa_yearly_potential_kwhperkwp", value_type="number", where="data",
+                       description="Global Solar Atlas annual yield, kWh per installed kWp."),
+            OutputSpec(name="solar.optimal_tilt_deg", value_type="number", where="data",
+                       description="Panel tilt angle that maximises annual yield, in degrees."),
+            OutputSpec(name="solar.ghi_kwh_m2", value_type="number", where="data",
+                       description="Global horizontal irradiation, kWh per square metre."),
+            OutputSpec(name="solar.gti_kwh_m2", value_type="number", where="data",
+                       description="Global tilted irradiation at optimal tilt, kWh per square metre."),
+            OutputSpec(name="solar.dni_kwh_m2", value_type="number", where="data",
+                       description="Direct normal irradiation, kWh per square metre."),
+            OutputSpec(name="solar.avg_temp_c", value_type="number", where="data",
+                       description="Average ambient air temperature at the site, in Celsius."),
+            OutputSpec(name="solar.elevation_m", value_type="number", where="data",
+                       description="Site elevation above sea level, in metres."),
+        ),
         guard_keys=("solar_potential_fetched",),
         side_effects="Calls the solar_get_solar_potential MCP tool (Global Solar Atlas).",
         mutates=False,

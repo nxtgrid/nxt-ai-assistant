@@ -59,3 +59,17 @@ def test_design_and_bom_declare_their_energy_and_cost_values():
         "energy.num_batteries",
         "energy.num_panels",
     } <= bom
+
+
+def test_solar_potential_declares_its_irradiation_values():
+    names = _output_names("fetch_solar_potential")
+    assert {
+        "energy.gsa_daily_potential_kwhperkwp",
+        "energy.gsa_yearly_potential_kwhperkwp",
+        "solar.optimal_tilt_deg",
+        "solar.ghi_kwh_m2",
+        "solar.gti_kwh_m2",
+        "solar.dni_kwh_m2",
+        "solar.avg_temp_c",
+        "solar.elevation_m",
+    } <= names
