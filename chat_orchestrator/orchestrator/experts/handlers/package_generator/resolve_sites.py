@@ -149,6 +149,7 @@ def _match_site_names(
         optional_consumes_state=("geo_source",),
         produces_state=("sites_to_process", "site_name", "site_id"),
         side_effects="Queries Auth DB pd_site_submissions via asyncpg (read-only) for site name validation.",
+        mutates=False,
     ),
 )
 async def resolve_sites(context: StepContext) -> StepResult:

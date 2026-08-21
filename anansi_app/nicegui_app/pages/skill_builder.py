@@ -431,10 +431,25 @@ async def render_builder(
 
     def _render_pending_step(index: int, stored_step: Dict[str, Any], is_up_next: bool) -> None:
         """A step from initial_steps not yet re-run in this edit session --
-        greyed out, nothing to act on yet. Graduates into a normal
-        _render_step card the moment its instruction is actually (re-)sent;
-        see _refresh_transcript's auto-fill and the pending-tail slice in
-        _rebuild_transcript."""
+        greyed out, mostly inert. Graduates into a normal _render_step card
+        the moment its instruction is actually (re-)sent; see
+        _refresh_transcript's auto-fill and the pending-tail slice in
+        _rebuild_transcript.
+
+        The ONE thing this card lets an author act on directly (Task 5.3 of
+        docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md) is
+        a mutating `kind:"function"` step's mock toggle -- this builder has
+        no way to CREATE a function step (that's the converter script's
+        job, Phase 7), but a converted skill's pending steps land here, and
+        an author reviewing/promoting one needs to see and control whether
+        it runs mocked without leaving this page. Gated on
+        `stored_step.get("mutates")`, which only a converted step's dict
+        carries (stamped by the converter at conversion time from the
+        handler's real StepContract.mutates -- nothing in this app can look
+        that up itself; anansi_app and chat_orchestrator are separately
+        deployed packages, see this module's docstring) -- a non-mutating
+        step shows no switch, since mock mode is meaningless for it.
+        """
         card_classes = "w-full bg-grey-2"
         if is_up_next:
             card_classes += " border-l-4 border-primary"
@@ -450,6 +465,20 @@ async def render_builder(
             if preview:
                 ui.label(f"Previously retrieved: {preview[:200]}").classes(
                     "text-caption text-grey-5"
+                )
+            if stored_step.get("mutates"):
+                # Default True (mock ON) when the converter hasn't stamped
+                # an explicit value -- "safe by default" matches every other
+                # mock-mode default in this plan (a mutating step is
+                # presumed unsafe to run for real until an author
+                # deliberately opts in).
+                handler_name = stored_step.get("handler") or "this step"
+                mock_switch = ui.switch(
+                    f"Mock '{handler_name}' (no real side effect)",
+                    value=stored_step.get("mock", True),
+                )
+                mock_switch.on_value_change(
+                    lambda e, s=stored_step: s.__setitem__("mock", e.value)
                 )
 
     def _render_step(index: int, step: Dict[str, Any], errors: List[Dict[str, Any]]) -> None:

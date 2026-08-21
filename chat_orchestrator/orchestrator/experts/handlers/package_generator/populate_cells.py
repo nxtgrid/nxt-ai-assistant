@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional
 from googleapiclient.discovery import build
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import ParamSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.apps_script_client import replace_sheet_image
 from shared.utils.google_auth import get_sheets_credentials, get_sheets_write_credentials
@@ -559,6 +559,16 @@ def _write_mapped_values(
             "Writes to the Main Input sheet and replaces the map image in the "
             "'Proposed Budget' sheet via the Sheets/Apps Script API; creates the Full "
             "BOM tab (calls create_bom_sheet from populate_bom_tab.py)."
+        ),
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={
+                "cells_populated": True,
+                "map_image_replaced": True,
+                "bom_tab_populated": True,
+            },
+            message="Would have populated the Main Input sheet, map image, and BOM tab.",
         ),
     ),
 )

@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 
 from orchestrator.config.settings import get_settings
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.llm import (
     GenerationOptions,
@@ -339,7 +340,50 @@ async def _run_analysis_turn(
         return "Sorry, I encountered an error processing your question. Please try again."
 
 
-@register_step("gtr_analysis_conversation")
+@register_step(
+    "gtr_analysis_conversation",
+    contract=StepContract(
+        description=(
+            "Conversational analysis of a grid's historical reviews, with live "
+            "Grafana timeseries deep dives. Runs its OWN multi-turn LLM loop "
+            "internally (Gemini calls + Grafana tool calls), not Phase 4's "
+            "skill-step tool-call machinery."
+        ),
+        # Every key here has a real, clean fallback (get_state(key, default) or an
+        # unconditional get_state(key) checked for truthiness with a skip path) --
+        # none of them make this step crash when absent.
+        optional_consumes_state=(
+            "analysis_mode",
+            "conversation_started",
+            "conversation_turns",
+            "grids_to_review",
+            "historical_reviews_md",
+            "available_timeseries_tools",
+            "chat_chronology_md",
+        ),
+        produces_state=(
+            "conversation_started",
+            "historical_reviews_md",
+            "available_timeseries_tools",
+            "conversation_turns",
+        ),
+        outputs=(
+            OutputSpec(
+                name="historical_reviews_md",
+                value_type="string",
+                description="Up to a year of past review sections, loaded once at conversation start.",
+            ),
+        ),
+        side_effects=(
+            "Runs its own multi-turn LLM conversation loop: Gemini generation calls "
+            "plus Grafana MCP tool calls for timeseries deep dives. No writes. "
+            "ARCHITECTURAL NOTE (Task 8.3): this is already an LLM tool-loop, not a "
+            "deterministic function -- when converting GTR to a skill, represent "
+            "this as a kind:\"llm\" step using Phase 4's tool-call machinery "
+            "instead, not a kind:\"function\" step naming this handler."
+        ),
+    ),
+)
 async def gtr_analysis_conversation(context: StepContext) -> StepResult:
     """Conversational analysis of historical GTR data with Grafana deep dives.
 

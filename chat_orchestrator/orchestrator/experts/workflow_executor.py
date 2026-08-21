@@ -63,10 +63,16 @@ from orchestrator.experts.skill_step_bindings import (
     strip_result_line,
 )
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import StepContract
 from orchestrator.experts.step_registry import (
     get_step_contract,
     get_step_handler,
     get_step_registry,
+)
+from orchestrator.experts.step_tool_schema import (
+    caller_holds_permission,
+    function_step_tool_declarations,
+    is_declared_function_step,
 )
 from orchestrator.mini_app.schemas import build_mini_app_url, build_view_state_url
 from orchestrator.models.schemas import ConversationMessage, FunctionCall, ToolCallResult
@@ -295,6 +301,20 @@ class ParsedStep:
     # that same section's "final step is always an implicit response step"
     # rule.
     is_response_step: bool = False
+    # mock: Phase 5 of docs/superpowers/plans/2026-08-20-expert-steps-as-
+    # skill-tools.md's per-step mock-mode override. `None` (the default --
+    # every step predating this field) means "defer to this run's baseline
+    # StepContext.dry_run"; True/False pins this ONE step's mocked-ness
+    # regardless of that baseline (e.g. "always mock send_lpp_map_to_telegram,
+    # even on an otherwise-real acceptance run" or the reverse). Consulted by
+    # _execute_function_step for a `kind:"function"` step called directly,
+    # and threaded into the synthetic ParsedStep _execute_declared_function_step_call
+    # builds for a tool call made from inside an `[llm]` step's loop (so an
+    # `[llm]` step's own `mock` setting governs every tool call it makes,
+    # the same way `allow_write` already governs which tools it can see at
+    # all). Meaningless for a non-mutating step -- see StepContract.mutates;
+    # never consulted unless the contract mutates.
+    mock: Optional[bool] = None
 
 
 @dataclass
@@ -1189,6 +1209,12 @@ class WorkflowExecutor:
             # Success - update the already-added record in place
             step_record.status = StepStatus.SUCCESS
             step_record.result_summary = self._summarize_result(result.data)
+            if result.was_mocked:
+                # R6 (docs/superpowers/plans/2026-08-20-expert-steps-as-
+                # skill-tools.md): the run log must say "mocked" regardless
+                # of what a MockSpec's own data/message happen to contain --
+                # never rely on eyeballing values for a "MOCK-" convention.
+                step_record.result_summary = f"[MOCKED] {step_record.result_summary}"
             execution_summary.completed_steps += 1
 
             # Store result in local dict AND sync back to context so that
@@ -2475,7 +2501,7 @@ class WorkflowExecutor:
         context: StepContext,
         accumulated_results: Dict[str, Any],
     ) -> StepResult:
-        """Execute a function step handler.
+        """Execute a function step handler -- or, in mock mode, its MockSpec.
 
         Args:
             step: Parsed step definition
@@ -2483,7 +2509,12 @@ class WorkflowExecutor:
             accumulated_results: Results from previous steps
 
         Returns:
-            StepResult from handler
+            StepResult from the handler, or (Phase 5 of docs/superpowers/
+            plans/2026-08-20-expert-steps-as-skill-tools.md) from
+            `contract.mock` when this step is both mutating and running
+            mock-mode-enabled -- see `_mock_step_result` below. Mock mode
+            never affects a non-mutating step or a step with no contract:
+            both always run for real, exactly as before this phase existed.
         """
         handler = get_step_handler(step.name)
 
@@ -2494,11 +2525,172 @@ class WorkflowExecutor:
         # Update context with accumulated results
         context.accumulated_results = accumulated_results
 
+        contract = get_step_contract(step.name)
+        # step.mock (a per-step override, e.g. "always mock this one
+        # regardless of the run's baseline") wins when set; otherwise this
+        # run's baseline (context.dry_run, False for every context built
+        # before this phase existed) applies. Never consulted for a
+        # non-mutating or contract-less step -- see MockSpec's docstring on
+        # why mock mode exists (rehearsing side effects, not changing reads).
+        effective_dry_run = context.dry_run if step.mock is None else step.mock
+        if contract is not None and contract.mutates and effective_dry_run:
+            return self._mock_step_result(step, contract)
+
         try:
             return await handler(context)
         except Exception as e:
             LOGGER.exception(f"Handler {step.name} raised exception: {e}")
             return StepResult.failure(str(e))
+
+    def _mock_step_result(self, step: ParsedStep, contract: StepContract) -> StepResult:
+        """Build the StepResult a mocked, mutating step returns instead of
+        calling its real handler.
+
+        Never calls the handler -- that is the entire point of mock mode
+        (R2: "mimic execution... run all immutable steps for real and mimic
+        the mutable ones"). Defensively copies `contract.mock`'s dicts:
+        `MockSpec` is a single shared, mutable, module-level-registered
+        instance (see step_contracts.py's docstring on why it isn't
+        frozen) -- handing out the original dicts would let one run's
+        `state_updates.update(...)`-style mutation (e.g. via
+        `StepContext.apply_result`) corrupt every future run's mock data.
+
+        A mutating step running mock-mode-enabled with NO `MockSpec`
+        registered is a hard failure, not a soft one: `_soft_failure_before_
+        running_step`-style soft failures leave `error` unset specifically
+        so `_execute_one_step`'s `if result.error:` halt check never trips
+        -- exactly wrong here, since silently continuing would mean a
+        `kind:"function"` skill step's run sails on to the next step having
+        produced NONE of its promised `produces_state` keys, with nothing
+        telling the user their mocked run didn't actually mock anything.
+        `skill_validation.py`'s save-time check (Task 5.4) is meant to catch
+        this before a run ever starts; this is the runtime backstop for
+        whatever that check doesn't (a contract's mock removed after the
+        skill was saved, an as-yet-unvalidated step).
+        """
+        if contract.mock is None:
+            return StepResult.failure(
+                f"Mock mode is enabled for '{step.name}', which has a real external side "
+                "effect, but no MockSpec is registered for it. Refusing to either perform "
+                "the real side effect or fabricate an unspecified result."
+            )
+
+        mock = contract.mock
+        detail = mock.message or f"Would have run '{step.name}'."
+        LOGGER.info(f"Mock mode: '{step.name}' short-circuited, real handler not called")
+        return StepResult(
+            data=dict(mock.data),
+            state_updates=dict(mock.state_updates),
+            progress_message=f"[MOCKED] {detail}",
+            was_mocked=True,
+        )
+
+    async def _soft_failure_before_running_step(
+        self, context: StepContext, step_name: str
+    ) -> Optional[StepResult]:
+        """Pre-flight check for calling `step_name` out of its recipe's fixed
+        order -- returns a `StepResult.soft_failure(...)` if it shouldn't run
+        right now, or `None` if it's fine to proceed.
+
+        Phase 3 of docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md.
+        This is the mechanism that lets ordering survive once a skill's tool-
+        call loop can invoke registered step handlers in whatever order an
+        LLM chooses (Phase 4, not yet wired to call this): a wrong-order call
+        gets a clear, actionable soft failure instead of a crash or silently
+        wrong behavior, naming exactly which other step to call first.
+
+        Deliberately NOT called from `_execute_function_step` itself, and
+        deliberately not merged into that method's unconditional "run the
+        handler" path. This mirrors an established pattern already in this
+        file: `run_single_step` (Phase C/D's out-of-order execution for the
+        MAIN chat LLM, further down in this file) gates BEFORE calling
+        `_execute_one_step`/`_execute_function_step`, never inside them --
+        every existing in-recipe-order call to `_execute_function_step`
+        (every production LPP/GTR/etc. run today) stays completely
+        unaffected by this method's existence, and pays none of its extra
+        DB round-trips, unless and until a caller actually invokes it.
+
+        Reuses `validate_step_prerequisites` (this class's own pure,
+        already-tested prerequisite/producer-chain reporting -- see that
+        method's docstring) rather than re-deriving "which other step
+        produces this key" here; this method's only job is translating a
+        `PrereqReport` into the `StepResult.soft_failure` vocabulary Phase 3
+        adds, plus the one check `validate_step_prerequisites` deliberately
+        doesn't do: guard_keys (see below).
+
+        Args:
+            context: The calling run's StepContext -- packet_state/
+                steps_completed/packet_inputs are read from here to build a
+                packet-shaped dict for validate_step_prerequisites, since a
+                skill run's tool-call loop has no real `packet` dict on hand
+                the way `run_single_step`'s caller does.
+            step_name: The registered step about to be called.
+
+        Returns:
+            `StepResult.soft_failure("guard_satisfied", ...)` if the
+            contract's `guard_keys` show this step's work is already done.
+            `StepResult.soft_failure("unmet_prerequisite", ...)` if
+            `consumes_state`/`consumes_results`/required `params` aren't
+            available yet, naming a producer step in `remediation` when
+            `validate_step_prerequisites` found one.
+            `None` if `step_name` has no contract (nothing to check -- same
+            "no contract, treat as satisfied" convention
+            `validate_step_prerequisites` itself uses) or every check passes.
+        """
+        contract = get_step_contract(step_name)
+        if contract is None:
+            return None
+
+        # Guard check first: work already done outranks "is it safe to start"
+        # -- there is no point telling the caller what's missing to (re)do
+        # work that doesn't need doing. Truthiness, not presence (unlike
+        # consumes_state below) -- a guard key's whole point is a flag like
+        # "cells_populated", where an explicit False means "not done yet",
+        # not "present so it's fine".
+        for guard_key in contract.guard_keys:
+            if context.get_state(guard_key):
+                return StepResult.soft_failure(
+                    code="guard_satisfied",
+                    message=(
+                        f"'{step_name}' has already run -- its guard key "
+                        f"'{guard_key}' is already set."
+                    ),
+                    remediation="No action needed; this step's work is already done.",
+                )
+
+        packet_like: Dict[str, Any] = {
+            "packet_state": context.packet_state,
+            "packet_inputs": context.packet_inputs,
+            "steps_completed": context.steps_completed,
+            "organization_id": context.effective_org_id,
+            "packet_type": context.packet_type,
+        }
+        report = await self.validate_step_prerequisites(packet_like, step_name)
+        if report.satisfied:
+            return None
+
+        missing_parts: List[str] = []
+        remediation_parts: List[str] = []
+        for key in report.missing_state:
+            missing_parts.append(key)
+            producers = report.producer_chain.get(key)
+            remediation_parts.append(
+                f"'{key}' is produced by calling {producers[0]!r} first."
+                if producers
+                else f"'{key}' has no known producer step -- it must be supplied another way."
+            )
+        for name in report.missing_results:
+            missing_parts.append(f"result of '{name}'")
+            remediation_parts.append(f"call {name!r} first.")
+        for param_name in report.missing_params:
+            missing_parts.append(f"parameter '{param_name}'")
+            remediation_parts.append(f"supply a value for '{param_name}'.")
+
+        return StepResult.soft_failure(
+            code="unmet_prerequisite",
+            message=f"'{step_name}' is missing: {', '.join(missing_parts)}.",
+            remediation=" ".join(remediation_parts),
+        )
 
     async def _execute_llm_step(
         self,
@@ -2590,7 +2782,13 @@ class WorkflowExecutor:
 
         try:
             response = await self._call_llm_step_with_tools(
-                prompt, expert_config, tools_payload, context, execution_summary
+                prompt,
+                expert_config,
+                tools_payload,
+                context,
+                execution_summary,
+                allow_write=step.allow_write,
+                mock_override=step.mock,
             )
 
             # Check finishReason for blocked content
@@ -2691,6 +2889,8 @@ class WorkflowExecutor:
         tools_payload: Optional[List[Dict[str, Any]]],
         context: StepContext,
         execution_summary: Optional[ExecutionSummary],
+        allow_write: bool = False,
+        mock_override: Optional[bool] = None,
     ) -> "GeminiTurnResult":
         """Call the LLM for one step, executing any tool calls it makes.
 
@@ -2704,6 +2904,20 @@ class WorkflowExecutor:
         global default would also raise it for every Google-Doc expert
         step). tools_payload is not None is exactly the is_skill_step
         signal here -- see this method's caller, _execute_llm_step.
+
+        Args:
+            allow_write: Forwarded to `_execute_skill_step_tool_call`
+                (mirrors `ParsedStep.allow_write` for the calling step, see
+                `_resolve_skill_step_tools`/`step_tool_schema.py`'s Phase 4
+                gate). Defaults to False, the safe default already used
+                everywhere else `allow_write` originates -- callers that
+                don't pass it explicitly get the same "no writes" behavior
+                as any other unmarked step.
+            mock_override: Forwarded to `_execute_skill_step_tool_call`
+                (mirrors `ParsedStep.mock` for the calling step -- Phase 5).
+                `None` (the default) means "no per-step override for any
+                tool call this step makes"; every such call falls back to
+                `context.dry_run`, this run's baseline.
 
         Returns the final round's GeminiTurnResult. If the round cap is hit
         while the model still wants to call tools, that response (whatever
@@ -2728,7 +2942,9 @@ class WorkflowExecutor:
         while response.tool_calls and tools_payload and rounds < max_rounds:
             rounds += 1
             for call in response.tool_calls:
-                tool_result = await self._execute_skill_step_tool_call(call, context)
+                tool_result = await self._execute_skill_step_tool_call(
+                    call, context, allow_write=allow_write, mock_override=mock_override
+                )
                 messages.append(ConversationMessage(role="model", function_call=call))
                 messages.append(ConversationMessage(role="tool", tool_result=tool_result))
 
@@ -2742,15 +2958,63 @@ class WorkflowExecutor:
         return response
 
     async def _execute_skill_step_tool_call(
-        self, call: FunctionCall, context: StepContext
+        self,
+        call: FunctionCall,
+        context: StepContext,
+        allow_write: bool = False,
+        mock_override: Optional[bool] = None,
     ) -> ToolCallResult:
-        """Run one tool call a skill step's LLM requested, via the same
-        context.mcp_executor function steps already use -- no second tool-
-        execution path. Never raises: a failed call becomes a ToolCallResult
-        with success=False, fed back to the LLM as a normal function
-        response, matching gtr_analysis_conversation.py's existing pattern
-        for LLM-driven tool loops elsewhere in this codebase.
+        """Run one tool call a skill step's LLM requested.
+
+        Phase 4 of docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md
+        routing: `call.name` naming a contract-bearing, permission-cleared
+        registered step handler (per `step_tool_schema.is_declared_function_step`
+        -- the SAME predicate that decided whether this name was offered to
+        the model at all, see that function's docstring) goes to
+        `_execute_declared_function_step_call`; everything else keeps going
+        to `context.mcp_executor`, exactly as before Phase 4. Never raises
+        either way: a failed call becomes a ToolCallResult with
+        success=False, fed back to the LLM as a normal function response,
+        matching gtr_analysis_conversation.py's existing pattern for
+        LLM-driven tool loops elsewhere in this codebase.
+
+        A successful call's output is also merged into `context` via
+        `StepContext.apply_result` (Phase 2 of the skills-as-tools plan's
+        run-scoped state carrier), under the SAME `accumulated_results` key
+        convention `_execute_one_step` already uses for a top-level function
+        step's result (the call/step name). `context` is one shared object
+        across every round of this step's tool-call loop (see
+        `_call_llm_step_with_tools`, this method's caller) -- so a later
+        call, in this round or a later one, can already read an earlier
+        call's output via `context.get_previous_result(call.name)`. MCP
+        tool output carries no `state_updates` (only `data`); a routed
+        function-step call's real `state_updates` become visible the same
+        way via `context.get_state(key)`, satisfying a later call's
+        `consumes_state` precondition -- reusing this exact mechanism
+        rather than a second one.
+
+        Args:
+            allow_write: Whether the calling skill step is allowed to invoke
+                mutating tools (`ParsedStep.allow_write`). Only affects
+                routing here indirectly, via `is_declared_function_step`
+                using the same flag `_resolve_skill_step_tools` used to
+                decide what to declare -- a mutating step name called from a
+                non-allow_write step was never declared, and this check
+                keeps it from being routable even if a call for it arrives
+                anyway.
+            mock_override: The calling skill step's own `ParsedStep.mock`
+                (Phase 5) -- forwarded to `_execute_declared_function_step_call`
+                so a mutating tool call made from this step's loop respects
+                that step's own mock-mode override, falling back to
+                `context.dry_run` when `None`. Not consulted for the MCP
+                path below at all: MCP tools have no `StepContract.mutates`/
+                `mock` to check against, so mock mode never applies to them.
         """
+        if is_declared_function_step(call.name, allow_write=allow_write):
+            return await self._execute_declared_function_step_call(
+                call, context, mock_override=mock_override
+            )
+
         if not context.mcp_executor:
             return ToolCallResult(
                 name=call.name,
@@ -2761,6 +3025,10 @@ class WorkflowExecutor:
             )
         try:
             output = await context.mcp_executor.call_tool(call.name, call.arguments)
+            context.apply_result(
+                call.name,
+                StepResult(data=output if isinstance(output, dict) else {"value": output}),
+            )
             return ToolCallResult(
                 name=call.name, success=True, output=output, tool_call_id=call.tool_call_id
             )
@@ -2774,19 +3042,161 @@ class WorkflowExecutor:
                 tool_call_id=call.tool_call_id,
             )
 
+    async def _execute_declared_function_step_call(
+        self, call: FunctionCall, context: StepContext, mock_override: Optional[bool] = None
+    ) -> ToolCallResult:
+        """Run one tool call that names a registered step handler.
+
+        Caller (`_execute_skill_step_tool_call`) has already confirmed
+        `call.name` clears `is_declared_function_step` -- the STRUCTURAL
+        half (contract exists, mutation/allow_write gate). This method
+        trusts that and does not re-check it. Permission is the ONE thing
+        it does re-check itself (Phase 6) -- see step_tool_schema.py's
+        module docstring addendum for why that check is deliberately not
+        folded into `is_declared_function_step`.
+
+        Args:
+            mock_override: The calling `[llm]` step's own `ParsedStep.mock`
+                (Phase 5), passed straight into the synthetic `ParsedStep`
+                built below so `_execute_function_step` sees the SAME
+                override it would for a top-level `kind:"function"` step --
+                `None` defers to `context.dry_run`, same as everywhere else
+                `mock` is consulted.
+
+        Four things happen, in order:
+        1. `caller_holds_permission` (Phase 6, Task 6.1) -- a caller who
+           doesn't hold `contract.required_permission` gets an explicit
+           `not_permitted` soft failure, never reaching the handler.
+        2. Caller-supplied arguments are fed into the two seams a handler
+           actually reads from -- `contract.params` via the existing
+           `context.set_parameter_override` (the same mechanism the
+           parameter-confirmation flow and `run_single_step`'s
+           `param_overrides` already use), `contract.consumes_state` keys
+           directly into `context.packet_state` (that field's own
+           documented meaning; `context.get_state` reads it straight).
+           Applied for every `consumes_state` key present in `arguments`,
+           not only the subset `step_tool_schema` declares as a tool
+           argument (see that module's docstring, fact 2) -- a caller that
+           already knows a precondition value (e.g. from an earlier read
+           tool, or told directly by the user) can supply it and skip a
+           redundant producer call; nothing is lost by accepting it.
+           Unrecognized argument names are ignored, not rejected -- the
+           precondition check below is what actually decides whether the
+           handler has what it needs.
+        3. `_soft_failure_before_running_step` (Phase 3) runs BEFORE the
+           handler -- a guard-already-satisfied or unmet-precondition call
+           never reaches `_execute_function_step` at all.
+        4. Otherwise the handler runs via `_execute_function_step`, exactly
+           as a top-level recipe step would (same never-raise contract:
+           handler exceptions already become `StepResult.failure`).
+
+        Every outcome (soft failure, hard failure, success) is merged into
+        `context` via `apply_result` before returning, same as the MCP path.
+        """
+        contract = get_step_contract(call.name)
+        if contract is None:
+            # is_declared_function_step already checked this; defensive only
+            # -- e.g. a contract removed from the registry between the
+            # routing check and this call in a hypothetically racy caller.
+            return ToolCallResult(
+                name=call.name,
+                success=False,
+                output=None,
+                error=f"'{call.name}' has no registered contract.",
+                tool_call_id=call.tool_call_id,
+            )
+
+        result: Optional[StepResult] = None
+        if not caller_holds_permission(contract.required_permission, context.user_context):
+            result = StepResult.soft_failure(
+                code="not_permitted",
+                message=(
+                    f"'{call.name}' requires the {contract.required_permission!r} "
+                    "permission, which this caller does not hold."
+                ),
+                remediation="Ask a user with that permission to run this step instead.",
+            )
+
+        if result is None:
+            param_names = {param.name for param in contract.params}
+            for key, value in (call.arguments or {}).items():
+                if key in param_names:
+                    context.set_parameter_override(key, value)
+                elif key in contract.consumes_state:
+                    context.packet_state[key] = value
+
+            result = await self._soft_failure_before_running_step(context, call.name)
+
+        if result is None:
+            step = ParsedStep(
+                index=0,
+                step_type="function",
+                name=call.name,
+                description=contract.description,
+                mock=mock_override,
+            )
+            result = await self._execute_function_step(step, context, context.accumulated_results)
+
+        context.apply_result(call.name, result)
+
+        if not result.is_success:
+            if result.is_soft_failure:
+                message = " ".join(
+                    part for part in (result.soft_failure_message, result.remediation) if part
+                )
+            else:
+                message = result.error or f"'{call.name}' failed with no error message."
+            return ToolCallResult(
+                name=call.name,
+                success=False,
+                output=None,
+                error=message,
+                tool_call_id=call.tool_call_id,
+            )
+
+        output = result.data
+        if result.was_mocked:
+            # R6: the chat response surface must say "mocked" too -- this is
+            # what the LLM actually sees as this call's return value, so it
+            # can (and, per system instructions, should) tell the user this
+            # step's real side effect did not happen.
+            output = {
+                **result.data,
+                "_mocked": True,
+                "_mock_note": "Mock mode is enabled; this step's real side effect did not happen.",
+            }
+
+        return ToolCallResult(
+            name=call.name, success=True, output=output, tool_call_id=call.tool_call_id
+        )
+
     async def _resolve_skill_step_tools(
         self, step: ParsedStep, context: StepContext
     ) -> List[Dict[str, Any]]:
         """Resolve and filter the tool payload for one skill step.
 
-        Uses the same permissions_service.get_available_tools(user_context)
-        call prepare_tools.py makes for the main chat graph -- no second
-        tool-listing path to keep in sync. Filtered to read-only-prefixed
-        tools unless step.allow_write=True (see skill_step_bindings.py).
+        Two sources, concatenated:
+        - MCP tools, via the same permissions_service.get_available_tools
+          (user_context) call prepare_tools.py makes for the main chat
+          graph -- no second tool-listing path to keep in sync. Filtered to
+          read-only-prefixed tools unless step.allow_write=True (see
+          skill_step_bindings.py).
+        - Registered step handlers with a `StepContract`, via
+          `step_tool_schema.function_step_tool_declarations` (Phase 4) --
+          filtered the same way, but by the contract's actual `mutates`
+          flag rather than a name prefix (see that module's `_is_offerable`
+          docstring for why the two lists use different mutation signals).
+          Also filtered by `context.user_context` against each contract's
+          `required_permission` (Phase 6) -- a step this caller doesn't
+          hold the permission for is never declared to them at all.
         """
         permissions_service = get_permissions_service()
         all_tools = await permissions_service.get_available_tools(context.user_context)
-        return filter_tools_for_step(all_tools or [], allow_write=step.allow_write)
+        mcp_tools = filter_tools_for_step(all_tools or [], allow_write=step.allow_write)
+        function_tools = function_step_tool_declarations(
+            allow_write=step.allow_write, user_context=context.user_context
+        )
+        return mcp_tools + function_tools
 
     def _extract_finish_reason(self, response: Dict[str, Any]) -> Optional[str]:
         """Extract finishReason from Gemini response.

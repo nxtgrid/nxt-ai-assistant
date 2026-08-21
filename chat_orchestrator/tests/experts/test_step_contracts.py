@@ -9,7 +9,14 @@ import dataclasses
 import pytest
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import ParamSpec, StepContract
+from orchestrator.experts.step_contracts import (
+    MUTATION_KINDS,
+    MockSpec,
+    OutputSpec,
+    ParamSpec,
+    StepContract,
+    validate_mock_covers_outputs,
+)
 from orchestrator.experts.step_registry import (
     StepHandlerRegistry,
     get_step_contract,
@@ -55,7 +62,13 @@ class TestStepContractConstruction:
     """StepContract construction and immutability."""
 
     def test_bare_construction_defaults(self):
-        """A bare StepContract() constructs fine with all-empty defaults."""
+        """A bare StepContract() constructs fine with all-empty defaults.
+
+        Regression per Phase 1 Task 1.6: adding mutates/mutation_kind/outputs/
+        mock/required_permission/expected_latency_seconds must not break any
+        of the 17 existing contracts or 35 uncontracted handlers that predate
+        these fields -- a bare StepContract() must keep constructing.
+        """
         contract = StepContract()
         assert contract.description == ""
         assert contract.consumes_state == ()
@@ -65,9 +78,17 @@ class TestStepContractConstruction:
         assert contract.params == ()
         assert contract.guard_keys == ()
         assert contract.side_effects == ""
+        assert contract.mutates is False
+        assert contract.mutation_kind == ""
+        assert contract.outputs == ()
+        assert contract.mock is None
+        assert contract.required_permission == ""
+        assert contract.expected_latency_seconds == 0.0
 
     def test_full_construction(self):
         param = ParamSpec(name="site_name", required=True)
+        output = OutputSpec(name="design_id", value_type="string", where="state")
+        mock = MockSpec(state_updates={"design_id": "MOCK-design-1", "design_generated": True})
         contract = StepContract(
             description="Generates a powerplant design",
             consumes_state=("site_name", "site_id"),
@@ -77,6 +98,12 @@ class TestStepContractConstruction:
             params=(param,),
             guard_keys=("design_generated",),
             side_effects="Calls grid_design MCP server",
+            mutates=True,
+            mutation_kind="external_write",
+            outputs=(output,),
+            mock=mock,
+            required_permission="package_generator.write",
+            expected_latency_seconds=45.0,
         )
         assert contract.consumes_state == ("site_name", "site_id")
         assert contract.optional_consumes_state == ("layout_result",)
@@ -85,11 +112,147 @@ class TestStepContractConstruction:
         assert contract.params == (param,)
         assert contract.guard_keys == ("design_generated",)
         assert contract.side_effects == "Calls grid_design MCP server"
+        assert contract.mutates is True
+        assert contract.mutation_kind == "external_write"
+        assert contract.outputs == (output,)
+        assert contract.mock is mock
+        assert contract.required_permission == "package_generator.write"
+        assert contract.expected_latency_seconds == 45.0
 
     def test_is_frozen(self):
         contract = StepContract(description="x")
         with pytest.raises(dataclasses.FrozenInstanceError):
             contract.description = "y"  # type: ignore[misc]
+
+
+class TestOutputSpecConstruction:
+    """OutputSpec construction, defaults, and immutability."""
+
+    def test_bare_construction_defaults(self):
+        spec = OutputSpec(name="document_id")
+        assert spec.name == "document_id"
+        assert spec.value_type == "string"
+        assert spec.description == ""
+        assert spec.where == "state"
+
+    def test_full_construction(self):
+        spec = OutputSpec(
+            name="analysis_summary",
+            value_type="object",
+            description="Structured summary of the failure analysis",
+            where="data",
+        )
+        assert spec.value_type == "object"
+        assert spec.description == "Structured summary of the failure analysis"
+        assert spec.where == "data"
+
+    def test_is_frozen(self):
+        spec = OutputSpec(name="document_id")
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            spec.name = "other_id"  # type: ignore[misc]
+
+
+class TestMutationKinds:
+    """MUTATION_KINDS is the closed vocabulary mutation_kind draws from."""
+
+    def test_contains_expected_kinds(self):
+        assert MUTATION_KINDS == (
+            "external_write",
+            "db_write",
+            "notification",
+            "control_action",
+        )
+
+    def test_is_a_tuple(self):
+        """Immutable by construction -- nothing should be able to append to it."""
+        assert isinstance(MUTATION_KINDS, tuple)
+
+
+class TestMockSpecConstruction:
+    """MockSpec construction, defaults, and (deliberate) mutability."""
+
+    def test_bare_construction_defaults(self):
+        mock = MockSpec()
+        assert mock.state_updates == {}
+        assert mock.data == {}
+        assert mock.message == ""
+
+    def test_full_construction(self):
+        mock = MockSpec(
+            state_updates={"document_id": "MOCK-doc-1"},
+            data={"template_name": "MOCK-template"},
+            message="Would have copied the LPP template.",
+        )
+        assert mock.state_updates == {"document_id": "MOCK-doc-1"}
+        assert mock.data == {"template_name": "MOCK-template"}
+        assert mock.message == "Would have copied the LPP template."
+
+    def test_is_not_frozen(self):
+        """MockSpec is deliberately mutable (see its docstring): it holds
+        dict fields, and a dataclass-generated __hash__ over mutable fields
+        would raise at runtime. Assigning to it must NOT raise."""
+        mock = MockSpec()
+        mock.message = "updated"
+        assert mock.message == "updated"
+
+    def test_default_dicts_are_independent_instances(self):
+        """default_factory=dict, not a shared mutable default."""
+        mock_a = MockSpec()
+        mock_b = MockSpec()
+        mock_a.state_updates["key"] = "value"
+        assert mock_b.state_updates == {}
+
+
+class TestValidateMockCoversOutputs:
+    """validate_mock_covers_outputs: findings-based, never raises."""
+
+    def test_non_mutating_contract_needs_no_mock(self):
+        contract = StepContract(mutates=False)
+        assert validate_mock_covers_outputs(contract) == []
+
+    def test_mutating_contract_with_no_mock_is_flagged(self):
+        contract = StepContract(mutates=True, produces_state=("document_id",))
+        findings = validate_mock_covers_outputs(contract)
+        assert len(findings) == 1
+        assert "mock is None" in findings[0]
+
+    def test_mock_missing_a_produces_state_key_is_flagged(self):
+        """The exact failure mode from the docstring: copy_lpp_template's mock
+        must populate document_id or populate_lpp_cells's precondition fails
+        and a mocked run collapses at the first mutation."""
+        contract = StepContract(
+            mutates=True,
+            produces_state=("document_id", "template_copied"),
+            mock=MockSpec(state_updates={"template_copied": True}),
+        )
+        findings = validate_mock_covers_outputs(contract)
+        assert len(findings) == 1
+        assert "document_id" in findings[0]
+        assert "template_copied" not in findings[0].split("--")[0]
+
+    def test_mock_covering_all_keys_passes(self):
+        contract = StepContract(
+            mutates=True,
+            produces_state=("document_id", "template_copied"),
+            mock=MockSpec(
+                state_updates={"document_id": "MOCK-doc-1", "template_copied": True}
+            ),
+        )
+        assert validate_mock_covers_outputs(contract) == []
+
+    def test_mutating_contract_with_no_produces_state_and_empty_mock_passes(self):
+        """A mutating step that produces nothing (e.g. a pure notification)
+        is satisfied by an empty-but-present MockSpec."""
+        contract = StepContract(mutates=True, mock=MockSpec())
+        assert validate_mock_covers_outputs(contract) == []
+
+    def test_never_raises_on_a_bare_mutating_contract(self):
+        """Belt-and-braces: calling this on adversarial-ish input returns
+        findings, never an exception."""
+        contract = StepContract(mutates=True)
+        findings = validate_mock_covers_outputs(contract)
+        assert isinstance(findings, list)
+        assert len(findings) >= 1
 
 
 class TestRegistryContractSupport:

@@ -25,8 +25,8 @@ and this module does not touch or replace `StepSchema`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -51,6 +51,87 @@ class ParamSpec:
     synonyms: tuple[str, ...] = ()
     required: bool = False
     default: Any = None
+
+
+# Machine-readable mutation categories a step's `mutation_kind` may declare.
+# `side_effects` stays free-form prose for humans; this tuple is what code
+# branches on to decide whether a step needs a MockSpec. Never infer mutation
+# from `side_effects` text, and never reuse the READ_ONLY_TOOL_PREFIXES
+# name-prefix heuristic in skill_step_bindings.py for this purpose -- that
+# heuristic already mislabels some handlers (e.g. `store_module` and
+# `process_doc_edits` both write and match no read-only prefix).
+MUTATION_KINDS: tuple[str, ...] = (
+    "external_write",  # writes to an external system: Drive, Sheets, Telegram, etc.
+    "db_write",  # writes to a database this codebase owns
+    "notification",  # sends a message/notification a human will see
+    "control_action",  # commands external equipment or an external control system
+)
+
+
+@dataclass(frozen=True)
+class OutputSpec:
+    """Describes one value a step produces, so a caller can chain onto it.
+
+    `StepContract.produces_state` names the `packet_state` keys a step
+    writes, but not their type or meaning, and `StepResult.data` (the
+    `accumulated_results` half of a step's output) is undeclared entirely.
+    Without this, an LLM calling steps as tools has no way to know what a
+    prior call actually returned, or whether it satisfies a later call's
+    input -- only the step's name to guess from.
+
+    Attributes:
+        name: Key this value is published under (a `produces_state` key when
+            `where="state"`, an `accumulated_results`/`StepResult.data` key
+            when `where="data"`).
+        value_type: Logical type of the value (e.g. "string", "integer",
+            "number", "boolean", "object", "array"). Informational only,
+            mirroring `ParamSpec.param_type` -- not enforced here.
+        description: What this value means to a caller.
+        where: Which half of `StepResult` carries this value -- `"state"`
+            for a `state_updates` key (expected to also appear in the
+            contract's `produces_state`), or `"data"` for a key nested
+            under `StepResult.data`.
+    """
+
+    name: str
+    value_type: str = "string"
+    description: str = ""
+    where: str = "state"
+
+
+@dataclass
+class MockSpec:
+    """Stand-in result for a mutating step run in mock mode.
+
+    Not `frozen`, unlike every other dataclass in this module -- it holds
+    mutable dict fields (`state_updates`, `data`), and a dataclass-generated
+    `__hash__` on mutable fields would raise at runtime. Nothing hashes a
+    `StepContract` or `MockSpec` today; failing loudly the moment something
+    tries beats silently making this type unhashable via `frozen=True`.
+
+    A mock that returns nothing is worse than no mock at all: mock
+    `copy_lpp_template` into an empty result and the next step
+    (`populate_lpp_cells`) fails its `document_id` precondition, so a mocked
+    run collapses at the first mutation and proves nothing end to end. A
+    `MockSpec` therefore must populate the same keys the real step would --
+    see `validate_mock_covers_outputs` below, which checks exactly that.
+
+    Values should be self-evidently synthetic -- a `MOCK-` prefix, an
+    obviously fake id -- so a mocked artefact is never mistaken for a real
+    one on inspection. This convention is not enforced by the dataclass
+    itself; it is on whoever writes the `MockSpec` for a given step.
+
+    Attributes:
+        state_updates: Stands in for the real step's
+            `StepResult.state_updates`.
+        data: Stands in for the real step's `StepResult.data`.
+        message: Progress message shown for the mocked step. Should read as
+            hypothetical (e.g. "Would have copied the LPP template.").
+    """
+
+    state_updates: dict[str, Any] = field(default_factory=dict)
+    data: dict[str, Any] = field(default_factory=dict)
+    message: str = ""
 
 
 @dataclass(frozen=True)
@@ -96,7 +177,35 @@ class StepContract:
         side_effects: Free-form description of external side effects this
             step has (e.g. "calls grid_design MCP server", "uploads to
             Google Drive") for operators/executors reasoning about safety
-            of re-running or skipping the step.
+            of re-running or skipping the step. Prose for humans only --
+            never branch code on this text; see `mutates`/`mutation_kind`.
+        mutates: Whether this step has an external side effect that a mock
+            run should not perform for real (writes to Drive/Sheets, sends a
+            Telegram message, triggers BOM generation, controls equipment,
+            etc.). Machine-readable and deliberately separate from the
+            `side_effects` prose -- see that field's docstring for why
+            nothing should infer this from text or from a name-prefix
+            heuristic. Defaults to `False`, matching every step handler
+            before this field existed: a step is presumed safe to run for
+            real unless explicitly marked otherwise.
+        mutation_kind: One of `MUTATION_KINDS` describing what kind of
+            mutation this is, when `mutates=True`. Empty string when
+            `mutates=False`. Purely descriptive -- not enforced here.
+        outputs: Typed description of the values this step produces (see
+            `OutputSpec`), complementing the bare key names in
+            `produces_state`.
+        mock: The stand-in result to return instead of actually running this
+            step, when a skill run has mock mode enabled and `mutates=True`.
+            `None` for a step that does not mutate anything, and for a
+            mutating step that has not had a `MockSpec` written yet --
+            `validate_mock_covers_outputs` below flags that second case.
+        required_permission: Permission name a caller must hold to invoke
+            this step as a tool. Empty string means no permission gate
+            beyond whatever already applies to the caller generally.
+        expected_latency_seconds: Roughly how long this step normally takes
+            to run for real (e.g. a step that sleeps ~60s waiting on an
+            external system). `0.0` means "fast, synchronous" -- the
+            default, matching every step handler before this field existed.
     """
 
     description: str = ""
@@ -107,6 +216,57 @@ class StepContract:
     params: tuple[ParamSpec, ...] = ()
     guard_keys: tuple[str, ...] = ()
     side_effects: str = ""
+    mutates: bool = False
+    mutation_kind: str = ""
+    outputs: tuple[OutputSpec, ...] = ()
+    mock: Optional[MockSpec] = None
+    required_permission: str = ""
+    expected_latency_seconds: float = 0.0
 
 
-__all__ = ["ParamSpec", "StepContract"]
+def validate_mock_covers_outputs(contract: StepContract) -> list[str]:
+    """Check that a mutating contract's MockSpec covers its produces_state keys.
+
+    Returns a list of human-readable findings; an empty list means the mock
+    is adequate (or the contract doesn't mutate, so no mock is required at
+    all). Never raises -- this is meant to be called from save-time
+    validation (see `skill_validation.py`) and from ad-hoc audits, neither
+    of which wants an exception for a data problem.
+
+    A `MockSpec` that doesn't populate every `produces_state` key is the
+    failure mode that makes a mocked run worthless: mock `copy_lpp_template`
+    into an empty result and `populate_lpp_cells` fails its `document_id`
+    precondition, so the run collapses at the first mutation and a mocked
+    pass proves nothing. This only checks `produces_state` coverage in
+    `mock.state_updates` -- it does not attempt to validate `outputs` entries
+    whose `where="data"` against `mock.data`, since not every `produces_state`
+    key necessarily has a matching `OutputSpec` yet.
+    """
+    if not contract.mutates:
+        return []
+
+    if contract.mock is None:
+        return [
+            "mutates=True but mock is None -- a mock run would have nothing "
+            "to return for this step."
+        ]
+
+    findings: list[str] = []
+    missing = [key for key in contract.produces_state if key not in contract.mock.state_updates]
+    if missing:
+        findings.append(
+            "mock.state_updates is missing produces_state key(s): "
+            f"{', '.join(missing)} -- a mocked run would fail any later "
+            "step's precondition on these keys."
+        )
+    return findings
+
+
+__all__ = [
+    "MUTATION_KINDS",
+    "MockSpec",
+    "OutputSpec",
+    "ParamSpec",
+    "StepContract",
+    "validate_mock_covers_outputs",
+]

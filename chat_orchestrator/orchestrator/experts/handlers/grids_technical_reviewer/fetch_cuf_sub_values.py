@@ -15,6 +15,7 @@ from orchestrator.experts.handlers.grids_technical_reviewer.fetch_grafana_kpis i
     get_previous_month_time_range,
 )
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -128,7 +129,30 @@ def extract_metric_value(
     return float(value) if value is not None else None
 
 
-@register_step("fetch_cuf_sub_values")
+@register_step(
+    "fetch_cuf_sub_values",
+    contract=StepContract(
+        description=(
+            "Fetches CUF loss-breakdown sub-values (uncurtailed loss, battery "
+            "usage, unknown loss, self-consumption %loss, power efficiency, "
+            "kWh/kWp) from Grafana for commentary analysis. Partial failures OK."
+        ),
+        consumes_state=("grids_to_review",),
+        optional_consumes_state=("chat_mode",),
+        produces_state=("cuf_sub_values",),
+        outputs=(
+            OutputSpec(
+                name="cuf_sub_values",
+                value_type="object",
+                description="Grid name (lowercase) -> {metric_key: {value, display_name}}, partial data allowed.",
+            ),
+        ),
+        side_effects=(
+            "Calls Grafana MCP tools (grafana_unutilized_solar_potential and 5 "
+            "others) per grid to read CUF loss-breakdown metrics. No writes."
+        ),
+    ),
+)
 async def fetch_cuf_sub_values(context: StepContext) -> StepResult:
     """Fetch CUF loss breakdown sub-values for commentary analysis.
 

@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timezone
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import ParamSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.grid_design.artifact_log import sweep_state_for_artifacts
 from shared.utils.error_messages import sanitize_error_for_user
@@ -255,6 +255,25 @@ def _get_requester_name(context: StepContext) -> str:
             "Calls the grid_design_design_and_bom MCP tool, which creates a design row "
             "in the Chat DB (gd_designs); also sweeps packet_state for previously "
             "uploaded Drive artifact IDs and attaches them to the new design."
+        ),
+        mutates=True,
+        mutation_kind="db_write",
+        mock=MockSpec(
+            state_updates={
+                "design_generated": True,
+                "design_id": "MOCK-design-id",
+                "design_name": "MOCK Design",
+                "total_kwp": 100.0,
+                "total_kwh": 200.0,
+                "total_kva": 110.0,
+                "num_subsystems": 1,
+                "num_inverters": 1,
+                "num_batteries": 1,
+                "num_panels": 100,
+                "editable_total_kwp": 100.0,
+                "editable_total_kwh": 200.0,
+            },
+            message="Would have created a grid design via the grid_design MCP server.",
         ),
     ),
 )

@@ -871,10 +871,23 @@ async def validate_skill(request: Request, body: SkillValidateRequest) -> SkillV
     from orchestrator.experts.skill_validation import validate_skill_steps
     from orchestrator.experts.step_registry import get_step_registry
 
+    registry = get_step_registry()
+    # Task 5.4 (docs/superpowers/plans/2026-08-20-expert-steps-as-skill-
+    # tools.md): handlers that mutate but have no MockSpec -- a step naming
+    # one of these can't be saved with mock enabled.
+    unmockable_handlers = {
+        handler_name
+        for handler_name in registry.list_handlers()
+        if (contract := registry.get_contract(handler_name)) is not None
+        and contract.mutates
+        and contract.mock is None
+    }
+
     errors = validate_skill_steps(
         [step.model_dump() for step in body.steps],
         declared_inputs=body.declared_inputs,
-        exposed_handlers=get_step_registry().builder_exposed_handlers(),
+        exposed_handlers=registry.builder_exposed_handlers(),
+        unmockable_handlers=unmockable_handlers,
     )
     return SkillValidateResponse(
         errors=[

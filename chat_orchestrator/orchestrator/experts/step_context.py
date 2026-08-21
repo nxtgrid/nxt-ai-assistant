@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from orchestrator.models.schemas import UserContext
@@ -86,6 +86,21 @@ class StepContext:
     context_message: Optional[str] = None  # Full context message (includes date, enrichment)
     rag_provider: Optional[Any] = None  # RAGProvider instance for on-demand queries
 
+    # dry_run: Phase 5 of docs/superpowers/plans/2026-08-20-expert-steps-as-
+    # skill-tools.md. False (the default -- every context built before this
+    # field existed, and every real Google-Doc expert run today) means every
+    # step runs for real, unchanged from before this field existed. True is
+    # this run's BASELINE mock-mode setting; `ParsedStep.mock`, when set,
+    # overrides it for that one step. Only ever consulted by
+    # WorkflowExecutor._execute_function_step, and only for a step whose
+    # StepContract.mutates is True -- a non-mutating step runs for real
+    # regardless of this flag (see MockSpec's docstring: mock mode exists so
+    # a skill run can rehearse its real side effects without performing
+    # them, not to change read behavior). Nothing in this codebase sets this
+    # True yet outside tests -- Phase 11 is what wires an actual "run this
+    # skill mocked" trigger to it.
+    dry_run: bool = False
+
     @property
     def effective_email(self) -> Optional[str]:
         """Get effective email - use packet requester for consistency.
@@ -114,6 +129,49 @@ class StepContext:
             Result data from that step, or None if not found
         """
         return self.accumulated_results.get(step_name)  # type: ignore[no-any-return]
+
+    def apply_result(self, name: str, result: "StepResult") -> None:
+        """Merge a StepResult into this run's shared state, in memory.
+
+        Phase 2 of docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md:
+        the run-scoped state carrier a skill's tool-call loop needs so one
+        call can satisfy a later call's precondition. Deliberately reuses
+        this object's own `packet_state`/`accumulated_results` -- the exact
+        two containers `WorkflowExecutor._execute_one_step` already merges a
+        top-level function step's result into (`context.packet_state.update
+        (result.state_updates)`, `accumulated_results[step.name] =
+        result.data`) -- rather than inventing a parallel mechanism.
+
+        `name` is stored under the same key convention top-level function
+        steps use for `accumulated_results` (the step/handler name), so
+        `get_previous_result(name)` and a later contract's
+        `consumes_results` resolve identically whether `name` ran as a
+        top-level recipe step or as a tool call inside one skill step's
+        loop.
+
+        Callers of this method (`WorkflowExecutor._execute_skill_step_tool_call`)
+        share ONE `StepContext` instance across every round of that step's
+        tool-call loop -- `context` is a fixed parameter passed unchanged
+        into every round, never rebuilt -- so a value applied here is
+        already visible to any later call in the same or a later round via
+        `get_state`/`get_previous_result`, with no further plumbing needed.
+
+        Unlike `_execute_one_step`'s merge, this does NOT persist to the
+        database. DB persistence of `packet_state` stays owned once-per-
+        outer-step by `_execute_one_step`'s own call to
+        `packet_service.update_state` after the whole step (including any
+        inner tool-call loop) completes -- persisting on every inner tool
+        call would be premature and far more frequent than every other
+        step's persistence cadence.
+
+        A `StepResult` with neither `state_updates` nor `data` set (e.g. a
+        read that produced no reusable output) is a safe no-op -- no keys
+        are touched.
+        """
+        if result.state_updates:
+            self.packet_state.update(result.state_updates)
+        if result.data:
+            self.accumulated_results[name] = result.data
 
     def get_input(self, key: str, default: Any = None) -> Any:
         """Get a value from packet inputs or parsed state.
@@ -440,8 +498,38 @@ class StepResult:
         progress_message: Optional message to show user during execution
         needs_user_input: If True, pause workflow and wait for user
         user_prompt: Question to ask user if needs_user_input is True
-        error: If set, step failed and workflow should stop
+        error: If set, step failed and workflow should stop. This is a
+            HARD failure -- see `soft_failure_code` below for the
+            must-not-halt alternative.
         skip_remaining: If True, skip remaining steps and complete packet
+        soft_failure_code: Set by `StepResult.soft_failure()` (Phase 3 of
+            docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md)
+            to one of `SOFT_FAILURE_CODES` -- a contract-detectable misuse
+            (wrong/missing argument, an unmet precondition, work already
+            done, a permission gap) rather than a genuine crash. Deliberately
+            NOT surfaced via `error`: `error` is what
+            `WorkflowExecutor._execute_one_step` checks to decide the whole
+            packet run should stop (see that method's `if result.error:`
+            handling) -- a soft failure must never trip that. It is meant to
+            be fed back to an LLM driving a skill step's tool-call loop as an
+            ordinary tool result the model can read and correct, not a fatal
+            error a human has to intervene on.
+        soft_failure_message: Human/LLM-readable explanation of what went
+            wrong, when `soft_failure_code` is set.
+        remediation: What the caller should do about it, when
+            `soft_failure_code` is set (e.g. "call copy_lpp_template first"
+            for `unmet_prerequisite` -- see
+            `WorkflowExecutor._soft_failure_before_running_step`, which
+            derives this from `PrereqReport.producer_chain`).
+        was_mocked: Set True by `WorkflowExecutor._execute_function_step`
+            (Phase 5 of docs/superpowers/plans/2026-08-20-expert-steps-as-
+            skill-tools.md) when this result came from a `StepContract.mock`
+            `MockSpec`, not a real handler call -- the step's real side
+            effect (Drive write, Telegram send, BOM trigger, ...) did NOT
+            happen. R6's "a mocked run must be labelled mocked everywhere"
+            reads this flag, not `data`/`progress_message` content, so
+            marking survives regardless of what a given `MockSpec` author
+            wrote into those fields.
     """
 
     # Results
@@ -463,6 +551,14 @@ class StepResult:
     # Flow control
     skip_remaining: bool = False
     redirect_to_main_llm: bool = False  # Input doesn't belong to this step, route to main LLM
+
+    # Soft failure (see soft_failure_code's docstring above and soft_failure() below)
+    soft_failure_code: Optional[str] = None
+    soft_failure_message: Optional[str] = None
+    remediation: Optional[str] = None
+
+    # Mock mode (see was_mocked's docstring above)
+    was_mocked: bool = False
 
     @classmethod
     def success(
@@ -533,10 +629,80 @@ class StepResult:
             progress_message=reason or "Input appears to be a new request",
         )
 
+    @classmethod
+    def soft_failure(cls, code: str, message: str, remediation: str = "") -> "StepResult":
+        """Create a result for contract-detectable misuse -- must NOT halt the run.
+
+        The whole difference from `failure()`: this leaves `error` unset, so
+        `WorkflowExecutor._execute_one_step`'s `if result.error:` halt check
+        (the thing that stops a packet's whole run) never trips. Meant to be
+        fed back to an LLM driving a skill step's tool-call loop as an
+        ordinary tool result it can read and self-correct from -- a wrong
+        call becomes something to retry differently, not a fatal error.
+
+        `code` should be one of `SOFT_FAILURE_CODES`, though this does not
+        enforce that -- callers outside this module (e.g. a step handler
+        that notices its own required parameter is missing) may need a code
+        this module didn't anticipate, and refusing to construct the result
+        would be worse than a slightly-unvalidated `code` string.
+
+        Args:
+            code: What kind of misuse this is (e.g. "unmet_prerequisite").
+            message: Human/LLM-readable explanation of what went wrong.
+            remediation: What the caller should do about it (e.g. which
+                other step to call first). Empty string, not None, when
+                there's nothing more specific to say -- keeps callers from
+                needing an `or ""` at every read site.
+
+        Returns:
+            StepResult with soft_failure_code/soft_failure_message/
+            remediation set, error left as None.
+        """
+        return cls(
+            soft_failure_code=code,
+            soft_failure_message=message,
+            remediation=remediation,
+        )
+
     @property
     def is_success(self) -> bool:
-        """Check if result indicates success."""
-        return self.error is None
+        """Check if result indicates success.
+
+        False for a soft failure too, despite `error` staying None --
+        `is_success` answers "did this step attempt actually succeed", which
+        a soft failure did not, even though it must not halt the run the way
+        `error` being set would. Callers that specifically need "did this
+        halt the run" should check `error` directly rather than this
+        property.
+        """
+        return self.error is None and self.soft_failure_code is None
+
+    @property
+    def is_soft_failure(self) -> bool:
+        """Whether this result is a soft_failure() -- convenience for callers
+        (e.g. Phase 4's tool-call routing) that need to branch on it
+        specifically, rather than inferring it from is_success being False."""
+        return self.soft_failure_code is not None
 
 
-__all__ = ["StepContext", "StepResult"]
+# Vocabulary for StepResult.soft_failure()'s `code` argument. Phase 3 of
+# docs/superpowers/plans/2026-08-20-expert-steps-as-skill-tools.md builds
+# automatic detection for exactly two of these --
+# WorkflowExecutor._soft_failure_before_running_step derives
+# "unmet_prerequisite" from consumes_state/produces_state and
+# "guard_satisfied" from guard_keys, both from a step's StepContract. The
+# other three are reserved vocabulary for later callers: a step handler
+# itself is the natural caller for "missing_parameter"/"invalid_parameter"
+# (nothing outside a handler can know if a parameter it read via
+# context.get_parameter_value() was well-formed), and "not_permitted" is
+# Phase 6's job (permission gating) in the same plan.
+SOFT_FAILURE_CODES: Tuple[str, ...] = (
+    "missing_parameter",
+    "invalid_parameter",
+    "unmet_prerequisite",
+    "guard_satisfied",
+    "not_permitted",
+)
+
+
+__all__ = ["SOFT_FAILURE_CODES", "StepContext", "StepResult"]

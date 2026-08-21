@@ -11,6 +11,7 @@ from datetime import datetime
 from typing import Any, Dict
 
 from orchestrator.experts.step_context import StepContext, StepResult
+from orchestrator.experts.step_contracts import OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -30,7 +31,39 @@ def _get_previous_month_days_back() -> int:
     return (today - first_of_prev).days
 
 
-@register_step("fetch_chat_chronology", exposed_to_builder=True)
+@register_step(
+    "fetch_chat_chronology",
+    contract=StepContract(
+        description=(
+            "Fetches recent customer/staff chat about each grid under review "
+            "(via the customer_get_grid_chat_chronology MCP tool) and formats it "
+            "as markdown context for the GTR analysis conversation."
+        ),
+        # NOTE: reads "resolved_grids", but resolve_grid_sheets (the other GTR
+        # step that resolves grids) produces "grids_to_review" -- a real name
+        # mismatch found while writing this contract (Phase 8 of docs/superpowers/
+        # plans/2026-08-20-expert-steps-as-skill-tools.md), left as-is rather than
+        # silently "fixed": nothing among GTR's 9 handlers currently sets
+        # "resolved_grids", so this step's grids-fetch appears to be dead today
+        # (always hits the "no grids resolved" skip). Not corrected here --
+        # out of scope for a contract-authoring pass, and correcting it changes
+        # runtime behavior that deserves its own review.
+        optional_consumes_state=("resolved_grids",),
+        produces_state=("chat_chronology_md",),
+        outputs=(
+            OutputSpec(
+                name="chat_chronology_md",
+                value_type="string",
+                description="Markdown summary of recent chat activity per grid, last 7 days, capped at 50 messages/grid.",
+            ),
+        ),
+        side_effects=(
+            "Calls the customer_get_grid_chat_chronology MCP tool per grid to read "
+            "chat history. No writes."
+        ),
+    ),
+    exposed_to_builder=True,
+)
 async def fetch_chat_chronology(context: StepContext) -> StepResult:
     """Fetch chat messages related to the grids being reviewed for the previous month."""
     grids = context.get_state("resolved_grids") or []

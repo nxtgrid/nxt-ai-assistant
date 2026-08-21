@@ -200,6 +200,29 @@ class StepHandlerRegistry:
         call sites (the package_generator/ingestion_expert/grids_technical_reviewer
         pipeline handlers) must NOT be builder-reachable, so exposure is an
         explicit, reviewed second step, not a registration side effect.
+
+        Task 6.2 of docs/superpowers/plans/2026-08-20-expert-steps-as-skill-
+        tools.md: this is a DESIGN-TIME curation gate, deliberately kept
+        separate from `StepContract.required_permission` (a RUNTIME
+        authorization gate, see `step_tool_schema.caller_holds_permission`)
+        rather than folded into it. They answer different questions and
+        neither substitutes for the other:
+        - `exposed_to_builder`: "may a human skill AUTHOR wire this handler
+          into a recipe by hand, in the builder UI, at design time" --
+          checked once, statically, by `skill_validation.validate_skill_steps`
+          against `builder_exposed_handlers()` when a `kind:"function"` step
+          names a handler. Never consulted at run time.
+        - `required_permission`: "may THIS caller invoke this handler as a
+          tool during an actual run" -- checked per-call, at run time, by
+          `step_tool_schema.function_step_tool_declarations` (declare-time
+          hiding) and `WorkflowExecutor._execute_declared_function_step_call`
+          (call-time rejection). Never consulted by the builder's save-time
+          validation.
+        A handler converted onto a skill by `scripts/convert_expert_to_skill.py`
+        (Phase 7) reaches `skills.steps` WITHOUT ever passing through
+        `exposed_to_builder` at all -- that gate exists for hand-authored
+        function steps only. `required_permission` is the one gate that
+        applies uniformly regardless of how a step got into `skills.steps`.
         """
         self._builder_exposed.add(name)
 

@@ -9,7 +9,7 @@ import os
 from typing import Any, Dict
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import MockSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 from shared.utils.telegram_send import send_telegram_photo
@@ -73,6 +73,16 @@ async def _send_telegram_photo(
         ),
         consumes_results=("generate_distribution_map",),
         side_effects="Sends photo(s) to Telegram via the Bot API sendPhoto endpoint; downloads images from Google Drive as a fallback.",
+        mutates=True,
+        mutation_kind="notification",
+        # produces_state is empty (this step's outcome only ever lands in
+        # StepResult.data, e.g. map_sent) -- an empty state_updates already
+        # satisfies validate_mock_covers_outputs; message/data below are for
+        # R6 clarity, not because anything requires them.
+        mock=MockSpec(
+            data={"map_sent": False, "reason": "mock_mode"},
+            message="Would have sent the map image to Telegram.",
+        ),
     ),
 )
 async def send_lpp_map_to_telegram(context: StepContext) -> StepResult:

@@ -35,6 +35,7 @@ LOGGER = get_logger(__name__)
         produces_state=("solar_potential_fetched", "gsa_daily_potential", "gsa_yearly_potential"),
         guard_keys=("solar_potential_fetched",),
         side_effects="Calls the solar_get_solar_potential MCP tool (Global Solar Atlas).",
+        mutates=False,
     ),
 )
 async def fetch_solar_potential(context: StepContext) -> StepResult:

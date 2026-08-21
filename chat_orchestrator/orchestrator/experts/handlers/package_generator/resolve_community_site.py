@@ -22,7 +22,7 @@ import math
 from shapely.geometry import shape
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import MockSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.layout.building_footprints import fetch_building_footprints
 from shared.layout.community_detector import detect_communities
@@ -67,6 +67,21 @@ LOGGER = get_logger(__name__)
             "Reverse-geocodes the anchor to a country dataset, runs GRID3 community "
             "boundary detection, fetches building footprints, and uploads the "
             "boundary + buildings GeoJSON to Google Drive."
+        ),
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={
+                "geo_source": "community",
+                "site_name": "MOCK Community Site",
+                "community_state": {},
+                "footprint_count": 10,
+                "footprint_source": "MOCK",
+                "grid3_building_count": 10,
+                "community_boundary_drive_id": "MOCK-community-boundary-drive-id",
+                "community_buildings_drive_id": "MOCK-community-buildings-drive-id",
+            },
+            message="Would have detected the community boundary and uploaded footprint GeoJSON.",
         ),
     ),
 )

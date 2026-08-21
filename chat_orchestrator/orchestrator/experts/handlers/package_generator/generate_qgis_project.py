@@ -14,7 +14,7 @@ import asyncio
 from typing import Any
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import ParamSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.logging import get_logger
 
@@ -64,6 +64,16 @@ LOGGER = get_logger(__name__)
         side_effects=(
             "Auto-places lightning arrestors/power jumpers using network-distance "
             "algorithms; builds and uploads .qgs + .gpkg files to Google Drive."
+        ),
+        mutates=True,
+        mutation_kind="external_write",
+        mock=MockSpec(
+            state_updates={
+                "qgis_project_uploaded": True,
+                "distribution_design_draft_drive_id": "MOCK-qgs-drive-id",
+                "distribution_network_drive_id": "MOCK-gpkg-drive-id",
+            },
+            message="Would have built and uploaded the QGIS project files.",
         ),
     ),
 )

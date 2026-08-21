@@ -10,7 +10,7 @@ import asyncio
 import json
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import StepContract
+from orchestrator.experts.step_contracts import MockSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
@@ -50,6 +50,33 @@ APPSHEET_RECALC_WAIT_SECONDS = 60
         side_effects=(
             "Calls the grid_design_update_design MCP tool; waits 60s for AppSheet "
             "recalculation on the legacy backend only (the internal engine needs no wait)."
+        ),
+        mutates=True,
+        mutation_kind="db_write",
+        # R5 (Task 9.1) -- the literal example the plan names: this handler
+        # itself does `await asyncio.sleep(APPSHEET_RECALC_WAIT_SECONDS)`
+        # in-call on the legacy backend, worst case 60s (0s on the internal
+        # engine backend -- StepContract has no way to express a
+        # backend-conditional value, so this declares the worst case).
+        # Blocking synchronously inside a tool call this long burns a whole
+        # round of settings.skill_max_tool_rounds and risks request-level
+        # timeouts on the skill-tool-call surface (Phase 4) in a way that's
+        # pre-existing, accepted behavior for a top-level recipe step but
+        # newly risky once this handler is ALSO reachable as an interactive
+        # tool call. A real poll/resume mechanism (defer the AppSheet wait,
+        # let the caller check back) is NOT built here -- it would need a
+        # durable background-task/scheduling subsystem this codebase doesn't
+        # have, and one built specifically for this one handler risked being
+        # fragile (a process-local asyncio.Task does not survive past the
+        # request that started it in this deployment). Declaring this field
+        # is the honest, safe subset of Task 9.1: every caller (and, in
+        # step_tool_schema.py, the tool declaration's own description) can
+        # see this is slow and not mistake latency for failure. Left as
+        # explicit, flagged future work -- see the plan's Phase 9 notes.
+        expected_latency_seconds=60.0,
+        mock=MockSpec(
+            state_updates={"design_distances_updated": True},
+            message="Would have updated the design's cable distances (no AppSheet wait in mock mode).",
         ),
     ),
 )
