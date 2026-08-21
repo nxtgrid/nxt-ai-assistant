@@ -13,7 +13,7 @@ import json
 from datetime import datetime, timezone
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import MockSpec, ParamSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, OutputSpec, ParamSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.grid_design.artifact_log import sweep_state_for_artifacts
 from shared.utils.error_messages import sanitize_error_for_user
@@ -226,6 +226,12 @@ def _get_requester_name(context: StepContext) -> str:
             "editable_total_kwh",
         ),
         consumes_results=("generate_distribution_map",),
+        outputs=(
+            OutputSpec(name="design.design_id", value_type="string", where="data",
+                       description="Identifier of the generated power plant design."),
+            OutputSpec(name="design.design_name", value_type="string", where="data",
+                       description="Human-readable name of the generated design."),
+        ),
         params=(
             ParamSpec(
                 name="site_name",

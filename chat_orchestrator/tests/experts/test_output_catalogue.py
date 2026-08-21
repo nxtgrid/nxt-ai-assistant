@@ -38,3 +38,24 @@ def test_every_catalogue_output_has_a_description():
         assert contract is not None, f"{step} has no StepContract"
         for spec in contract.outputs:
             assert spec.description.strip(), f"{step}.{spec.name} has no description"
+
+
+def test_design_and_bom_declare_their_energy_and_cost_values():
+    design = _output_names("generate_powerplant_design")
+    assert {"design.design_id", "design.design_name"} <= design
+
+    bom = _output_names("generate_site_bom")
+    assert {
+        "bom.total_cost",
+        "bom.main_energy_asset_cost",
+        "bom.metering_cost",
+        "bom.bos_cost",
+        "energy.total_kwp",
+        "energy.total_kwh",
+        "energy.total_kva",
+        "energy.Wp_per_conn",
+        "energy.num_subsystems",
+        "energy.num_inverters",
+        "energy.num_batteries",
+        "energy.num_panels",
+    } <= bom

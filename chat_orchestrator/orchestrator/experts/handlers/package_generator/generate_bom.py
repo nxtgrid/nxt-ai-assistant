@@ -8,7 +8,7 @@ energy specs.
 import json
 
 from orchestrator.experts.step_context import StepContext, StepResult
-from orchestrator.experts.step_contracts import MockSpec, StepContract
+from orchestrator.experts.step_contracts import MockSpec, OutputSpec, StepContract
 from orchestrator.experts.step_registry import register_step
 from shared.utils.error_messages import sanitize_error_for_user
 from shared.utils.logging import get_logger
@@ -54,6 +54,32 @@ LOGGER = get_logger(__name__)
             "num_panels",
             "editable_total_kwp",
             "editable_total_kwh",
+        ),
+        outputs=(
+            OutputSpec(name="bom.total_cost", value_type="number", where="data",
+                       description="Total bill-of-materials cost for the site."),
+            OutputSpec(name="bom.main_energy_asset_cost", value_type="number", where="data",
+                       description="Cost of generation and storage assets only."),
+            OutputSpec(name="bom.metering_cost", value_type="number", where="data",
+                       description="Cost of meters and metering infrastructure."),
+            OutputSpec(name="bom.bos_cost", value_type="number", where="data",
+                       description="Balance-of-system cost: mounting, cabling, protection."),
+            OutputSpec(name="energy.total_kwp", value_type="number", where="data",
+                       description="Total installed solar peak capacity in kWp."),
+            OutputSpec(name="energy.total_kwh", value_type="number", where="data",
+                       description="Total battery storage capacity in kWh."),
+            OutputSpec(name="energy.total_kva", value_type="number", where="data",
+                       description="Total inverter apparent power rating in kVA."),
+            OutputSpec(name="energy.Wp_per_conn", value_type="number", where="data",
+                       description="Installed peak watts per served connection."),
+            OutputSpec(name="energy.num_subsystems", value_type="integer", where="data",
+                       description="Number of independent generation subsystems."),
+            OutputSpec(name="energy.num_inverters", value_type="integer", where="data",
+                       description="Number of inverters in the design."),
+            OutputSpec(name="energy.num_batteries", value_type="integer", where="data",
+                       description="Number of battery units in the design."),
+            OutputSpec(name="energy.num_panels", value_type="integer", where="data",
+                       description="Number of solar panels in the design."),
         ),
         guard_keys=("bom_generated",),
         side_effects=(
