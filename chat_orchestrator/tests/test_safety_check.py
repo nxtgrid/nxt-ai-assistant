@@ -289,3 +289,69 @@ def test_detect_escalation_claim_negation_handles_both_apostrophes(apostrophe):
     text = f"I can{apostrophe}t escalate this, but here is what I found."
 
     assert safety_check_module._detect_escalation_claim(text) is False
+
+
+# The 2026-08-24 Hardrock leak, verbatim in shape: the model wrapped the call
+# in square brackets, so the text ends in ")]" rather than ")". It carried a
+# conversation_context but no question_summary.
+BRACKET_WRAPPED_LEAK = (
+    "[Call Tool: escalate_to_support(action_type='other_action', "
+    "conversation_context='Meter 47003334126. User reports burnt output "
+    "terminals (second occurrence). User seeks clarification and "
+    "recommendations on meter burning.')]"
+)
+
+
+def test_extract_kwargs_recovers_arguments_from_bracket_wrapped_call():
+    # The end-anchored r"...\)\s*$" match this replaced silently returned {}
+    # for any leak with a trailing character after the closing paren.
+    kwargs = safety_check_module._extract_kwargs_from_tool_call_text(
+        BRACKET_WRAPPED_LEAK, "escalate_to_support"
+    )
+
+    assert kwargs["action_type"] == "other_action"
+    assert kwargs["conversation_context"].startswith("Meter 47003334126.")
+
+
+def test_extract_kwargs_tolerates_parentheses_inside_quoted_arguments():
+    leaked = (
+        "escalate_to_support(question_summary='Burnt meter (output terminals)', "
+        "reason='staff_action_required'). Support will follow up."
+    )
+
+    kwargs = safety_check_module._extract_kwargs_from_tool_call_text(
+        leaked, "escalate_to_support"
+    )
+
+    assert kwargs["question_summary"] == "Burnt meter (output terminals)"
+    assert kwargs["reason"] == "staff_action_required"
+
+
+@pytest.mark.asyncio
+async def test_bracket_wrapped_leak_escalates_with_model_context(fake_escalation_service):
+    state = _make_state(final_response=BRACKET_WRAPPED_LEAK)
+
+    await safety_check(state)
+
+    _, kwargs = fake_escalation_service.escalate_to_support.await_args
+    assert kwargs["question_summary"].startswith("Meter 47003334126.")
+
+
+@pytest.mark.asyncio
+async def test_escalation_question_is_never_the_customer_error_message(
+    fake_escalation_service,
+):
+    # The card's "Question:" is what support staff read first. Extracting it
+    # from `final_response` after the leak guard replaced that with the
+    # generic "I tried to get help..." message made every safety escalation
+    # arrive with a useless question (2026-08-24 Hardrock incident).
+    state = _make_state(final_response="default_api.escalate_to_support")
+
+    await safety_check(state)
+
+    _, kwargs = fake_escalation_service.escalate_to_support.await_args
+    summary = kwargs["question_summary"]
+    assert "contact support directly" not in summary
+    assert "ran into an issue" not in summary
+    # Falls back to what the customer actually asked.
+    assert summary == _make_state()["user_input"]

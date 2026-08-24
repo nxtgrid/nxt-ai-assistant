@@ -53,6 +53,20 @@ def _grid_option(field: JiraFieldDefinition, grid_name: str | None) -> dict[str,
     return {"id": option.id} if option is not None else None
 
 
+def _organization_ids(organization_id: str) -> list[int] | None:
+    """Jira's array-of-numbers value for the Organizations field.
+
+    ``None`` when the id isn't numeric, which can only happen if Jira's
+    organisation list returns an unexpected shape. Dropping the field still
+    files the ticket; sending a non-number 400s the whole create and the
+    escalation ends up with no ticket at all.
+    """
+    try:
+        return [int(str(organization_id).strip())]
+    except (TypeError, ValueError):
+        return None
+
+
 def _resolve_field_value(field: JiraFieldDefinition, context: JiraCreateContext) -> Any:
     """Value ``build_issue_payload`` would set for a non-standard field, or ``None``
     when this context has nothing to offer it. Shared with
@@ -64,10 +78,14 @@ def _resolve_field_value(field: JiraFieldDefinition, context: JiraCreateContext)
     if field.id == "priority" and context.priority_id:
         return {"id": context.priority_id}
     if _field_name(field) in _ORGANIZATION_FIELD_NAMES and context.organization_id:
-        # Jira's Organizations field is multi-value even for a single org --
-        # the create API rejects a bare object with "Specify the value for
-        # Organizations in an array" (2026-08-11 Hardrock incident).
-        return [{"id": context.organization_id}]
+        # Jira's Organizations field takes an array of *numeric* org ids.
+        # Both other shapes are rejected by the create API, one incident
+        # apart: a bare object with "Specify the value for Organizations in
+        # an array" (2026-08-11), and an array of objects with "Operation
+        # value must be a number" (2026-08-24) -- both on Hardrock.
+        # ``[int(...)]`` is what the pre-metadata `_create_jira_ticket` sent,
+        # and it filed tickets successfully for months.
+        return _organization_ids(context.organization_id)
     if _field_name(field) == "grid":
         return _grid_option(field, context.grid_name)
     return None

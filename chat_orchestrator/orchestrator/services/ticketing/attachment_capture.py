@@ -80,11 +80,13 @@ async def capture_escalation_media(
     try:
         client = get_client()
     except Exception:
-        LOGGER.warning(
+        # opt(exception=True), not exc_info=True: LOGGER is loguru, which
+        # takes unknown kwargs as str.format arguments and silently drops
+        # them -- so exc_info logged the message with no traceback at all.
+        LOGGER.opt(exception=True).warning(
             "capture_escalation_media: get_client() raised -- skipping capture "
             "for escalation {}",
             escalation_id,
-            exc_info=True,
         )
         return
 
@@ -140,10 +142,12 @@ async def capture_escalation_media(
                 size_bytes=len(file_bytes),
             )
         except Exception:
-            LOGGER.warning(
+            # Same loguru caveat as above -- without opt(exception=True) this
+            # recorded only the file_id, leaving the 2026-08-24 media-capture
+            # failures with no recoverable cause.
+            LOGGER.opt(exception=True).warning(
                 "capture_escalation_media: failed to capture file_id={} for escalation {}",
                 file_id,
                 escalation_id,
-                exc_info=True,
             )
             continue

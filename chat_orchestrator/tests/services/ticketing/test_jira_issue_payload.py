@@ -81,33 +81,55 @@ def _issue_type_requiring_organization(field_name: str = "Organizations") -> Jir
     )
 
 
-def test_build_issue_payload_wraps_organization_id_in_array_when_org_id_provided():
-    # Jira's Organizations field (customfield_10002 in production) is a
-    # multi-value field even for a single org: the create API 400s with
-    # "Specify the value for Organizations in an array" for a bare object.
-    # Reproduces the 2026-08-11 Hardrock incident (both escalations for
-    # meter 47003337616 failed with exactly this error).
+def test_build_issue_payload_sends_organization_id_as_array_of_numbers():
+    # Jira's Organizations field (customfield_10002 in production) takes an
+    # array of *numeric* org ids -- ``[14]``, not ``[{"id": "14"}]``. The
+    # object form 400s with {"customfield_10002": "Operation value must be a
+    # number"}, which is what broke auto-tracking on the 2026-08-24 Hardrock
+    # escalation for meter 47003334126.
+    #
+    # ``_resolve_jira_org_id`` returns ``str(o["id"])`` off Jira's own
+    # organisation list, so the id is always a numeric string here -- the
+    # pre-metadata ``_create_jira_ticket`` sent ``[int(jira_org_id)]`` and
+    # created tickets successfully for months.
     issue_type = _issue_type_requiring_organization()
-    context = _context(organization_id="org-14")
+    context = _context(organization_id="14")
 
     payload = build_issue_payload(context, issue_type)
 
     assert payload is not None
-    assert payload["fields"]["customfield_10002"] == [{"id": "org-14"}]
+    assert payload["fields"]["customfield_10002"] == [14]
 
 
-def test_build_issue_payload_wraps_organization_id_in_array_for_organisation_variant():
+def test_build_issue_payload_sends_numeric_organization_for_organisation_variant():
     # _ORGANIZATION_FIELD_NAMES matches "organization"/"organisation" (both
     # spellings, singular and plural) case-insensitively -- confirm the
-    # array-wrap applies via that shared set, not a one-off literal check
-    # bolted onto just the "Organizations" spelling.
+    # numeric-array shape applies via that shared set, not a one-off literal
+    # check bolted onto just the "Organizations" spelling.
     issue_type = _issue_type_requiring_organization(field_name="Organisation")
+    context = _context(organization_id="14")
+
+    payload = build_issue_payload(context, issue_type)
+
+    assert payload is not None
+    assert payload["fields"]["customfield_10002"] == [14]
+
+
+def test_build_issue_payload_omits_organization_when_id_is_not_numeric():
+    # A non-numeric id can only come from an unexpected Jira response shape.
+    # Dropping the optional field still files the ticket; sending it 400s the
+    # whole create, losing the escalation's ticket entirely.
+    issue_type = JiraIssueType(
+        id="disruption-id",
+        name="Electricity Service Disruption",
+        fields=(JiraFieldDefinition(id="customfield_10002", name="Organizations"),),
+    )
     context = _context(organization_id="org-14")
 
     payload = build_issue_payload(context, issue_type)
 
     assert payload is not None
-    assert payload["fields"]["customfield_10002"] == [{"id": "org-14"}]
+    assert "customfield_10002" not in payload["fields"]
 
 
 def test_build_issue_payload_rejects_type_when_organizations_required_but_unresolved():

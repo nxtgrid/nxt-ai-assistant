@@ -323,3 +323,52 @@ async def test_default_download_fn_resolves_to_download_telegram_photo(
     )
     assert len(bucket.uploaded) == 1
     repo.insert.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_capture_failure_logs_the_underlying_cause(
+    repo: AttachmentRepository,
+) -> None:
+    """The warning must carry the traceback, not just the file_id.
+
+    ``exc_info=True`` is a stdlib-logging keyword; loguru treats an unknown
+    kwarg as a ``str.format`` argument and drops it, so the cause never
+    reached the logs. Three escalations lost their media on 2026-08-24 with
+    nothing recorded but the file_id -- including a burnt-meter report whose
+    photos were the entire evidence.
+    """
+    from loguru import logger
+
+    class _RaisingBucket:
+        def upload(self, path: str, file: bytes, file_options: Dict[str, Any]) -> None:
+            raise RuntimeError("Bucket not found")
+
+    class _RaisingStorage:
+        def from_(self, name: str) -> "_RaisingBucket":
+            return _RaisingBucket()
+
+    class _RaisingClient:
+        def __init__(self) -> None:
+            self.storage = _RaisingStorage()
+
+    async def fake_download(file_id: str, bot_token: str, max_size_bytes: int):
+        return "ZmFrZS1ieXRlcw==", "image/jpeg"
+
+    records: List[str] = []
+    sink_id = logger.add(records.append, level="WARNING", backtrace=False, diagnose=False)
+    try:
+        await capture_escalation_media(
+            escalation_id="esc-1",
+            media_file_ids=[{"type": "image", "file_id": "file123"}],
+            bot_token="token",
+            get_client=lambda: _RaisingClient(),
+            attachment_repository=repo,
+            download_fn=fake_download,
+        )
+    finally:
+        logger.remove(sink_id)
+
+    logged = "".join(records)
+    assert "file123" in logged
+    assert "Bucket not found" in logged
+    assert "Traceback" in logged
