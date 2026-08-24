@@ -157,14 +157,16 @@ def test_build_issue_payload_includes_caller_supplied_assignee_and_organisation_
     )
 
     payload = build_issue_payload(
-        _context(assignee_account_id="account-1", organization_id="organisation-2"), issue_type
+        _context(assignee_account_id="account-1", organization_id="2"), issue_type
     )
 
     assert payload is not None
     assert payload["fields"]["assignee"] == {"accountId": "account-1"}
-    # Organizations is a multi-value Jira field even for a single org --
-    # a bare object 400s against the real API (2026-08-11 Hardrock incident).
-    assert payload["fields"]["customfield_56"] == [{"id": "organisation-2"}]
+    # Organizations takes an array of numeric org ids against the real API:
+    # a bare object 400s with "Specify the value ... in an array"
+    # (2026-08-11 Hardrock) and an array of objects 400s with "Operation
+    # value must be a number" (2026-08-24 Hardrock).
+    assert payload["fields"]["customfield_56"] == [2]
 
 
 def test_incompatible_type_with_an_unknown_required_field_is_excluded():

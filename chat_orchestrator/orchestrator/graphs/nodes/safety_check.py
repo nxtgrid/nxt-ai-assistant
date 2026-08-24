@@ -35,6 +35,11 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
         State updates with safety_escalation_needed flag
     """
     final_response = state.get("final_response", "")
+    # The model's response as generated. Every guard below may replace
+    # `final_response` with a customer-safe message, so the internal
+    # escalation summary must be derived from this instead -- see the summary
+    # block further down.
+    original_response = final_response
     tool_calls = state.get("accumulated_tool_calls") or state.get("tool_calls") or []
     user_context = state.get("user_context")
     session_id = state.get("session_id")
@@ -163,13 +168,26 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
                 user_context.organization_ids[0]
             )
 
-        # Extract summary from bot's response. Prefer the model's own summary
-        # recovered from a leaked raw tool call over a truncated dump of that
-        # call's syntax.
+        # The escalation card's "Question:" -- the first thing support staff
+        # read. Prefer the model's own summary recovered from a leaked raw
+        # tool call, then its context, then the response as generated.
+        #
+        # Never `final_response`: by this point the guards above may have
+        # replaced it with the generic "I tried to get help but ran into an
+        # issue" message, which made every safety escalation arrive with that
+        # error text as its question (2026-08-24 Hardrock incident). When the
+        # response was raw call syntax there is no prose in it to summarise
+        # either, so the customer's own message is the useful fallback.
+        if raw_tool_call_leaked:
+            fallback_summary = (user_input or "").strip() or _extract_escalation_summary(
+                original_response
+            )
+        else:
+            fallback_summary = _extract_escalation_summary(original_response)
         summary = (
             leaked_kwargs.get("question_summary")
             or leaked_kwargs.get("conversation_context")
-            or _extract_escalation_summary(final_response)
+            or fallback_summary
         )
 
         # Trigger the escalation
@@ -383,6 +401,45 @@ def _extract_first_json_object(text: str, start: int):
     return None
 
 
+def _extract_balanced_call_args(text: str, start: int):
+    """Return the argument text inside the call whose ``(`` follows ``start``.
+
+    Brace/quote-aware for the same reason ``_extract_first_json_object`` is:
+    the call is embedded in free-form model output, so it may be wrapped
+    (``[Call Tool: name(...)]``) or trailed by prose, and its arguments may
+    themselves contain parentheses. Matching to end-of-string instead —
+    ``\\)\\s*$`` — silently recovered nothing for any leak that did not end at
+    the closing paren, which is how the 2026-08-24 bracket-wrapped leak lost
+    the model's own context.
+    """
+    open_idx = text.find("(", start)
+    if open_idx == -1:
+        return None
+
+    depth = 0
+    quote = None
+    escaped = False
+    for i in range(open_idx, len(text)):
+        char = text[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in "\"'":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx + 1 : i]
+    return None
+
+
 def _extract_kwargs_from_tool_call_text(response_text: str, tool_name: str) -> Dict[str, str]:
     """Best-effort recovery of arguments from a leaked raw tool-call string.
 
@@ -395,11 +452,16 @@ def _extract_kwargs_from_tool_call_text(response_text: str, tool_name: str) -> D
         return {}
 
     # Shape 1: name(key='value', ...)
-    match = re.search(rf"{re.escape(tool_name)}\s*\((.*)\)\s*$", response_text, re.DOTALL)
-    if match:
+    name_pos = response_text.find(tool_name)
+    args_text = (
+        _extract_balanced_call_args(response_text, name_pos + len(tool_name))
+        if name_pos != -1
+        else None
+    )
+    if args_text:
         kwargs: Dict[str, str] = {}
         for kw_match in re.finditer(
-            r"(\w+)\s*=\s*'([^']*)'|(\w+)\s*=\s*\"([^\"]*)\"", match.group(1)
+            r"(\w+)\s*=\s*'([^']*)'|(\w+)\s*=\s*\"([^\"]*)\"", args_text
         ):
             key = kw_match.group(1) or kw_match.group(3)
             value = kw_match.group(2) if kw_match.group(1) else kw_match.group(4)
