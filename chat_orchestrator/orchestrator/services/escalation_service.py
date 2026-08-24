@@ -19,7 +19,6 @@ import asyncio
 import base64
 import os
 import re
-import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional, cast
@@ -77,11 +76,6 @@ def _get_jira_session() -> aiohttp.ClientSession:
         _jira_session = aiohttp.ClientSession()
     return _jira_session
 
-
-# TTL cache for Jira organization list (changes rarely — max one fetch per 30 min).
-_jira_orgs_cache: List[Dict[str, Any]] = []
-_jira_orgs_cache_time: float = 0.0
-_JIRA_ORGS_TTL: float = 1800.0  # 30 minutes
 
 
 def _is_after_hours() -> bool:
@@ -178,7 +172,6 @@ class EscalationService:
         self._jira_email = os.getenv("JIRA_USERNAME", "")
         self._jira_api_token = os.getenv("JIRA_API_TOKEN", "")
         self._jira_project_key = os.getenv("JIRA_PROJECT_KEY", "OPS")
-        self._jira_issue_type = os.getenv("JIRA_ISSUE_TYPE", "Task")
 
         # Backend-agnostic ticketing seam. Routes to Jira or the internal ticket
         # backend per TICKET_BACKEND_OVERRIDE / Jira health. Shares this service's
@@ -809,19 +802,22 @@ class EscalationService:
             }
 
     # ==========================================================================
-    # DEAD CODE (Task 4, Jira-optional ticket backend plan): everything from here
-    # down to notify_customer_resolved() has zero remaining callers. This logic
-    # was moved to orchestrator/services/ticketing/jira_backend.py's
-    # JiraTicketBackend, which is what self._tickets (TicketService) now uses for
-    # all ticket creation/comment/status/dedup. DO NOT call these methods directly
-    # or add new callers -- that would silently bypass TicketService's backend
-    # resolution (Jira-vs-internal), the exact bug class this refactor exists to
-    # prevent. Safe to delete in a follow-up cleanup pass (see Task 9).
+    # LEGACY Jira helpers. Ticket creation/comment/status/dedup all go through
+    # self._tickets (TicketService) -> orchestrator/services/ticketing/
+    # jira_backend.py's JiraTicketBackend. DO NOT add new callers here -- that
+    # would silently bypass TicketService's backend resolution (Jira-vs-internal),
+    # the exact bug class that refactor exists to prevent.
+    #
+    # Still reachable, so not removable: _transition_jira_to_done() is awaited by
+    # handler.py's support-reply "Closed" cleanup, and _jira_auth_headers() serves
+    # the remaining methods below.
+    #
+    # An earlier banner here claimed everything down to notify_customer_resolved()
+    # was callerless; that was wrong about _transition_jira_to_done. Re-check each
+    # method individually before deleting any of the rest -- the pre-metadata
+    # _create_jira_ticket() sat dead here holding the *correct* Jira Organizations
+    # field shape while the live path shipped two wrong ones.
     # ==========================================================================
-
-    # JIRA Grid field (customfield_10057) option IDs — required select field.
-    # Fallback used when grid cannot be resolved from escalation context.
-    JIRA_GRID_FALLBACK_OPTION_ID = "10315"  # "Software"
 
     def _jira_auth_headers(self) -> Dict[str, str]:
         """Return Basic-auth + JSON headers for Jira API calls (cached per instance)."""
@@ -835,317 +831,6 @@ class EscalationService:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
-
-    async def _resolve_jira_grid_option(
-        self,
-        grid_name: Optional[str],
-        headers: Dict[str, str],
-    ) -> Dict[str, str]:
-        """Resolve a grid name to a JIRA customfield_10057 option.
-
-        Fetches allowed values from JIRA create metadata, fuzzy-matches the
-        grid name, and returns ``{"id": "<option_id>"}``.  Falls back to the
-        ``Software`` option when no match is found or when *grid_name* is None.
-        """
-        fallback = {"id": self.JIRA_GRID_FALLBACK_OPTION_ID}
-        if not grid_name:
-            return fallback
-
-        try:
-            meta_url = (
-                f"{self._jira_base_url}/rest/api/3/issue/createmeta"
-                f"/{self._jira_project_key}/issuetypes"
-            )
-            session = _get_jira_session()
-            # Find Task issue type ID
-            async with session.get(
-                meta_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp:
-                if resp.status != 200:
-                    LOGGER.warning(f"Could not fetch issue types: {resp.status}")
-                    return fallback
-                type_data = await resp.json()
-
-            task_type_id = None
-            for it in type_data.get("issueTypes", type_data.get("values", [])):
-                if it.get("name") == "Task":
-                    task_type_id = it.get("id")
-                    break
-            if not task_type_id:
-                return fallback
-
-            # Fetch field metadata for Task type
-            fields_url = (
-                f"{self._jira_base_url}/rest/api/3/issue/createmeta"
-                f"/{self._jira_project_key}/issuetypes/{task_type_id}"
-            )
-            async with session.get(
-                fields_url, headers=headers, timeout=aiohttp.ClientTimeout(total=15)
-            ) as resp2:
-                if resp2.status != 200:
-                    return fallback
-                fields_data = await resp2.json()
-
-            # Find customfield_10057 and match
-            for field in fields_data.get("fields", fields_data.get("values", [])):
-                fid = field.get("fieldId", field.get("key", ""))
-                if fid == "customfield_10057":
-                    allowed = field.get("allowedValues", [])
-                    # Exact match first (case-insensitive)
-                    for opt in allowed:
-                        if opt["value"].lower() == grid_name.lower():
-                            LOGGER.info(f"Grid '{grid_name}' matched JIRA option id={opt['id']}")
-                            return {"id": opt["id"]}
-                    # Fuzzy match
-                    try:
-                        from shared.utils.grid_matcher import find_best_grid_match
-
-                        option_names = [o["value"] for o in allowed]
-                        matched, was_fuzzy, score = find_best_grid_match(
-                            grid_name, option_names, threshold=80
-                        )
-                        if matched:
-                            for opt in allowed:
-                                if opt["value"] == matched:
-                                    LOGGER.info(
-                                        f"Grid '{grid_name}' fuzzy matched to "
-                                        f"'{matched}' (score={score}%) -> id={opt['id']}"
-                                    )
-                                    return {"id": opt["id"]}
-                    except ImportError:
-                        pass
-                    LOGGER.warning(f"No JIRA grid option matched for '{grid_name}', using fallback")
-                    return fallback
-        except Exception as e:
-            LOGGER.warning(f"Error resolving JIRA grid option: {e}")
-        return fallback
-
-    async def _resolve_jira_account_id(
-        self,
-        email: str,
-        headers: Dict[str, str],
-    ) -> Optional[str]:
-        """Resolve a JIRA account ID from an email address."""
-        try:
-            url = f"{self._jira_base_url}/rest/api/3/user/search"
-            async with _get_jira_session().get(
-                url,
-                params={"query": email},
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status != 200:
-                    return None
-                users = await resp.json()
-                for user in users:
-                    if user.get("emailAddress", "").lower() == email.lower():
-                        return str(user.get("accountId"))
-        except Exception as e:
-            LOGGER.debug(f"Could not resolve JIRA account for {email}: {e}")
-        return None
-
-    async def _fetch_jira_organizations(self) -> List[Dict[str, Any]]:
-        """GET all JSM organizations, handling pagination (max 50 per page, 20 pages max).
-
-        Results are cached for 30 minutes to avoid hammering the Jira API on every escalation.
-        """
-        global _jira_orgs_cache, _jira_orgs_cache_time
-        if time.monotonic() - _jira_orgs_cache_time < _JIRA_ORGS_TTL:
-            return _jira_orgs_cache
-
-        orgs: List[Dict[str, Any]] = []
-        url: Optional[str] = f"{self._jira_base_url}/rest/servicedeskapi/organization"
-        headers = self._jira_auth_headers()
-        session = _get_jira_session()
-        page = 0
-        max_pages = 20
-        while url and page < max_pages:
-            try:
-                async with session.get(
-                    url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
-                    if resp.status != 200:
-                        LOGGER.warning(
-                            "Jira org fetch returned HTTP {} — stopping pagination", resp.status
-                        )
-                        break
-                    data = await resp.json()
-            except Exception as e:
-                LOGGER.warning("Error fetching Jira organizations (page {}): {}", page, e)
-                break
-            orgs.extend(data.get("values", []))
-            next_url = (
-                data.get("_links", {}).get("next") if not data.get("isLastPage", True) else None
-            )
-            # Validate next URL is on the same Jira host to prevent SSRF
-            if next_url and self._jira_base_url and next_url.startswith(self._jira_base_url):
-                url = next_url
-            else:
-                url = None
-            page += 1
-
-        _jira_orgs_cache = orgs
-        _jira_orgs_cache_time = time.monotonic()
-        return orgs
-
-    async def _resolve_jira_org_id(self, org_name: str) -> Optional[str]:
-        """Fuzzy-match org_name against Jira's organisation list.
-
-        Returns the Jira org ID as a string, or None if no match.
-        """
-        from shared.utils.grid_matcher import find_best_grid_match
-
-        try:
-            orgs = await self._fetch_jira_organizations()
-            name_to_id = {o["name"]: str(o["id"]) for o in orgs}
-            matched_name, _, _score = find_best_grid_match(org_name, list(name_to_id.keys()))
-            return name_to_id[matched_name] if matched_name else None
-        except Exception as e:
-            LOGGER.warning("Could not resolve Jira org for '{}': {}", org_name, e)
-            return None
-
-    async def _create_jira_ticket(
-        self,
-        summary: str,
-        description: str,
-        grid_name: Optional[str] = None,
-        assignee_email: Optional[str] = None,
-        organization_short_name: Optional[str] = None,
-        labels: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Create a Jira ticket.
-
-        Args:
-            summary: Ticket summary/title
-            description: Ticket description
-            grid_name: Grid name to match against JIRA options (optional)
-            assignee_email: Email to auto-assign the ticket to (optional)
-            organization_short_name: Org name for JSM Organizations field (optional)
-
-        Returns:
-            Dict with success status and ticket key
-        """
-        try:
-            headers = self._jira_auth_headers()
-            url = f"{self._jira_base_url}/rest/api/3/issue"
-
-            # Resolve grid option (required field in OPS project)
-            grid_option = await self._resolve_jira_grid_option(grid_name, headers)
-
-            # Resolve assignee account ID
-            assignee_account_id = None
-            if assignee_email:
-                assignee_account_id = await self._resolve_jira_account_id(assignee_email, headers)
-                if assignee_account_id:
-                    LOGGER.info(f"Will assign ticket to {assignee_email}")
-                else:
-                    LOGGER.debug(f"Could not resolve JIRA account for {assignee_email}")
-
-            # Build ticket payload
-            payload: Dict[str, Any] = {
-                "fields": {
-                    "project": {"key": self._jira_project_key},
-                    "summary": summary,
-                    "description": {
-                        "type": "doc",
-                        "version": 1,
-                        "content": [
-                            {
-                                "type": "paragraph",
-                                "content": [{"type": "text", "text": description}],
-                            }
-                        ],
-                    },
-                    "issuetype": {"name": self._jira_issue_type},
-                    "customfield_10057": grid_option,
-                }
-            }
-
-            if assignee_account_id:
-                payload["fields"]["assignee"] = {"accountId": assignee_account_id}
-
-            if labels:
-                payload["fields"]["labels"] = labels
-
-            # Tag the JSM Organizations field (fuzzy-match our org to Jira's org list)
-            org_field_id = os.getenv("JIRA_ORGANIZATION_FIELD_ID")
-            if organization_short_name and org_field_id:
-                jira_org_id = await self._resolve_jira_org_id(organization_short_name)
-                if jira_org_id:
-                    payload["fields"][org_field_id] = [int(jira_org_id)]
-                    LOGGER.info(
-                        "Tagged Jira org field {}={} for org '{}'",
-                        org_field_id,
-                        jira_org_id,
-                        organization_short_name,
-                    )
-
-            LOGGER.info(f"JIRA ticket grid option: {grid_option}")
-
-            jira_sess = _get_jira_session()
-            async with jira_sess.post(
-                url, json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=30)
-            ) as response:
-                response_text = await response.text()
-
-                if response.status in (200, 201):
-                    result: Dict[str, Any] = await response.json()
-                    jira_key = result.get("key")
-                    LOGGER.info(f"Successfully created Jira ticket: {jira_key}")
-                    return {
-                        "success": True,
-                        "key": jira_key,
-                        "id": result.get("id"),
-                    }
-
-                # Fallback: if issue type is invalid, retry with "Task"
-                if (
-                    response.status == 400
-                    and "issuetype" in response_text
-                    and payload["fields"]["issuetype"]["name"] != "Task"
-                ):
-                    LOGGER.warning(
-                        f"Issue type '{payload['fields']['issuetype']['name']}' "
-                        f"rejected, retrying with 'Task'"
-                    )
-                    payload["fields"]["issuetype"]["name"] = "Task"
-                    async with jira_sess.post(
-                        url,
-                        json=payload,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=30),
-                    ) as retry_resp:
-                        retry_text = await retry_resp.text()
-                        if retry_resp.status in (200, 201):
-                            retry_result: Dict[str, Any] = await retry_resp.json()
-                            jira_key = retry_result.get("key")
-                            LOGGER.info(f"Created Jira ticket with fallback type: {jira_key}")
-                            return {
-                                "success": True,
-                                "key": jira_key,
-                                "id": retry_result.get("id"),
-                            }
-                        LOGGER.error(
-                            f"Fallback also failed: status={retry_resp.status}, "
-                            f"response={retry_text}"
-                        )
-
-                LOGGER.error(
-                    f"Failed to create Jira ticket: status={response.status}, "
-                    f"response={response_text}"
-                )
-                return {
-                    "success": False,
-                    "error": f"Jira API returned {response.status}: {response_text}",
-                }
-
-        except Exception as e:
-            LOGGER.exception(f"Error creating Jira ticket: {e}")
-            return {
-                "success": False,
-                "error": str(e),
-            }
 
     async def _add_jira_comment(self, issue_key: str, body: str) -> bool:
         """Post a plain-text comment to an existing Jira issue. Returns True on success."""
