@@ -8,6 +8,7 @@ This node runs post-generation safety checks:
    call, and replaces it before it reaches the customer
 """
 
+import json
 import os
 import re
 from typing import Any, Dict
@@ -58,14 +59,16 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
     # call's keyword arguments (better than falling back to a truncated dump of
     # the raw syntax), replace the response with a safe message, and treat it the
     # same as a natural-language escalation claim below.
-    raw_tool_call_leaked = _detect_raw_tool_call_leak(final_response)
+    known_tool_names = extract_declared_tool_names(state)
+    raw_tool_call_leaked = _detect_raw_tool_call_leak(final_response, known_tool_names)
     leaked_kwargs: Dict[str, str] = {}
     if raw_tool_call_leaked:
+        leaked_tool = _find_leaked_tool_name(final_response, known_tool_names)
         LOGGER.error(
-            f"Raw tool-call syntax leaked into response, replacing with safe message: "
-            f"{final_response[:200]!r}"
+            f"Raw tool-call syntax leaked into response (tool={leaked_tool}), "
+            f"replacing with safe message: {final_response[:200]!r}"
         )
-        leaked_kwargs = _extract_kwargs_from_tool_call_text(final_response, "escalate_to_support")
+        leaked_kwargs = _extract_kwargs_from_tool_call_text(final_response, leaked_tool)
         final_response = get_user_message(ErrorCategory.ESCALATION, "failed")
         state_updates["final_response"] = final_response
 
@@ -254,40 +257,174 @@ def _strip_impersonation(response_text: str) -> str:
     return cleaned
 
 
-def _detect_raw_tool_call_leak(response_text: str) -> bool:
+# Structural signals that a model wrote a tool invocation as prose instead of
+# emitting a native function call. These are tool-name agnostic on purpose: the
+# 2026-08-24 incident leaked a tool the guard did know about, in a syntax it did
+# not, so anchoring on any single syntax just moves the blind spot.
+_TOOL_CALL_MARKERS = (
+    # "Call Tool: x", "Tool Call: x", "functionCall: x", "tool_call = x"
+    r"(?:^|\n)\s*(?:call\s+tool|tool\s+call|tool_call|function\s*call|invoke\s+tool)\s*[:=]",
+    # Gemini's python-style tool harness leaking through verbatim
+    r"\bdefault_api\s*\.",
+    # Fenced tool blocks (```tool_code, ```tool_call, ```function_call)
+    r"```\s*(?:tool_code|tool_call|tool_use|function_call)",
+)
+
+# Fallback tool names for when the turn's declared payload is unavailable.
+# Only the orchestrator's own built-ins — MCP tool names vary per deployment and
+# arrive via tools_payload, which is why known_tool_names is the primary source.
+_CORE_TOOL_NAMES = frozenset(
+    {
+        "escalate_to_support",
+        "fetch_training_image",
+        "store_user_preference",
+        "list_user_preferences",
+        "delete_user_preference",
+        "start_expert_workflow",
+        "expert_list_steps",
+        "expert_find_packet",
+        "expert_get_packet_state",
+        "expert_run_steps",
+    }
+)
+
+# JSON keys a model uses to name the tool it is "calling" when it serialises the
+# whole invocation as an object instead of calling it.
+_TOOL_NAME_JSON_KEYS = r"tool|tool_name|name|function|function_name"
+
+
+def extract_declared_tool_names(state: Dict[str, Any]) -> set:
+    """Tool names declared to the model this turn, for leak detection.
+
+    Sourced from ``tools_payload`` so the guard covers every tool actually put
+    in front of the model — including per-deployment MCP tools this module has
+    no static knowledge of — rather than a hardcoded list that silently rots.
+    """
+    names = set(_CORE_TOOL_NAMES)
+    for func in state.get("tools_payload") or []:
+        name = func.get("name") if isinstance(func, dict) else None
+        if name:
+            names.add(name)
+    return names
+
+
+def _detect_raw_tool_call_leak(response_text: str, known_tool_names=None) -> bool:
     """Detect a tool invocation leaked into the response as plain text.
 
-    The orchestrator relies entirely on native provider function-calling
-    (Gemini `functionCall` parts / OpenRouter `tool_calls`) — there is no
-    text-based tool-call scheme. If a model instead writes the call out as
-    text (e.g. "Call Tool: escalate_to_support(question_summary='...')"),
-    nothing else strips it, so it would otherwise reach the customer as-is.
-    Matching the tool name followed immediately by an opening paren is the
-    reliable signal that this is code, not customer-facing prose — plain
-    mentions of the tool name (no call syntax) do not match.
+    The orchestrator relies entirely on native provider function-calling (Gemini
+    ``functionCall`` parts / OpenRouter ``tool_calls``) — there is no text-based
+    tool-call scheme, so nothing else strips this and it reaches the customer
+    as-is.
+
+    Detection keys on call *structure* rather than one tool name in one syntax:
+    a tool-call marker anywhere, or any known tool name in call position —
+    followed by ``(`` (``name(arg=1)``) or ``{`` (``name\n{"arg": 1}``, the
+    shape that caused the 2026-08-24 leak), or named as the tool inside a
+    serialised call object. A bare prose mention of a tool name with no call
+    structure is deliberately not a match.
     """
     if not response_text:
         return False
-    return bool(re.search(r"\bescalate_to_support\s*\(", response_text))
+
+    for marker in _TOOL_CALL_MARKERS:
+        if re.search(marker, response_text, re.IGNORECASE):
+            return True
+
+    for name in known_tool_names or _CORE_TOOL_NAMES:
+        escaped = re.escape(name)
+        # name( ... )  or  name { ... }  — \s* spans the newline in the JSON form
+        if re.search(rf"\b{escaped}\s*[(\{{]", response_text):
+            return True
+        # {"tool": "name", ...} / {"name": "name", "arguments": {...}}
+        if re.search(rf'"(?:{_TOOL_NAME_JSON_KEYS})"\s*:\s*"{escaped}"', response_text):
+            return True
+
+    return False
+
+
+def _find_leaked_tool_name(response_text: str, known_tool_names=None) -> str:
+    """Return which tool the leaked call names, defaulting to escalate_to_support."""
+    for name in known_tool_names or _CORE_TOOL_NAMES:
+        escaped = re.escape(name)
+        if re.search(rf"\b{escaped}\s*[(\{{]", response_text) or re.search(
+            rf'"(?:{_TOOL_NAME_JSON_KEYS})"\s*:\s*"{escaped}"', response_text
+        ):
+            return name
+    return "escalate_to_support"
+
+
+def _extract_first_json_object(text: str, start: int):
+    """Return the brace-balanced JSON object starting at/after ``start``, or None."""
+    open_idx = text.find("{", start)
+    if open_idx == -1:
+        return None
+
+    depth = 0
+    in_string = False
+    escaped = False
+    for i in range(open_idx, len(text)):
+        char = text[i]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return text[open_idx : i + 1]
+    return None
 
 
 def _extract_kwargs_from_tool_call_text(response_text: str, tool_name: str) -> Dict[str, str]:
-    """Best-effort recovery of keyword arguments from a leaked raw tool-call string.
+    """Best-effort recovery of arguments from a leaked raw tool-call string.
 
     Used so the internal escalation notice carries the model's own summary
-    (e.g. `question_summary=...`) instead of a truncated dump of the raw call
-    syntax. Returns {} if the text doesn't match the expected call shape.
+    (e.g. ``question_summary``) instead of a truncated dump of the raw call
+    syntax. Handles both leak shapes seen in production — Python-style keyword
+    arguments and a JSON argument object. Returns {} if neither parses.
     """
-    match = re.search(rf"{tool_name}\s*\((.*)\)\s*$", response_text, re.DOTALL)
-    if not match:
+    if not response_text:
         return {}
 
-    kwargs: Dict[str, str] = {}
-    for kw_match in re.finditer(r"(\w+)\s*=\s*'([^']*)'|(\w+)\s*=\s*\"([^\"]*)\"", match.group(1)):
-        key = kw_match.group(1) or kw_match.group(3)
-        value = kw_match.group(2) if kw_match.group(1) else kw_match.group(4)
-        kwargs[key] = value
-    return kwargs
+    # Shape 1: name(key='value', ...)
+    match = re.search(rf"{re.escape(tool_name)}\s*\((.*)\)\s*$", response_text, re.DOTALL)
+    if match:
+        kwargs: Dict[str, str] = {}
+        for kw_match in re.finditer(
+            r"(\w+)\s*=\s*'([^']*)'|(\w+)\s*=\s*\"([^\"]*)\"", match.group(1)
+        ):
+            key = kw_match.group(1) or kw_match.group(3)
+            value = kw_match.group(2) if kw_match.group(1) else kw_match.group(4)
+            kwargs[key] = value
+        if kwargs:
+            return kwargs
+
+    # Shape 2: name\n{"key": "value", ...} — the 2026-08-24 leak
+    name_pos = response_text.find(tool_name)
+    raw_json = _extract_first_json_object(response_text, name_pos if name_pos != -1 else 0)
+    if raw_json:
+        try:
+            parsed = json.loads(raw_json)
+        except (ValueError, TypeError):
+            return {}
+        if isinstance(parsed, dict):
+            # Unwrap {"name": ..., "arguments": {...}} envelopes
+            for envelope_key in ("arguments", "args", "parameters"):
+                inner = parsed.get(envelope_key)
+                if isinstance(inner, dict):
+                    parsed = inner
+                    break
+            return {k: v for k, v in parsed.items() if isinstance(v, str)}
+
+    return {}
 
 
 def _detect_escalation_claim(response_text: str) -> bool:
@@ -302,7 +439,12 @@ def _detect_escalation_claim(response_text: str) -> bool:
     if not response_text:
         return False
 
+    # Models emit typographic apostrophes (U+2019) routinely, which silently
+    # defeated every "i've"/"i'm"/"can't" pattern below and disabled the backup
+    # escalation for any claim phrased with one. Normalise before matching.
     text_lower = response_text.lower()
+    for curly in ("\u2019", "\u2018", "\u02bc", "\u2032", "`"):
+        text_lower = text_lower.replace(curly, "'")
 
     # Patterns indicating the bot claims to escalate
     escalation_patterns = [

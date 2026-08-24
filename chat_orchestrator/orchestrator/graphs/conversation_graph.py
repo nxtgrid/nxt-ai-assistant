@@ -16,6 +16,7 @@ Nodes, in the order the full graph reaches them:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -822,15 +823,21 @@ class ConversationGraphBuilder:
             # Get available tools for verification context
             tools_payload = state.get("tools_payload")
 
-            result = await verification_service.verify_response(
-                original_message=user_input,
-                response_text=final_response,
-                verification_instructions=verification_instructions,
-                conversation_context=conversation_context,
-                available_tools=tools_payload,
-            )
-
-            await verification_service.aclose()
+            try:
+                result = await verification_service.verify_response(
+                    original_message=user_input,
+                    response_text=final_response,
+                    verification_instructions=verification_instructions,
+                    conversation_context=conversation_context,
+                    available_tools=tools_payload,
+                )
+            finally:
+                # Cleanup must never discard a verdict. This call used to sit
+                # inline between verify_response() and the result handling, so
+                # an error closing the service fell through to the fail-open
+                # handler below and turned a FAIL into a PASS on every turn.
+                with contextlib.suppress(Exception):
+                    await verification_service.aclose()
 
             if result.passed:
                 LOGGER.info(f"Response passed verification (attempt {attempt})")

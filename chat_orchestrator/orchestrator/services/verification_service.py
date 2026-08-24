@@ -447,9 +447,19 @@ Respond with a JSON object (and nothing else):
             return response_text
 
     async def aclose(self) -> None:
-        """Close the HTTP client."""
-        if self._client:
-            await self._client.aclose()
+        """Close any HTTP client this service owns.
+
+        Vestigial: the service used to own an httpx client, but now delegates
+        to a shared GenerationGateway it does not own and must not close. The
+        attribute was removed in that migration while this method kept
+        dereferencing it, so every call raised AttributeError — which in
+        _verify_node landed in the fail-open handler and silently converted
+        every verification verdict into a pass (2026-08-24 incident). Read it
+        defensively so cleanup can never be the thing that breaks a caller.
+        """
+        client = getattr(self, "_client", None)
+        if client is not None:
+            await client.aclose()
             self._client = None
 
     async def __aenter__(self) -> "ResponseVerificationService":
