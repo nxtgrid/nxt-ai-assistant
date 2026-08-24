@@ -336,7 +336,7 @@ async def _run_analysis_turn(
         return "I couldn't generate a response. Please try rephrasing your question."
 
     except Exception as e:
-        LOGGER.error(f"LLM call failed in analysis turn: {e}", exc_info=True)
+        LOGGER.opt(exception=True).error(f"LLM call failed in analysis turn: {e}")
         return "Sorry, I encountered an error processing your question. Please try again."
 
 

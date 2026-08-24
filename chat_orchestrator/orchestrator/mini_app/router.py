@@ -417,7 +417,7 @@ async def proxy_drive_image(
     try:
         image_bytes = await download_drive_file(file_id)
     except Exception:
-        LOGGER.warning("Failed to proxy Drive image file_id={}", file_id, exc_info=True)
+        LOGGER.opt(exception=True).warning("Failed to proxy Drive image file_id={}", file_id)
         raise HTTPException(status_code=502, detail="Could not fetch image from Drive")
 
     # Sniff content type from first bytes; default to PNG

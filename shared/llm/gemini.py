@@ -823,4 +823,4 @@ class GeminiGateway:
                 },
             )
         except Exception:
-            LOGGER.debug("Skipping Langfuse generation update", exc_info=True)
+            LOGGER.opt(exception=True).debug("Skipping Langfuse generation update")

@@ -162,11 +162,10 @@ class TicketUpdateNotifier:
                 external_message_id=int(message_id),
             )
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "ticket update: failed to record fallback delivery for {} -- the "
                 "next update will post another fresh message instead of anchoring",
                 event.ticket_ref,
-                exc_info=True,
             )
         LOGGER.info(
             "ticket update: posted first-ever card for {} (chat={} msg={})",
@@ -194,8 +193,8 @@ class TicketUpdateNotifier:
                 event.ticket_ref, limit=COMMENT_WINDOW
             )
         except Exception:
-            LOGGER.warning(
-                "ticket update: comment lookup failed for {}", event.ticket_ref, exc_info=True
+            LOGGER.opt(exception=True).warning(
+                "ticket update: comment lookup failed for {}", event.ticket_ref
             )
             comments = []
         if self._gateway is None:
@@ -209,10 +208,9 @@ class TicketUpdateNotifier:
         try:
             return await self._notify_inner(event)
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "ticket update: notification failed for {} (non-fatal)",
                 event.ticket_ref,
-                exc_info=True,
             )
             return False
 
@@ -293,11 +291,10 @@ class TicketUpdateNotifier:
                 external_message_id=int(message_id),
             )
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "ticket update: failed to record receipt for {} -- the next update "
                 "will anchor on the older message",
                 event.ticket_ref,
-                exc_info=True,
             )
         LOGGER.info(
             "ticket update: posted reply for {} (chat={} msg={} gap={})",

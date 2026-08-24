@@ -101,7 +101,7 @@ class SkillCatalogStore:
 
             return cls(client=create_client(url, key))
         except Exception:
-            LOGGER.warning("Could not build the skill catalog store client", exc_info=True)
+            LOGGER.opt(exception=True).warning("Could not build the skill catalog store client")
             return cls(client=None)
 
     def invalidate(self) -> None:
@@ -125,7 +125,7 @@ class SkillCatalogStore:
             )
             self._cache = [Skill(**row) for row in (result.data or [])]
         except Exception:
-            LOGGER.warning("Skill catalog fetch failed; continuing without", exc_info=True)
+            LOGGER.opt(exception=True).warning("Skill catalog fetch failed; continuing without")
             self._cache = []
         self._expires = time.time() + self._ttl
         return self._cache

@@ -73,7 +73,7 @@ class ChatWatermarkRepository:
             try:
                 return self._get_client()
             except Exception:
-                LOGGER.warning("chat watermark: get_client() raised", exc_info=True)
+                LOGGER.opt(exception=True).warning("chat watermark: get_client() raised")
                 return None
         return None
 
@@ -112,7 +112,9 @@ class ChatWatermarkRepository:
             if rows and rows[0].get("telegram_message_id"):
                 candidates.append(int(rows[0]["telegram_message_id"]))
         except Exception:
-            LOGGER.debug("chat watermark: chat_messages read failed for {}", chat_id, exc_info=True)
+            LOGGER.opt(exception=True).debug(
+                "chat watermark: chat_messages read failed for {}", chat_id
+            )
 
         try:
             query = (
@@ -132,8 +134,8 @@ class ChatWatermarkRepository:
             if rows and rows[0].get("external_message_id"):
                 candidates.append(int(rows[0]["external_message_id"]))
         except Exception:
-            LOGGER.debug(
-                "chat watermark: message_deliveries read failed for {}", chat_id, exc_info=True
+            LOGGER.opt(exception=True).debug(
+                "chat watermark: message_deliveries read failed for {}", chat_id
             )
 
         return max(candidates) if candidates else None

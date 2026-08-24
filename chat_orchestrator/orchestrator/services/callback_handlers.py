@@ -825,10 +825,9 @@ async def _handle_escalation_track_callback(
                 try:
                     await canonical_escalations.release(mapping_id)
                 except Exception:
-                    LOGGER.warning(
+                    LOGGER.opt(exception=True).warning(
                         "Could not release canonical escalation {}",
                         mapping_id,
-                        exc_info=True,
                     )
         if not escalation:
             await _answer_callback_query(
@@ -876,8 +875,8 @@ async def _handle_escalation_track_callback(
             try:
                 await _canonical_escalations(supabase_client).release(mapping_id)
             except Exception:
-                LOGGER.warning(
-                    "Could not release canonical escalation {}", mapping_id, exc_info=True
+                LOGGER.opt(exception=True).warning(
+                    "Could not release canonical escalation {}", mapping_id
                 )
             error_msg = result.get("error", "Unknown error")
             LOGGER.error(f"Failed to track escalation {mapping_id}: {error_msg}")
@@ -951,10 +950,9 @@ async def _handle_escalation_close_callback(
             try:
                 await canonical_escalations.release(mapping_id)
             except Exception:
-                LOGGER.warning(
+                LOGGER.opt(exception=True).warning(
                     "Could not release canonical escalation {}",
                     mapping_id,
-                    exc_info=True,
                 )
         if not escalation:
             await _answer_callback_query(
@@ -973,8 +971,8 @@ async def _handle_escalation_close_callback(
         try:
             await _canonical_escalations(supabase_client).resolve(mapping_id)
         except Exception:
-            LOGGER.warning(
-                "Could not resolve canonical escalation {}", mapping_id, exc_info=True
+            LOGGER.opt(exception=True).warning(
+                "Could not resolve canonical escalation {}", mapping_id
             )
 
         session_id = escalation.get("session_id")

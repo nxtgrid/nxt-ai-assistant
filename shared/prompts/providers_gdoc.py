@@ -81,9 +81,8 @@ class GDocProvider:
         try:
             allowed = await self._can_access(file_id, ctx.user_email, strict=True)
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 f"Drive access check failed for module '{module.slug}'; withholding",
-                exc_info=True,
             )
             return False
 
@@ -123,7 +122,7 @@ class GDocProvider:
             else:
                 body = await asyncio.to_thread(self._fetch, file_id)
         except Exception:
-            LOGGER.warning(f"Drive fetch failed for module '{slug}'", exc_info=True)
+            LOGGER.opt(exception=True).warning(f"Drive fetch failed for module '{slug}'")
             return None
 
         body = body.strip() if body else None

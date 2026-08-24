@@ -224,7 +224,7 @@ async def send_lpp_map_to_telegram(context: StepContext) -> StepResult:
                             f"Failed to send site options map: {options_result.get('error')}"
                         )
                 except Exception:
-                    LOGGER.debug("Failed to send site options map", exc_info=True)
+                    LOGGER.opt(exception=True).debug("Failed to send site options map")
 
             return StepResult(
                 data={

@@ -195,7 +195,7 @@ class JiraIssueTypeSelector:
                 timeout=self._metadata_timeout_seconds,
             )
         except Exception:
-            LOGGER.warning("Unable to fetch Jira issue-type metadata", exc_info=True)
+            LOGGER.opt(exception=True).warning("Unable to fetch Jira issue-type metadata")
             return []
         if not types:
             return []
@@ -219,7 +219,7 @@ class JiraIssueTypeSelector:
             try:
                 issue_type = task.result()
             except Exception:
-                LOGGER.warning("Unable to fetch Jira issue-type field metadata", exc_info=True)
+                LOGGER.opt(exception=True).warning("Unable to fetch Jira issue-type field metadata")
                 continue
             if issue_type is not None:
                 detailed.append(issue_type)
@@ -372,7 +372,7 @@ class JiraIssueTypeSelector:
                 return None
             return IssueTypeSelection(selected, "llm", str(raw.get("reason") or ""))
         except Exception:
-            LOGGER.warning("Jira issue-type selection failed", exc_info=True)
+            LOGGER.opt(exception=True).warning("Jira issue-type selection failed")
             return None
 
     @staticmethod

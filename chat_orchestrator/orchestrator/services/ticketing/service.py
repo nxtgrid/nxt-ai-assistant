@@ -189,11 +189,10 @@ class TicketService:
                     sync_result.attachment_id, sync_result.external_id
                 )
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "Failed to sync attachments for escalation {} / ticket {}",
                 escalation_id,
                 ticket_ref,
-                exc_info=True,
             )
 
     async def create_ticket_with_internal_fallback(
@@ -299,7 +298,9 @@ class TicketService:
             try:
                 gateway = get_default_generation_gateway()
             except Exception:
-                LOGGER.warning("ticket update: no LLM gateway -- summaries degrade", exc_info=True)
+                LOGGER.opt(exception=True).warning(
+                    "ticket update: no LLM gateway -- summaries degrade"
+                )
                 gateway = None
 
             self._update_notifier = TicketUpdateNotifier(
@@ -370,10 +371,9 @@ class TicketService:
                 newly_closed = await self._tickets.transition_to_done_by_ref(ref)
             except Exception:
                 newly_closed = False
-                LOGGER.warning(
+                LOGGER.opt(exception=True).warning(
                     "transition_to_done: failed to persist canonical status for jira ticket {}",
                     ref,
-                    exc_info=True,
                 )
         else:
             newly_closed = bool(await backend.transition_to_done(ref))
@@ -420,10 +420,9 @@ class TicketService:
         try:
             newly_set = await self._tickets.set_in_progress_by_ref(ref)
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "mark_in_progress_from_webhook: failed to persist canonical status for {}",
                 ref,
-                exc_info=True,
             )
             return False
 
@@ -468,11 +467,10 @@ class TicketService:
             try:
                 await self._tickets.update_by_ref(ref, summary=summary, description=description)
             except Exception:
-                LOGGER.warning(
+                LOGGER.opt(exception=True).warning(
                     "update_ticket: backend update for {} succeeded but canonical "
                     "projection write failed -- tickets.summary/description may be stale",
                     ref,
-                    exc_info=True,
                 )
         return ok
 
@@ -494,7 +492,9 @@ class TicketService:
             try:
                 status = await self._jira.get_status(ref)
             except Exception:
-                LOGGER.warning("ticket status sync: get_status failed for {}", ref, exc_info=True)
+                LOGGER.opt(exception=True).warning(
+                    "ticket status sync: get_status failed for {}", ref
+                )
                 continue
             if status is None or not status.is_done:
                 continue
@@ -502,7 +502,7 @@ class TicketService:
                 await self._tickets.transition_to_done_by_ref(ref)
                 closed += 1
             except Exception:
-                LOGGER.warning("ticket status sync: failed to close {}", ref, exc_info=True)
+                LOGGER.opt(exception=True).warning("ticket status sync: failed to close {}", ref)
         return {"checked": checked, "closed": closed}
 
     async def find_open_by_grid(

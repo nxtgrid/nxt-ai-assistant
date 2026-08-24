@@ -112,7 +112,7 @@ async def resolve_tool_pattern(pattern_prefix: str) -> Optional[str]:
             return None
 
     except Exception as e:
-        LOGGER.error(f"Error resolving tool pattern '{pattern_prefix}': {e}", exc_info=True)
+        LOGGER.opt(exception=True).error(f"Error resolving tool pattern '{pattern_prefix}': {e}")
         _resolved_tool_cache[pattern_prefix] = None
         return None
 

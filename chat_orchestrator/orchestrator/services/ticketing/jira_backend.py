@@ -466,7 +466,7 @@ class JiraTicketBackend:
                 LOGGER.warning("Failed to update Jira issue {}: HTTP {} -- {}", ref, resp.status, body)
                 return False
         except Exception:
-            LOGGER.warning("Error updating Jira issue {}", ref, exc_info=True)
+            LOGGER.opt(exception=True).warning("Error updating Jira issue {}", ref)
             return False
 
     async def resolve_priority_id(self, priority_id: str) -> Optional[str]:
@@ -497,7 +497,7 @@ class JiraTicketBackend:
                     return None
                 priorities = await response.json()
         except Exception:
-            LOGGER.warning("Failed to discover Jira Highest priority", exc_info=True)
+            LOGGER.opt(exception=True).warning("Failed to discover Jira Highest priority")
             return None
 
         if not isinstance(priorities, list):
@@ -546,7 +546,7 @@ class JiraTicketBackend:
                     return []
                 data = await resp.json()
         except Exception:
-            LOGGER.warning("Error searching Jira for grid {!r}", grid_name, exc_info=True)
+            LOGGER.opt(exception=True).warning("Error searching Jira for grid {!r}", grid_name)
             return []
 
         results: List[TicketSummary] = []
@@ -591,10 +591,9 @@ class JiraTicketBackend:
         try:
             client = self._get_storage_client()
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "get_storage_client() raised -- skipping download for attachment {}",
                 storage_path,
-                exc_info=True,
             )
             return None
         if client is None:
@@ -602,8 +601,8 @@ class JiraTicketBackend:
         try:
             return client.storage.from_(BUCKET_NAME).download(storage_path)
         except Exception:
-            LOGGER.warning(
-                "Failed to download attachment {} from storage", storage_path, exc_info=True
+            LOGGER.opt(exception=True).warning(
+                "Failed to download attachment {} from storage", storage_path
             )
             return None
 
@@ -648,7 +647,7 @@ class JiraTicketBackend:
                     return None
                 return str(entries[0]["id"])
         except Exception:
-            LOGGER.warning("Jira attachment upload failed for {}", issue_key, exc_info=True)
+            LOGGER.opt(exception=True).warning("Jira attachment upload failed for {}", issue_key)
             return None
 
     async def add_attachments(
@@ -876,7 +875,7 @@ class JiraTicketBackend:
                 return True
 
         except Exception:
-            LOGGER.warning("Error transitioning Jira {} to Done", issue_key, exc_info=True)
+            LOGGER.opt(exception=True).warning("Error transitioning Jira {} to Done", issue_key)
             return False
 
     async def _fetch_jira_issue_fields(self, issue_key: str) -> Optional[Dict[str, Any]]:
@@ -911,7 +910,7 @@ class JiraTicketBackend:
                 "raw_status": status_field.get("name", ""),
             }
         except Exception:
-            LOGGER.debug("Error fetching Jira issue fields for {}", issue_key, exc_info=True)
+            LOGGER.opt(exception=True).debug("Error fetching Jira issue fields for {}", issue_key)
             return None
 
     async def _search_jira_for_escalation(self, mapping_id: str) -> Optional[str]:
@@ -939,5 +938,5 @@ class JiraTicketBackend:
             issues = data.get("issues", [])
             return str(issues[0]["key"]) if issues else None
         except Exception:
-            LOGGER.debug("Error searching Jira for escalation {}", mapping_id, exc_info=True)
+            LOGGER.opt(exception=True).debug("Error searching Jira for escalation {}", mapping_id)
             return None

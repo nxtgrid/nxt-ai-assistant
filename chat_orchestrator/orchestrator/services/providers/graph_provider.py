@@ -88,7 +88,7 @@ def _default_client() -> Any:
 
         return create_client(url, key)
     except Exception:
-        LOGGER.warning("Could not build the graph provider client", exc_info=True)
+        LOGGER.opt(exception=True).warning("Could not build the graph provider client")
         return None
 
 

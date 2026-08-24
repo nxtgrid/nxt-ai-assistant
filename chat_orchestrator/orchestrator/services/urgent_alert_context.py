@@ -63,8 +63,8 @@ class LiveTelemetryLookup:
         except asyncio.TimeoutError:
             LOGGER.warning("Urgent alert live telemetry timed out for grid {!r}", self._grid_name)
         except Exception:
-            LOGGER.warning(
-                "Urgent alert live telemetry failed for grid {!r}", self._grid_name, exc_info=True
+            LOGGER.opt(exception=True).warning(
+                "Urgent alert live telemetry failed for grid {!r}", self._grid_name
             )
         return dict(_UNAVAILABLE)
 

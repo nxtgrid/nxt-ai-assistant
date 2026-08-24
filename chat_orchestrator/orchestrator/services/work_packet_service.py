@@ -1089,9 +1089,8 @@ class WorkPacketService:
                 session_id=session_id,
             )
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "interrupt_packet: best-effort during shutdown, swallowing exception",
-                exc_info=True,
             )
 
     async def retry_packet(

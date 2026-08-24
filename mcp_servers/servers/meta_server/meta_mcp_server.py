@@ -342,7 +342,7 @@ async def _get_issue_type_breakdown(
     try:
         response = query.execute()
     except Exception:
-        logger.warning("chat_threads query failed — table may not exist yet", exc_info=True)
+        logger.opt(exception=True).warning("chat_threads query failed — table may not exist yet")
         return {}
     rows = response.data or []
     if len(rows) == _LIMIT:
