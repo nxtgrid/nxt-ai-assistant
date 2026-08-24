@@ -76,7 +76,13 @@ jobs:
       - name: Validate tool_definitions.json
         run: python3 -c "import json; json.load(open('mcp_servers/tool_definitions.json')); print('tool_definitions.json OK')"
       - name: Install test dependencies
-        run: pip install -r mcp_servers/requirements.txt pytest pytest-asyncio
+        # markdown is an anansi_app dependency, installed explicitly because this
+        # job deliberately skips anansi_app/requirements.txt (see
+        # anansi_app/tests/conftest.py). Unlike nicegui -- stubbed in that
+        # conftest because tests only need its imports to resolve --
+        # rendering/conversation_html.py renders real output through markdown,
+        # so stubbing it would make the renderer tests assert against fake HTML.
+        run: pip install -r mcp_servers/requirements.txt pytest pytest-asyncio "markdown>=3.10.2"
       - name: Run tests (mcp_servers)
         env:
           GRAFANA_URL: http://localhost

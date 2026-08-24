@@ -38,6 +38,50 @@ def _format_time_ago(dt: datetime) -> str:
     return dt.strftime("%b %d")
 
 
+# Telegram lets a bot delete its own message in a private chat at any time, but
+# rejects anything older than this in a group.
+_TELEGRAM_GROUP_DELETE_WINDOW = timedelta(hours=48)
+
+
+def _is_expired_for_deletion(msg: dict[str, Any], is_group: bool) -> bool:
+    """Whether Telegram will refuse to delete this message because of its age."""
+    if not is_group:
+        return False
+    msg_time = datetime.fromisoformat(msg["created_at"])
+    # chat_messages timestamps come back tz-aware from Supabase; compare naive.
+    if msg_time.tzinfo is not None:
+        msg_time = msg_time.replace(tzinfo=None)
+    return datetime.utcnow() - msg_time > _TELEGRAM_GROUP_DELETE_WINDOW
+
+
+def _deletable_messages(messages: list[dict[str, Any]], is_group: bool) -> list[dict[str, Any]]:
+    """Bot messages that can still be pulled from Telegram, in display order.
+
+    Only messages that actually reached Telegram (``telegram_message_id`` set)
+    can be deleted there. One already flagged deleted is skipped -- re-deleting
+    it would just overwrite the existing deletion record with a fresh timestamp.
+
+    Expired entries are kept in the list but flagged, so an operator can see
+    *why* an old message isn't offered rather than wondering where it went.
+    """
+    entries: list[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") != "model" or not msg.get("content"):
+            continue
+        if not msg.get("telegram_message_id"):
+            continue
+        if (msg.get("metadata") or {}).get("deleted"):
+            continue
+        time_str = datetime.fromisoformat(msg["created_at"]).strftime("%H:%M")
+        preview = (msg["content"] or "")[:60].replace("\n", " ")
+        expired = _is_expired_for_deletion(msg, is_group)
+        label = f"[{time_str}] #{msg['telegram_message_id']} {preview}…"
+        if expired:
+            label += " (expired >48h)"
+        entries.append({"label": label, "msg": msg, "expired": expired})
+    return entries
+
+
 async def render(user: dict[str, Any]) -> None:
     user_email = user.get("email", "unknown")
     db = get_reader()
@@ -158,7 +202,7 @@ async def render(user: dict[str, Any]) -> None:
             _render_stats(stats)
             selected = state["selected"]
             if selected:
-                await _render_conversation(db, selected, days_back)
+                await _render_conversation(db, selected, days_back, _reload)
 
     await _reload()
 
@@ -214,7 +258,7 @@ def _stat(label: str, value: Any) -> None:
         ui.label(label).classes("text-caption")
 
 
-async def _render_conversation(db, context: dict, days_back: int) -> None:
+async def _render_conversation(db, context: dict, days_back: int, refresh) -> None:
     ui.label(f"Messages: {context['message_count']}").classes("text-bold")
 
     date_from = datetime.utcnow() - timedelta(days=days_back)
@@ -263,7 +307,12 @@ async def _render_conversation(db, context: dict, days_back: int) -> None:
         show_internal["value"] = e.value
         rebuild()
 
-    ui.switch("Show internal messages to LLM", value=False, on_change=toggle)
+    with ui.row().classes("items-center justify-between w-full"):
+        ui.switch("Show internal messages to LLM", value=False, on_change=toggle)
+        ui.button(
+            "🗑️ Delete a bot message",
+            on_click=lambda: _delete_message_dialog(db, context, messages, refresh),
+        ).props("outline dense color=negative")
     rebuild()
 
 
@@ -287,3 +336,90 @@ async def _resolve_feedback_names(db, messages: list[dict]) -> dict[str, str]:
         return dict(result) if result else {}
     except Exception:
         return {}
+
+
+async def _delete_message_dialog(db, context: dict, messages: list[dict], refresh) -> None:
+    """Delete one bot message from Telegram, keeping the text in chat history.
+
+    The DB row is not destroyed: ``delete_bot_message`` flags it with
+    ``metadata.deleted`` and leaves ``content`` intact, so the Chats page can
+    still show what was said (see ``conversation_html``'s deleted branch) while
+    the model's context readers redact it.
+    """
+    is_group = bool(context.get("is_group"))
+    entries = _deletable_messages(messages, is_group)
+    if not entries:
+        ui.notify(
+            "No bot messages in this date range can be deleted from Telegram.",
+            type="info",
+        )
+        return
+
+    with ui.dialog() as dialog, ui.card().classes("w-full").style("max-width: 720px"):
+        ui.label("🗑️ Delete a bot message").classes("text-h6")
+        ui.label(
+            "Removes the message from the Telegram chat. The text stays in the chat "
+            "history here, flagged as deleted."
+        ).classes("text-caption")
+
+        select = ui.select(
+            {i: entry["label"] for i, entry in enumerate(entries)},
+            value=0,
+            label="Message to delete",
+        ).classes("w-full")
+        warning = ui.label().classes("text-caption text-negative")
+
+        async def do_delete() -> None:
+            msg = entries[select.value]["msg"]
+            chat_id = (
+                msg.get("from_chat_id")
+                or context.get("telegram_chat_id")
+                or context.get("chat_id", "")
+            )
+            result = await run.io_bound(
+                lambda: db.delete_bot_message(
+                    message_id=msg["id"],
+                    chat_id=chat_id,
+                    telegram_message_id=msg.get("telegram_message_id"),
+                )
+            )
+            dialog.close()
+            if not result.get("success"):
+                ui.notify(
+                    f"Failed to delete: {result.get('error', 'Unknown error')}",
+                    type="negative",
+                )
+                return
+            if result.get("telegram_deleted"):
+                ui.notify("Deleted from Telegram · kept in chat history", type="positive")
+            else:
+                # Flagged either way, but say so plainly rather than letting the
+                # operator believe the customer can no longer see it.
+                ui.notify(
+                    "Flagged as deleted in chat history, but Telegram refused to remove "
+                    f"it: {result.get('telegram_error') or 'unknown reason'}",
+                    type="warning",
+                    timeout=8000,
+                )
+            await refresh()
+
+        with ui.row().classes("justify-end w-full"):
+            ui.button("Cancel", on_click=dialog.close).props("flat")
+            delete_btn = ui.button("Delete from Telegram", on_click=do_delete).props(
+                "color=negative"
+            )
+
+        def _sync_selection() -> None:
+            """Block deletions Telegram is guaranteed to reject."""
+            if entries[select.value]["expired"]:
+                warning.text = (
+                    "Older than 48 hours — Telegram will reject the deletion in a group chat."
+                )
+                delete_btn.disable()
+            else:
+                warning.text = ""
+                delete_btn.enable()
+
+        select.on_value_change(lambda _: _sync_selection())
+        _sync_selection()
+    dialog.open()

@@ -22,6 +22,28 @@ from shared.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
+# Text substituted for a bot message an operator deleted. anansi_app's delete
+# flow (SupabaseReader.delete_bot_message) removes the message from Telegram and
+# sets ``metadata.deleted``, but deliberately KEEPS ``content`` -- chat_messages
+# holds the only remaining copy of what the bot said, and operators need it for
+# the audit trail. Redaction therefore happens at read time, here, so a deleted
+# message never re-enters the model's context and gets repeated.
+DELETED_MESSAGE_PLACEHOLDER = "[Message deleted]"
+
+
+def content_for_llm(row: Dict[str, Any]) -> Optional[str]:
+    """Return a chat_messages row's content as the model should see it.
+
+    Deleted rows collapse to ``DELETED_MESSAGE_PLACEHOLDER`` -- the same text
+    the column itself used to be overwritten with, so model-facing behaviour is
+    unchanged from before the content was preserved.
+    """
+    metadata = row.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("deleted"):
+        return DELETED_MESSAGE_PLACEHOLDER
+    return row.get("content")
+
+
 class EnhancedSupabaseClient:
     """Enhanced Supabase client for comprehensive database operations."""
 
@@ -637,7 +659,7 @@ class EnhancedSupabaseClient:
         metadata = row.get("metadata") or {}
         return ConversationMessage(
             role=row["role"],
-            content=row["content"],
+            content=content_for_llm(row),
             function_call=(
                 FunctionCall(**row["function_call"]) if row.get("function_call") else None
             ),
@@ -904,7 +926,7 @@ class EnhancedSupabaseClient:
             for row in response.data:
                 message = ConversationMessage(
                     role=row["role"],
-                    content=row["content"],
+                    content=content_for_llm(row),
                     function_call=(
                         FunctionCall(**row["function_call"]) if row["function_call"] else None
                     ),
