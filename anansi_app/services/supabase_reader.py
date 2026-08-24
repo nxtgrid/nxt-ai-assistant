@@ -499,13 +499,19 @@ class SupabaseReader:
             telegram_message_id: Telegram message ID to delete (None = DB-only)
 
         Returns:
-            Dict with success status and optional error
+            ``{"success": True, "telegram_deleted": bool, "telegram_error": str | None}``
+            once the DB row is flagged, or ``{"success": False, "error": ...}``.
+            ``telegram_deleted`` is False when Telegram refused the removal
+            (e.g. a group message past the 48h window) -- the message is still
+            visible to the customer in that case.
         """
         import os
 
         import requests
 
         # 1. Delete from Telegram (skip if no telegram_message_id)
+        telegram_deleted = False
+        telegram_error: str | None = None
         if telegram_message_id:
             bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
             if not bot_token:
@@ -518,16 +524,25 @@ class SupabaseReader:
                     timeout=10,
                 )
                 tg_result = resp.json()
-                if not tg_result.get("ok"):
+                telegram_deleted = bool(tg_result.get("ok"))
+                if not telegram_deleted:
                     # Message may already be deleted or too old (>48h)
-                    tg_error = tg_result.get("description", "Unknown Telegram error")
-                    logger.warning("Telegram deleteMessage failed: %s", tg_error)
+                    telegram_error = tg_result.get("description", "Unknown Telegram error")
+                    logger.warning("Telegram deleteMessage failed: %s", telegram_error)
             except Exception as e:
+                telegram_error = str(e)
                 logger.warning("Telegram deleteMessage request failed: %s", e)
                 # Continue to soft-delete from DB even if Telegram fails
 
-        # 2. Soft-delete from DB: clear content, merge deleted flag into existing metadata
-        #    (preserves agent_instance_id and other fields needed for reply routing)
+        # 2. Soft-delete from DB: flag the row but KEEP ``content``.
+        #    The message text is the operator-facing audit record of what the
+        #    bot actually said; chat_messages holds the only copy once Telegram
+        #    has dropped it, so destroying the column to hide the message would
+        #    lose it for good. ``metadata.deleted`` is what marks it deleted --
+        #    readers that build model context honour that flag and redact at
+        #    read time instead (chat_orchestrator's ``content_for_llm``).
+        #    Merging into existing metadata preserves agent_instance_id and the
+        #    other fields reply routing depends on.
         try:
             existing = (
                 self.client.table("chat_messages")
@@ -541,14 +556,18 @@ class SupabaseReader:
                 **current_metadata,
                 "deleted": True,
                 "deleted_at": datetime.utcnow().isoformat(),
+                "deleted_from_telegram": telegram_deleted,
             }
-            self.client.table("chat_messages").update(
-                {
-                    "content": "[Message deleted]",
-                    "metadata": merged_metadata,
-                }
-            ).eq("id", message_id).execute()
-            return {"success": True}
+            if telegram_error:
+                merged_metadata["telegram_delete_error"] = telegram_error
+            self.client.table("chat_messages").update({"metadata": merged_metadata}).eq(
+                "id", message_id
+            ).execute()
+            return {
+                "success": True,
+                "telegram_deleted": telegram_deleted,
+                "telegram_error": telegram_error,
+            }
         except Exception as e:
             return {"success": False, "error": f"DB update failed: {e}"}
 

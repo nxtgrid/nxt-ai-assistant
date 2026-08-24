@@ -273,6 +273,42 @@ def render_message_html(message: Dict[str, Any], cache: Dict[str, str]) -> str:
         feedback_html = render_feedback_html(metadata, cache) if metadata else ""
         is_blocked = metadata.get("blocked", False) if metadata else False
         is_placeholder = metadata.get("placeholder_for_blocked", False) if metadata else False
+        is_deleted = metadata.get("deleted", False) if metadata else False
+
+        if is_deleted:
+            # The text is deliberately still here: delete_bot_message pulls the
+            # message from Telegram but keeps chat_messages.content as the
+            # record of what the bot said. Render it plainly (muted, not struck
+            # through) -- an operator reviewing a deletion needs to read it.
+            deleted_at = metadata.get("deleted_at") or ""
+            deleted_display = (
+                f" · deleted {deleted_at[:16].replace('T', ' ')}" if deleted_at else ""
+            )
+            if metadata.get("deleted_from_telegram") is False:
+                tg_error = metadata.get("telegram_delete_error") or ""
+                detail = f": {html_module.escape(str(tg_error))}" if tg_error else ""
+                status_html = (
+                    '<div style="margin-top: 6px; font-size: 0.85em; color: #b71c1c;">'
+                    "⚠️ Telegram did not remove this message — it is still visible "
+                    f"in the chat{detail}"
+                    "</div>"
+                )
+            else:
+                status_html = (
+                    '<div style="margin-top: 6px; font-size: 0.8em; color: #90a4ae;">'
+                    "Removed from Telegram · kept here for the record"
+                    "</div>"
+                )
+            return f"""
+            <div class="chat-msg" data-thread-id="{thread_id}" style="background-color: #eceff1; padding: 10px; border-radius: 10px; margin: 5px 0; border-left: 4px solid #78909c;">
+                <div style="font-size: 0.8em; color: #546e7a; margin-bottom: 5px;">
+                    🗑️ Bot (Deleted) · {time_str}{thread_display}{token_info}{deleted_display}
+                </div>
+                <div style="color: #607d8b;">{content_html}</div>
+                {status_html}
+                {feedback_html}
+            </div>
+            """
 
         if is_blocked:
             verification_feedback = metadata.get("verification_feedback", "")

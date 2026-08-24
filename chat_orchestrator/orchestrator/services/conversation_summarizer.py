@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import json
 import os
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID
 
+from orchestrator.services.supabase_client import content_for_llm
 from shared.llm import (
     GenerationGateway,
     GenerationOptions,
@@ -43,6 +44,21 @@ LOGGER = get_logger(__name__)
 SUMMARY_THRESHOLD = 40
 # Number of oldest messages to summarize at a time
 SUMMARY_BATCH_SIZE = 20
+
+
+def format_messages_for_summary(rows: List[Dict[str, Any]]) -> str:
+    """Render chat_messages rows as the ``role: text`` block the summarizer sends.
+
+    Routed through ``content_for_llm`` so a message an operator deleted is
+    summarized as "[Message deleted]" rather than by its preserved text -- a
+    summary is model context that outlives the message it was built from.
+    """
+    formatted = []
+    for row in rows:
+        content = content_for_llm(row)
+        if content:
+            formatted.append(f"{row['role']}: {content[:300]}")
+    return "\n".join(formatted)
 
 
 class ConversationSummarizer:
@@ -127,16 +143,10 @@ class ConversationSummarizer:
                 return None
 
             # Format messages for summarization
-            formatted_messages = []
-            for row in messages_response.data:
-                content = row.get("content", "")
-                if content:
-                    formatted_messages.append(f"{row['role']}: {content[:300]}")
+            messages_text = format_messages_for_summary(messages_response.data)
 
-            if not formatted_messages:
+            if not messages_text:
                 return None
-
-            messages_text = "\n".join(formatted_messages)
             prompt = PROMPTS.text("conversation.summarize", messages=messages_text)
 
             # Generate summary
