@@ -103,10 +103,9 @@ async def run(*, apply: bool, max_age_hours: int, limit: int) -> None:
             try:
                 await svc._escalations.resolve(row["id"])
             except Exception:
-                logger.warning(
+                logger.opt(exception=True).warning(
                     "resolve_stale_swept_escalations: failed to resolve {}",
                     row["id"],
-                    exc_info=True,
                 )
 
     if apply:

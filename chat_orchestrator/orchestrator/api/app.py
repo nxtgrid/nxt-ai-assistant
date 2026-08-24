@@ -595,7 +595,7 @@ async def _run_telegram_workflow(body: dict, chat_id: str, topic_id: int | None)
     try:
         await async_main(body)
     except Exception as e:
-        logger.error(f"Telegram workflow failed for chat {chat_id}: {e}", exc_info=True)
+        logger.opt(exception=True).error(f"Telegram workflow failed for chat {chat_id}: {e}")
         if chat_id:
             try:
                 from shared.utils.telegram_send import send_telegram_message
@@ -1251,7 +1251,7 @@ async def _deliver_notification(
             alert=body.alert.model_dump() if body.alert is not None else {"text": body.text},
         )
     except Exception:
-        logger.warning("Notify: successful-delivery ledger write failed", exc_info=True)
+        logger.opt(exception=True).warning("Notify: successful-delivery ledger write failed")
 
     if delivery is not None and delivery.ticket is not None and delivery.ticket.ticket_id:
         try:
@@ -1267,7 +1267,7 @@ async def _deliver_notification(
                 external_message_id=int(message_id),
             )
         except Exception:
-            logger.warning("Notify: failed to record delivery receipt", exc_info=True)
+            logger.opt(exception=True).warning("Notify: failed to record delivery receipt")
 
 
 def _raw_supabase_client() -> Optional[Any]:
@@ -1359,9 +1359,8 @@ async def _create_notify_ticket(
             if primary_backend.name == "jira":
                 llm_context = await alert_context.llm_facts()
         except Exception:
-            logger.warning(
+            logger.opt(exception=True).warning(
                 "Notify: unable to resolve ticket backend before telemetry enrichment",
-                exc_info=True,
             )
     try:
         outcome = await ticket_service.create_ticket_with_internal_fallback(
@@ -1486,8 +1485,8 @@ async def _record_new_correlation(
             severity=alert.severity,
         )
     except Exception:
-        logger.warning(
-            "Notify: failed to seed correlation row for {!r}", result.ref, exc_info=True
+        logger.opt(exception=True).warning(
+            "Notify: failed to seed correlation row for {!r}", result.ref
         )
 
 
@@ -1704,7 +1703,9 @@ async def _ticket_summary(ticket_service: Any, ticket_ref: str) -> str:
         status = await ticket_service.get_status(ticket_ref)
         return status.summary if status is not None else ""
     except Exception:
-        logger.warning("Notify: failed to read current ticket summary for {!r}", ticket_ref, exc_info=True)
+        logger.opt(exception=True).warning(
+            "Notify: failed to read current ticket summary for {!r}", ticket_ref
+        )
         return ""
 
 
@@ -1903,8 +1904,8 @@ async def _finalize_correlation_decision(
                 deliveries = DeliveryRepository(get_client=_raw_supabase_client)
                 anchor = await deliveries.latest_for_ticket(amendment.ticket_id)
             except Exception:
-                logger.warning(
-                    "Notify: failed to resolve delivery anchor for {!r}", ref, exc_info=True
+                logger.opt(exception=True).warning(
+                    "Notify: failed to resolve delivery anchor for {!r}", ref
                 )
                 anchor = None
             if anchor:
@@ -2020,20 +2021,18 @@ async def _attempt_lock_free_signature_correlation(
                 llm_raw=decision.llm_raw,
             )
         except Exception:
-            logger.warning(
+            logger.opt(exception=True).warning(
                 "Notify: failed to record lock-free correlation event for grid {}",
                 target.grid_name,
-                exc_info=True,
             )
 
         return await _finalize_correlation_decision(
             body, target, alert, alert_context, store, ticket_service, decision
         )
     except Exception:
-        logger.warning(
+        logger.opt(exception=True).warning(
             "Notify: lock-free correlation attempt raised for grid {} -- filing plain ticket",
             target.grid_name,
-            exc_info=True,
         )
         return None
 
@@ -2292,7 +2291,7 @@ async def _resolve_notify_ticket_llm_judgment(
     try:
         candidates = await correlator._assemble_candidates(target.grid_name, backend_override=backend_override)
     except Exception:
-        logger.warning("Notify: judgment candidate assembly failed", exc_info=True)
+        logger.opt(exception=True).warning("Notify: judgment candidate assembly failed")
         candidates = []
     since = (datetime.now(timezone.utc) - timedelta(hours=168)).isoformat()
     history = NotifyAlertDeliveryRepository(get_client=_raw_supabase_client)
@@ -2334,7 +2333,7 @@ async def _resolve_notify_ticket_llm_judgment(
             send_forced_by=send_decision.forced_by,
         )
     except Exception:
-        logger.warning("Notify: LLM judgment audit write failed", exc_info=True)
+        logger.opt(exception=True).warning("Notify: LLM judgment audit write failed")
     if decision.decision == "new" or not decision.ticket_ref or not decision.ticket_id:
         ref, response, extra, delivery = await _file_uncorrelated_ticket(body, target, backend_override, alert, alert_context, store, "llm_judgment")
     else:

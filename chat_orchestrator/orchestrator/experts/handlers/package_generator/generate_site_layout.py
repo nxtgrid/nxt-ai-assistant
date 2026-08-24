@@ -482,7 +482,7 @@ def _gate_to_site_local(gate_lat, gate_lon, boundary):
             # Boundary is in WGS84 degrees
             return (gate_lon, gate_lat)
     except Exception:
-        LOGGER.debug("Failed to convert gate position to site-local", exc_info=True)
+        LOGGER.opt(exception=True).debug("Failed to convert gate position to site-local")
         return None
 
 

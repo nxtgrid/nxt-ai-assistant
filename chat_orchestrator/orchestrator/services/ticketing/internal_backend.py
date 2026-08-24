@@ -63,7 +63,7 @@ class InternalTicketBackend:
             try:
                 return self._get_client_fn()
             except Exception:
-                LOGGER.warning("internal ticket backend: get_client() raised", exc_info=True)
+                LOGGER.opt(exception=True).warning("internal ticket backend: get_client() raised")
                 return None
         return None
 

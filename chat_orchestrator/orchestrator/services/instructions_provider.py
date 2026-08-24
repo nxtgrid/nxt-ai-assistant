@@ -223,7 +223,7 @@ def _append_skill_catalog(context_message: Optional[str], *, is_staff: bool) -> 
     try:
         skills = SKILL_CATALOG.all_skills()
     except Exception:
-        LOGGER.warning("Skill catalog fetch failed; continuing without", exc_info=True)
+        LOGGER.opt(exception=True).warning("Skill catalog fetch failed; continuing without")
         return context_message
 
     visible = select_skills_for_context(skills, is_staff=is_staff)

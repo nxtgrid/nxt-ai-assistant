@@ -975,7 +975,7 @@ async def _save_passive_group_message(telegram_msg: Dict[str, Any], chat: Dict[s
             )
             thread_id = assign_passive_thread(history, reply_to_telegram_message_id)
         except Exception:
-            LOGGER.warning("Passive thread assignment failed (non-fatal)", exc_info=True)
+            LOGGER.opt(exception=True).warning("Passive thread assignment failed (non-fatal)")
 
     # Build message metadata with topic info
     msg_metadata: Dict[str, Any] = {}

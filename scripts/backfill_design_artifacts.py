@@ -203,10 +203,9 @@ def run(*, dry_run: bool, limit: int | None) -> None:
             result = backfill_packet(packet, design_repo, dry_run)
         except Exception:
             errored += 1
-            logger.warning(
+            logger.opt(exception=True).warning(
                 "backfill_design_artifacts: error processing packet_id={}; continuing",
                 packet_id,
-                exc_info=True,
             )
             continue
 

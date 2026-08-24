@@ -232,8 +232,8 @@ class EscalationService:
         try:
             session_obj = await supabase_client.get_session(session_id)
         except Exception:
-            LOGGER.warning(
-                "Could not resolve chat_sessions.id for session {}", session_id, exc_info=True
+            LOGGER.opt(exception=True).warning(
+                "Could not resolve chat_sessions.id for session {}", session_id
             )
             return None
         return str(session_obj.id) if session_obj and session_obj.id else None
@@ -283,10 +283,9 @@ class EscalationService:
             if chat_session_uuid is None:
                 return
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "Failed to resolve chat session for canonical escalation {}",
                 escalation_id,
-                exc_info=True,
             )
             return
 
@@ -295,11 +294,10 @@ class EscalationService:
                 escalation_id, chat_session_uuid, reason=reason, ticket_id=ticket_id
             )
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "Failed to write canonical escalation {} -- no canonical row "
                 "will exist for it",
                 escalation_id,
-                exc_info=True,
             )
             return
 
@@ -325,14 +323,13 @@ class EscalationService:
                     )
                     await asyncio.sleep(_DELIVERY_RECORD_RETRY_DELAY_SECONDS)
                 else:
-                    LOGGER.error(
+                    LOGGER.opt(exception=True).error(
                         "Escalation {} was created but its Telegram delivery "
                         "receipt could not be recorded after {} attempts -- "
                         "it will be untraceable (no [View] link, no reply "
                         "routing) until manually reconciled in Supabase",
                         escalation_id,
                         _DELIVERY_RECORD_MAX_ATTEMPTS,
-                        exc_info=True,
                     )
 
     async def escalate_to_support(
@@ -747,10 +744,9 @@ class EscalationService:
                                     attachment_repository=self._attachments,
                                 )
                             except Exception:
-                                LOGGER.warning(
+                                LOGGER.opt(exception=True).warning(
                                     "Failed to capture escalation media for mapping {}",
                                     saved_mapping_id,
-                                    exc_info=True,
                                 )
                         LOGGER.info(
                             f"Saved escalation to database: msg_id={escalation_message_id} → "
@@ -930,7 +926,7 @@ class EscalationService:
                     )
 
         except Exception:
-            LOGGER.warning("Error transitioning Jira {} to Done", issue_key, exc_info=True)
+            LOGGER.opt(exception=True).warning("Error transitioning Jira {} to Done", issue_key)
 
     async def _fetch_jira_issue_fields(self, issue_key: str) -> Optional[Dict[str, Any]]:
         """Fetch summary and status category for a Jira issue.
@@ -958,7 +954,7 @@ class EscalationService:
                 "is_done": status_category == "done",
             }
         except Exception:
-            LOGGER.debug("Error fetching Jira issue fields for {}", issue_key, exc_info=True)
+            LOGGER.opt(exception=True).debug("Error fetching Jira issue fields for {}", issue_key)
             return None
 
     async def _search_jira_for_escalation(self, mapping_id: str) -> Optional[str]:
@@ -986,7 +982,7 @@ class EscalationService:
             issues = data.get("issues", [])
             return str(issues[0]["key"]) if issues else None
         except Exception:
-            LOGGER.debug("Error searching Jira for escalation {}", mapping_id, exc_info=True)
+            LOGGER.opt(exception=True).debug("Error searching Jira for escalation {}", mapping_id)
             return None
 
     # ==========================================================================
@@ -1105,11 +1101,10 @@ class EscalationService:
                 "ticket_backend": ticket_backend,
             }
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "Canonical support-reply resolution failed for message_id {} -- "
                 "falling back to legacy",
                 reply_to_message_id,
-                exc_info=True,
             )
             return None
 
@@ -1326,10 +1321,9 @@ class EscalationService:
                 chat_session_uuid, exclude_reasons=_NON_BLOCKING_ESCALATION_REASONS
             )
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "Canonical escalation check failed for session {} -- falling back to legacy",
                 session_id,
-                exc_info=True,
             )
             return None
 
@@ -1388,11 +1382,10 @@ class EscalationService:
                 "jira_ticket_key": None,  # canonical rows never carry the legacy-only column
             }
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "Canonical escalation-info resolution failed for session {} -- "
                 "falling back to legacy",
                 session_id,
-                exc_info=True,
             )
             return None
 
@@ -1448,10 +1441,9 @@ class EscalationService:
                 "jira_ticket_key": None,  # canonical rows never carry this legacy-only column
             }
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "Canonical escalation lookup failed for id {}",
                 escalation_id,
-                exc_info=True,
             )
             return None
 
@@ -1986,11 +1978,10 @@ class EscalationService:
                         await self._escalations.create(mapping_id, chat_session_uuid)
                 await self._escalations.claim(mapping_id)
             except Exception:
-                LOGGER.warning(
+                LOGGER.opt(exception=True).warning(
                     "Could not claim canonical escalation {} before ticket "
                     "creation -- durable dedup won't apply if this call is retried",
                     mapping_id,
-                    exc_info=True,
                 )
 
             try:
@@ -2026,12 +2017,11 @@ class EscalationService:
             try:
                 await self._escalations.attach_ticket(mapping_id, result.ticket_id)
             except Exception:
-                LOGGER.warning(
+                LOGGER.opt(exception=True).warning(
                     "Could not attach canonical escalation {} to ticket {} -- "
                     "durable dedup won't find this ticket on a future retry",
                     mapping_id,
                     ticket_ref,
-                    exc_info=True,
                 )
 
             # Grid stayed unset and the org had 2+ candidates (see 4b above)
@@ -2056,10 +2046,9 @@ class EscalationService:
                         public=False,
                     )
                 except Exception:
-                    LOGGER.warning(
+                    LOGGER.opt(exception=True).warning(
                         "Could not post grid-ambiguity flag comment on {}",
                         ticket_ref,
-                        exc_info=True,
                     )
 
             # escalations.state is now "tracked" (set by attach_ticket above),
@@ -2209,7 +2198,9 @@ class EscalationService:
                 limit=limit,
             )
         except Exception:
-            LOGGER.warning("Escalation sweep: canonical eligible-list query failed", exc_info=True)
+            LOGGER.opt(exception=True).warning(
+                "Escalation sweep: canonical eligible-list query failed"
+            )
             eligible = []
 
         if len(eligible) == limit:
@@ -2223,8 +2214,8 @@ class EscalationService:
             try:
                 await self._escalations.release(mapping_id)
             except Exception:
-                LOGGER.warning(
-                    "Sweep: could not release canonical claim {}", mapping_id, exc_info=True
+                LOGGER.opt(exception=True).warning(
+                    "Sweep: could not release canonical claim {}", mapping_id
                 )
 
         for idx, mapping in enumerate(eligible):
@@ -2332,7 +2323,9 @@ class EscalationService:
                 limit=20,
             )
         except Exception:
-            LOGGER.warning("Escalation sweep: canonical old-unfiled query failed", exc_info=True)
+            LOGGER.opt(exception=True).warning(
+                "Escalation sweep: canonical old-unfiled query failed"
+            )
             old_rows = []
         old_escalations = []
         for row in old_rows:
@@ -2418,7 +2411,9 @@ class EscalationService:
         try:
             tracked_rows = await self._escalations.list_active_tracked()
         except Exception:
-            LOGGER.warning("Escalation sweep: canonical active-tracked query failed", exc_info=True)
+            LOGGER.opt(exception=True).warning(
+                "Escalation sweep: canonical active-tracked query failed"
+            )
             tracked_rows = []
         tracked = []
         for row in tracked_rows:
@@ -2464,10 +2459,9 @@ class EscalationService:
                     try:
                         await self._escalations.resolve(esc["id"])
                     except Exception:
-                        LOGGER.warning(
+                        LOGGER.opt(exception=True).warning(
                             "Could not resolve canonical escalation {}",
                             esc["id"],
-                            exc_info=True,
                         )
                 else:
                     open_tracked.append((esc, fields))
@@ -2515,11 +2509,10 @@ class EscalationService:
                         )
                         sent_any = True
                     except Exception:
-                        LOGGER.warning(
+                        LOGGER.opt(exception=True).warning(
                             "Failed to send pending issue {} to chat_id={}",
                             issue["key"],
                             chat_id,
-                            exc_info=True,
                         )
                 if sent_any:
                     notified_groups += 1
@@ -2554,7 +2547,7 @@ class EscalationService:
         try:
             orphaned = await self._escalations.list_claimed_orphans(limit=50)
         except Exception:
-            LOGGER.warning("Orphan recovery: canonical query failed", exc_info=True)
+            LOGGER.opt(exception=True).warning("Orphan recovery: canonical query failed")
             return
         if len(orphaned) == 50:
             LOGGER.warning("Orphan recovery: hit row cap, may have more orphans")
@@ -2565,8 +2558,8 @@ class EscalationService:
             try:
                 await self._escalations.release(row["id"])
             except Exception:
-                LOGGER.warning(
-                    "Orphan recovery: could not release {}", row["id"], exc_info=True
+                LOGGER.opt(exception=True).warning(
+                    "Orphan recovery: could not release {}", row["id"]
                 )
         if orphaned:
             LOGGER.info(
@@ -2675,11 +2668,10 @@ class EscalationService:
             try:
                 await self._escalations.claim(mapping_id)
             except Exception:
-                LOGGER.warning(
+                LOGGER.opt(exception=True).warning(
                     "Could not claim canonical escalation {} before after-hours "
                     "ticket creation -- durable dedup won't apply if this races",
                     mapping_id,
-                    exc_info=True,
                 )
 
             try:
@@ -2708,11 +2700,10 @@ class EscalationService:
                 try:
                     await self._escalations.release(mapping_id)
                 except Exception:
-                    LOGGER.warning(
+                    LOGGER.opt(exception=True).warning(
                         "Could not release canonical escalation {} after failed "
                         "after-hours ticket creation",
                         mapping_id,
-                        exc_info=True,
                     )
                 restore_keyboard = build_escalation_track_keyboard(mapping_id, include_track=True)
                 if question_summary:
@@ -2746,12 +2737,11 @@ class EscalationService:
                 try:
                     await self._escalations.attach_ticket(mapping_id, result.ticket_id)
                 except Exception:
-                    LOGGER.warning(
+                    LOGGER.opt(exception=True).warning(
                         "Could not attach canonical escalation {} to after-hours "
                         "ticket {} -- durable dedup and webhook routing won't find it",
                         mapping_id,
                         ticket_ref,
-                        exc_info=True,
                     )
             else:
                 LOGGER.warning(
@@ -2817,8 +2807,8 @@ class EscalationService:
                 return None
             return await self.get_escalation_by_id_canonical(escalation["id"])
         except Exception:
-            LOGGER.warning(
-                "Canonical mapping lookup failed for ticket ref {}", ticket_ref, exc_info=True
+            LOGGER.opt(exception=True).warning(
+                "Canonical mapping lookup failed for ticket ref {}", ticket_ref
             )
             return None
 
@@ -2923,8 +2913,8 @@ class EscalationService:
             try:
                 await self._tickets.add_comment(ticket_ref, comment_text, public=is_public)
             except Exception:
-                LOGGER.warning(
-                    "Jira webhook: failed to mirror comment for {}", ticket_ref, exc_info=True
+                LOGGER.opt(exception=True).warning(
+                    "Jira webhook: failed to mirror comment for {}", ticket_ref
                 )
             try:
                 from orchestrator.services.ticketing.update_notifier import TicketEvent
@@ -2946,8 +2936,8 @@ class EscalationService:
                     )
                 )
             except Exception:
-                LOGGER.warning(
-                    "Jira webhook: comment notification failed for {}", ticket_ref, exc_info=True
+                LOGGER.opt(exception=True).warning(
+                    "Jira webhook: comment notification failed for {}", ticket_ref
                 )
 
         # Everything below is specific to a Telegram-escalation origin -- the
@@ -3044,10 +3034,9 @@ class EscalationService:
                         fallback_topic_id=ctx["escalation_topic_id"] if ctx else None,
                     )
                 except Exception:
-                    LOGGER.warning(
+                    LOGGER.opt(exception=True).warning(
                         "Jira webhook: failed to sync in-progress status for canonical ticket {}",
                         ticket_ref,
-                        exc_info=True,
                     )
             return
 
@@ -3064,10 +3053,9 @@ class EscalationService:
                     ticket_ref, already_confirmed_externally=True
                 )
             except Exception:
-                LOGGER.warning(
+                LOGGER.opt(exception=True).warning(
                     "Jira webhook closure: failed to close canonical ticket {}",
                     ticket_ref,
-                    exc_info=True,
                 )
 
         if mapping is None:
@@ -3099,10 +3087,9 @@ class EscalationService:
             try:
                 claimed = await self._escalations.resolve_if_active(mapping_id)
             except Exception:
-                LOGGER.warning(
+                LOGGER.opt(exception=True).warning(
                     "Could not atomically close canonical escalation {}",
                     mapping_id,
-                    exc_info=True,
                 )
         if not claimed:
             LOGGER.info(
@@ -3144,10 +3131,9 @@ class EscalationService:
         try:
             await self._escalations.resolve_all_for_session(chat_session_uuid)
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "Failed to close canonical escalations for session {}",
                 session_id,
-                exc_info=True,
             )
             return {"success": False, "error": "Failed to close escalation"}
         LOGGER.info(f"Closed escalation for session {session_id}")
@@ -3184,10 +3170,9 @@ class EscalationService:
                 return {"success": False, "error": "Failed to reopen escalation"}
             await self._escalations.reopen(escalation_id)
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 "Failed to reopen canonical escalation for session {}",
                 session_id,
-                exc_info=True,
             )
             return {"success": False, "error": "Failed to reopen escalation"}
         LOGGER.info(f"Reopened escalation for session {session_id}")

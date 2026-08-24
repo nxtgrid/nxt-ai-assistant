@@ -60,12 +60,11 @@ def sweep_state_for_artifacts(design_id: str, state: dict, *, packet_id: str | N
                 label=artifact_type,
             )
         except Exception:
-            logger.warning(
+            logger.opt(exception=True).warning(
                 "sweep_state_for_artifacts: failed to log artifact for design_id={} "
                 "key={}; continuing sweep",
                 design_id,
                 key,
-                exc_info=True,
             )
 
 
@@ -136,11 +135,10 @@ def append_design_artifact(
             return None
         return artifacts
     except Exception:
-        logger.warning(
+        logger.opt(exception=True).warning(
             "append_design_artifact failed for design_id={} artifact_type={}",
             design_id,
             artifact_type,
-            exc_info=True,
         )
         return None
 
@@ -215,11 +213,10 @@ def mark_artifact_stale(design_id: str, artifact_type: str, drive_file_id: str) 
             return None
         return artifacts
     except Exception:
-        logger.warning(
+        logger.opt(exception=True).warning(
             "mark_artifact_stale failed for design_id={} artifact_type={} drive_file_id={}",
             design_id,
             artifact_type,
             drive_file_id,
-            exc_info=True,
         )
         return None

@@ -323,7 +323,7 @@ class OpenRouterGateway:
                 },
             )
         except Exception:
-            LOGGER.debug("Skipping Langfuse generation update", exc_info=True)
+            LOGGER.opt(exception=True).debug("Skipping Langfuse generation update")
 
 
 def _csv_env(name: str) -> list[str]:

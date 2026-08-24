@@ -146,7 +146,7 @@ async def handle_pending_command(
         return result
 
     except Exception as e:
-        LOGGER.error(f"Error handling /pending command: {e}", exc_info=True)
+        LOGGER.opt(exception=True).error(f"Error handling /pending command: {e}")
         result = dict(base_result)
         result["final_response"] = "Sorry, could not retrieve pending workflows."
         return result

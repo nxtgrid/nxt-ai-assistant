@@ -202,7 +202,7 @@ class KnowledgeStore:
 
             return cls(client=create_client(url, key))
         except Exception:
-            LOGGER.warning("Could not build the knowledge store client", exc_info=True)
+            LOGGER.opt(exception=True).warning("Could not build the knowledge store client")
             return cls(client=None)
 
     def invalidate(self) -> None:
@@ -228,7 +228,7 @@ class KnowledgeStore:
             )
             self._cache = [KnowledgeModule(**row) for row in (result.data or [])]
         except Exception:
-            LOGGER.warning("Knowledge module fetch failed; continuing without", exc_info=True)
+            LOGGER.opt(exception=True).warning("Knowledge module fetch failed; continuing without")
             self._cache = []
         self._expires = time.time() + self._ttl
         return self._cache
@@ -244,7 +244,9 @@ class KnowledgeStore:
                 .execute()
             )
         except Exception:
-            LOGGER.warning(f"Knowledge overrides fetch failed for '{prompt_id}'", exc_info=True)
+            LOGGER.opt(exception=True).warning(
+                f"Knowledge overrides fetch failed for '{prompt_id}'"
+            )
             return {}
         by_id = {m.id: m.slug for m in self.all_modules()}
         return {
@@ -266,7 +268,7 @@ class KnowledgeStore:
                 .execute()
             )
         except Exception:
-            LOGGER.warning(f"Prompt-pin fetch failed for module '{module_id}'", exc_info=True)
+            LOGGER.opt(exception=True).warning(f"Prompt-pin fetch failed for module '{module_id}'")
             return []
         return [row["prompt_id"] for row in (result.data or [])]
 

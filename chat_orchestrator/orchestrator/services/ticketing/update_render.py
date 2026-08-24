@@ -134,7 +134,7 @@ async def summarize_activity(
             GenerationOptions(model=model, temperature=0.0),
         )
     except Exception:
-        LOGGER.warning("ticket update: activity summarisation failed", exc_info=True)
+        LOGGER.opt(exception=True).warning("ticket update: activity summarisation failed")
         return fallback_summary(comments)
     text = (getattr(result, "text", "") or "").strip()
     return text or fallback_summary(comments)
@@ -165,6 +165,6 @@ async def classify_significance(
         )
         parsed = json.loads((getattr(result, "text", "") or "").strip())
     except Exception:
-        LOGGER.warning("ticket update: significance classification failed", exc_info=True)
+        LOGGER.opt(exception=True).warning("ticket update: significance classification failed")
         return False
     return bool(parsed.get("significant")) if isinstance(parsed, dict) else False

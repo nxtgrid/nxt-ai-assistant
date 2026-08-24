@@ -75,8 +75,8 @@ class JitContextResolver:
             modules = self._store.all_modules()
             pins = self._store.overrides_for(prompt_id)
         except Exception:
-            LOGGER.warning(
-                f"JIT module lookup failed for '{prompt_id}'; continuing without", exc_info=True
+            LOGGER.opt(exception=True).warning(
+                f"JIT module lookup failed for '{prompt_id}'; continuing without"
             )
             return "", []
 
@@ -131,9 +131,8 @@ class JitContextResolver:
                 if await asyncio.wait_for(check(module, ctx), timeout=self.timeout_seconds):
                     out.append(module)
             except Exception:
-                LOGGER.warning(
+                LOGGER.opt(exception=True).warning(
                     f"Visibility check failed for '{module.slug}'; withholding",
-                    exc_info=True,
                 )
         return out
 
@@ -189,25 +188,25 @@ def build_default_registry() -> ProviderRegistry:
 
         registry.register(GDocProvider())
     except Exception:
-        LOGGER.warning("GDocProvider unavailable", exc_info=True)
+        LOGGER.opt(exception=True).warning("GDocProvider unavailable")
     try:
         from orchestrator.services.providers.directory_provider import DirectoryProvider
 
         registry.register(DirectoryProvider())
     except Exception:
-        LOGGER.warning("DirectoryProvider unavailable", exc_info=True)
+        LOGGER.opt(exception=True).warning("DirectoryProvider unavailable")
     try:
         from orchestrator.services.providers.graph_provider import GraphProvider
 
         registry.register(GraphProvider())
     except Exception:
-        LOGGER.warning("GraphProvider unavailable", exc_info=True)
+        LOGGER.opt(exception=True).warning("GraphProvider unavailable")
     try:
         from orchestrator.services.providers.episodic_provider import EpisodicProvider
 
         registry.register(EpisodicProvider())
     except Exception:
-        LOGGER.warning("EpisodicProvider unavailable", exc_info=True)
+        LOGGER.opt(exception=True).warning("EpisodicProvider unavailable")
     return registry
 
 

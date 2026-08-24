@@ -788,8 +788,8 @@ class WorkflowExecutor:
                     if record is not None:
                         await on_step_complete(step, record, signal.final_response)
                 except Exception:
-                    LOGGER.warning(
-                        f"on_step_complete callback failed for step {step.name}", exc_info=True
+                    LOGGER.opt(exception=True).warning(
+                        f"on_step_complete callback failed for step {step.name}"
                     )
             if signal.action == "break":
                 break
@@ -3528,11 +3528,10 @@ Be specific and actionable. Reference data from previous steps as needed.
                 if similar_packets:
                     similar_state = similar_packets[0].get("packet_state") or {}
             except Exception:
-                LOGGER.warning(
+                LOGGER.opt(exception=True).warning(
                     "validate_step_prerequisites: find_similar_completed lookup failed "
                     "for step {!r}; continuing without Tier 2 data",
                     step_name,
-                    exc_info=True,
                 )
 
         # Tier 3: Phase B design-artifact jsonb, cached per design_id so repeat
@@ -3545,11 +3544,10 @@ Be specific and actionable. Reference data from previous steps as needed.
                     repo = Repository("designs")
                     design_row_cache[design_id] = await asyncio.to_thread(repo.get, design_id)
                 except Exception:
-                    LOGGER.warning(
+                    LOGGER.opt(exception=True).warning(
                         "validate_step_prerequisites: design artifact lookup failed for "
                         "design_id={}; continuing without Tier 3 data",
                         design_id,
-                        exc_info=True,
                     )
                     design_row_cache[design_id] = None
             return design_row_cache[design_id]

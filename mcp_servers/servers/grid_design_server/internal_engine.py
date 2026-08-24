@@ -674,14 +674,13 @@ def _get_design_artifact_sync(
                 )
                 artifact_log.mark_artifact_stale(design_id, artifact_type, drive_file_id)
                 continue
-            logger.warning(
+            logger.opt(exception=True).warning(
                 "get_design_artifact: non-404 Drive error checking drive_file_id={} "
                 "(design_id={}, artifact_type={}, version={}); stopping walk",
                 drive_file_id,
                 design_id,
                 artifact_type,
                 index,
-                exc_info=True,
             )
             return {
                 "success": False,
@@ -689,14 +688,13 @@ def _get_design_artifact_sync(
                 "backend": "internal",
             }
         except Exception:
-            logger.warning(
+            logger.opt(exception=True).warning(
                 "get_design_artifact: unexpected error checking drive_file_id={} "
                 "(design_id={}, artifact_type={}, version={}); stopping walk",
                 drive_file_id,
                 design_id,
                 artifact_type,
                 index,
-                exc_info=True,
             )
             return {
                 "success": False,

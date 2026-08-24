@@ -120,9 +120,8 @@ class PromptLibrary:
             if found:
                 return found[0], PromptSource.DB, found[1]
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 f"Prompt override lookup failed for '{prompt_id}'; continuing to the next source",
-                exc_info=True,
             )
         return None
 
@@ -134,10 +133,9 @@ class PromptLibrary:
             if body:
                 return body, PromptSource.GDOC, None
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 f"Prompt Google Doc lookup failed for '{prompt_id}'; "
                 f"continuing to the next source",
-                exc_info=True,
             )
         return None
 
@@ -178,8 +176,8 @@ class PromptLibrary:
             modules = self._knowledge.all_modules()
             pins = self._knowledge.overrides_for(spec.id)
         except Exception:
-            LOGGER.warning(
-                f"Knowledge lookup failed for '{spec.id}'; rendering without it", exc_info=True
+            LOGGER.opt(exception=True).warning(
+                f"Knowledge lookup failed for '{spec.id}'; rendering without it"
             )
             return None, []
 

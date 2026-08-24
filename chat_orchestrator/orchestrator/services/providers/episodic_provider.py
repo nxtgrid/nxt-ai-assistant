@@ -89,7 +89,7 @@ async def _default_grid_access(grid: str, ctx: ResolutionContext) -> bool:
         )
         return grid in (names or [])
     except Exception:
-        LOGGER.warning(f"Grid access check failed for '{grid}'; denying", exc_info=True)
+        LOGGER.opt(exception=True).warning(f"Grid access check failed for '{grid}'; denying")
         return False
 
 
@@ -104,7 +104,7 @@ def _default_client() -> Any:
 
         return create_client(url, key)
     except Exception:
-        LOGGER.warning("Could not build the episodic provider client", exc_info=True)
+        LOGGER.opt(exception=True).warning("Could not build the episodic provider client")
         return None
 
 

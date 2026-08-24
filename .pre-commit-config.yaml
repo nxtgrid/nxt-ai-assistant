@@ -14,3 +14,13 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      # Repo-wide, not staged-files-only: the check classifies each module's
+      # loggers, so it needs to read a file even when the diff only moved a
+      # logger binding around.
+      - id: loguru-exc-info
+        name: No exc_info= on a loguru logger (it drops the traceback)
+        entry: python3 .github/scripts/check_loguru_exc_info.py
+        language: system
+        pass_filenames: false
+        always_run: true

@@ -89,10 +89,9 @@ class GDocStore:
         try:
             body = self._fetch(doc_id)
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 f"Google Doc fetch failed for prompt '{prompt_id}' (doc {doc_id}); "
                 f"falling back to the bundled default",
-                exc_info=True,
             )
             return None
 

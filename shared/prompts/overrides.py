@@ -50,7 +50,7 @@ class OverrideStore:
 
             return cls(client=create_client(url, key))
         except Exception:
-            LOGGER.warning("Could not build the prompt override client", exc_info=True)
+            LOGGER.opt(exception=True).warning("Could not build the prompt override client")
             return cls(client=None)
 
     def is_configured(self) -> bool:
@@ -89,7 +89,7 @@ class OverrideStore:
             )
             self._label_cache = self._label_map(result.data or [])
         except Exception:
-            LOGGER.warning("Prompt label fetch failed; using bundled prompts", exc_info=True)
+            LOGGER.opt(exception=True).warning("Prompt label fetch failed; using bundled prompts")
             self._label_cache = {}
         self._label_expires = time.time() + LABEL_TTL_SECONDS
         return self._label_cache
@@ -114,9 +114,8 @@ class OverrideStore:
                 .execute()
             )
         except Exception:
-            LOGGER.warning(
+            LOGGER.opt(exception=True).warning(
                 f"Prompt body fetch failed for '{prompt_id}' v{version}; using bundled",
-                exc_info=True,
             )
             return None
 
@@ -161,7 +160,9 @@ class OverrideStore:
                 for row in (result.data or [])
             }
         except Exception:
-            LOGGER.warning("Doc binding fetch failed; using legacy env vars only", exc_info=True)
+            LOGGER.opt(exception=True).warning(
+                "Doc binding fetch failed; using legacy env vars only"
+            )
             self._doc_binding_cache = {}
         self._doc_binding_expires = time.time() + DOC_BINDING_TTL_SECONDS
         return self._doc_binding_cache
@@ -213,7 +214,9 @@ class OverrideStore:
                 row["prompt_id"]: row["tier"] for row in (result.data or [])
             }
         except Exception:
-            LOGGER.warning("Model override fetch failed; using bundled tiers only", exc_info=True)
+            LOGGER.opt(exception=True).warning(
+                "Model override fetch failed; using bundled tiers only"
+            )
             self._model_override_cache = {}
         self._model_override_expires = time.time() + DOC_BINDING_TTL_SECONDS
         return self._model_override_cache
