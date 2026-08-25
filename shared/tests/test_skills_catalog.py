@@ -8,15 +8,27 @@ import time
 from types import SimpleNamespace
 
 from shared.prompts.skills import (
+    SKILL_PIN_PREFIX,
     Skill,
     SkillCatalogStore,
     render_skill_catalog,
     select_skills_for_context,
+    skill_prompt_id,
 )
 
 
 def _skill(slug="find_tickets", title="Find Tickets", summary="Finds open tickets.", staff_only=True):
     return Skill(id=f"id-{slug}", slug=slug, title=title, summary=summary, staff_only=staff_only)
+
+
+def test_skill_prompt_id_prefixes_the_skill_id():
+    assert skill_prompt_id("11111111-1111-1111-1111-111111111111") == (
+        "skill:11111111-1111-1111-1111-111111111111"
+    )
+
+
+def test_skill_pin_prefix_is_the_literal_prefix_used():
+    assert SKILL_PIN_PREFIX == "skill:"
 
 
 class TestSelectSkillsForContext:

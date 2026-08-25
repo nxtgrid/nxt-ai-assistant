@@ -28,6 +28,18 @@ from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
+# Separate from skill_runner.py's SKILL_EXPERT_PREFIX (routes
+# matched_expert_id in a different table, for a different purpose) even
+# though both happen to be "skill:" -- this one is the key convention for
+# prompt_knowledge_overrides.prompt_id, defined here in shared/ because
+# anansi_app has no `orchestrator` package to import skill_runner from.
+SKILL_PIN_PREFIX = "skill:"
+
+
+def skill_prompt_id(skill_id: str) -> str:
+    """The prompt_knowledge_overrides.prompt_id key for a skill's pins."""
+    return f"{SKILL_PIN_PREFIX}{skill_id}"
+
 
 @dataclass(frozen=True)
 class Skill:
@@ -142,8 +154,10 @@ SKILL_CATALOG = SkillCatalogStore.from_env()
 
 __all__ = [
     "SKILL_CATALOG",
+    "SKILL_PIN_PREFIX",
     "Skill",
     "SkillCatalogStore",
     "render_skill_catalog",
     "select_skills_for_context",
+    "skill_prompt_id",
 ]
