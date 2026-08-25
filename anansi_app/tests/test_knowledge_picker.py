@@ -6,7 +6,12 @@ this file replaces)."""
 import ast
 from pathlib import Path
 
-from nicegui_app.pages.knowledge_picker import PickerRow, build_picker_rows, filter_picker_rows
+from nicegui_app.pages.knowledge_picker import (
+    PickerRow,
+    build_picker_rows,
+    filter_picker_rows,
+    rows_to_display,
+)
 
 from shared.prompts.knowledge import KnowledgeModule
 
@@ -61,6 +66,34 @@ def test_filter_picker_rows_matches_slug_title_and_summary():
     assert [r.slug for r in filter_picker_rows(rows, "azimuth")] == ["azimuth-calculation"]
     assert [r.slug for r in filter_picker_rows(rows, "LED")] == ["victron-led"]
     assert len(filter_picker_rows(rows, "")) == 2
+
+
+# ── The reverse-direction picker's own scaling hazard ───────────────────────
+# render_entity_picker (knowledge_modules.py's "Used by these prompts"/"these
+# skills") can face dozens of candidates -- every registered prompt id today,
+# every skill ever created tomorrow. Rendering all of them, unfiltered, the
+# moment the Edit-module dialog opens produced a single websocket update big
+# enough to trip NiceGUI's own message-size limit -- the dialog would open
+# with the connection dropping mid-render, leaving both "Used by" sections
+# (and everything below them) blank with no error the operator could see.
+# rows_to_display is the fix: an empty search shows only what's already
+# pinned (always small in practice), and typing a query searches the full
+# candidate set regardless of pinned state, so a new pin stays discoverable.
+
+
+def test_rows_to_display_with_empty_query_shows_only_selected_rows():
+    rows = _picker_rows_fixture()  # azimuth-calculation, victron-led
+    assert [r.slug for r in rows_to_display(rows, {"victron-led"}, "")] == ["victron-led"]
+
+
+def test_rows_to_display_with_a_query_searches_every_row_regardless_of_selection():
+    rows = _picker_rows_fixture()
+    assert [r.slug for r in rows_to_display(rows, set(), "azimuth")] == ["azimuth-calculation"]
+
+
+def test_rows_to_display_with_nothing_selected_and_empty_query_is_empty():
+    rows = _picker_rows_fixture()
+    assert rows_to_display(rows, set(), "") == []
 
 
 # ── The same null-body / JIT hazard build_module_rows has ──────────────────

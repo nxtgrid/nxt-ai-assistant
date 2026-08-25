@@ -65,6 +65,35 @@ def filter_picker_rows(rows: List[PickerRow], query: str) -> List[PickerRow]:
     ]
 
 
+def rows_to_display(rows: List[Any], selected: "set[str]", query: str) -> List[PickerRow]:
+    """Which rows render_entity_picker shows right now.
+
+    An empty query shows only the currently-selected rows, never the full
+    candidate list -- render_entity_picker can face dozens of candidates
+    (every registered prompt id today, every skill ever created tomorrow),
+    and pushing all of them, unfiltered, into the Edit-module dialog's
+    initial paint produced one websocket update large enough to trip
+    NiceGUI's own message-size limit: the dialog would open with the
+    connection dropping mid-render, leaving both "Used by" sections (and
+    everything below them, since the dialog builds top-to-bottom in one
+    pass) blank with no error the operator could ever see. A query searches
+    every row regardless of selection, so a new pin is still discoverable.
+
+    ``rows`` may be the raw ``PickerRow``s passed into render_entity_picker
+    (whose own ``checked`` is a snapshot from dialog-open time) -- this
+    always re-derives ``checked`` from ``selected``, the live, mutated set,
+    so a row just ticked or unticked shows correctly without needing rows
+    itself rebuilt.
+    """
+    current = [
+        PickerRow(slug=r.slug, title=r.title, chars=r.chars, checked=(r.slug in selected), summary=r.summary)
+        for r in rows
+    ]
+    if not query.strip():
+        return [r for r in current if r.checked]
+    return filter_picker_rows(current, query)
+
+
 def render_module_picker(
     pinning_id: str, store: Any, user_email: str, *, show_budget: bool
 ) -> None:
@@ -173,6 +202,11 @@ def render_entity_picker(
     picker's selection with a second one (skills) before writing once (see
     resolve_pins_to_save; two separate saves would have the second call's
     diff delete the first call's pins).
+
+    Shows only the currently-ticked rows until the operator types a search
+    -- see rows_to_display's own docstring for why: with dozens of
+    candidates, rendering all of them unfiltered on open can push a single
+    websocket message past NiceGUI's size limit and blank the whole dialog.
     """
     selected: "set[str]" = {r.slug for r in rows if r.checked}
 
@@ -182,14 +216,13 @@ def render_entity_picker(
 
     def redraw() -> None:
         options.clear()
-        current = [
-            PickerRow(slug=r.slug, title=r.title, chars=r.chars, checked=(r.slug in selected), summary=r.summary)
-            for r in rows
-        ]
-        visible = filter_picker_rows(current, search.value or "")
+        query = search.value or ""
+        visible = rows_to_display(rows, selected, query)
         with options:
             if not visible:
-                ui.label("No matches.").classes("text-italic text-caption")
+                ui.label(
+                    "No matches." if query.strip() else "Nothing pinned yet — type to search."
+                ).classes("text-italic text-caption")
             for r in visible:
                 def toggle(e, slug=r.slug) -> None:
                     if e.value:
@@ -214,4 +247,5 @@ __all__ = [
     "filter_picker_rows",
     "render_entity_picker",
     "render_module_picker",
+    "rows_to_display",
 ]
