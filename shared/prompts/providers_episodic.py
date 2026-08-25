@@ -1,12 +1,17 @@
 """Distilled prior history for the grid or organization in scope.
 
-Read-only. Generation is scripts/distill_episodic_memory.py, run nightly --
-distilling at render time would put an LLM call on the critical path of every
-request that pins this module.
+Read-only. Generation is the nightly batch in shared/episodic_memory.py, driven
+by anansi_app/scripts/episodic_scheduler.py -- distilling at render time would
+put an LLM call on the critical path of every request that uses this module.
+
+Two things gate this beyond the batch: scope must name a grid or an
+organization (prepare_context.py does not currently pass a grid, so in practice
+only the organization anchor matches), and the module must be attached to a
+prompt -- ensure_singleton_modules creates it attached to none.
 
 Grid is preferred over organization when the scope names both: it is the more
 specific anchor, matching how site-scoped knowledge modules already beat
-sector-scoped ones in budget_pinned.
+sector-scoped ones in budget_inlined.
 """
 
 from __future__ import annotations

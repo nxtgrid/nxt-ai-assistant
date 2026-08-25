@@ -27,6 +27,20 @@ python scripts/grafana_scheduler.py --daemon --interval 60 &
 GRAFANA_SCHEDULER_PID=$!
 echo "Grafana indexer scheduler started (PID: $GRAFANA_SCHEDULER_PID)"
 
+# Start the episodic memory distiller (nightly at EPISODIC_DISTILL_HOUR,
+# default 03:00 -- an hour after the Grafana indexer, so the two LLM-heavy
+# batches in this container don't compete for rate limit).
+#
+# Nothing had ever run this batch: its script said "run nightly" but no
+# scheduler anywhere invoked it, and repo-root scripts/ isn't in any deployed
+# image either -- so episodic_distillations had been empty since migration
+# 0019 created it. See episodic_scheduler.py's docstring for the full history.
+# Disable with EPISODIC_DISTILL_ENABLED=false.
+echo "Starting episodic memory distiller scheduler daemon..."
+python scripts/episodic_scheduler.py --daemon --interval 60 &
+EPISODIC_SCHEDULER_PID=$!
+echo "Episodic distiller scheduler started (PID: $EPISODIC_SCHEDULER_PID)"
+
 # Start the NiceGUI app (foreground - main process). Binds 0.0.0.0:8501 and
 # serves /healthz for the platform health check.
 export PORT="${PORT:-8501}"

@@ -15,22 +15,11 @@ from shared.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 
-def resolve_mode(body: str) -> str:
-    """New modules are on_demand.
-
-    Pinned modules are inlined into every render of every prompt that uses
-    them and share a fixed character budget, so promoting one is a deliberate
-    decision an operator makes on the Context page -- never a default.
-    """
-    return "on_demand"
-
-
 def build_module_payload(
     slug: str,
     title: str,
     summary: str,
     body: str,
-    mode: str,
     actor: str,
     source: str = "manual",
     source_ref: str = "",
@@ -42,6 +31,12 @@ def build_module_payload(
     A doc-linked module stores no body: the document is the source of truth
     and is fetched fresh at request time, so a stored copy could only drift.
     Its audience defaults to mirroring the document's own sharing.
+
+    No `mode`: nothing reads that column any more (see
+    shared/prompts/knowledge.py) and it has a NOT NULL DEFAULT, so omitting
+    it works whether or not migration 0029 has been applied. A module is
+    inlined in full into every prompt it is attached to, and this step
+    attaches none by default -- module_prompt_ids decides that.
     """
     payload: Dict[str, Any] = {
         "slug": slug,
@@ -49,7 +44,6 @@ def build_module_payload(
         "summary": summary,
         "tags": [],
         "scope": "global",
-        "mode": mode,
         "source": source,
         "updated_by": actor,
     }
@@ -78,7 +72,6 @@ async def store_module(context: StepContext) -> StepResult:
         title=context.get_state("module_title") or "",
         summary=context.get_state("module_summary") or "",
         body=body,
-        mode=context.get_state("module_mode") or resolve_mode(body),
         actor=actor,
         source=context.get_state("module_source") or "manual",
         source_ref=context.get_state("module_source_ref") or "",

@@ -2,13 +2,13 @@
 
 import pytest
 
-from orchestrator.services.providers import directory_provider
-from orchestrator.services.providers.directory_provider import (
+from shared.prompts import providers_directory as directory_provider
+from shared.prompts.knowledge import KnowledgeModule
+from shared.prompts.providers import ResolutionContext
+from shared.prompts.providers_directory import (
     DirectoryProvider,
     render_directory,
 )
-from shared.prompts.knowledge import KnowledgeModule
-from shared.prompts.providers import ResolutionContext
 from shared.prompts.types import RequestScope
 
 

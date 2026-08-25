@@ -395,11 +395,10 @@ document_content: string - Raw content from source
 improved_content: string - After the improvement loop
 module_slug: string - Proposed kebab-case identifier
 module_title: string - Proposed human-readable title
-module_summary: string - One-line catalog summary
+module_summary: string - One-line summary shown in the Context picker
 module_body: string - Final body text
-module_mode: string - pinned or on_demand (new modules default to on_demand)
 module_collision: string - none, identical, slug_taken, title_taken
-module_prompt_ids: list - Prompt ids that will pin this module
+module_prompt_ids: list - Prompt ids that will use this module (each inlines it in full)
 module_source: string - manual or gdoc
 module_source_ref: string - Drive file id when linked live
 module_source_tab: string - Sheet tab name, blank for the first tab

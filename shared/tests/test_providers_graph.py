@@ -2,9 +2,9 @@
 
 import pytest
 
-from orchestrator.services.providers.graph_provider import GraphProvider, render_primer
 from shared.prompts.knowledge import KnowledgeModule
 from shared.prompts.providers import ResolutionContext
+from shared.prompts.providers_graph import GraphProvider, render_primer
 from shared.prompts.types import RequestScope
 
 

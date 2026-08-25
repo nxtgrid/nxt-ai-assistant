@@ -23,7 +23,6 @@ def _module(slug):
         body=f"{slug} full body",
         tags=[],
         scope="sector",
-        mode="on_demand",
     )
 
 

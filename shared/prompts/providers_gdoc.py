@@ -61,10 +61,10 @@ class GDocProvider:
     async def visible_to(self, module: KnowledgeModule, ctx: ResolutionContext) -> bool:
         """Whether this caller may see the module at all. Never raises.
 
-        Separate from resolve() so the on-demand catalog can be filtered
-        without fetching any content: a denied module's summary must not
-        appear, and the model must not spend a turn fetching what it will
-        be refused.
+        Separate from resolve() so a caller can ask "may they see this?"
+        without paying to fetch the body. It is not the gate on its own:
+        resolve() calls this itself and returns None when denied, which is
+        what actually keeps a denied document out of a prompt.
         """
         if module.doc_audience == "published":
             return True

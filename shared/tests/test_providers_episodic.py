@@ -2,9 +2,9 @@
 
 import pytest
 
-from orchestrator.services.providers.episodic_provider import EpisodicProvider
 from shared.prompts.knowledge import KnowledgeModule
 from shared.prompts.providers import ResolutionContext
+from shared.prompts.providers_episodic import EpisodicProvider
 from shared.prompts.types import RequestScope
 
 

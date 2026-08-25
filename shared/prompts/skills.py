@@ -9,7 +9,7 @@ author, and per the plan's Phase 3, they must render as visibly separate
 blocks so a model is never choosing between a document and a procedure in
 one flat list. What they share is the *shape* of "small store, cheap
 catalog line, full body fetched on demand" -- this module mirrors
-knowledge.py's KnowledgeStore/render_catalog pattern deliberately, without
+knowledge.py's KnowledgeStore/render_inlined pattern deliberately, without
 importing from it.
 
 Skills have no per-prompt pinning or geographic/org scope selection the way
@@ -58,11 +58,12 @@ def render_skill_catalog(skills: List[Skill]) -> Optional[str]:
     """Titles and one-liners only -- never step bodies.
 
     Its own '# Available Skills' block, deliberately not merged with
-    knowledge.render_catalog's '# Available Knowledge' output -- see this
-    module's docstring.
+    knowledge.render_inlined's '# Technical Knowledge' output -- see this
+    module's docstring. Note those differ in kind now: knowledge modules are
+    inlined in full, while skills genuinely are a catalog to pick from.
 
-    Shows `title`, not `slug` -- unlike knowledge modules (an admin-curated,
-    slug-addressed catalog), a skill's title is the name its author chose
+    Shows `title`, not `slug` -- unlike knowledge modules (admin-curated and
+    slug-addressed), a skill's title is the name its author chose
     and edits directly (see the plan's Phase 3/4), so it's the identifier
     that should actually appear in context. `slug` stays available on the
     Skill object for a future by-name invocation path (not built yet).

@@ -34,7 +34,7 @@ from shared.utils.logging import get_logger
 LOGGER = get_logger(__name__)
 
 # The only truncation point for system-instructions context injected into the
-# contradiction-check LLM call. Matches PINNED_BUDGET_CHARS
+# contradiction-check LLM call. Matches INLINE_BUDGET_CHARS
 # (shared/prompts/knowledge.py) -- knowledge modules get the same-order
 # budget, so this input isn't the odd one out. Previously 1000 chars, applied
 # twice (here and again where the text was consumed) -- a single named

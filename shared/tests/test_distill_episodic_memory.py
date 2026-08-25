@@ -1,45 +1,24 @@
-"""Episodic distillation batch: selection and write rules."""
+"""The hand-run CLI is a thin shell over shared.episodic_memory.
 
-from scripts.distill_episodic_memory import (
-    anchors_to_refresh,
-    build_distillation_prompt,
-)
+The logic itself moved to shared/episodic_memory.py (and is tested in
+test_episodic_memory.py) because no deployed image contains repo-root
+scripts/ -- which is why the nightly distillation this script describes had
+never actually run. What is left worth pinning here is the seam: the names
+this module used to define stay importable from it, so a developer's muscle
+memory and anything already importing them keeps working.
+"""
 
-
-def _row(anchor_id, edited_by=None, message_count=50):
-    return {
-        "anchor_type": "grid",
-        "anchor_id": anchor_id,
-        "edited_by": edited_by,
-        "message_count": message_count,
-    }
+import scripts.distill_episodic_memory as cli
+from shared import episodic_memory
 
 
-def test_refreshes_an_anchor_with_no_existing_row():
-    assert anchors_to_refresh(["Alpha"], existing=[]) == ["Alpha"]
+def test_the_cli_reexports_the_shared_implementations():
+    assert cli.anchors_to_refresh is episodic_memory.anchors_to_refresh
+    assert cli.build_distillation_prompt is episodic_memory.build_distillation_prompt
+    assert cli.distill_anchor_type is episodic_memory.distill_anchor_type
 
 
-def test_refreshes_an_existing_generated_row():
-    assert anchors_to_refresh(["Alpha"], existing=[_row("Alpha")]) == ["Alpha"]
-
-
-def test_never_overwrites_a_hand_edited_row():
-    existing = [_row("Alpha", edited_by="ops@example.com")]
-    assert anchors_to_refresh(["Alpha"], existing=existing) == []
-
-
-def test_refreshes_only_the_anchors_asked_for():
-    existing = [_row("Alpha"), _row("Beta")]
-    assert anchors_to_refresh(["Beta"], existing=existing) == ["Beta"]
-
-
-def test_prompt_includes_the_anchor_and_the_messages():
-    prompt = build_distillation_prompt("Alpha", ["inverter tripped", "replaced fuse"])
-    assert "Alpha" in prompt
-    assert "inverter tripped" in prompt
-    assert "replaced fuse" in prompt
-
-
-def test_prompt_asks_for_durable_lessons_not_a_transcript():
-    prompt = build_distillation_prompt("Alpha", ["x"])
-    assert "transcript" in prompt.lower()
+def test_the_cli_reexports_the_shared_tuning_constants():
+    assert cli.LOOKBACK_DAYS == episodic_memory.LOOKBACK_DAYS
+    assert cli.MAX_MESSAGES == episodic_memory.MAX_MESSAGES
+    assert cli.TARGET_WORDS == episodic_memory.TARGET_WORDS

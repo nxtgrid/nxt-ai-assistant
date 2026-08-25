@@ -10,10 +10,10 @@ from shared.prompts.providers import ProviderRegistry, ResolutionContext
 from shared.prompts.types import RequestScope
 
 
-def _module(slug, source="graph", mode="pinned", scope="sector"):
+def _module(slug, source="graph", scope="sector"):
     return KnowledgeModule(
         id=slug, slug=slug, title=slug.title(), summary=f"About {slug}.",
-        body=None, scope=scope, mode=mode, source=source,
+        body=None, scope=scope, source=source,
     )
 
 
@@ -54,7 +54,7 @@ def _resolver(modules, pins, providers):
 
 
 @pytest.mark.asyncio
-async def test_resolves_a_pinned_jit_module():
+async def test_resolves_an_attached_jit_module():
     provider = _FakeProvider("graph", text="Entity types: Meter, DCU.")
     resolver = _resolver([_module("graph-overview")], {"graph-overview": True}, [provider])
 
@@ -174,20 +174,22 @@ async def test_scope_gate_still_applies():
 
 
 @pytest.mark.asyncio
-async def test_on_demand_jit_module_renders_a_catalog_line_not_a_body():
+async def test_every_attached_jit_module_is_resolved_and_inlined_in_full():
+    """The old on-demand tier rendered a summary and never called resolve().
+
+    Attaching a module now means its resolved content reaches the prompt, so
+    the provider must actually be called and its body must appear.
+    """
     provider = _FakeProvider("graph", text="full body")
-    resolver = _resolver(
-        [_module("graph-overview", mode="on_demand")], {"graph-overview": True}, [provider]
-    )
+    resolver = _resolver([_module("graph-overview")], {"graph-overview": True}, [provider])
 
     text, used = await resolver.resolve_for_prompt(
         "staff.system", ResolutionContext(scope=RequestScope())
     )
 
-    assert "graph-overview" in text
-    assert "About graph-overview." in text
-    assert "full body" not in text
-    assert provider.calls == 0
+    assert "full body" in text
+    assert "get_knowledge_module" not in text
+    assert provider.calls == 1
     assert used == ["graph-overview"]
 
 
@@ -264,7 +266,7 @@ def test_budget_resolved_drops_whole_modules_not_fragments():
 
 
 def test_budget_resolved_keeps_site_scoped_material_first():
-    """Most specific, least replaceable -- same rule as budget_pinned."""
+    """Most specific, least replaceable -- same rule as budget_inlined."""
     from orchestrator.services.jit_context_resolver import budget_resolved
     from shared.prompts.knowledge import KnowledgeModule
 
@@ -285,6 +287,17 @@ def test_budget_resolved_on_an_empty_list_is_empty():
 
 
 class _GatedProvider:
+    """A provider that enforces its own access check inside resolve().
+
+    Faithful to GDocProvider, which calls its own visible_to() at the top of
+    resolve() and returns None when denied. That is the load-bearing detail:
+    resolve() is the authoritative gate. The resolver used to pre-filter
+    on-demand modules through visible_to() before rendering a catalog line;
+    with no catalog left, resolve() is the only gate there is, so a fake
+    that returned a body regardless of its own check would be testing a
+    contract no real provider has.
+    """
+
     source = "gdoc"
 
     def __init__(self, visible):
@@ -293,18 +306,18 @@ class _GatedProvider:
     async def visible_to(self, _module, _ctx):
         return self._visible
 
-    async def resolve(self, _module, _ctx):
+    async def resolve(self, module, ctx):
+        if not await self.visible_to(module, ctx):
+            return None
         return "body"
 
 
-def _on_demand_module(slug="secret-doc"):
+def _gated_module(slug="secret-doc"):
     from shared.prompts.knowledge import KnowledgeModule
 
-    # No explicit scope: this task runs before the sector -> global rename in
-    # Task 9, and the dataclass default matches under both spellings.
     return KnowledgeModule(
         id="1", slug=slug, title="T", summary="A sensitive summary.",
-        body=None, mode="on_demand", source="gdoc", source_ref="doc-1",
+        body=None, source="gdoc", source_ref="doc-1",
         doc_audience="acl_mirror",
     )
 
@@ -317,12 +330,12 @@ def _catalog_resolver(provider, module):
 
 
 @pytest.mark.asyncio
-async def test_a_denied_on_demand_module_is_absent_from_the_catalog():
-    """Its summary must not leak, and the model must not try to fetch it."""
+async def test_a_denied_module_contributes_nothing():
+    """Neither its body nor its name may reach a caller who cannot see it."""
     from shared.prompts.providers import ResolutionContext
     from shared.prompts.types import RequestScope
 
-    module = _on_demand_module()
+    module = _gated_module()
     resolver = _catalog_resolver(_GatedProvider(visible=False), module)
 
     text, used = await resolver.resolve_for_prompt(
@@ -335,58 +348,39 @@ async def test_a_denied_on_demand_module_is_absent_from_the_catalog():
 
 
 @pytest.mark.asyncio
-async def test_an_allowed_on_demand_module_still_appears():
+async def test_an_allowed_module_is_inlined_in_full():
     from shared.prompts.providers import ResolutionContext
     from shared.prompts.types import RequestScope
 
-    module = _on_demand_module()
+    module = _gated_module()
     resolver = _catalog_resolver(_GatedProvider(visible=True), module)
 
     text, used = await resolver.resolve_for_prompt(
         "customer.system", ResolutionContext(scope=RequestScope(), user_email="a@b.com")
     )
 
-    assert "secret-doc" in text
+    assert "body" in text
     assert used == ["secret-doc"]
 
 
 @pytest.mark.asyncio
-async def test_a_provider_without_visible_to_is_not_filtered():
-    """graph/directory/episodic do their own filtering inside resolve()."""
-    from shared.prompts.providers import ResolutionContext
-    from shared.prompts.types import RequestScope
+async def test_a_provider_that_raises_while_checking_access_fails_closed():
+    """A provider whose own gate blows up must contribute nothing.
 
-    class _Plain:
-        source = "gdoc"
-
-        async def resolve(self, _module, _ctx):
-            return "body"
-
-    module = _on_demand_module()
-    resolver = _catalog_resolver(_Plain(), module)
-
-    text, _used = await resolver.resolve_for_prompt(
-        "customer.system", ResolutionContext(scope=RequestScope(), user_email="a@b.com")
-    )
-
-    assert "secret-doc" in text
-
-
-@pytest.mark.asyncio
-async def test_a_visibility_check_that_raises_fails_closed():
+    graph/directory/episodic filter database rows by permission inside
+    resolve(); gdoc checks Drive. Whichever way it fails, the resolver drops
+    that one module rather than serving unfiltered content.
+    """
     from shared.prompts.providers import ResolutionContext
     from shared.prompts.types import RequestScope
 
     class _Boom:
         source = "gdoc"
 
-        async def visible_to(self, _module, _ctx):
+        async def resolve(self, _module, _ctx):
             raise RuntimeError("drive down")
 
-        async def resolve(self, _module, _ctx):
-            return "body"
-
-    module = _on_demand_module()
+    module = _gated_module()
     resolver = _catalog_resolver(_Boom(), module)
 
     text, used = await resolver.resolve_for_prompt(

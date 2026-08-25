@@ -20,7 +20,7 @@ from shared.prompts import PROMPTS
 from shared.prompts.access import can_edit_prompt, can_publish_prompt, can_view_prompt
 from shared.prompts.components import COMPONENT_LABELS, COMPONENT_ORDER, UNCATEGORIZED
 from shared.prompts.gdoc import LEGACY_DOC_ENV_VARS, legacy_doc_id_for
-from shared.prompts.knowledge import PINNED_BUDGET_CHARS
+from shared.prompts.knowledge import INLINE_BUDGET_CHARS
 from shared.prompts.overrides import OverrideStore
 from shared.prompts.types import PromptSource
 
@@ -68,13 +68,12 @@ class PromptRow:
 class KnowledgeTabRow:
     slug: str
     title: str
-    mode: str
     chars: int
     checked: bool
     summary: str = ""
     # A provider-backed module (see shared/prompts/knowledge.py's is_jit) has
-    # no stored body -- chars is 0 (correct for the pinned-budget sum below,
-    # matching budget_pinned's "unresolved costs nothing" rule) but that
+    # no stored body -- chars is 0 (correct for the budget sum below,
+    # matching budget_inlined's "unresolved costs nothing" rule) but that
     # reads as "empty" rather than "resolved at request time" unless a row
     # can say which one it is.
     is_jit: bool = False
@@ -90,7 +89,6 @@ def build_knowledge_tab(modules: List[Any], pins: dict) -> List[KnowledgeTabRow]
         KnowledgeTabRow(
             slug=module.slug,
             title=module.title,
-            mode=module.mode,
             # None for a provider-backed module -- len(None) would crash
             # (this hazard is the same one build_module_rows had; see
             # knowledge_modules.py's build_module_rows for the sibling fix).
@@ -506,9 +504,10 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                     ).classes("text-warning")
                 else:
                     ui.label(
-                        "Context modules this prompt uses. Pinned modules are inlined in full; "
-                        "on-demand modules contribute only a summary line, and the model fetches "
-                        "the body with get_knowledge_module when it decides it's relevant."
+                        "Context modules this prompt uses. Every module you tick is inlined "
+                        "into this prompt in full. Built-in modules resolve per request and "
+                        "have no fixed size until they do, so they don't count towards the "
+                        "budget below."
                     ).classes("text-caption")
 
                     all_modules = k_store.all_modules()
@@ -529,16 +528,21 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                             build_knowledge_tab(all_modules, {s: True for s in selected}),
                             search.value or "",
                         )
-                        pinned_chars = sum(
-                            r.chars for r in rows if r.checked and r.mode == "pinned"
-                        )
+                        # Every ticked module is inlined, so the counter sums
+                        # all of them rather than a subset. Past the budget,
+                        # budget_inlined drops whole modules at render time
+                        # and only logs it -- this red counter is the one
+                        # warning an operator gets before that happens.
+                        inlined_chars = sum(r.chars for r in rows if r.checked)
+                        over = inlined_chars > INLINE_BUDGET_CHARS
                         picked_label.text = (
-                            f"{len(selected)} selected · {pinned_chars} pinned chars "
-                            f"of {PINNED_BUDGET_CHARS} budget"
+                            f"{len(selected)} selected · {inlined_chars} chars "
+                            f"of {INLINE_BUDGET_CHARS} budget"
+                            + (" · over budget, some will be dropped at render" if over else "")
                         )
                         picked_label.classes(
                             replace="text-caption text-bold "
-                            + ("text-negative" if pinned_chars > PINNED_BUDGET_CHARS else "")
+                            + ("text-negative" if over else "")
                         )
                         with options:
                             if not rows:
@@ -555,7 +559,7 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                                     ui.checkbox(value=r.checked, on_change=toggle).props("dense")
                                     with ui.column().classes("gap-0"):
                                         size_text = "live" if r.is_jit else f"{r.chars} chars"
-                                        ui.label(f"{r.title}  ·  {r.mode}  ·  {size_text}")
+                                        ui.label(f"{r.title}  ·  {size_text}")
                                         if r.summary:
                                             ui.label(r.summary).classes("text-caption")
 

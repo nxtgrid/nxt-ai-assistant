@@ -29,7 +29,7 @@ def bundled(tmp_path):
     return BundledStore(directory=tmp_path)
 
 
-def _module(slug, mode="pinned"):
+def _module(slug):
     return KnowledgeModule(
         id=slug,
         slug=slug,
@@ -38,11 +38,10 @@ def _module(slug, mode="pinned"):
         body=f"{slug} body",
         tags=["grid_ops"],
         scope="sector",
-        mode=mode,
     )
 
 
-def test_pinned_module_lands_in_the_context_channel(bundled):
+def test_an_attached_module_lands_in_the_context_channel(bundled):
     library = PromptLibrary(
         bundled=bundled,
         knowledge=FakeKnowledge([_module("comms")], {"a.b": {"comms": True}}),
@@ -53,14 +52,21 @@ def test_pinned_module_lands_in_the_context_channel(bundled):
     assert out.knowledge_used == ["comms"]
 
 
-def test_on_demand_module_contributes_only_a_catalog_line(bundled):
+def test_every_attached_module_is_inlined_in_full(bundled):
+    """No summary-only tier: attaching a module puts its body in the prompt.
+
+    This is the regression guard for the old 'on_demand' mode, where an
+    attached module contributed a catalog line ("About sites.") and the body
+    only arrived if the model chose to fetch it.
+    """
     library = PromptLibrary(
         bundled=bundled,
-        knowledge=FakeKnowledge([_module("sites", mode="on_demand")], {"a.b": {"sites": True}}),
+        knowledge=FakeKnowledge([_module("sites")], {"a.b": {"sites": True}}),
     )
     out = library.render("a.b", scope=RequestScope())
-    assert "sites body" not in (out.context_text or "")
-    assert "About sites." in out.context_text
+    assert "sites body" in (out.context_text or "")
+    assert "get_knowledge_module" not in out.context_text
+    assert out.knowledge_used == ["sites"]
 
 
 def test_prompt_without_tags_gets_no_knowledge(bundled):
@@ -122,7 +128,7 @@ def test_compose_uses_pins_not_tags(monkeypatch):
 
     module = KnowledgeModule(
         id="m1", slug="comms", title="Comms", summary="About comms.",
-        body="Radio checks hourly.", tags=[], scope="sector", mode="pinned",
+        body="Radio checks hourly.", tags=[], scope="sector",
     )
 
     class _Store:
@@ -150,7 +156,7 @@ def test_a_gdoc_module_is_left_to_the_jit_resolver():
 
     module = KnowledgeModule(
         id="d", slug="doc-module", title="Doc", summary="From a doc.",
-        body=None, mode="pinned", source="gdoc", source_ref="doc-1",
+        body=None, source="gdoc", source_ref="doc-1",
         doc_audience="acl_mirror",
     )
     assert module.is_jit is True

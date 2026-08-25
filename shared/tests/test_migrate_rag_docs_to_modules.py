@@ -40,7 +40,7 @@ def test_curated_covers_exactly_fourteen_documents():
     assert len({entry["slug"] for entry in CURATED.values()}) == 14
 
 
-def test_build_module_row_is_on_demand_and_traceable():
+def test_build_module_row_is_traceable_and_writes_no_mode():
     doc = {
         "id": "doc-uuid-1",
         "title": "Technical: Azimuth Calculation Azimuth is defined as the angle... by Vaibhav Vaidya",
@@ -49,7 +49,7 @@ def test_build_module_row_is_on_demand_and_traceable():
     row = build_module_row(doc, body="### Azimuth\n\nAngle from true north.", summary="How azimuth is measured.")
     assert row["slug"] == "azimuth-calculation"
     assert row["title"] == "Azimuth Calculation"
-    assert row["mode"] == "on_demand"
+    assert "mode" not in row  # retired; see migration 0029
     assert row["scope"] == "sector"
     assert row["tags"] == []
     assert row["source"] == "ingested"
