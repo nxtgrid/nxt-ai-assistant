@@ -64,55 +64,6 @@ class PromptRow:
     doc_is_live: bool = False
 
 
-@dataclass(frozen=True)
-class KnowledgeTabRow:
-    slug: str
-    title: str
-    chars: int
-    checked: bool
-    summary: str = ""
-    # A provider-backed module (see shared/prompts/knowledge.py's is_jit) has
-    # no stored body -- chars is 0 (correct for the budget sum below,
-    # matching budget_inlined's "unresolved costs nothing" rule) but that
-    # reads as "empty" rather than "resolved at request time" unless a row
-    # can say which one it is.
-    is_jit: bool = False
-
-
-def build_knowledge_tab(modules: List[Any], pins: dict) -> List[KnowledgeTabRow]:
-    """Every module as a pickable row, flagged with this prompt's current pins.
-
-    Unlike the tag-era version this hides nothing: the picker is how an
-    operator discovers modules, so an unpinned module must still be findable.
-    """
-    return [
-        KnowledgeTabRow(
-            slug=module.slug,
-            title=module.title,
-            # None for a provider-backed module -- len(None) would crash
-            # (this hazard is the same one build_module_rows had; see
-            # knowledge_modules.py's build_module_rows for the sibling fix).
-            chars=len(module.body or ""),
-            checked=bool(pins.get(module.slug)),
-            summary=module.summary,
-            is_jit=getattr(module, "is_jit", False),
-        )
-        for module in sorted(modules, key=lambda m: m.slug)
-    ]
-
-
-def filter_module_rows(rows: List[KnowledgeTabRow], query: str) -> List[KnowledgeTabRow]:
-    """Case-insensitive substring match over slug, title and summary."""
-    needle = query.strip().lower()
-    if not needle:
-        return list(rows)
-    return [
-        r
-        for r in rows
-        if needle in r.slug.lower() or needle in r.title.lower() or needle in r.summary.lower()
-    ]
-
-
 def build_rows(
     library: Any,
     email: str,

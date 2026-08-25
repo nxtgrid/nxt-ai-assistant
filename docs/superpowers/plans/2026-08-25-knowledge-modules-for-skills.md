@@ -840,7 +840,7 @@ change for prompts. This is what both new UI surfaces in Phases 3-4 build on.
 - Modify: `anansi_app/tests/test_knowledge_modules_page.py` (remove the 3 relocated tests + fixture + cross-import)
 - Create: `anansi_app/tests/test_knowledge_picker.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `anansi_app/tests/test_knowledge_picker.py`:
 
@@ -901,13 +901,13 @@ def test_filter_picker_rows_matches_slug_title_and_summary():
     assert len(filter_picker_rows(rows, "")) == 2
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests/test_knowledge_picker.py -q`
 (from the worktree root)
 Expected: FAIL with `ModuleNotFoundError: No module named 'nicegui_app.pages.knowledge_picker'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Create `anansi_app/nicegui_app/pages/knowledge_picker.py`:
 
@@ -994,7 +994,7 @@ Update `anansi_app/tests/test_knowledge_modules_page.py`:
   `_knowledge_tab_rows_fixture` (they now live in `test_knowledge_picker.py`,
   renamed as above).
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills
@@ -1004,7 +1004,7 @@ Expected: PASS on both files (prompts.py itself won't import cleanly again
 until Task 8 fixes its one broken call site — if this step errors on an
 `ImportError` from `prompts.py`, that's expected; it's fixed next).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add anansi_app/nicegui_app/pages/knowledge_picker.py \
