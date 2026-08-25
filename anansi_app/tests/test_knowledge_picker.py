@@ -111,3 +111,55 @@ def test_save_pins_surfaces_unexpected_errors():
     operator with a dialog that silently did nothing."""
     src = KNOWLEDGE_PICKER_PATH.read_text()
     assert "Exception" in _caught_exception_names(src, "save_pins")
+
+
+class _FakeElement:
+    def __init__(self):
+        self.children = []
+        self.value = ""
+
+    def classes(self, *_a, **_k):
+        return self
+
+    def props(self, *_a, **_k):
+        return self
+
+    def style(self, *_a, **_k):
+        return self
+
+    def clear(self):
+        self.children = []
+
+    def on_value_change(self, _callback):
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_render_entity_picker_returns_a_getter_seeded_from_checked_rows(monkeypatch):
+    import nicegui_app.pages.knowledge_picker as knowledge_picker
+
+    fake_ui = type(
+        "FakeUi",
+        (),
+        {
+            "label": staticmethod(lambda *a, **k: _FakeElement()),
+            "input": staticmethod(lambda *a, **k: _FakeElement()),
+            "column": staticmethod(lambda *a, **k: _FakeElement()),
+            "row": staticmethod(lambda *a, **k: _FakeElement()),
+            "checkbox": staticmethod(lambda *a, **k: _FakeElement()),
+        },
+    )()
+    monkeypatch.setattr(knowledge_picker, "ui", fake_ui, raising=False)
+
+    rows = [
+        PickerRow(slug="a", title="A", chars=0, checked=True, summary=""),
+        PickerRow(slug="b", title="B", chars=0, checked=False, summary=""),
+    ]
+    get_selected = knowledge_picker.render_entity_picker(rows, label="Used by these prompts")
+
+    assert get_selected() == ["a"]

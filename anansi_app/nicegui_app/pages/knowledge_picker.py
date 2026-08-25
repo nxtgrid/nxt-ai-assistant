@@ -11,7 +11,7 @@ test_knowledge_modules_page.py.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List
+from typing import Any, Callable, List
 
 from nicegui import ui
 
@@ -152,4 +152,55 @@ def render_module_picker(
         ui.button("Save context", on_click=save_pins).props("color=primary")
 
 
-__all__ = ["PickerRow", "build_picker_rows", "filter_picker_rows", "render_module_picker"]
+def render_entity_picker(
+    rows: List[PickerRow], *, label: str, search_placeholder: str = "Search…"
+) -> "Callable[[], List[str]]":
+    """Search + tick which entities (prompts, or skills) use ONE module --
+    the reverse direction from render_module_picker. No budget footer: a
+    module's own size is shown elsewhere on the same form.
+
+    Returns a zero-argument getter for the currently-ticked slugs/ids,
+    rather than a Save button -- knowledge_modules.py must union this
+    picker's selection with a second one (skills) before writing once (see
+    resolve_pins_to_save; two separate saves would have the second call's
+    diff delete the first call's pins).
+    """
+    selected: "set[str]" = {r.slug for r in rows if r.checked}
+
+    ui.label(label).classes("text-caption text-bold")
+    search = ui.input(placeholder=search_placeholder).classes("w-full").props("clearable dense")
+    options = ui.column().classes("w-full gap-0").style("max-height: 260px; overflow-y: auto")
+
+    def redraw() -> None:
+        options.clear()
+        current = [
+            PickerRow(slug=r.slug, title=r.title, chars=r.chars, checked=(r.slug in selected), summary=r.summary)
+            for r in rows
+        ]
+        visible = filter_picker_rows(current, search.value or "")
+        with options:
+            if not visible:
+                ui.label("No matches.").classes("text-italic text-caption")
+            for r in visible:
+                def toggle(e, slug=r.slug) -> None:
+                    if e.value:
+                        selected.add(slug)
+                    else:
+                        selected.discard(slug)
+
+                with ui.row().classes("items-center no-wrap w-full"):
+                    ui.checkbox(value=r.checked, on_change=toggle).props("dense")
+                    ui.label(f"{r.title}  ·  {r.summary}" if r.summary else r.title)
+
+    search.on_value_change(redraw)
+    redraw()
+    return lambda: sorted(selected)
+
+
+__all__ = [
+    "PickerRow",
+    "build_picker_rows",
+    "filter_picker_rows",
+    "render_entity_picker",
+    "render_module_picker",
+]

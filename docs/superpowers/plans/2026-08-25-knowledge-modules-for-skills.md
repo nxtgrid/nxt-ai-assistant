@@ -1196,7 +1196,7 @@ existing "used by" summary line.
 - Modify: `anansi_app/nicegui_app/pages/knowledge_picker.py`
 - Test: `anansi_app/tests/test_knowledge_picker.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `anansi_app/tests/test_knowledge_picker.py`:
 
@@ -1264,13 +1264,13 @@ consistency (it currently imports `ui` locally — hoist that import to the
 top of the file too while you're here, it's dead weight as a local import
 once the module already imports `ui` at top level).
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests/test_knowledge_picker.py -q -k render_entity_picker`
 (from the worktree root)
 Expected: FAIL with `AttributeError: module ... has no attribute 'render_entity_picker'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 At the top of `knowledge_picker.py`, change `from typing import Any, List`
 to `from typing import Any, Callable, List`, and add `from nicegui import ui`
@@ -1327,7 +1327,7 @@ def render_entity_picker(
 
 Add `"render_entity_picker"` to `__all__`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills
@@ -1336,7 +1336,7 @@ PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests -q
 ```
 Expected: PASS on both (full suite still green).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add anansi_app/nicegui_app/pages/knowledge_picker.py anansi_app/tests/test_knowledge_picker.py
