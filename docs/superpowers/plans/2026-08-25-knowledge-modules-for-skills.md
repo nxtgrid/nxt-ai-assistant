@@ -2083,7 +2083,7 @@ directory, force-add it (`git add -f <path>`) after checking it holds no
 operator data — see CLAUDE.md's checklist. Re-run `pre-commit run --all-files`
 until clean.
 
-- [ ] **Step 4: Report and hand off**
+- [x] **Step 4: Report and hand off**
 
 Summarize what changed, the final test counts across all three suites, and
 that no schema migration was needed, per the spec's "reuse tables" goal.
