@@ -151,7 +151,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Test: `shared/tests/test_prompt_knowledge.py`
 - Verify unchanged: `shared/tests/test_prompt_knowledge_wiring.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `shared/tests/test_prompt_knowledge.py` (it already imports
 `KnowledgeModule`, `budget_inlined`, `diff_prompt_pins`, `render_inlined`,
@@ -196,12 +196,12 @@ def test_compose_knowledge_text_returns_none_and_empty_when_nothing_pinned():
     assert used == []
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd chat_orchestrator && uv run pytest ../shared/tests/test_prompt_knowledge.py -q -k compose_knowledge_text`
 Expected: FAIL with `ImportError: cannot import name 'compose_knowledge_text'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `shared/prompts/knowledge.py`, add a new free function right after
 `render_inlined` (before `class KnowledgeStore:`):
@@ -258,7 +258,7 @@ Add the import at the top of `shared/prompts/core.py`, in its existing
 `from shared.prompts.knowledge import (...)` block (find it near the top of
 the file and add `compose_knowledge_text` to that tuple of names).
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd chat_orchestrator
@@ -270,7 +270,7 @@ Expected: PASS on both files — the wiring file's
 `library._compose_knowledge(spec, RequestScope())` directly) must still pass
 unchanged, proving the extraction didn't alter behavior.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add shared/prompts/knowledge.py shared/prompts/core.py shared/tests/test_prompt_knowledge.py

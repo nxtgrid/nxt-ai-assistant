@@ -183,6 +183,34 @@ def render_inlined(modules: List[KnowledgeModule]) -> Optional[str]:
     return "# Technical Knowledge\n\n" + "\n\n".join(parts)
 
 
+def compose_knowledge_text(
+    store: "KnowledgeStore",
+    prompt_id: str,
+    scope: RequestScope,
+) -> Tuple[Optional[str], List[str]]:
+    """Resolve, budget and render the inline (non-JIT) knowledge a pinning
+    id (a prompt id or skill:<uuid>, both live in prompt_knowledge_overrides)
+    uses. Never raises.
+
+    Shared by PromptLibrary._compose_knowledge (prompts) and skill_runner.py
+    (skills) -- there must be exactly one place this selection logic lives.
+    """
+    try:
+        modules = store.all_modules()
+        pins = store.overrides_for(prompt_id)
+    except Exception:
+        LOGGER.opt(exception=True).warning(
+            f"Knowledge lookup failed for '{prompt_id}'; rendering without it"
+        )
+        return None, []
+
+    chosen = [m for m in select_for_prompt(modules, pins, scope) if not m.is_jit]
+    chosen = [m for m in chosen if m.body]
+
+    inlined, _dropped = budget_inlined(chosen)
+    return render_inlined(inlined), [m.slug for m in inlined]
+
+
 class KnowledgeStore:
     """Reads knowledge_modules and prompt_knowledge_overrides.
 

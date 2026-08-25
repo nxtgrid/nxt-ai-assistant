@@ -5,6 +5,7 @@ import pytest
 from shared.prompts.knowledge import (
     KnowledgeModule,
     budget_inlined,
+    compose_knowledge_text,
     diff_prompt_pins,
     render_inlined,
     select_for_prompt,
@@ -206,3 +207,36 @@ def test_an_unknown_scope_still_matches_nothing():
 
 def test_a_new_module_defaults_to_global_scope():
     assert KnowledgeModule(id="m", slug="m", title="M", summary="s", body="b").scope == "global"
+
+
+class _FakeKnowledgeStore:
+    def __init__(self, modules, pins):
+        self._modules = modules
+        self._pins = pins
+
+    def all_modules(self):
+        return self._modules
+
+    def overrides_for(self, prompt_id):
+        return self._pins.get(prompt_id, {})
+
+
+def test_compose_knowledge_text_renders_pinned_modules():
+    # This file's _module(slug, tags=(...), scope=..., body="B") defaults
+    # body to the literal string "B" -- asserted on directly below.
+    module = _module("comms", tags=[])
+    store = _FakeKnowledgeStore([module], {"skill:abc": {"comms": True}})
+
+    text, used = compose_knowledge_text(store, "skill:abc", RequestScope())
+
+    assert "B" in text
+    assert used == ["comms"]
+
+
+def test_compose_knowledge_text_returns_none_and_empty_when_nothing_pinned():
+    store = _FakeKnowledgeStore([_module("comms")], {})
+
+    text, used = compose_knowledge_text(store, "skill:abc", RequestScope())
+
+    assert text is None
+    assert used == []

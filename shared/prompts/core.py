@@ -13,11 +13,7 @@ import dataclasses
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.prompts.bundled import BundledStore
-from shared.prompts.knowledge import (
-    budget_inlined,
-    render_inlined,
-    select_for_prompt,
-)
+from shared.prompts.knowledge import compose_knowledge_text
 from shared.prompts.render import render_body, split_sections
 from shared.prompts.spec import PromptSpec, body_checksum
 from shared.prompts.types import PromptSource, RenderedPrompt, RequestScope
@@ -168,29 +164,15 @@ class PromptLibrary:
     def _compose_knowledge(
         self, spec: PromptSpec, scope: RequestScope
     ) -> Tuple[Optional[str], List[str]]:
-        """Resolve, budget and render this prompt's knowledge. Never raises."""
+        """Resolve, budget and render this prompt's knowledge. Never raises.
+
+        Delegates to shared.prompts.knowledge.compose_knowledge_text, which
+        skill_runner.py also calls for a skill's own pinning id -- there must
+        be exactly one place this selection logic lives.
+        """
         if self._knowledge is None:
             return None, []
-        try:
-            modules = self._knowledge.all_modules()
-            pins = self._knowledge.overrides_for(spec.id)
-        except Exception:
-            LOGGER.opt(exception=True).warning(
-                f"Knowledge lookup failed for '{spec.id}'; rendering without it"
-            )
-            return None, []
-
-        chosen = select_for_prompt(modules, pins, scope)
-        # JIT sources (gdoc/graph/directory/episodic) all need the caller's
-        # identity, which render() does not carry. JitContextResolver handles
-        # them and appends its output to context_message instead.
-        chosen = [m for m in chosen if not m.is_jit]
-        chosen = [m for m in chosen if m.body]
-
-        # Every attached module is inlined in full -- the budget is the only
-        # thing that can hold one back, and it drops whole modules.
-        inlined, _dropped = budget_inlined(chosen)
-        return render_inlined(inlined), [m.slug for m in inlined]
+        return compose_knowledge_text(self._knowledge, spec.id, scope)
 
     def resolve(self, prompt_id: str) -> Tuple[str, PromptSource, Optional[int]]:
         """The current body exactly as stored (DB, then Doc, then bundled).
