@@ -1353,7 +1353,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Modify: `shared/prompts/skills.py`
 - Test: `shared/tests/test_skills_catalog.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `shared/tests/test_skills_catalog.py`, inside `TestSkillCatalogStore`
 (reuse its existing `_fake_supabase_client` helper):
@@ -1392,13 +1392,13 @@ def test_skill_status_defaults_to_active():
     assert _skill().status == "active"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd chat_orchestrator && uv run pytest ../shared/tests/test_skills_catalog.py -q -k "active_only or status_defaults"`
 Expected: FAIL (`status` attribute doesn't exist yet; `active_only` kwarg
 not accepted yet)
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `shared/prompts/skills.py`, add a `status` field to `Skill`:
 
@@ -1486,7 +1486,7 @@ Add `Dict` to the file's `from typing import ...` line if not already
 imported (check the current import list; it likely has `List, Optional`
 already — add `Dict`).
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd chat_orchestrator
@@ -1499,7 +1499,7 @@ Expected: PASS on both — every pre-existing test in this file
 `test_invalidate_forces_a_fresh_fetch`, `test_expired_cache_forces_a_fresh_fetch`,
 `test_query_failure_degrades_to_empty_not_raise`) must still pass unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add shared/prompts/skills.py shared/tests/test_skills_catalog.py

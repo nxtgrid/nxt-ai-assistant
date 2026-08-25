@@ -31,6 +31,10 @@ def test_skill_pin_prefix_is_the_literal_prefix_used():
     assert SKILL_PIN_PREFIX == "skill:"
 
 
+def test_skill_status_defaults_to_active():
+    assert _skill().status == "active"
+
+
 class TestSelectSkillsForContext:
     def test_staff_only_skill_visible_to_staff(self):
         skills = [_skill(staff_only=True)]
@@ -119,6 +123,34 @@ class TestSkillCatalogStore:
         store.all_skills()
 
         assert client.last_query.filters.get("status") == "active"
+
+    def test_active_only_false_fetches_every_status(self):
+        client = _fake_supabase_client([])
+        store = SkillCatalogStore(client=client)
+
+        store.all_skills(active_only=False)
+
+        # The fake's last_query is only ever set inside .eq(...) (see
+        # _FakeQuery below) -- staying None proves no .eq("status", ...)
+        # call happened at all, not just that it wasn't the last one.
+        assert client.last_query is None
+
+    def test_active_only_true_is_still_the_default(self):
+        client = _fake_supabase_client([])
+        store = SkillCatalogStore(client=client)
+
+        store.all_skills()
+
+        assert client.last_query.filters.get("status") == "active"
+
+    def test_active_only_and_all_are_cached_separately(self):
+        client = _fake_supabase_client([])
+        store = SkillCatalogStore(client=client, ttl_seconds=300)
+
+        store.all_skills(active_only=True)
+        store.all_skills(active_only=False)
+
+        assert client.query_count == 2
 
     def test_result_is_cached_within_ttl(self):
         client = _fake_supabase_client([])
