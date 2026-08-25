@@ -29,6 +29,7 @@ from typing import Any, List, Tuple
 from nicegui import ui
 
 from shared.prompts.knowledge import INLINE_BUDGET_CHARS, SINGLETON_SOURCES, KnowledgeModule
+from shared.prompts.skills import SKILL_CATALOG, SKILL_PIN_PREFIX, skill_prompt_id
 
 VALID_SOURCES = {"manual", "gdoc", "ingested"}
 
@@ -281,16 +282,42 @@ def describe_usage(used_by: List[str]) -> str:
     return f"used by: {', '.join(used_by)}"
 
 
+def resolve_pin_label(pin_id: str, skill_titles: "dict[str, str]") -> str:
+    """A prompt id shows as-is; a skill:<uuid> id shows its title (falling
+    back to the raw id if the skill's title isn't known -- e.g. a skill
+    deleted after the pin was made; prompt_knowledge_overrides has no FK on
+    skill ids to clean this up automatically, matching how a retired
+    prompt id's stale pin already behaved before skills existed)."""
+    if pin_id.startswith(SKILL_PIN_PREFIX):
+        skill_id = pin_id[len(SKILL_PIN_PREFIX):]
+        return f"🎬 {skill_titles.get(skill_id, skill_id)}"
+    return pin_id
+
+
+def resolve_pins_to_save(prompt_ids: List[str], skill_ids: List[str]) -> List[str]:
+    """The full id list for one set_prompt_pins call -- prompts and skills
+    share prompt_knowledge_overrides' key space, so writing them via two
+    separate calls would have the second call's diff (current - selected)
+    delete the first call's pins (see knowledge.py's diff_prompt_pins).
+    This must always be a single call with the union."""
+    return list(prompt_ids) + [skill_prompt_id(sid) for sid in skill_ids]
+
+
 def build_module_rows(
-    modules: List[Any], pins: "dict[str, List[str]] | None" = None
+    modules: List[Any],
+    pins: "dict[str, List[str]] | None" = None,
+    skill_titles: "dict[str, str] | None" = None,
 ) -> List[ModuleRow]:
-    """Rows for the list. ``pins`` is module_id -> prompt ids, fetched once.
+    """Rows for the list. ``pins`` is module_id -> prompt/skill ids, fetched
+    once. ``skill_titles`` is skill_id -> title, for resolving a skill pin
+    to something readable (see resolve_pin_label).
 
     Optional so callers that only need identity/size (and every test that
     predates usage display) keep working; omitting it renders every module
     as unattached, which is why the page itself always passes it.
     """
     pins = pins or {}
+    skill_titles = skill_titles or {}
     rows = []
     for m in sorted(modules, key=lambda m: m.slug):
         body = m.body or ""
@@ -306,7 +333,7 @@ def build_module_rows(
                 size_label="live" if source in PROVIDER_SOURCES else f"{chars} chars",
                 summary=m.summary,
                 body=body,
-                used_by=list(pins.get(m.id, [])),
+                used_by=[resolve_pin_label(pid, skill_titles) for pid in pins.get(m.id, [])],
             )
         )
     return rows
@@ -457,8 +484,10 @@ async def render(user_email: str) -> None:
     def refresh() -> None:
         list_container.clear()
         store.invalidate()
+        SKILL_CATALOG.invalidate()
         # One query for every row's usage, not one per row.
-        rows = build_module_rows(store.all_modules(), store.all_prompt_pins())
+        skill_titles = {s.id: s.title for s in SKILL_CATALOG.all_skills(active_only=False)}
+        rows = build_module_rows(store.all_modules(), store.all_prompt_pins(), skill_titles)
         all_empty = not rows
         rows = filter_context_rows(rows, search_input.value or "")
         with list_container:
@@ -809,21 +838,49 @@ async def _open_edit_dialog(
         doc_ref_input.on("blur", _refresh_preview, [])
         doc_tab_input.on("blur", _refresh_preview, [])
 
-        prompt_options = {
-            pid: prompt_option_label(pid, PROMPTS.spec(pid).description)
-            for pid in sorted(PROMPTS.ids())
+        from nicegui_app.pages.knowledge_picker import PickerRow, render_entity_picker
+
+        existing_prompt_pins = {
+            pid for pid in existing_pins if not pid.startswith(SKILL_PIN_PREFIX)
         }
-        prompts_select = ui.select(
-            prompt_options,
-            value=list(existing_pins),
-            multiple=True,
-            label="Used by these prompts",
-        ).classes("w-full").props("use-chips")
+        prompt_rows = [
+            PickerRow(
+                slug=pid, title=pid, chars=0,
+                checked=(pid in existing_prompt_pins),
+                summary=PROMPTS.spec(pid).description,
+            )
+            for pid in sorted(PROMPTS.ids())
+        ]
 
         def _refresh_audience_warning() -> None:
             audience_warning.set_text(
-                describe_audience(audience_select.value, list(prompts_select.value or [])) or ""
+                describe_audience(audience_select.value, get_selected_prompts()) or ""
             )
+
+        get_selected_prompts = render_entity_picker(
+            prompt_rows,
+            label="Used by these prompts",
+            search_placeholder="Search prompts…",
+            on_change=_refresh_audience_warning,
+        )
+
+        existing_skill_pins = {
+            pid[len(SKILL_PIN_PREFIX):]
+            for pid in existing_pins
+            if pid.startswith(SKILL_PIN_PREFIX)
+        }
+        all_skills = SKILL_CATALOG.all_skills(active_only=False)
+        skill_rows = [
+            PickerRow(
+                slug=s.id, title=s.title, chars=0,
+                checked=(s.id in existing_skill_pins),
+                summary=f"/{s.slug} · {s.status}",
+            )
+            for s in sorted(all_skills, key=lambda s: s.title)
+        ]
+        get_selected_skills = render_entity_picker(
+            skill_rows, label="Used by these skills", search_placeholder="Search skills…"
+        )
 
         async def _on_audience_change(_e) -> None:
             _refresh_audience_warning()
@@ -833,7 +890,6 @@ async def _open_edit_dialog(
             await _refresh_preview()
 
         audience_select.on_value_change(_on_audience_change)
-        prompts_select.on_value_change(lambda _e: _refresh_audience_warning())
         _refresh_audience_warning()
 
         async def save() -> None:
@@ -910,7 +966,9 @@ async def _open_edit_dialog(
                     result = store._client.table("knowledge_modules").insert(row).execute()
                     module_id = result.data[0]["id"]
                 store.set_prompt_pins(
-                    module_id, list(prompts_select.value or []), actor=user_email
+                    module_id,
+                    resolve_pins_to_save(get_selected_prompts(), get_selected_skills()),
+                    actor=user_email,
                 )
                 ui.notify("Saved", type="positive")
                 dialog.close()

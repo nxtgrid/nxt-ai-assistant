@@ -14,7 +14,7 @@ mechanism for deciding what a prompt is attached to.
 from __future__ import annotations
 
 import asyncio
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from shared.prompts.knowledge import KnowledgeModule, select_for_prompt
 from shared.prompts.providers import (
@@ -156,6 +156,27 @@ def get_jit_resolver() -> JitContextResolver:
     return _RESOLVER
 
 
+async def resolve_jit_context_for(
+    prompt_id: str,
+    user_context: Optional[Any],
+    grid: Optional[str] = None,
+) -> Tuple[str, List[str]]:
+    """Resolve provider-backed context modules for a pinning id. Fail open.
+
+    Shared by prepare_context.py (a live conversation turn) and
+    skill_runner.py (a skill run) -- both just need "this id's JIT modules,
+    for this caller" and neither should re-implement the try/except.
+    """
+    try:
+        from shared.prompts.providers import ResolutionContext
+
+        ctx = ResolutionContext.from_user_context(user_context, grid=grid)
+        return await get_jit_resolver().resolve_for_prompt(prompt_id, ctx)
+    except Exception as e:
+        LOGGER.warning(f"JIT context resolution failed (continuing without): {e}")
+        return "", []
+
+
 # build_default_registry is re-exported, not defined here: it lives in
 # shared.prompts.providers so anansi_app (whose image has no `orchestrator`
 # package -- see anansi_app/Dockerfile) can build the same registry for the
@@ -166,4 +187,5 @@ __all__ = [
     "budget_resolved",
     "build_default_registry",
     "get_jit_resolver",
+    "resolve_jit_context_for",
 ]

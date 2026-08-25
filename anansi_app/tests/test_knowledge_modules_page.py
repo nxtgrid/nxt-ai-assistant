@@ -1,4 +1,9 @@
-"""Knowledge Modules page view-model and the Prompts page knowledge tab."""
+"""Knowledge Modules page view-model.
+
+The Prompts page's original knowledge-tab tests (KnowledgeTabRow/
+build_knowledge_tab/filter_module_rows) moved to test_knowledge_picker.py
+when that logic was generalized into knowledge_picker.py.
+"""
 
 import pytest
 from nicegui_app.pages.knowledge_modules import (
@@ -21,7 +26,6 @@ from nicegui_app.pages.knowledge_modules import (
     slugify,
     validate_module,
 )
-from nicegui_app.pages.prompts import KnowledgeTabRow, build_knowledge_tab, filter_module_rows
 
 from shared.prompts.knowledge import KnowledgeModule
 
@@ -58,6 +62,26 @@ def test_build_module_rows_carries_the_prompts_using_each_module():
 def test_a_module_no_pin_row_mentions_is_unused():
     rows = build_module_rows([_module("comms")], {"other-id": ["staff.system"]})
     assert rows[0].used_by == []
+
+
+def test_build_module_rows_resolves_a_skill_pin_to_its_title():
+    rows = build_module_rows(
+        [_module("comms")],
+        {"comms": ["customer.system", "skill:11111111-1111-1111-1111-111111111111"]},
+        skill_titles={"11111111-1111-1111-1111-111111111111": "Find Tickets"},
+    )
+    assert rows[0].used_by == ["customer.system", "🎬 Find Tickets"]
+
+
+def test_build_module_rows_falls_back_to_the_raw_id_for_an_unknown_skill():
+    """E.g. a skill deleted after the pin was made -- prompt_knowledge_overrides
+    has no FK on skill ids, so a stale pin can outlive its skill."""
+    rows = build_module_rows(
+        [_module("comms")],
+        {"comms": ["skill:22222222-2222-2222-2222-222222222222"]},
+        skill_titles={},
+    )
+    assert rows[0].used_by == ["🎬 22222222-2222-2222-2222-222222222222"]
 
 
 def test_describe_usage_names_the_prompts():
@@ -113,41 +137,6 @@ def test_filter_context_rows_empty_query_returns_everything_unchanged():
 def test_filter_context_rows_no_match_returns_empty():
     rows = build_module_rows([_module("azimuth-calc")])
     assert filter_context_rows(rows, "no such module") == []
-
-
-def test_knowledge_tab_lists_all_modules_with_attached_state():
-    rows = build_knowledge_tab([_module("beta"), _module("alpha")], {"alpha": True})
-    assert rows == [
-        KnowledgeTabRow(slug="alpha", title="Alpha", chars=40, checked=True, summary="s"),
-        KnowledgeTabRow(slug="beta", title="Beta", chars=40, checked=False, summary="s"),
-    ]
-
-
-def test_knowledge_tab_with_no_pins_checks_nothing():
-    rows = build_knowledge_tab([_module("alpha")], {})
-    assert [r.checked for r in rows] == [False]
-
-
-def test_filter_modules_matches_slug_title_and_summary():
-    rows = _knowledge_tab_rows_fixture()
-    assert [r.slug for r in filter_module_rows(rows, "azimuth")] == ["azimuth-calculation"]
-    assert [r.slug for r in filter_module_rows(rows, "LED")] == ["victron-led"]
-    assert len(filter_module_rows(rows, "")) == 2
-
-
-def _knowledge_tab_rows_fixture():
-    return [
-        KnowledgeTabRow(
-            slug="azimuth-calculation", title="Azimuth Calculation",
-            chars=318, checked=False,
-            summary="How PV azimuth is measured.",
-        ),
-        KnowledgeTabRow(
-            slug="victron-led", title="Victron Quattro Codes",
-            chars=2438, checked=True,
-            summary="Decoding inverter LED error states.",
-        ),
-    ]
 
 
 def test_validate_module_requires_a_summary():
@@ -312,28 +301,6 @@ def test_validate_module_does_not_require_a_body_when_not_required():
 def test_validate_module_still_requires_a_body_by_default():
     with pytest.raises(ValueError, match="required"):
         validate_module(slug="a", title="A", summary="s", body="")
-
-
-# ── The Prompts page's Context tab: the same null-body / JIT hazard ────────
-# build_knowledge_tab lists every module (including provider-backed ones) so
-# an operator can pin/unpin it to a prompt. It has the exact same
-# len(module.body) crash build_module_rows had -- fixed alongside it here,
-# since a JIT module now genuinely exists once the seed script runs.
-
-
-def test_knowledge_tab_handles_a_jit_module_without_crashing():
-    rows = build_knowledge_tab(
-        [KnowledgeModule(id="g", slug="entity-graph", title="Graph", summary="s",
-                         body=None, source="graph")],
-        {},
-    )
-    assert rows[0].chars == 0
-    assert rows[0].is_jit is True
-
-
-def test_knowledge_tab_marks_manual_modules_as_not_jit():
-    rows = build_knowledge_tab([_module("comms")], {})
-    assert rows[0].is_jit is False
 
 
 # ── Doc source, audience, and the honest scope dropdown ─────────────────────
@@ -613,3 +580,26 @@ def test_draft_gdoc_module_falls_back_to_a_placeholder_slug_and_title():
     )
     assert module.slug
     assert module.title
+
+
+def test_resolve_pins_to_save_unions_prompts_and_skills():
+    from nicegui_app.pages.knowledge_modules import resolve_pins_to_save
+
+    result = resolve_pins_to_save(
+        ["customer.system"], ["11111111-1111-1111-1111-111111111111"]
+    )
+    assert result == ["customer.system", "skill:11111111-1111-1111-1111-111111111111"]
+
+
+def test_resolve_pins_to_save_with_no_skills_matches_old_behavior():
+    from nicegui_app.pages.knowledge_modules import resolve_pins_to_save
+
+    assert resolve_pins_to_save(["customer.system", "staff.system"], []) == [
+        "customer.system", "staff.system",
+    ]
+
+
+def test_resolve_pins_to_save_with_no_prompts():
+    from nicegui_app.pages.knowledge_modules import resolve_pins_to_save
+
+    assert resolve_pins_to_save([], ["abc"]) == ["skill:abc"]

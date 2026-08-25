@@ -36,7 +36,6 @@ def _caught_exception_names(src: str, func_name: str) -> set[str]:
         "save_draft",
         "publish_latest",
         "revert",
-        "save_pins",
     ],
 )
 def test_dialog_save_handlers_surface_unexpected_errors(handler_name):
@@ -53,8 +52,12 @@ def test_dialog_save_handlers_surface_unexpected_errors(handler_name):
     (``postgrest.exceptions.APIError`` -- e.g. because
     ``prompt_model_overrides`` from db/migrations/0015_prompt_model_overrides.sql
     hasn't been applied yet -- is a plain ``Exception`` subclass, not a
-    ``RuntimeError``) hits exactly this gap. ``save_pins`` already catches
-    ``Exception`` for this reason; the rest must too.
+    ``RuntimeError``) hits exactly this gap.
+
+    ``save_pins`` used to be this dialog's proof that the pattern works and
+    was covered here too -- it now lives in knowledge_picker.py's
+    render_module_picker (see test_knowledge_picker.py's own copy of this
+    check) since the Context tab moved there.
     """
     src = PROMPTS_PATH.read_text()
     assert "Exception" in _caught_exception_names(src, handler_name)
@@ -77,3 +80,9 @@ def test_prompts_dialog_body_defaults_to_preview():
     src = PROMPTS_PATH.read_text()
 
     assert 'ui.toggle(["Edit", "Preview"], value="Preview")' in src
+
+
+def test_context_tab_delegates_to_the_shared_picker():
+    src = PROMPTS_PATH.read_text()
+
+    assert "render_module_picker(row.prompt_id, k_store, user_email, show_budget=True)" in src

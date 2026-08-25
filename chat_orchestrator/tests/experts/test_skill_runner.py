@@ -13,6 +13,7 @@ import pytest
 from orchestrator.experts.skill_runner import (
     SKILL_EXPERT_PREFIX,
     SKILL_PACKET_TYPE,
+    _resolve_skill_system_instructions,
     _ResponseBuffer,
     build_parsed_steps,
     is_skill_expert_id,
@@ -421,6 +422,15 @@ class TestRunSkillPacket:
                 "orchestrator.experts.skill_runner.create_chat_llm_client", return_value=MagicMock()
             ),
             patch("orchestrator.experts.skill_runner.WorkflowExecutor", return_value=mock_executor),
+            # This suite mocks no knowledge-store/JIT-provider network calls;
+            # without this, _resolve_skill_system_instructions would try a
+            # real (fake-URL) Supabase call on every test that reaches this
+            # point. Its own behavior (empty/non-empty/grid-preference) is
+            # covered directly by TestResolveSkillSystemInstructions below.
+            patch(
+                "orchestrator.experts.skill_runner._resolve_skill_system_instructions",
+                new=AsyncMock(return_value=""),
+            ),
         ):
             result = await run_skill_packet(
                 self._state(),
@@ -485,6 +495,15 @@ class TestRunSkillPacket:
                 "orchestrator.experts.skill_runner.create_chat_llm_client", return_value=MagicMock()
             ),
             patch("orchestrator.experts.skill_runner.WorkflowExecutor", return_value=mock_executor),
+            # This suite mocks no knowledge-store/JIT-provider network calls;
+            # without this, _resolve_skill_system_instructions would try a
+            # real (fake-URL) Supabase call on every test that reaches this
+            # point. Its own behavior (empty/non-empty/grid-preference) is
+            # covered directly by TestResolveSkillSystemInstructions below.
+            patch(
+                "orchestrator.experts.skill_runner._resolve_skill_system_instructions",
+                new=AsyncMock(return_value=""),
+            ),
         ):
             await run_skill_packet(
                 state,
@@ -530,6 +549,15 @@ class TestRunSkillPacket:
                 "orchestrator.experts.skill_runner.create_chat_llm_client", return_value=MagicMock()
             ),
             patch("orchestrator.experts.skill_runner.WorkflowExecutor", return_value=mock_executor),
+            # This suite mocks no knowledge-store/JIT-provider network calls;
+            # without this, _resolve_skill_system_instructions would try a
+            # real (fake-URL) Supabase call on every test that reaches this
+            # point. Its own behavior (empty/non-empty/grid-preference) is
+            # covered directly by TestResolveSkillSystemInstructions below.
+            patch(
+                "orchestrator.experts.skill_runner._resolve_skill_system_instructions",
+                new=AsyncMock(return_value=""),
+            ),
         ):
             await run_skill_packet(
                 self._state(),
@@ -565,6 +593,15 @@ class TestRunSkillPacket:
                 "orchestrator.experts.skill_runner.create_chat_llm_client", return_value=MagicMock()
             ),
             patch("orchestrator.experts.skill_runner.WorkflowExecutor", return_value=mock_executor),
+            # This suite mocks no knowledge-store/JIT-provider network calls;
+            # without this, _resolve_skill_system_instructions would try a
+            # real (fake-URL) Supabase call on every test that reaches this
+            # point. Its own behavior (empty/non-empty/grid-preference) is
+            # covered directly by TestResolveSkillSystemInstructions below.
+            patch(
+                "orchestrator.experts.skill_runner._resolve_skill_system_instructions",
+                new=AsyncMock(return_value=""),
+            ),
         ):
             result = await run_skill_packet(
                 self._state(),
@@ -575,3 +612,63 @@ class TestRunSkillPacket:
         packet_service.fail_packet.assert_awaited_once()
         assert result["expert_executed"] is False
         assert "LLM exploded" in result["expert_error"]
+
+
+class TestResolveSkillSystemInstructions:
+    @pytest.mark.asyncio
+    async def test_combines_inline_and_jit_text(self):
+        user_context = UserContext(
+            user_id="u", user_email="ops@example.com", source="telegram",
+            organization_ids=["7"],
+        )
+        with patch(
+            "orchestrator.experts.skill_runner.compose_knowledge_text",
+            return_value=("# Technical Knowledge\n\nInline body.", ["comms"]),
+        ), patch(
+            "orchestrator.experts.skill_runner.resolve_jit_context_for",
+            new=AsyncMock(return_value=("# Live Context\n\nLive body.", ["entity-graph"])),
+        ), patch(
+            "orchestrator.experts.skill_runner.resolve_scope_grid_from_user_context",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await _resolve_skill_system_instructions(
+                "11111111-1111-1111-1111-111111111111", user_context, {}
+            )
+
+        assert "Inline body." in result
+        assert "Live body." in result
+
+    @pytest.mark.asyncio
+    async def test_empty_when_nothing_pinned(self):
+        with patch(
+            "orchestrator.experts.skill_runner.compose_knowledge_text",
+            return_value=(None, []),
+        ), patch(
+            "orchestrator.experts.skill_runner.resolve_jit_context_for",
+            new=AsyncMock(return_value=("", [])),
+        ), patch(
+            "orchestrator.experts.skill_runner.resolve_scope_grid_from_user_context",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await _resolve_skill_system_instructions("id", None, {})
+
+        assert result == ""
+
+    @pytest.mark.asyncio
+    async def test_prefers_an_explicit_grid_over_the_channel_resolver(self):
+        with patch(
+            "orchestrator.experts.skill_runner.compose_knowledge_text", return_value=(None, [])
+        ) as mock_compose, patch(
+            "orchestrator.experts.skill_runner.resolve_jit_context_for",
+            new=AsyncMock(return_value=("", [])),
+        ) as mock_jit, patch(
+            "orchestrator.experts.skill_runner.resolve_scope_grid_from_user_context",
+            new=AsyncMock(return_value="should-not-be-used"),
+        ) as mock_channel_grid:
+            await _resolve_skill_system_instructions(
+                "id", None, {"grid": {"grid_name": "grid-a"}}
+            )
+
+        mock_channel_grid.assert_not_awaited()
+        assert mock_compose.call_args.args[2].grid == "grid-a"
+        assert mock_jit.call_args.kwargs["grid"] == "grid-a"

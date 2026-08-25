@@ -401,6 +401,30 @@ async def _open_editor(row, schedule, service, refresh, user_email) -> None:
                     "First run (YYYY-MM-DD HH:MM)", value=schedule_defaults["first_run"]
                 ).classes("w-full")
 
+            # 3. Context -- which knowledge modules this workflow's steps
+            # can draw on, resolved once at the start of each run (see
+            # orchestrator/experts/skill_runner.py's
+            # _resolve_skill_system_instructions). Only shown once a
+            # workflow has been saved at least once: pins key on the real
+            # skill_id, which a brand-new, unsaved workflow doesn't have yet
+            # -- same rule already applied to title/slug above.
+            if row:
+                with ui.card().classes("w-full gap-2"):
+                    ui.label("Context").classes("text-subtitle2")
+                    ui.label(
+                        "Knowledge modules this workflow's steps can draw on, "
+                        "resolved once at the start of each run."
+                    ).classes("text-xs text-gray-500")
+
+                    from nicegui_app.pages.knowledge_picker import render_module_picker
+                    from shared.prompts.knowledge import KnowledgeStore
+                    from shared.prompts.skills import skill_prompt_id
+
+                    k_store = KnowledgeStore.from_env()
+                    render_module_picker(
+                        skill_prompt_id(row["id"]), k_store, user_email, show_budget=True
+                    )
+
             # Guards state_holder["summary_user_edited"] against the
             # programmatic write below setting it -- only a real user edit
             # (guard inactive) should count as "stop auto-updating".

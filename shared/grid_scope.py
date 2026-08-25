@@ -156,9 +156,27 @@ async def resolve_scope_grid(
         return None
 
 
+async def resolve_scope_grid_from_user_context(user_context: Optional[Any]) -> Optional[str]:
+    """resolve_scope_grid, given a UserContext-shaped object instead of its
+    four unpacked fields. Duck-typed, not imported from orchestrator.models
+    -- this module lives in shared/, which must not depend on the
+    orchestrator package. Returns None immediately for None (no conversation
+    channel, no permission set to check).
+    """
+    if user_context is None:
+        return None
+    return await resolve_scope_grid(
+        chat_id=getattr(user_context, "chat_id", None),
+        topic_id=getattr(user_context, "topic_id", None),
+        organization_ids=getattr(user_context, "organization_ids", None) or [],
+        is_staff=bool(getattr(user_context, "is_staff", False)),
+    )
+
+
 __all__ = [
     "build_channel_map",
     "grid_from_channel",
     "invalidate",
     "resolve_scope_grid",
+    "resolve_scope_grid_from_user_context",
 ]

@@ -1,10 +1,11 @@
 """JIT context resolution: selection, concurrency, fail-open, rendering."""
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 
-from orchestrator.services.jit_context_resolver import JitContextResolver
+from orchestrator.services.jit_context_resolver import JitContextResolver, resolve_jit_context_for
 from shared.prompts.knowledge import KnowledgeModule
 from shared.prompts.providers import ProviderRegistry, ResolutionContext
 from shared.prompts.types import RequestScope
@@ -234,7 +235,13 @@ async def test_fetch_jit_context_never_raises(monkeypatch):
     def _boom(*_a, **_k):
         raise RuntimeError("store exploded")
 
-    monkeypatch.setattr(pc, "get_jit_resolver", _boom)
+    # _fetch_jit_context now delegates to resolve_jit_context_for (see
+    # resolve_jit_context_for's own fail-open test above) -- patch the
+    # resolver where that function actually looks it up, not on
+    # prepare_context itself, which no longer imports get_jit_resolver at all.
+    import orchestrator.services.jit_context_resolver as jcr
+
+    monkeypatch.setattr(jcr, "get_jit_resolver", _boom)
     text, used = await pc._fetch_jit_context("staff.system", None)
     assert text == ""
     assert used == []
@@ -388,4 +395,30 @@ async def test_a_provider_that_raises_while_checking_access_fails_closed():
     )
 
     assert "secret-doc" not in text
+    assert used == []
+
+
+@pytest.mark.asyncio
+async def test_resolve_jit_context_for_delegates_to_the_process_wide_resolver():
+    provider = _FakeProvider("graph", text="Entity types: grid, meter.")
+    resolver = _resolver([_module("graph-overview")], {"graph-overview": True}, [provider])
+
+    with patch(
+        "orchestrator.services.jit_context_resolver.get_jit_resolver", return_value=resolver
+    ):
+        text, used = await resolve_jit_context_for("skill:abc", user_context=None, grid=None)
+
+    assert "Entity types: grid, meter." in text
+    assert used == ["graph-overview"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_jit_context_for_fails_open_on_error():
+    with patch(
+        "orchestrator.services.jit_context_resolver.get_jit_resolver",
+        side_effect=RuntimeError("boom"),
+    ):
+        text, used = await resolve_jit_context_for("skill:abc", user_context=None, grid=None)
+
+    assert text == ""
     assert used == []

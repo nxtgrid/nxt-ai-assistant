@@ -119,3 +119,21 @@ def test_save_rejects_a_colliding_slug_by_name():
     src = KNOWLEDGE_MODULES_PATH.read_text()
 
     assert "taken_slugs=taken_slugs" in src
+
+
+def test_prompts_picker_uses_the_shared_searchable_widget_not_a_chip_select():
+    src = KNOWLEDGE_MODULES_PATH.read_text()
+
+    assert "use-chips" not in src
+    # Not a single exact-formatting substring: render_entity_picker's real
+    # call wraps across lines (ruff/black would reformat a one-liner here
+    # anyway), so check the call and its argument are both present instead.
+    assert "render_entity_picker(" in src
+    assert "prompt_rows," in src
+
+
+def test_skills_picker_is_present_and_distinctly_labeled():
+    src = KNOWLEDGE_MODULES_PATH.read_text()
+
+    assert 'label="Used by these skills"' in src
+    assert "resolve_pins_to_save(" in src

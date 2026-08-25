@@ -12,21 +12,38 @@ catalog line, full body fetched on demand" -- this module mirrors
 knowledge.py's KnowledgeStore/render_inlined pattern deliberately, without
 importing from it.
 
-Skills have no per-prompt pinning or geographic/org scope selection the way
-knowledge modules do (see knowledge.py's select_for_prompt): every active,
-non-staff-only skill is potentially relevant to every conversation, so the
-only gate is staff_only vs. the request's is_staff -- the same convention
-command_registry.py already uses for slash commands.
+This catalog itself has no per-prompt pinning or geographic/org scope
+selection the way knowledge modules do (see knowledge.py's
+select_for_prompt): every active, non-staff-only skill is potentially
+relevant to every conversation, so the only gate here is staff_only vs. the
+request's is_staff -- the same convention command_registry.py already uses
+for slash commands. A skill's *own* knowledge (what it draws on when it
+runs, as opposed to whether it's listed in this catalog) is a separate
+concern, pinned via skill_prompt_id() into the exact same
+prompt_knowledge_overrides table a prompt's knowledge modules use -- see
+orchestrator/experts/skill_runner.py's _resolve_skill_system_instructions.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+
+# Separate from skill_runner.py's SKILL_EXPERT_PREFIX (routes
+# matched_expert_id in a different table, for a different purpose) even
+# though both happen to be "skill:" -- this one is the key convention for
+# prompt_knowledge_overrides.prompt_id, defined here in shared/ because
+# anansi_app has no `orchestrator` package to import skill_runner from.
+SKILL_PIN_PREFIX = "skill:"
+
+
+def skill_prompt_id(skill_id: str) -> str:
+    """The prompt_knowledge_overrides.prompt_id key for a skill's pins."""
+    return f"{SKILL_PIN_PREFIX}{skill_id}"
 
 
 @dataclass(frozen=True)
@@ -42,6 +59,12 @@ class Skill:
     title: str
     summary: str
     staff_only: bool
+    # Included so a caller with active_only=False (the knowledge-module
+    # picker, which must be able to pin a draft skill before it goes live)
+    # can still show status. Defaults to "active" so every existing caller
+    # (active_only=True, which never selects this column) keeps working
+    # unchanged.
+    status: str = "active"
 
 
 def select_skills_for_context(skills: List[Skill], is_staff: bool) -> List[Skill]:
@@ -87,8 +110,8 @@ class SkillCatalogStore:
     def __init__(self, client=None, ttl_seconds: int = 300) -> None:
         self._client = client
         self._ttl = ttl_seconds
-        self._cache: Optional[List[Skill]] = None
-        self._expires = 0.0
+        self._cache: Dict[bool, List[Skill]] = {}
+        self._expires: Dict[bool, float] = {}
 
     @classmethod
     def from_env(cls) -> "SkillCatalogStore":
@@ -106,30 +129,37 @@ class SkillCatalogStore:
             return cls(client=None)
 
     def invalidate(self) -> None:
-        self._cache = None
-        self._expires = 0.0
+        self._cache = {}
+        self._expires = {}
 
-    def all_skills(self) -> List[Skill]:
-        """Active skills only -- disabled/unusable skills never enter context."""
+    def all_skills(self, *, active_only: bool = True) -> List[Skill]:
+        """Active skills by default. active_only=False includes draft/
+        disabled/unusable too -- for the knowledge-module picker, which must
+        let an operator pin a module to a skill before it goes live.
+
+        Cached separately per active_only value: they're different result
+        sets, and a naive shared cache slot would return the wrong one
+        within the TTL window.
+        """
         import time
 
-        if self._cache is not None and time.time() < self._expires:
-            return self._cache
+        if active_only in self._cache and time.time() < self._expires.get(active_only, 0):
+            return self._cache[active_only]
         if not self._client:
             return []
         try:
-            result = (
-                self._client.table("skills")
-                .select("id, slug, title, summary, staff_only")
-                .eq("status", "active")
-                .execute()
+            query = self._client.table("skills").select(
+                "id, slug, title, summary, staff_only, status"
             )
-            self._cache = [Skill(**row) for row in (result.data or [])]
+            if active_only:
+                query = query.eq("status", "active")
+            result = query.execute()
+            self._cache[active_only] = [Skill(**row) for row in (result.data or [])]
         except Exception:
             LOGGER.opt(exception=True).warning("Skill catalog fetch failed; continuing without")
-            self._cache = []
-        self._expires = time.time() + self._ttl
-        return self._cache
+            self._cache[active_only] = []
+        self._expires[active_only] = time.time() + self._ttl
+        return self._cache[active_only]
 
 
 # Module-level singleton, matching shared.prompts.core's `PROMPTS = _build_default_library()`
@@ -142,8 +172,10 @@ SKILL_CATALOG = SkillCatalogStore.from_env()
 
 __all__ = [
     "SKILL_CATALOG",
+    "SKILL_PIN_PREFIX",
     "Skill",
     "SkillCatalogStore",
     "render_skill_catalog",
     "select_skills_for_context",
+    "skill_prompt_id",
 ]
