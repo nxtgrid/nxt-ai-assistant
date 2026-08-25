@@ -7,11 +7,10 @@ import ast
 from pathlib import Path
 
 from nicegui_app.pages.knowledge_picker import (
-    UNPINNED_PREVIEW_LIMIT,
     PickerRow,
     build_picker_rows,
+    entity_select_options,
     filter_picker_rows,
-    rows_to_display,
 )
 
 from shared.prompts.knowledge import KnowledgeModule
@@ -69,91 +68,70 @@ def test_filter_picker_rows_matches_slug_title_and_summary():
     assert len(filter_picker_rows(rows, "")) == 2
 
 
-# ── The reverse-direction picker's own scaling hazard, and its discoverability
-# gap ────────────────────────────────────────────────────────────────────────
-# render_entity_picker (knowledge_modules.py's "Used by these prompts"/"these
-# skills") can face dozens of candidates -- every registered prompt id today,
-# every skill ever created tomorrow -- so its default (no-query) view must
-# never grow proportionally to the candidate pool: rows_to_display keeps it
-# capped at UNPINNED_PREVIEW_LIMIT no matter how large that pool gets.
+# ── Why this direction is a native dropdown, not an inline tick-list ────────
+# knowledge_modules.py's "Used by these prompts"/"Used by these skills" sit
+# inside _open_edit_dialog's ui.card() -- a flex column capped at
+# `max-height: calc(100dvh - 32px)`. An inline list styled
+# `max-height: …px; overflow-y: auto` is a flex item whose *automatic minimum
+# size is 0*: CSS only resolves min-height:auto to the content size while
+# overflow is `visible`. So the card's default flex-shrink:1 crushed that
+# list to zero height whenever the dialog's own fields outgrew the viewport
+# -- every row still in the DOM (scrollHeight 188px) at a rendered height of
+# 0, which is precisely what an operator reported as "nothing pops up".
 #
-# An earlier version of that cap showed *only* whatever was already pinned
-# and nothing else until you typed -- for a module with nothing pinned yet
-# (every module, the day this shipped) the picker opened looking completely
-# inert: a plain text box with no rows and no indication anything was there
-# to find, unlike the native dropdowns elsewhere in the same dialog that
-# visibly pop open on click. rows_to_display now always tops up to
-# UNPINNED_PREVIEW_LIMIT with a small, deterministic (alphabetical) sample of
-# not-yet-pinned rows too, so there's always something to see and click the
-# moment the dialog opens -- capped, not proportional, so it can't
-# reintroduce the original scaling problem.
+# Measured directly in a browser against the shipped build: it reproduces
+# only when the card is over-constrained, which is why every unit test and
+# every standalone repro of the widget passed while the real dialog showed an
+# empty box -- and why two prior fixes that only changed *which rows* got
+# rendered could never have helped.
+#
+# A ui.select's popup is portalled to <body> by Quasar, so no ancestor's
+# height cap can clip or shrink it. That is what makes the dropdown the
+# structural fix rather than another style tweak, and it restores the
+# click-to-open behaviour operators expect from every other field on the
+# same form.
 
 
 def _rows(*slugs_and_checked):
-    """N distinct rows from (slug, checked) pairs, for the preview-limit
-    tests below -- knowledge_modules.py always hands render_entity_picker
-    its rows pre-sorted (alphabetically by prompt id, or by skill title), so
-    these fixtures do too."""
+    """N distinct rows from (slug, checked) pairs. knowledge_modules.py hands
+    the picker its rows pre-sorted (alphabetically by prompt id, or by skill
+    title), so these fixtures do too."""
     return [
         PickerRow(slug=slug, title=slug, chars=0, checked=checked, summary="")
         for slug, checked in slugs_and_checked
     ]
 
 
-def test_rows_to_display_with_empty_query_and_room_shows_pinned_plus_a_sample():
-    rows = _picker_rows_fixture()  # 2 rows total, well under the preview limit
-    # victron-led is pinned; azimuth-calculation isn't -- both now fit under
-    # the cap, so an empty query shows both, not just the pinned one.
-    assert {r.slug for r in rows_to_display(rows, {"victron-led"}, "")} == {
-        "victron-led",
-        "azimuth-calculation",
-    }
+def test_entity_select_options_are_keyed_by_the_id_that_gets_saved():
+    """The dict key is what resolve_pins_to_save writes into
+    prompt_knowledge_overrides; the label is only what the operator reads.
+    Conflating the two would silently save a display string as a pin."""
+    options = entity_select_options(_picker_rows_fixture())
+    assert set(options) == {"azimuth-calculation", "victron-led"}
 
 
-def test_rows_to_display_with_more_unpinned_rows_than_the_limit_caps_the_sample():
-    rows = _rows(*[(f"prompt-{i}", False) for i in range(20)])
-    visible = rows_to_display(rows, set(), "")
-    assert len(visible) == UNPINNED_PREVIEW_LIMIT
-    # Deterministic and stable -- the same alphabetical prefix every time,
-    # not a random/rotating sample, so an unrelated redraw doesn't reshuffle
-    # what's already on screen.
-    assert [r.slug for r in visible] == [f"prompt-{i}" for i in range(UNPINNED_PREVIEW_LIMIT)]
+def test_entity_select_options_lead_with_the_title_then_the_summary():
+    """The original chip-select showed bare ids ("customer.system") and was
+    reported as unreadable -- which is what started this whole detour. A
+    label has to carry the human title first."""
+    options = entity_select_options(_picker_rows_fixture())
+    assert options["victron-led"] == (
+        "Victron Quattro Codes — Decoding inverter LED error states."
+    )
 
 
-def test_rows_to_display_always_shows_every_pinned_row_even_past_the_limit():
-    # 12 pinned rows, over the 8-row cap -- pinned rows are never hidden;
-    # the cap only ever applies to the sample of *unpinned* rows.
-    rows = _rows(*[(f"prompt-{i}", True) for i in range(12)])
-    visible = rows_to_display(rows, {f"prompt-{i}" for i in range(12)}, "")
-    assert len(visible) == 12
+def test_entity_select_options_without_a_summary_is_just_the_title():
+    assert entity_select_options(_rows(("solo", False)))["solo"] == "solo"
 
 
-def test_rows_to_display_tops_up_pinned_rows_with_unpinned_ones_up_to_the_limit():
-    rows = _rows(("pinned-a", True), *[(f"unpinned-{i}", False) for i in range(20)])
-    visible = rows_to_display(rows, {"pinned-a"}, "")
-    assert len(visible) == UNPINNED_PREVIEW_LIMIT
-    assert visible[0].slug == "pinned-a"
-    assert [r.slug for r in visible[1:]] == [
-        f"unpinned-{i}" for i in range(UNPINNED_PREVIEW_LIMIT - 1)
-    ]
-
-
-def test_rows_to_display_with_no_candidates_at_all_is_empty():
-    assert rows_to_display([], set(), "") == []
-
-
-def test_rows_to_display_with_a_query_searches_every_row_regardless_of_selection():
-    rows = _picker_rows_fixture()
-    assert [r.slug for r in rows_to_display(rows, set(), "azimuth")] == ["azimuth-calculation"]
-
-
-def test_rows_to_display_with_a_query_is_not_capped_by_the_preview_limit():
-    # Typing a query bypasses the preview cap entirely -- every match must
-    # stay reachable however many there are; only the empty-query default
-    # view is capped.
-    rows = _rows(*[(f"prompt-{i}", False) for i in range(20)])
-    visible = rows_to_display(rows, set(), "prompt")
-    assert len(visible) == 20
+def test_entity_select_options_falls_back_to_the_id_when_there_is_no_title():
+    """A skill saved with an empty title would otherwise render as a blank,
+    unpickable row -- and the summary has to survive the fallback, because
+    "/gtr · active" is then the only readable part of that row."""
+    options = entity_select_options(
+        [PickerRow(slug="skill-uuid", title="", chars=0, checked=False, summary="/gtr · active")]
+    )
+    assert options["skill-uuid"] == "skill-uuid — /gtr · active"
 
 
 # ── The same null-body / JIT hazard build_module_rows has ──────────────────
@@ -211,6 +189,11 @@ class _FakeElement:
     def __init__(self):
         self.children = []
         self.value = ""
+        # Recorded, not discarded: the picker's one shipped rendering bug
+        # lived entirely in a .style() string (see
+        # test_module_picker_scroll_box_cannot_be_flex_shrunk), and a fake
+        # that swallowed styles is why no test ever saw it.
+        self.styles: list = []
 
     def classes(self, *_a, **_k):
         return self
@@ -218,7 +201,9 @@ class _FakeElement:
     def props(self, *_a, **_k):
         return self
 
-    def style(self, *_a, **_k):
+    def style(self, *a, **_k):
+        if a:
+            self.styles.append(a[0])
         return self
 
     def clear(self):
@@ -234,8 +219,129 @@ class _FakeElement:
         return False
 
 
-def test_render_entity_picker_returns_a_getter_seeded_from_checked_rows(monkeypatch):
+class _FakeSelect(_FakeElement):
+    def __init__(self, options=None, value=None, **kwargs):
+        super().__init__()
+        self.options = options
+        self.value = value
+        self.kwargs = kwargs
+        self.change_handlers: list = []
+
+    def on_value_change(self, callback):
+        self.change_handlers.append(callback)
+        return self
+
+
+def _fake_select_ui(monkeypatch, sink):
+    """Patch knowledge_picker.ui with a stub whose ui.select records every
+    select built, so a test can read back its options/kwargs and drive its
+    on_value_change the way a real pick would."""
     import nicegui_app.pages.knowledge_picker as knowledge_picker
+
+    def _select(options=None, value=None, **kwargs):
+        element = _FakeSelect(options, value, **kwargs)
+        sink.append(element)
+        return element
+
+    fake_ui = type(
+        "FakeUi",
+        (),
+        {
+            "label": staticmethod(lambda *a, **k: _FakeElement()),
+            "select": staticmethod(_select),
+        },
+    )()
+    monkeypatch.setattr(knowledge_picker, "ui", fake_ui, raising=False)
+    return knowledge_picker
+
+
+def test_render_entity_select_returns_a_getter_seeded_from_checked_rows(monkeypatch):
+    created: list = []
+    knowledge_picker = _fake_select_ui(monkeypatch, created)
+
+    get_selected = knowledge_picker.render_entity_select(
+        _rows(("a", True), ("b", False)), label="Used by these prompts"
+    )
+
+    assert get_selected() == ["a"]
+
+
+def test_render_entity_select_getter_follows_a_later_pick(monkeypatch):
+    """knowledge_modules.py reads this getter once, at Save time (see
+    resolve_pins_to_save), so it has to report live state rather than the
+    snapshot taken when the dialog opened."""
+    created: list = []
+    knowledge_picker = _fake_select_ui(monkeypatch, created)
+
+    get_selected = knowledge_picker.render_entity_select(
+        _rows(("a", True), ("b", False)), label="Used by these prompts"
+    )
+    created[0].value = ["b", "a"]
+
+    assert get_selected() == ["a", "b"]
+
+
+def test_render_entity_select_is_a_searchable_multi_select(monkeypatch):
+    """multiple: a module is used by more than one prompt. with_input: the
+    ~30 registered prompt ids have to stay findable by typing, which is the
+    one thing the inline tick-list did better than the original chip-select
+    and must not be lost going back to a dropdown."""
+    created: list = []
+    knowledge_picker = _fake_select_ui(monkeypatch, created)
+
+    knowledge_picker.render_entity_select(_rows(("a", False)), label="Used by these prompts")
+
+    assert created[0].kwargs.get("multiple") is True
+    assert created[0].kwargs.get("with_input") is True
+
+
+def test_render_entity_select_notifies_on_change(monkeypatch):
+    """knowledge_modules.py recomputes its audience warning from the current
+    prompt selection, so every pick has to call back."""
+    created: list = []
+    knowledge_picker = _fake_select_ui(monkeypatch, created)
+    fired: list = []
+
+    knowledge_picker.render_entity_select(
+        _rows(("a", False)), label="Used by these prompts", on_change=lambda: fired.append(1)
+    )
+    for callback in created[0].change_handlers:
+        callback(None)
+
+    assert fired == [1]
+
+
+def test_render_entity_select_with_no_candidates_still_renders(monkeypatch):
+    """A fresh install has no skills at all -- the field must still build
+    (empty) rather than break the whole dialog."""
+    created: list = []
+    knowledge_picker = _fake_select_ui(monkeypatch, created)
+
+    get_selected = knowledge_picker.render_entity_select([], label="Used by these skills")
+
+    assert get_selected() == []
+    assert created[0].options == {}
+
+
+def test_module_picker_scroll_box_cannot_be_flex_shrunk(monkeypatch):
+    """render_module_picker's options box is `overflow-y: auto`, which drops
+    its flex automatic minimum size to 0. Inside any height-capped flex
+    column -- skills.py's Context card, the Prompts page's Context tab -- the
+    default flex-shrink:1 is then free to crush it to zero height with every
+    row still present in the DOM.
+
+    That is exactly the failure that made the modules dialog's own picker
+    render as an empty box across three releases (see the comment block above
+    entity_select_options). Nothing about it is visible to a test that only
+    checks which rows were computed, so pin the style that prevents it."""
+    import nicegui_app.pages.knowledge_picker as knowledge_picker
+
+    built_columns: list = []
+
+    def _column(*_a, **_k):
+        element = _FakeElement()
+        built_columns.append(element)
+        return element
 
     fake_ui = type(
         "FakeUi",
@@ -243,75 +349,32 @@ def test_render_entity_picker_returns_a_getter_seeded_from_checked_rows(monkeypa
         {
             "label": staticmethod(lambda *a, **k: _FakeElement()),
             "input": staticmethod(lambda *a, **k: _FakeElement()),
-            "column": staticmethod(lambda *a, **k: _FakeElement()),
+            "column": staticmethod(_column),
             "row": staticmethod(lambda *a, **k: _FakeElement()),
             "checkbox": staticmethod(lambda *a, **k: _FakeElement()),
+            "button": staticmethod(lambda *a, **k: _FakeElement()),
         },
     )()
     monkeypatch.setattr(knowledge_picker, "ui", fake_ui, raising=False)
 
-    rows = [
-        PickerRow(slug="a", title="A", chars=0, checked=True, summary=""),
-        PickerRow(slug="b", title="B", chars=0, checked=False, summary=""),
+    class _Store:
+        _client = object()
+
+        def all_modules(self):
+            return [_module("alpha")]
+
+        def overrides_for(self, _pinning_id):
+            return {}
+
+    knowledge_picker.render_module_picker(
+        "customer.system", _Store(), "operator@example.com", show_budget=False
+    )
+
+    scroll_boxes = [
+        column
+        for column in built_columns
+        if any("overflow-y: auto" in style for style in column.styles)
     ]
-    get_selected = knowledge_picker.render_entity_picker(rows, label="Used by these prompts")
-
-    assert get_selected() == ["a"]
-
-
-def _record_label(sink):
-    element = _FakeElement()
-    sink.append(element)
-    return element
-
-
-def _record_checkbox(sink, kwargs):
-    element = _FakeElement()
-    sink.append((element, kwargs.get("on_change")))
-    return element
-
-
-def test_render_entity_picker_toggling_a_row_updates_the_live_selected_count(monkeypatch):
-    """A tick/untick here has no Save button of its own and no other
-    feedback (see render_entity_picker's toggle) -- the running "N selected"
-    label is the only visible confirmation a click registered at all, so it
-    must actually move when a row is ticked, not just exist."""
-    from types import SimpleNamespace
-
-    import nicegui_app.pages.knowledge_picker as knowledge_picker
-
-    created_labels: list = []
-    created_checkboxes: list = []
-
-    fake_ui = type(
-        "FakeUi",
-        (),
-        {
-            "label": staticmethod(lambda *a, **k: _record_label(created_labels)),
-            "input": staticmethod(lambda *a, **k: _FakeElement()),
-            "column": staticmethod(lambda *a, **k: _FakeElement()),
-            "row": staticmethod(lambda *a, **k: _FakeElement()),
-            "checkbox": staticmethod(lambda *a, **k: _record_checkbox(created_checkboxes, k)),
-        },
-    )()
-    monkeypatch.setattr(knowledge_picker, "ui", fake_ui, raising=False)
-
-    rows = [
-        PickerRow(slug="a", title="A", chars=0, checked=True, summary=""),
-        PickerRow(slug="b", title="B", chars=0, checked=False, summary=""),
-    ]
-    knowledge_picker.render_entity_picker(rows, label="Used by these prompts")
-
-    # created_labels[0] is the "Used by these prompts" heading; [1] is the
-    # running count -- both created once, up front, before redraw() ever
-    # touches the row list itself.
-    picked_label = created_labels[1]
-    assert picked_label.text == "1 selected"
-
-    # created_checkboxes[0] is row "a" (already checked); [1] is row "b".
-    # Simulate ticking it the same way a real click would: invoke the
-    # on_change NiceGUI itself hands to toggle().
-    _, toggle_b = created_checkboxes[1]
-    toggle_b(SimpleNamespace(value=True))
-
-    assert picked_label.text == "2 selected"
+    assert scroll_boxes, "expected render_module_picker to build a scrollable options box"
+    for box in scroll_boxes:
+        assert "flex-shrink: 0" in " ".join(box.styles)
