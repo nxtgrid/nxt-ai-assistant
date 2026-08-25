@@ -7,6 +7,7 @@ from nicegui_app.pages.knowledge_modules import (
     body_is_editable,
     build_module_rows,
     describe_audience,
+    describe_usage,
     extract_drive_id,
     filter_context_rows,
     group_label,
@@ -41,9 +42,33 @@ def test_build_module_rows_reports_size():
         ModuleRow(
             slug="comms", title="Comms", tags=["grid_ops"], scope="sector",
             chars=40, source="manual", size_label="40 chars",
-            summary="s", body="b" * 40,
+            summary="s", body="b" * 40, used_by=[],
         )
     ]
+
+
+def test_build_module_rows_carries_the_prompts_using_each_module():
+    rows = build_module_rows([_module("comms")], {"comms": ["customer.system", "staff.system"]})
+    assert rows[0].used_by == ["customer.system", "staff.system"]
+
+
+def test_a_module_no_pin_row_mentions_is_unused():
+    rows = build_module_rows([_module("comms")], {"other-id": ["staff.system"]})
+    assert rows[0].used_by == []
+
+
+def test_describe_usage_names_the_prompts():
+    assert describe_usage(["staff.system"]) == "used by: staff.system"
+
+
+def test_describe_usage_calls_out_an_unattached_module():
+    """A module attached to nothing reaches no conversation -- say so.
+
+    Blank would read as "no information"; the built-in modules sat unattached
+    unnoticed for exactly that reason.
+    """
+    text = describe_usage([])
+    assert "not used by any prompt" in text
 
 
 def test_filter_context_rows_matches_slug_title_summary_and_body():

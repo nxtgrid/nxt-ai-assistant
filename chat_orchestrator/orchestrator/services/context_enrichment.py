@@ -121,7 +121,20 @@ class ContextEnrichmentProvider:
             return []
 
     async def _get_jira_assignees(self, executor: Any) -> List[str]:
-        """Fetch Jira assignees via MCP tool call."""
+        """DEAD CODE. Fetch Jira assignees via MCP tool call.
+
+        Unreachable twice over, and passing a real tool_executor will NOT
+        revive it: `prepare_context.py`'s _fetch_enrichment has only ever
+        called get_enrichment_context with tool_executor=None, AND the tool
+        name below does not exist -- the Jira MCP server exposes nine tools
+        and `jira_get_schedule_participants` is not among them (same for
+        `jira_get_organization_options` in _get_jira_organizations).
+
+        The directory context module now sources people and organizations
+        from the Auth DB instead; see shared/prompts/providers_directory.py.
+        Kept rather than deleted so the next person to look does not
+        rediscover the tool names and assume they are wired.
+        """
         cache_key = "jira_assignees"
 
         # Check module-level cache
@@ -160,7 +173,8 @@ class ContextEnrichmentProvider:
             return []
 
     async def _get_jira_organizations(self, executor: Any) -> List[str]:
-        """Fetch JIRA organization options via MCP tool call."""
+        """DEAD CODE -- see _get_jira_assignees. `jira_get_organization_options`
+        does not exist in mcp_servers either."""
         cache_key = "jira_organizations"
 
         # Check module-level cache

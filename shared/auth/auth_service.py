@@ -804,6 +804,74 @@ class AuthService:
             LOGGER.exception(f"Error getting grid names: {e}")
             return []
 
+    async def get_organization_names(
+        self,
+        organization_ids: Optional[List[str]] = None,
+        include_all: bool = False,
+    ) -> List[str]:
+        """Organization names, for the directory context module.
+
+        Mirrors get_grid_names_for_organization's shape and gate: staff pass
+        include_all, everyone else passes the org ids they actually belong to.
+        Added because the directory module's "Available organizations" line
+        used to come from a Jira fetcher that has never existed -- see
+        shared/prompts/providers_directory.py.
+        """
+        try:
+            pool = await self._get_db_pool()
+            async with pool.acquire() as conn:
+                if include_all:
+                    rows = await conn.fetch(
+                        """
+                        SELECT name FROM public.organizations
+                        WHERE deleted_at IS NULL
+                        ORDER BY name
+                        """
+                    )
+                else:
+                    if not organization_ids:
+                        return []
+                    rows = await conn.fetch(
+                        """
+                        SELECT name FROM public.organizations
+                        WHERE deleted_at IS NULL
+                        AND id = ANY($1::int[])
+                        ORDER BY name
+                        """,
+                        [int(o) for o in organization_ids],
+                    )
+                return [row["name"] for row in rows if row["name"]]
+        except Exception as e:
+            LOGGER.warning(f"Error getting organization names: {e}")
+            return []
+
+    async def get_staff_member_names(self) -> List[str]:
+        """Display names of the internal team (accounts in STAFF_ORG_ID).
+
+        Only ever shown to staff -- see providers_directory.py's is_staff
+        gate. full_name only: this feeds name disambiguation ("when a user
+        mentions a name..."), and an email address is not a name. An account
+        with no full_name is skipped rather than degraded to its email local
+        part, which would put addresses in a prompt for no benefit.
+        """
+        try:
+            pool = await self._get_db_pool()
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT full_name FROM public.accounts
+                    WHERE deleted_at IS NULL
+                    AND organization_id = $1
+                    AND full_name IS NOT NULL
+                    ORDER BY full_name
+                    """,
+                    STAFF_ORG_ID,
+                )
+                return [row["full_name"] for row in rows if row["full_name"]]
+        except Exception as e:
+            LOGGER.warning(f"Error getting staff member names: {e}")
+            return []
+
     async def get_grid_portal_id(self, grid_name: str) -> Optional[str]:
         """
         Get VRM portal ID (generation_external_gateway_id) for a grid by name.

@@ -278,6 +278,32 @@ class KnowledgeStore:
             return []
         return [row["prompt_id"] for row in (result.data or [])]
 
+    def all_prompt_pins(self) -> Dict[str, List[str]]:
+        """module_id -> the prompt ids using it, in one query.
+
+        The Context page needs this for every row at once. Calling
+        prompts_pinning per module would be one query per module just to
+        render a list, which is what a batch read exists to avoid.
+        Degrades to {} rather than raising: an unattached-looking list is a
+        better failure than a page that will not load.
+        """
+        if not self._client:
+            return {}
+        try:
+            result = (
+                self._client.table("prompt_knowledge_overrides")
+                .select("module_id, prompt_id")
+                .eq("pinned", True)
+                .execute()
+            )
+        except Exception:
+            LOGGER.opt(exception=True).warning("Batch prompt-pin fetch failed")
+            return {}
+        pins: Dict[str, List[str]] = {}
+        for row in result.data or []:
+            pins.setdefault(row["module_id"], []).append(row["prompt_id"])
+        return {module_id: sorted(ids) for module_id, ids in pins.items()}
+
     def set_prompt_pins(self, module_id: str, prompt_ids: List[str], actor: str) -> None:
         """Reconcile this module's pinned prompts to exactly ``prompt_ids``.
 
