@@ -18,7 +18,6 @@ from orchestrator.graphs.state import ConversationState
 from orchestrator.models.schemas import EntityContext, UserContext
 from orchestrator.services.command_parser import COMMAND_REGISTRY
 from orchestrator.services.expert_instructions_provider import ExpertInstructionsProvider
-from orchestrator.services.jit_context_resolver import get_jit_resolver
 
 
 async def _generate_commands_context(user_context: Optional[UserContext]) -> str:
@@ -247,14 +246,9 @@ async def _fetch_jit_context(
     grid: Optional[str] = None,
 ) -> Tuple[str, List[str]]:
     """Resolve provider-backed context modules. Fail open."""
-    try:
-        from shared.prompts.providers import ResolutionContext
+    from orchestrator.services.jit_context_resolver import resolve_jit_context_for
 
-        ctx = ResolutionContext.from_user_context(user_context, grid=grid)
-        return await get_jit_resolver().resolve_for_prompt(prompt_id, ctx)
-    except Exception as e:
-        LOGGER.warning(f"JIT context resolution failed (continuing without): {e}")
-        return "", []
+    return await resolve_jit_context_for(prompt_id, user_context, grid=grid)
 
 
 async def _fetch_user_preferences(

@@ -367,7 +367,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Modify: `chat_orchestrator/orchestrator/graphs/nodes/prepare_context.py:244-257`
 - Test: `chat_orchestrator/tests/test_jit_context_resolver.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `chat_orchestrator/tests/test_jit_context_resolver.py` (it already has
 `_module()`, `_FakeStore`, `_FakeProvider` helpers and imports
@@ -416,12 +416,12 @@ no constructor arguments, and `.register(provider)` (keyed internally off
 uses this exact shape, matching how every other test in this same file
 registers a `_FakeProvider`.
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd chat_orchestrator && uv run pytest tests/test_jit_context_resolver.py -q -k resolve_jit_context_for`
 Expected: FAIL with `ImportError: cannot import name 'resolve_jit_context_for'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `chat_orchestrator/orchestrator/services/jit_context_resolver.py`, add
 after `get_jit_resolver()`:
@@ -471,7 +471,7 @@ async def _fetch_jit_context(
 redundant — remove it along with the old inline try/except, since
 `resolve_jit_context_for` now owns that logic.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd chat_orchestrator
@@ -481,7 +481,7 @@ uv run pytest tests/ -q -k prepare_context
 ```
 Expected: PASS on both.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add chat_orchestrator/orchestrator/services/jit_context_resolver.py \
