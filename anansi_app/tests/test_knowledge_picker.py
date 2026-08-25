@@ -3,8 +3,15 @@
 see test_knowledge_modules_page.py's git history for the pre-move tests
 this file replaces)."""
 
+import ast
+from pathlib import Path
+
 from nicegui_app.pages.knowledge_picker import PickerRow, build_picker_rows, filter_picker_rows
 from shared.prompts.knowledge import KnowledgeModule
+
+KNOWLEDGE_PICKER_PATH = (
+    Path(__file__).resolve().parents[1] / "nicegui_app" / "pages" / "knowledge_picker.py"
+)
 
 
 def _module(slug, chars=40, summary="s", is_jit=False):
@@ -75,3 +82,32 @@ def test_picker_rows_handles_a_jit_module_without_crashing():
 def test_picker_rows_marks_manual_modules_as_not_jit():
     rows = build_picker_rows([_module("comms")], {})
     assert rows[0].is_jit is False
+
+
+def _caught_exception_names(src: str, func_name: str) -> "set[str]":
+    """Exception type names a top-level ``except`` clause in async def
+    ``func_name`` catches, e.g. {"PermissionError", "RuntimeError"}. Mirrors
+    test_prompts_dialog.py's own copy of this check -- both dialogs need the
+    same "does this save handler catch broad Exception" guarantee, and this
+    module's save_pins is where the Prompts dialog's version moved from."""
+    for node in ast.walk(ast.parse(src)):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == func_name:
+            names: "set[str]" = set()
+            for handler in ast.walk(node):
+                if not isinstance(handler, ast.ExceptHandler) or handler.type is None:
+                    continue
+                candidates = (
+                    handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+                )
+                names.update(c.id for c in candidates if isinstance(c, ast.Name))
+            return names
+    raise AssertionError(f"no `async def {func_name}` found in {KNOWLEDGE_PICKER_PATH}")
+
+
+def test_save_pins_surfaces_unexpected_errors():
+    """NiceGUI never surfaces an exception an event handler doesn't catch
+    itself, so save_pins must catch a broad Exception, not just
+    PermissionError/RuntimeError, or a real write failure leaves the
+    operator with a dialog that silently did nothing."""
+    src = KNOWLEDGE_PICKER_PATH.read_text()
+    assert "Exception" in _caught_exception_names(src, "save_pins")

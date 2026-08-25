@@ -20,7 +20,6 @@ from shared.prompts import PROMPTS
 from shared.prompts.access import can_edit_prompt, can_publish_prompt, can_view_prompt
 from shared.prompts.components import COMPONENT_LABELS, COMPONENT_ORDER, UNCATEGORIZED
 from shared.prompts.gdoc import LEGACY_DOC_ENV_VARS, legacy_doc_id_for
-from shared.prompts.knowledge import INLINE_BUDGET_CHARS
 from shared.prompts.overrides import OverrideStore
 from shared.prompts.types import PromptSource
 
@@ -454,88 +453,11 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                 _refresh_body_actions()
 
             with ui.tab_panel(knowledge_tab):
+                from nicegui_app.pages.knowledge_picker import render_module_picker
                 from shared.prompts.knowledge import KnowledgeStore
 
                 k_store = KnowledgeStore.from_env()
-                if not k_store._client:  # noqa: SLF001 -- readiness check, as elsewhere on this page
-                    ui.label(
-                        "⚠️ Context storage not configured (CHAT_DB_URL / CHAT_DB_SERVICE_KEY)."
-                    ).classes("text-warning")
-                else:
-                    ui.label(
-                        "Context modules this prompt uses. Every module you tick is inlined "
-                        "into this prompt in full. Built-in modules resolve per request and "
-                        "have no fixed size until they do, so they don't count towards the "
-                        "budget below."
-                    ).classes("text-caption")
-
-                    all_modules = k_store.all_modules()
-                    pins = k_store.overrides_for(row.prompt_id)
-                    selected: set[str] = {m.slug for m in all_modules if pins.get(m.slug)}
-
-                    search = ui.input(placeholder="Search modules…").classes("w-full").props(
-                        "clearable dense"
-                    )
-                    picked_label = ui.label().classes("text-caption text-bold")
-                    options = ui.column().classes("w-full gap-0").style(
-                        "max-height: 340px; overflow-y: auto"
-                    )
-
-                    def redraw() -> None:
-                        options.clear()
-                        rows = filter_module_rows(
-                            build_knowledge_tab(all_modules, {s: True for s in selected}),
-                            search.value or "",
-                        )
-                        # Every ticked module is inlined, so the counter sums
-                        # all of them rather than a subset. Past the budget,
-                        # budget_inlined drops whole modules at render time
-                        # and only logs it -- this red counter is the one
-                        # warning an operator gets before that happens.
-                        inlined_chars = sum(r.chars for r in rows if r.checked)
-                        over = inlined_chars > INLINE_BUDGET_CHARS
-                        picked_label.text = (
-                            f"{len(selected)} selected · {inlined_chars} chars "
-                            f"of {INLINE_BUDGET_CHARS} budget"
-                            + (" · over budget, some will be dropped at render" if over else "")
-                        )
-                        picked_label.classes(
-                            replace="text-caption text-bold "
-                            + ("text-negative" if over else "")
-                        )
-                        with options:
-                            if not rows:
-                                ui.label("No modules match.").classes("text-italic text-caption")
-                            for r in rows:
-                                def toggle(e, slug=r.slug) -> None:
-                                    if e.value:
-                                        selected.add(slug)
-                                    else:
-                                        selected.discard(slug)
-                                    redraw()
-
-                                with ui.row().classes("items-center no-wrap w-full"):
-                                    ui.checkbox(value=r.checked, on_change=toggle).props("dense")
-                                    with ui.column().classes("gap-0"):
-                                        size_text = "live" if r.is_jit else f"{r.chars} chars"
-                                        ui.label(f"{r.title}  ·  {size_text}")
-                                        if r.summary:
-                                            ui.label(r.summary).classes("text-caption")
-
-                    async def save_pins() -> None:
-                        try:
-                            k_store.set_prompt_modules(
-                                row.prompt_id, sorted(selected), actor=user_email
-                            )
-                            k_store.invalidate()
-                            ui.notify("Context updated", type="positive")
-                        except Exception as e:  # noqa: BLE001 -- surfaced to the operator
-                            ui.notify(f"Save failed: {e}", type="negative")
-
-                    search.on_value_change(redraw)
-                    redraw()
-                    with ui.row().classes("justify-end w-full q-mt-sm"):
-                        ui.button("Save context", on_click=save_pins).props("color=primary")
+                render_module_picker(row.prompt_id, k_store, user_email, show_budget=True)
 
             with ui.tab_panel(diff_tab):
                 lines = diff_lines(spec.body, current_body)

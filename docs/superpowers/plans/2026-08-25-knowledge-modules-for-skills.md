@@ -1025,7 +1025,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Modify: `anansi_app/nicegui_app/pages/prompts.py:505-587` (the Context tab panel body)
 - Test: `anansi_app/tests/test_prompts_dialog.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `anansi_app/tests/test_prompts_dialog.py` (it reads `prompts.py`'s
 source as text and asserts a substring — the same convention already used
@@ -1040,12 +1040,12 @@ def test_context_tab_delegates_to_the_shared_picker():
     assert "render_module_picker(row.prompt_id, k_store, user_email, show_budget=True)" in src
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests/test_prompts_dialog.py -q -k shared_picker`
 Expected: FAIL (substring not present yet)
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add to `anansi_app/nicegui_app/pages/knowledge_picker.py` (after
 `filter_picker_rows`):
@@ -1155,7 +1155,7 @@ line) with:
                 render_module_picker(row.prompt_id, k_store, user_email, show_budget=True)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills
@@ -1164,7 +1164,7 @@ PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests -q
 Expected: PASS, full anansi_app suite green (426+ passed — this refactor
 must not lose or break any existing test).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add anansi_app/nicegui_app/pages/knowledge_picker.py \
