@@ -2010,7 +2010,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 **Files:**
 - Modify: `README.md`
 
-- [ ] **Step 1: Update the cross-reference sentence**
+- [x] **Step 1: Update the cross-reference sentence**
 
 Find the sentence (currently around line 84):
 
@@ -2020,7 +2020,7 @@ Change it to note the two now connect:
 
 > **context modules** (what it's told as fact — see [Context](#context-curated-and-attached-knowledge) above; a module can attach to a prompt or to a skill), and **Skills** (multi-step automations it can run — see [Skills](#skills-operator-authored-automations) above)
 
-- [ ] **Step 2: Fix the stale "per prompt" phrasing**
+- [x] **Step 2: Fix the stale "per prompt" phrasing**
 
 Find (currently around line 1278):
 
@@ -2028,7 +2028,7 @@ Find (currently around line 1278):
 
 Change `per prompt` to `per prompt or skill`.
 
-- [ ] **Step 3: Add one line to the Context section itself**
+- [x] **Step 3: Add one line to the Context section itself**
 
 Find the `#context-curated-and-attached-knowledge` section's body text and
 add one sentence noting a module can also attach to a skill from that
@@ -2037,7 +2037,7 @@ existing text there already describes attaching from a prompt's own Context
 tab) — read that section's current wording first and match its voice rather
 than pasting a mismatched tone.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add README.md
