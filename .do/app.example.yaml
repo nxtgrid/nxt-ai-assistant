@@ -237,6 +237,15 @@ envs:
   - key: GRAFANA_SYNC_HOUR
     value: "2"
     scope: RUN_TIME
+  # Episodic memory distiller (anansi_app/scripts/episodic_scheduler.py, started
+  # from start.sh). Writes episodic_distillations, which the `episodic` context
+  # module reads. Defaults to 03:00 -- an hour after GRAFANA_SYNC_HOUR, so the
+  # two LLM-heavy nightly batches in that container don't compete for rate
+  # limit. Both keys are optional; set EPISODIC_DISTILL_ENABLED=false to stop
+  # the daemon. Uses METRICS_TIMEZONE, like the Grafana one.
+  - key: EPISODIC_DISTILL_HOUR
+    value: "3"
+    scope: RUN_TIME
   - key: GRAFANA_FORCE_FULL_REINDEX
     value: "true"
     scope: RUN_TIME
