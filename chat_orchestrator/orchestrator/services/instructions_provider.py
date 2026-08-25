@@ -331,7 +331,7 @@ class InstructionsProvider:
             return True  # Safe default: treat as customer on error
 
     async def get_customer_instructions(
-        self, organization_id: Optional[str] = None
+        self, organization_id: Optional[str] = None, grid: Optional[str] = None
     ) -> tuple[str, Optional[str]]:
         """
         Get customer-facing system instructions and optional context.
@@ -339,13 +339,16 @@ class InstructionsProvider:
         Args:
             organization_id: Caller's organization, for org-scoped knowledge modules.
                 None renders with no org scope (matches sector-scoped modules only).
+            grid: The grid this conversation is about, for site-scoped modules.
+                None renders with no grid scope. Resolved by
+                shared/grid_scope.py, which returns None rather than guess.
 
         Returns:
             Tuple of (system_instructions, context_message)
             - system_instructions: Goes to the provider system-instruction channel
             - context_message: Goes as first user message (or None)
         """
-        scope = RequestScope(organization_id=organization_id)
+        scope = RequestScope(organization_id=organization_id, grid=grid)
         rendered = PROMPTS.render("customer.system", scope=scope)
         self._last_provenance = prompt_metadata(rendered)
         context_message = _postprocess_context(rendered.context_text, extract_staff_groups=False)
@@ -365,6 +368,7 @@ class InstructionsProvider:
         user_context: UserContext,
         entity_context: Optional[EntityContext] = None,
         task_type: Optional[str] = None,
+        grid: Optional[str] = None,
     ) -> tuple[str, Optional[str]]:
         """
         Get composed system instructions and optional context message.
@@ -373,6 +377,9 @@ class InstructionsProvider:
             user_context: User context with roles
             entity_context: Optional entity context (grid, meter, etc.)
             task_type: Optional task type (analysis, reporting, troubleshooting, etc.)
+            grid: The grid this conversation is about, for site-scoped context
+                modules and the episodic module's anchor. See
+                shared/grid_scope.py.
 
         Returns:
             Tuple of (system_instructions, context_message)
@@ -387,15 +394,19 @@ class InstructionsProvider:
             LOGGER.info(
                 f"Using INTERNAL/STAFF mode for {user_context.user_email or user_context.user_id}"
             )
-            return await self._get_staff_instructions_from_doc(organization_id=organization_id)
+            return await self._get_staff_instructions_from_doc(
+                organization_id=organization_id, grid=grid
+            )
         else:
             LOGGER.info(
                 f"Using CUSTOMER mode for {user_context.user_email or user_context.user_id}"
             )
-            return await self.get_customer_instructions(organization_id=organization_id)
+            return await self.get_customer_instructions(
+                organization_id=organization_id, grid=grid
+            )
 
     async def _get_staff_instructions_from_doc(
-        self, organization_id: Optional[str] = None
+        self, organization_id: Optional[str] = None, grid: Optional[str] = None
     ) -> tuple[str, Optional[str]]:
         """
         Get staff instructions and optional context.
@@ -403,13 +414,15 @@ class InstructionsProvider:
         Args:
             organization_id: Caller's organization, for org-scoped knowledge modules.
                 None renders with no org scope (matches sector-scoped modules only).
+            grid: The grid this conversation is about, for site-scoped modules.
+                None renders with no grid scope. See get_customer_instructions.
 
         Returns:
             Tuple of (system_instructions, context_message)
             - system_instructions: Goes to the provider system-instruction channel
             - context_message: Goes as first user message (or None)
         """
-        scope = RequestScope(organization_id=organization_id)
+        scope = RequestScope(organization_id=organization_id, grid=grid)
         rendered = PROMPTS.render("staff.system", scope=scope)
         self._last_provenance = prompt_metadata(rendered)
         context_message = _postprocess_context(rendered.context_text, extract_staff_groups=True)

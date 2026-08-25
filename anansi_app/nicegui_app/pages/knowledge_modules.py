@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List, Tuple
 
 from nicegui import ui
@@ -197,6 +197,11 @@ class ModuleRow:
     chars: int
     source: str = "manual"
     size_label: str = ""
+    # Prompt ids using this module. Shown on the row because a module
+    # attached to nothing reaches no conversation, and until it was surfaced
+    # here the only way to find that out was to open every module in turn --
+    # which is exactly how the built-in modules sat unattached unnoticed.
+    used_by: List[str] = field(default_factory=list)
     # Not shown in _render_row -- only used to make a module findable via
     # the search box (see filter_context_rows). Same reasoning as chars
     # above: already in memory here, so carrying it costs nothing new.
@@ -204,7 +209,23 @@ class ModuleRow:
     body: str = ""
 
 
-def build_module_rows(modules: List[Any]) -> List[ModuleRow]:
+def describe_usage(used_by: List[str]) -> str:
+    """The row's usage line. Explicit about "nothing", never blank."""
+    if not used_by:
+        return "⚠️ not used by any prompt"
+    return f"used by: {', '.join(used_by)}"
+
+
+def build_module_rows(
+    modules: List[Any], pins: "dict[str, List[str]] | None" = None
+) -> List[ModuleRow]:
+    """Rows for the list. ``pins`` is module_id -> prompt ids, fetched once.
+
+    Optional so callers that only need identity/size (and every test that
+    predates usage display) keep working; omitting it renders every module
+    as unattached, which is why the page itself always passes it.
+    """
+    pins = pins or {}
     rows = []
     for m in sorted(modules, key=lambda m: m.slug):
         body = m.body or ""
@@ -220,6 +241,7 @@ def build_module_rows(modules: List[Any]) -> List[ModuleRow]:
                 size_label="live" if source in PROVIDER_SOURCES else f"{chars} chars",
                 summary=m.summary,
                 body=body,
+                used_by=list(pins.get(m.id, [])),
             )
         )
     return rows
@@ -352,7 +374,8 @@ async def render(user_email: str) -> None:
     def refresh() -> None:
         list_container.clear()
         store.invalidate()
-        rows = build_module_rows(store.all_modules())
+        # One query for every row's usage, not one per row.
+        rows = build_module_rows(store.all_modules(), store.all_prompt_pins())
         all_empty = not rows
         rows = filter_context_rows(rows, search_input.value or "")
         with list_container:
@@ -417,6 +440,9 @@ def _render_row(row: ModuleRow, store: Any, refresh, user_email: str) -> None:
                     f"{row.slug} · {SOURCE_LABELS.get(row.source, row.source)} · "
                     f"{row.scope} · {row.size_label}"
                 ).classes("text-caption")
+                ui.label(describe_usage(row.used_by)).classes(
+                    "text-caption" + ("" if row.used_by else " text-warning")
+                )
                 if row.tags:
                     ui.label(f"tags (legacy): {', '.join(row.tags)}").classes("text-caption")
             ui.button(

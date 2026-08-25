@@ -104,8 +104,13 @@ async def _generate_commands_context(user_context: Optional[UserContext]) -> str
 async def _fetch_instructions(
     user_context: Optional[UserContext],
     entity_context: Optional[EntityContext],
+    grid: Optional[str] = None,
 ) -> Tuple[str, Optional[str], Optional[Dict[str, Any]]]:
-    """Fetch system instructions, context message, and prompt provenance."""
+    """Fetch system instructions, context message, and prompt provenance.
+
+    ``grid`` reaches RequestScope so site-scoped context modules can match --
+    the non-JIT half of the same gate _fetch_jit_context covers.
+    """
     from orchestrator.services.instructions_provider import InstructionsProvider
 
     instructions_provider = InstructionsProvider(
@@ -115,6 +120,7 @@ async def _fetch_instructions(
     system_instructions, context_message = await instructions_provider.get_instructions(
         user_context=user_context,
         entity_context=entity_context,
+        grid=grid,
     )
     return system_instructions, context_message, instructions_provider.get_last_provenance()
 
@@ -215,6 +221,26 @@ async def _fetch_enrichment(
         return "", []
 
 
+async def _resolve_scope_grid(user_context: Optional[UserContext]) -> Optional[str]:
+    """Which grid this conversation is about, for RequestScope. Never raises.
+
+    Resolved once here and handed to _fetch_jit_context rather than being
+    looked up inside it, so the gather below stays a single round of
+    concurrent work. See shared/grid_scope.py for the two signals and why
+    anything ambiguous stays None.
+    """
+    if user_context is None:
+        return None
+    from shared.grid_scope import resolve_scope_grid
+
+    return await resolve_scope_grid(
+        chat_id=getattr(user_context, "chat_id", None),
+        topic_id=getattr(user_context, "topic_id", None),
+        organization_ids=getattr(user_context, "organization_ids", None) or [],
+        is_staff=bool(getattr(user_context, "is_staff", False)),
+    )
+
+
 async def _fetch_jit_context(
     prompt_id: str,
     user_context: Optional[UserContext],
@@ -287,6 +313,13 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
     # same way here rather than threading a new return value through.
     _prompt_id = "staff.system" if (user_context and user_context.is_staff) else "customer.system"
 
+    # Resolved before the gather because _fetch_jit_context needs it as an
+    # argument. Cached behind a 5-minute channel map, so this is a dictionary
+    # lookup on all but the first request in that window.
+    scope_grid = await _resolve_scope_grid(user_context)
+    if scope_grid:
+        LOGGER.info(f"Request scope resolved to grid '{scope_grid}'")
+
     # Run all independent fetches concurrently
     (
         (system_instructions, context_message, prompt_provenance),
@@ -297,13 +330,13 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
         user_preferences,
         (jit_context, jit_used),
     ) = await asyncio.gather(
-        _fetch_instructions(user_context, entity_ctx),
+        _fetch_instructions(user_context, entity_ctx, grid=scope_grid),
         _fetch_troubleshooting(),
         _fetch_rag_context(user_input, user_email, user_context),
         _fetch_verification_instructions(),
         _fetch_enrichment(user_context),
         _fetch_user_preferences(user_context),
-        _fetch_jit_context(_prompt_id, user_context),
+        _fetch_jit_context(_prompt_id, user_context, grid=scope_grid),
     )
 
     # Assemble system_instructions
