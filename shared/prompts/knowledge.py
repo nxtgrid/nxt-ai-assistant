@@ -449,3 +449,10 @@ class KnowledgeStore:
             self._client.table("prompt_knowledge_overrides").delete().eq(
                 "prompt_id", prompt_id
             ).eq("module_id", by_slug[slug]).execute()
+
+
+# Module-level singleton, same reasoning as shared.prompts.skills.SKILL_CATALOG:
+# built once at import time so its TTL cache is actually shared across every
+# caller (PromptLibrary's own rendering AND skill_runner.py's composition),
+# rather than each constructing an independent client + cache.
+KNOWLEDGE_STORE = KnowledgeStore.from_env()

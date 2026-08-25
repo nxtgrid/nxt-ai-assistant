@@ -288,7 +288,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Modify: `shared/prompts/core.py:285-297` (`_build_default_library`)
 - Test: `shared/tests/test_prompt_knowledge_store.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `shared/tests/test_prompt_knowledge_store.py`:
 
@@ -299,12 +299,12 @@ def test_knowledge_store_singleton_exists_and_is_a_knowledge_store():
     assert isinstance(KNOWLEDGE_STORE, KnowledgeStore)
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd chat_orchestrator && uv run pytest ../shared/tests/test_prompt_knowledge_store.py -q -k singleton`
 Expected: FAIL with `ImportError: cannot import name 'KNOWLEDGE_STORE'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 At the bottom of `shared/prompts/knowledge.py`, after the `KnowledgeStore`
 class definition (mirroring `shared/prompts/skills.py`'s
@@ -340,7 +340,7 @@ def _build_default_library() -> PromptLibrary:
     )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd chat_orchestrator
@@ -349,7 +349,7 @@ uv run pytest ../shared -q -n auto
 ```
 Expected: PASS, full `shared/` suite still green (839+2 passed).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add shared/prompts/knowledge.py shared/prompts/core.py shared/tests/test_prompt_knowledge_store.py

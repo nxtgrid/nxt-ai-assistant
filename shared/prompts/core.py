@@ -267,7 +267,7 @@ class PromptLibrary:
 
 def _build_default_library() -> PromptLibrary:
     from shared.prompts.gdoc import GDocStore
-    from shared.prompts.knowledge import KnowledgeStore
+    from shared.prompts.knowledge import KNOWLEDGE_STORE
     from shared.prompts.overrides import OverrideStore
 
     overrides = OverrideStore.from_env()
@@ -276,7 +276,7 @@ def _build_default_library() -> PromptLibrary:
         overrides=overrides,
         gdoc_body_for=gdoc_store.body_for,
         invalidate_gdoc=gdoc_store.invalidate,
-        knowledge=KnowledgeStore.from_env(),
+        knowledge=KNOWLEDGE_STORE,
     )
 
 

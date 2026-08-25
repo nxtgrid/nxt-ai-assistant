@@ -7,7 +7,7 @@ is pinned to specific prompts directly, from the Knowledge Modules page.
 
 import pytest
 
-from shared.prompts.knowledge import KnowledgeStore
+from shared.prompts.knowledge import KNOWLEDGE_STORE, KnowledgeStore
 
 # ── a minimal chainable stand-in for the supabase-py query builder ─────────
 # Mirrors the fake used in test_prompt_overrides.py, trimmed to the
@@ -389,3 +389,7 @@ def test_ensure_singleton_modules_fails_open_per_source():
 
 def test_unconfigured_store_ensure_singleton_modules_is_a_noop():
     assert KnowledgeStore(client=None).ensure_singleton_modules(actor="ops@example.com") == {}
+
+
+def test_knowledge_store_singleton_exists_and_is_a_knowledge_store():
+    assert isinstance(KNOWLEDGE_STORE, KnowledgeStore)
