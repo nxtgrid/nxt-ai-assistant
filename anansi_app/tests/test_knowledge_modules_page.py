@@ -8,14 +8,17 @@ from nicegui_app.pages.knowledge_modules import (
     build_module_rows,
     describe_audience,
     describe_usage,
+    draft_gdoc_module,
     extract_drive_id,
     filter_context_rows,
     group_label,
     group_module_rows,
     module_is_deletable,
+    next_auto_slug,
     preview_module_body,
     prompt_option_label,
     singleton_creation_warnings,
+    slugify,
     validate_module,
 )
 from nicegui_app.pages.prompts import KnowledgeTabRow, build_knowledge_tab, filter_module_rows
@@ -177,23 +180,29 @@ def test_validate_module_no_longer_takes_a_mode():
         validate_module(slug="a", title="A", summary="s", body="b", mode="on_demand")
 
 
-def test_group_label_splits_built_in_from_curated():
+def test_group_label_splits_built_in_curated_and_external():
     assert group_label("directory") == "Built-in"
     assert group_label("graph") == "Built-in"
     assert group_label("episodic") == "Built-in"
-    # A doc an operator attached is theirs, not the system's.
-    assert group_label("gdoc") == "Curated"
+    # Typed directly into this admin UI -- this app is the source of truth.
     assert group_label("manual") == "Curated"
+    # Attached from Google Drive -- content lives elsewhere, only mirrored
+    # here, so it gets its own bucket rather than sharing Curated's "this
+    # app is the source of truth" framing.
+    assert group_label("gdoc") == "External"
 
 
-def test_group_module_rows_orders_built_in_before_curated():
+def test_group_module_rows_orders_built_in_then_curated_then_external():
     rows = [
+        _row_for_grouping("doc", source="gdoc"),
         _row_for_grouping("comms", source="manual"),
         _row_for_grouping("directory", source="directory"),
     ]
     groups = group_module_rows(rows)
-    assert [label for label, _ in groups] == ["Built-in", "Curated"]
+    assert [label for label, _ in groups] == ["Built-in", "Curated", "External"]
     assert [r.slug for r in groups[0][1]] == ["directory"]
+    assert [r.slug for r in groups[1][1]] == ["comms"]
+    assert [r.slug for r in groups[2][1]] == ["doc"]
 
 
 def test_group_module_rows_keeps_slug_order_within_a_group():
@@ -477,3 +486,130 @@ def test_preview_reports_a_provider_failure_rather_than_raising():
         preview_module_body(module, _Provider(), user_email="ops@example.com")
     )
     assert "RPC missing" in text
+
+
+# ── Slug autofill: same shape as the Skills editor and /learn's
+# normalize_slug, applied live as an operator types a Title instead of at
+# save time. Never raises -- it runs on every keystroke, where "nothing
+# survived" just means "nothing to suggest yet." ────────────────────────────
+
+
+def test_slugify_kebab_cases_a_title():
+    assert slugify("Inverter Fault Codes and LED Error States") == (
+        "inverter-fault-codes-and-led-error-states"
+    )
+
+
+def test_slugify_collapses_punctuation_to_single_hyphens():
+    assert slugify("Victron -- Quattro!! (LED codes)") == "victron-quattro-led-codes"
+
+
+def test_slugify_strips_leading_and_trailing_hyphens():
+    assert slugify("  -- Wrapped --  ") == "wrapped"
+
+
+def test_slugify_returns_empty_rather_than_raising_when_nothing_survives():
+    assert slugify("🎉🎉🎉") == ""
+
+
+def test_next_auto_slug_fills_in_from_a_blank_start():
+    assert next_auto_slug(current_slug="", last_auto_slug="", title="Comms Plan") == (
+        "comms-plan"
+    )
+
+
+def test_next_auto_slug_keeps_following_the_title_until_touched():
+    """Still following: the slug field holds exactly what autofill wrote
+    last time, so a further title edit is free to overwrite it again."""
+    first = next_auto_slug(current_slug="", last_auto_slug="", title="Comms")
+    second = next_auto_slug(current_slug=first, last_auto_slug=first, title="Comms Plan")
+    assert second == "comms-plan"
+
+
+def test_next_auto_slug_stops_once_the_operator_types_their_own():
+    """The moment the slug field diverges from what autofill last wrote,
+    it must never be overwritten again -- that would clobber a deliberate
+    choice mid-keystroke."""
+    result = next_auto_slug(
+        current_slug="my-own-slug", last_auto_slug="comms-plan", title="Comms Plan V2"
+    )
+    assert result is None
+
+
+def test_next_auto_slug_leaves_an_existing_modules_slug_alone():
+    """Belt-and-suspenders: the dialog only wires this for a brand-new
+    module (existing is None) in the first place, but the function itself
+    should never suggest overwriting a slug that wasn't just its own last
+    suggestion -- covered by the "stops once touched" case above using the
+    same mechanism an already-saved slug would trigger."""
+    result = next_auto_slug(current_slug="directory", last_auto_slug="", title="Directory")
+    assert result is None
+
+
+# ── Slug collisions are reported, not silently renamed: the field is
+# visible and editable (unlike the Skills editor's hidden autofill), so a
+# clash should read as "choose another," the same way an explicitly typed
+# Skill name does (see SkillBuilderService.slug_taken) -- not disappear into
+# a silently appended "-2" or a raw database UNIQUE-constraint error. ───────
+
+
+def test_validate_module_accepts_a_free_slug():
+    validate_module(
+        slug="new-module", title="T", summary="s", body="b", taken_slugs=frozenset({"other"})
+    )
+
+
+def test_validate_module_rejects_a_taken_slug():
+    with pytest.raises(ValueError, match="already used"):
+        validate_module(
+            slug="comms", title="T", summary="s", body="b",
+            taken_slugs=frozenset({"comms", "other"}),
+        )
+
+
+def test_validate_module_skips_the_collision_check_when_taken_slugs_is_omitted():
+    """An edit to an existing module never passes taken_slugs (its slug
+    field is locked, so it can't newly collide) -- must not start rejecting
+    every save because its own slug is technically "taken" by itself."""
+    validate_module(slug="comms", title="T", summary="s", body="b")
+
+
+# ── Live preview for an unsaved document module: resolving needs a
+# KnowledgeModule to hand the provider, and a module being created doesn't
+# have one yet. draft_gdoc_module builds a throwaway one from the current
+# form values so Preview can run the real provider (and therefore the real
+# access check) before Save, instead of a canned "save it first" message. ──
+
+
+def test_draft_gdoc_module_carries_the_pasted_fields():
+    module = draft_gdoc_module(
+        slug="warranty-terms", title="Warranty Terms", summary="s",
+        file_id="abc123", source_tab="Sheet2", doc_audience="acl_mirror",
+    )
+    assert module.source == "gdoc"
+    assert module.source_ref == "abc123"
+    assert module.source_tab == "Sheet2"
+    assert module.doc_audience == "acl_mirror"
+    assert module.slug == "warranty-terms"
+
+
+def test_draft_gdoc_module_treats_a_blank_tab_as_the_first_tab():
+    """Mirrors the save path's ``doc_tab_input.value.strip() or None`` --
+    an empty string must resolve the same way an unset tab does, not be
+    sent to the Sheets fetcher as a literal empty-string tab name."""
+    module = draft_gdoc_module(
+        slug="s", title="T", summary="", file_id="abc123", source_tab="", doc_audience="published"
+    )
+    assert module.source_tab is None
+
+
+def test_draft_gdoc_module_falls_back_to_a_placeholder_slug_and_title():
+    """Preview can run before the operator has typed a Slug or Title at
+    all -- the draft needs *something* non-empty there since KnowledgeModule
+    doesn't accept a blank slug/title, but this is never saved, so a
+    placeholder is fine."""
+    module = draft_gdoc_module(
+        slug="", title="", summary="", file_id="abc123", source_tab=None, doc_audience="published"
+    )
+    assert module.slug
+    assert module.title

@@ -11,8 +11,12 @@ Modules are grouped by where their body comes from:
 * **Built-in** -- directory, entity-graph and episodic. Defined by the code,
   generated fresh per request and filtered to what the caller may see. You
   choose which prompts use them; you cannot create, delete or write one.
-* **Curated** -- what an operator authors: a body typed in here, or an
-  attached Google Doc / Sheet.
+* **Curated** -- a body typed directly into this admin UI. This app is the
+  source of truth for it.
+* **External** -- an attached Google Doc or Sheet. The content lives in
+  Drive, not here; this app only mirrors it (fetched fresh at request time,
+  filtered to what the caller may see), which is why it gets its own group
+  rather than sharing Curated's "this app owns it" framing.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ from typing import Any, List, Tuple
 
 from nicegui import ui
 
-from shared.prompts.knowledge import INLINE_BUDGET_CHARS, SINGLETON_SOURCES
+from shared.prompts.knowledge import INLINE_BUDGET_CHARS, SINGLETON_SOURCES, KnowledgeModule
 
 VALID_SOURCES = {"manual", "gdoc", "ingested"}
 
@@ -83,6 +87,65 @@ def extract_drive_id(text: str) -> "str | None":
     return text if _BARE_DRIVE_ID.match(text) else None
 
 
+def slugify(text: str) -> str:
+    """Kebab-case identifier -- same shape as chat_orchestrator's
+    normalize_slug (context_expert/propose_module.py, the /learn flow) and
+    the Skills editor's _slugify (skill_builder_service.py), but never
+    raises: this one runs live on every keystroke of a Title field while
+    creating a module, where "nothing survived" just means "nothing to
+    suggest yet," not an error worth interrupting typing over.
+    """
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def next_auto_slug(current_slug: str, last_auto_slug: str, title: str) -> "str | None":
+    """The slug to auto-fill from a Title edit, or None to leave it alone.
+
+    Auto-fills only while the Slug field still holds exactly what autofill
+    itself last wrote there. The moment an operator types their own slug,
+    ``current_slug`` diverges from ``last_auto_slug`` and every subsequent
+    call returns None for good -- autofill can never overwrite a deliberate
+    choice, even if they later change their mind about the Title too.
+
+    Only meaningful while creating a module: the dialog never wires this up
+    for an existing one, whose slug field is locked (it's the identity;
+    see slug_input.set_enabled below).
+    """
+    if current_slug != last_auto_slug:
+        return None
+    return slugify(title)
+
+
+def draft_gdoc_module(
+    slug: str, title: str, summary: str, file_id: str, source_tab: "str | None",
+    doc_audience: "str | None",
+) -> KnowledgeModule:
+    """A throwaway KnowledgeModule for previewing a document before Save.
+
+    Resolving a module means handing a KnowledgeModule to a provider
+    (see shared/prompts/providers_gdoc.py's GDocProvider.resolve) -- but a
+    module being created doesn't have a real row or id yet. This builds one
+    from the current form values instead, good for exactly one preview
+    resolve and never persisted: an empty id is harmless because nothing
+    downstream of resolve() reads it.
+
+    Slug/title fall back to placeholders rather than staying blank --
+    KnowledgeModule requires both non-empty, and this draft only exists to
+    be resolved, never saved, so a placeholder cannot leak into real data.
+    """
+    return KnowledgeModule(
+        id="",
+        slug=slug or "preview",
+        title=title or "(untitled)",
+        summary=summary,
+        body=None,
+        source="gdoc",
+        source_ref=file_id,
+        source_tab=source_tab or None,
+        doc_audience=doc_audience,
+    )
+
+
 def describe_audience(doc_audience: str, pinned_prompts: List[str]) -> "str | None":
     """A warning to show at attach time, or None.
 
@@ -124,11 +187,13 @@ def compose_scope(kind: str, detail: str) -> str:
     return f"{kind}{detail}"
 
 # The list groups by where a body comes from, which is the only axis a
-# module still varies on. "Built-in" is the code-defined singletons; anything
-# else is something an operator wrote or attached.
+# module still varies on. "Built-in" is the code-defined singletons; "External"
+# is an attached Google Doc/Sheet (content lives in Drive, not here); anything
+# else an operator wrote directly is "Curated".
 BUILT_IN_LABEL = "Built-in"
 CURATED_LABEL = "Curated"
-GROUP_ORDER = [BUILT_IN_LABEL, CURATED_LABEL]
+EXTERNAL_LABEL = "External"
+GROUP_ORDER = [BUILT_IN_LABEL, CURATED_LABEL, EXTERNAL_LABEL]
 
 SOURCE_LABELS = {
     "manual": "typed here",
@@ -252,9 +317,15 @@ def group_label(source: str) -> str:
 
     Built-in is defined by SINGLETON_SOURCES, not by a hardcoded list here,
     so a provider added later lands in the right section without a second
-    place to remember to update.
+    place to remember to update. External is specifically 'gdoc': content
+    that lives in Drive and is only ever mirrored here, as distinct from
+    Curated, which this app itself is the source of truth for.
     """
-    return BUILT_IN_LABEL if source in SINGLETON_SOURCES else CURATED_LABEL
+    if source in SINGLETON_SOURCES:
+        return BUILT_IN_LABEL
+    if source == "gdoc":
+        return EXTERNAL_LABEL
+    return CURATED_LABEL
 
 
 def group_module_rows(rows: List[ModuleRow]) -> List[Tuple[str, List[ModuleRow]]]:
@@ -311,15 +382,27 @@ def validate_module(
     source: str = "manual",
     source_ref: str = "",
     doc_audience: "str | None" = None,
+    taken_slugs: "frozenset[str] | None" = None,
 ) -> None:
     """Reject a module that would fail silently at render time.
 
     require_body=False for a provider-backed module being edited: its body
     isn't stored here (see body_is_editable), so the field is legitimately
     empty and must not block saving a title/summary/scope/mode change.
+
+    taken_slugs, when given, is every slug already in use by another
+    module: a new module with a colliding slug is rejected here, by name,
+    rather than surfacing whatever raw error the database's UNIQUE
+    constraint produces on insert. Omitted (None) by an edit to an existing
+    module -- its slug field is locked, so it can never newly collide, and
+    checking it against its own slug would reject every save.
     """
     if not slug or not title or (require_body and not body):
         raise ValueError("slug, title and body are required")
+    if taken_slugs is not None and slug in taken_slugs:
+        raise ValueError(
+            f"the slug '{slug}' is already used by another module — choose a different one"
+        )
     if not summary.strip():
         raise ValueError(
             "a summary is required: it is how you and anyone else recognise this "
@@ -488,6 +571,23 @@ async def _open_edit_dialog(
         title_input = ui.input("Title", value=existing.title if existing else "").classes(
             "w-full"
         )
+        if existing is None:
+            # Live "slug follows title" convenience -- same idea as the
+            # Skills editor's auto-derived slug (SkillBuilderService.
+            # _slugify) and /learn's normalize_slug, applied here instead of
+            # hidden since this dialog shows the Slug field itself. Stops
+            # the moment the operator edits Slug directly (next_auto_slug).
+            _last_auto_slug = [""]
+
+            def _on_title_change(_e) -> None:
+                new_slug = next_auto_slug(
+                    slug_input.value, _last_auto_slug[0], title_input.value
+                )
+                if new_slug is not None:
+                    slug_input.value = new_slug
+                    _last_auto_slug[0] = new_slug
+
+            title_input.on_value_change(_on_title_change)
         summary_input = ui.input("Summary", value=existing.summary if existing else "").classes(
             "w-full"
         )
@@ -592,6 +692,15 @@ async def _open_edit_dialog(
         async def _resolved_body() -> str:
             """The live body, as this operator would actually receive it.
 
+            For a document module this always resolves the *current form
+            values* (whether or not the module is already saved) rather
+            than only a saved row -- an operator changing the doc link, tab
+            or audience before saving should see what that change would
+            actually produce, and a brand-new module has no saved row to
+            resolve at all yet. Every other provider source (graph/
+            directory/episodic) has no editable fields here, so those still
+            resolve the saved ``existing`` row unchanged.
+
             Imported from `shared`, not from the orchestrator: this page runs
             in anansi_app, whose image ships only anansi_app/ and shared/
             (see anansi_app/Dockerfile). This import used to name
@@ -604,21 +713,50 @@ async def _open_edit_dialog(
             Never raises: a provider that cannot be built is reported as
             missing, and preview_module_body catches a failing resolve.
             """
-            if existing is None:
+            current_source = source_select.value
+            if current_source == "gdoc":
+                file_id = extract_drive_id(doc_ref_input.value)
+                if not file_id:
+                    return "_Paste a Google Doc or Sheet link above to preview it._"
+                module = draft_gdoc_module(
+                    slug=slug_input.value.strip() or (existing.slug if existing else ""),
+                    title=title_input.value.strip() or (existing.title if existing else ""),
+                    summary=summary_input.value.strip(),
+                    file_id=file_id,
+                    source_tab=doc_tab_input.value,
+                    doc_audience=audience_select.value,
+                )
+            elif existing is None:
                 return "_Save the module first to preview it._"
+            else:
+                module = existing
             try:
                 from shared.prompts.providers import build_default_registry
 
-                provider = build_default_registry().get(source)
+                provider = build_default_registry().get(current_source)
             except Exception as e:  # noqa: BLE001 -- a broken preview must not block editing
                 return f"Could not build the context providers: {e}"
             if provider is None:
-                return f"No '{source}' provider is available in this process."
-            return await preview_module_body(existing, provider, user_email=user_email)
+                return f"No '{current_source}' provider is available in this process."
+            return await preview_module_body(module, provider, user_email=user_email)
+
+        async def _refresh_preview() -> None:
+            """Re-resolve the Preview pane for the current form values.
+
+            Safe to call whether Preview is showing or not -- it just keeps
+            the pane warm, so switching to it (or pasting a new link while
+            already on it) doesn't need a second trigger. A no-op for an
+            editable source: Preview there just mirrors body_input, which
+            _switch_view already handles the moment the toggle is clicked.
+            """
+            if body_is_editable(source_select.value):
+                return
+            body_preview.set_content("_Resolving…_")
+            body_preview.set_content(await _resolved_body())
 
         async def _switch_view(e) -> None:
             if e.value == "Preview":
-                if body_is_editable(source):
+                if body_is_editable(source_select.value):
                     body_preview.set_content(body_input.value)
                 else:
                     body_preview.set_content("_Resolving…_")
@@ -628,12 +766,48 @@ async def _open_edit_dialog(
 
         view_toggle.on_value_change(_switch_view)
 
-        if not body_is_editable(source):
-            body_input.props("readonly").classes("opacity-60")
-            ui.label(_READONLY_BODY_EXPLANATIONS[source]).classes("text-xs text-gray-500")
+        readonly_explanation = ui.label("").classes("text-xs text-gray-500")
+
+        def _apply_source_view() -> None:
+            """Keep the body pane's read-only state in sync with the
+            selected source. Re-run on every source change, not just at
+            dialog build -- for a new module the dropdown starts on "Typed
+            here" and the operator can switch it to "Google Doc or Sheet"
+            before ever touching Save, and the body pane must stop looking
+            editable (with the explanation appearing) the moment they do.
+
+            This used to read a `source` variable frozen at dialog-open
+            time, which never noticed a later change here -- that was the
+            whole bug: the Edit button stayed usable and no explanation
+            showed for a Google-Doc source chosen after the dialog opened.
+            """
+            if body_is_editable(source_select.value):
+                body_input.props(remove="readonly").classes(remove="opacity-60")
+                readonly_explanation.set_visibility(False)
+            else:
+                body_input.props("readonly").classes("opacity-60")
+                readonly_explanation.set_text(
+                    _READONLY_BODY_EXPLANATIONS.get(source_select.value, "")
+                )
+                readonly_explanation.set_visibility(True)
+
+        async def _on_source_change(_e) -> None:
+            _apply_source_view()
+            await _refresh_preview()
+
+        source_select.on_value_change(_on_source_change)
+        _apply_source_view()
+
+        if not body_is_editable(source_select.value):
             # The dialog opens on Preview by default -- resolve once now so
             # the pane isn't just showing the (always-empty) stored body.
             body_preview.set_content(await _resolved_body())
+
+        # A pasted link fires on_value_change on every keystroke (see
+        # ui.input's own docs); blur only fires once typing/pasting is
+        # actually done, so this can't hammer the Drive API per keystroke.
+        doc_ref_input.on("blur", _refresh_preview, [])
+        doc_tab_input.on("blur", _refresh_preview, [])
 
         prompt_options = {
             pid: prompt_option_label(pid, PROMPTS.spec(pid).description)
@@ -651,13 +825,26 @@ async def _open_edit_dialog(
                 describe_audience(audience_select.value, list(prompts_select.value or [])) or ""
             )
 
-        audience_select.on_value_change(lambda _e: _refresh_audience_warning())
+        async def _on_audience_change(_e) -> None:
+            _refresh_audience_warning()
+            # Audience decides whether the document resolves at all (see
+            # GDocProvider.visible_to), so a change here can flip Preview
+            # from real content to "withheld" or back -- keep it live too.
+            await _refresh_preview()
+
+        audience_select.on_value_change(_on_audience_change)
         prompts_select.on_value_change(lambda _e: _refresh_audience_warning())
         _refresh_audience_warning()
 
         async def save() -> None:
             chosen_source = source_select.value
             scope_value = compose_scope(scope_select.value, scope_detail.value)
+            # Only a new module can collide -- an existing one's slug field
+            # is locked (see slug_input.set_enabled above), so it can never
+            # newly clash and this stays None, skipping the check entirely.
+            taken_slugs = (
+                frozenset(m.slug for m in store.all_modules()) if existing is None else None
+            )
             try:
                 validate_module(
                     slug=slug_input.value.strip(),
@@ -669,6 +856,7 @@ async def _open_edit_dialog(
                     source=chosen_source,
                     source_ref=doc_ref_input.value,
                     doc_audience=audience_select.value if chosen_source == "gdoc" else None,
+                    taken_slugs=taken_slugs,
                 )
             except ValueError as e:
                 ui.notify(str(e), type="negative")
@@ -693,13 +881,11 @@ async def _open_edit_dialog(
                     ui.notify("That doesn't look like a Google Doc or Sheet link", type="negative")
                     return
                 # You cannot attach a document you cannot open yourself.
-                from shared.utils.drive_permissions import user_can_access
+                from shared.utils.drive_permissions import check_access
 
-                if not await user_can_access(file_id, user_email, strict=True):
-                    ui.notify(
-                        "You don't have access to that document, so you can't attach it.",
-                        type="negative",
-                    )
+                access = await check_access(file_id, user_email, strict=True)
+                if not access.allowed:
+                    ui.notify(access.reason, type="negative")
                     return
                 row["source_ref"] = file_id
                 row["source_tab"] = doc_tab_input.value.strip() or None
