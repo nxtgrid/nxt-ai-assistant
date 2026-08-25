@@ -1781,7 +1781,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Test: `anansi_app/tests/test_knowledge_modules_page.py`
 - Test: `anansi_app/tests/test_knowledge_modules_dialog.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `anansi_app/tests/test_knowledge_modules_page.py` (this is the
 critical regression test for the wipe-out trap the spec called out — it
@@ -1822,7 +1822,7 @@ def test_skills_picker_is_present_and_distinctly_labeled():
     assert "resolve_pins_to_save(" in src
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills
@@ -1831,7 +1831,7 @@ PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests/tes
 Expected: FAIL (`resolve_pins_to_save` doesn't exist; the skills label isn't
 in the source yet)
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `anansi_app/nicegui_app/pages/knowledge_modules.py`, add near the top
 (with the other module-level pure functions, e.g. right after
@@ -1886,7 +1886,7 @@ to the real union:
                 )
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills
@@ -1894,7 +1894,7 @@ PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests -q
 ```
 Expected: PASS, full anansi_app suite green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add anansi_app/nicegui_app/pages/knowledge_modules.py \

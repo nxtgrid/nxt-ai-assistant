@@ -29,7 +29,7 @@ from typing import Any, List, Tuple
 from nicegui import ui
 
 from shared.prompts.knowledge import INLINE_BUDGET_CHARS, SINGLETON_SOURCES, KnowledgeModule
-from shared.prompts.skills import SKILL_CATALOG, SKILL_PIN_PREFIX
+from shared.prompts.skills import SKILL_CATALOG, SKILL_PIN_PREFIX, skill_prompt_id
 
 VALID_SOURCES = {"manual", "gdoc", "ingested"}
 
@@ -292,6 +292,15 @@ def resolve_pin_label(pin_id: str, skill_titles: "dict[str, str]") -> str:
         skill_id = pin_id[len(SKILL_PIN_PREFIX):]
         return f"🎬 {skill_titles.get(skill_id, skill_id)}"
     return pin_id
+
+
+def resolve_pins_to_save(prompt_ids: List[str], skill_ids: List[str]) -> List[str]:
+    """The full id list for one set_prompt_pins call -- prompts and skills
+    share prompt_knowledge_overrides' key space, so writing them via two
+    separate calls would have the second call's diff (current - selected)
+    delete the first call's pins (see knowledge.py's diff_prompt_pins).
+    This must always be a single call with the union."""
+    return list(prompt_ids) + [skill_prompt_id(sid) for sid in skill_ids]
 
 
 def build_module_rows(
@@ -855,6 +864,24 @@ async def _open_edit_dialog(
             on_change=_refresh_audience_warning,
         )
 
+        existing_skill_pins = {
+            pid[len(SKILL_PIN_PREFIX):]
+            for pid in existing_pins
+            if pid.startswith(SKILL_PIN_PREFIX)
+        }
+        all_skills = SKILL_CATALOG.all_skills(active_only=False)
+        skill_rows = [
+            PickerRow(
+                slug=s.id, title=s.title, chars=0,
+                checked=(s.id in existing_skill_pins),
+                summary=f"/{s.slug} · {s.status}",
+            )
+            for s in sorted(all_skills, key=lambda s: s.title)
+        ]
+        get_selected_skills = render_entity_picker(
+            skill_rows, label="Used by these skills", search_placeholder="Search skills…"
+        )
+
         async def _on_audience_change(_e) -> None:
             _refresh_audience_warning()
             # Audience decides whether the document resolves at all (see
@@ -939,7 +966,9 @@ async def _open_edit_dialog(
                     result = store._client.table("knowledge_modules").insert(row).execute()
                     module_id = result.data[0]["id"]
                 store.set_prompt_pins(
-                    module_id, list(get_selected_prompts() or []), actor=user_email
+                    module_id,
+                    resolve_pins_to_save(get_selected_prompts(), get_selected_skills()),
+                    actor=user_email,
                 )
                 ui.notify("Saved", type="positive")
                 dialog.close()

@@ -580,3 +580,26 @@ def test_draft_gdoc_module_falls_back_to_a_placeholder_slug_and_title():
     )
     assert module.slug
     assert module.title
+
+
+def test_resolve_pins_to_save_unions_prompts_and_skills():
+    from nicegui_app.pages.knowledge_modules import resolve_pins_to_save
+
+    result = resolve_pins_to_save(
+        ["customer.system"], ["11111111-1111-1111-1111-111111111111"]
+    )
+    assert result == ["customer.system", "skill:11111111-1111-1111-1111-111111111111"]
+
+
+def test_resolve_pins_to_save_with_no_skills_matches_old_behavior():
+    from nicegui_app.pages.knowledge_modules import resolve_pins_to_save
+
+    assert resolve_pins_to_save(["customer.system", "staff.system"], []) == [
+        "customer.system", "staff.system",
+    ]
+
+
+def test_resolve_pins_to_save_with_no_prompts():
+    from nicegui_app.pages.knowledge_modules import resolve_pins_to_save
+
+    assert resolve_pins_to_save([], ["abc"]) == ["skill:abc"]

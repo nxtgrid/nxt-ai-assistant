@@ -130,3 +130,10 @@ def test_prompts_picker_uses_the_shared_searchable_widget_not_a_chip_select():
     # anyway), so check the call and its argument are both present instead.
     assert "render_entity_picker(" in src
     assert "prompt_rows," in src
+
+
+def test_skills_picker_is_present_and_distinctly_labeled():
+    src = KNOWLEDGE_MODULES_PATH.read_text()
+
+    assert 'label="Used by these skills"' in src
+    assert "resolve_pins_to_save(" in src
