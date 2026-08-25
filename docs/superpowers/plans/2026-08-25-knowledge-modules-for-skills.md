@@ -1664,7 +1664,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Modify: `anansi_app/nicegui_app/pages/knowledge_modules.py:805-836` (approx — the `prompt_options`/`prompts_select` block inside `_open_edit_dialog`)
 - Test: `anansi_app/tests/test_knowledge_modules_dialog.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `anansi_app/tests/test_knowledge_modules_dialog.py` (reuse its
 existing `KNOWLEDGE_MODULES_PATH` constant):
@@ -1677,13 +1677,13 @@ def test_prompts_picker_uses_the_shared_searchable_widget_not_a_chip_select():
     assert "render_entity_picker(prompt_rows" in src
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests/test_knowledge_modules_dialog.py -q -k searchable_widget`
 (from the worktree root)
 Expected: FAIL (`use-chips` still present, `render_entity_picker` not called yet)
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `_open_edit_dialog`, find:
 
@@ -1749,7 +1749,7 @@ instead of `prompts_select.value`:
 (Task 13 replaces this line again with the full union — this is an
 intermediate, still-correct state where only prompts exist.)
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills
@@ -1762,7 +1762,7 @@ directly and are untouched by this task. No existing test asserts
 `use-chips`/`prompts_select` in the dialog's source, so nothing needs
 removing on that front.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add anansi_app/nicegui_app/pages/knowledge_modules.py \

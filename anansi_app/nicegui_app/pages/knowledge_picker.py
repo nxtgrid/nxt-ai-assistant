@@ -153,11 +153,20 @@ def render_module_picker(
 
 
 def render_entity_picker(
-    rows: List[PickerRow], *, label: str, search_placeholder: str = "Search…"
+    rows: List[PickerRow],
+    *,
+    label: str,
+    search_placeholder: str = "Search…",
+    on_change: "Callable[[], None] | None" = None,
 ) -> "Callable[[], List[str]]":
     """Search + tick which entities (prompts, or skills) use ONE module --
     the reverse direction from render_module_picker. No budget footer: a
     module's own size is shown elsewhere on the same form.
+
+    `on_change`, if given, fires after every tick/untick -- for a caller
+    that needs to react live to the selection (e.g. knowledge_modules.py's
+    audience warning, which used to re-check on the native ui.select's own
+    on_value_change).
 
     Returns a zero-argument getter for the currently-ticked slugs/ids,
     rather than a Save button -- knowledge_modules.py must union this
@@ -187,6 +196,8 @@ def render_entity_picker(
                         selected.add(slug)
                     else:
                         selected.discard(slug)
+                    if on_change:
+                        on_change()
 
                 with ui.row().classes("items-center no-wrap w-full"):
                     ui.checkbox(value=r.checked, on_change=toggle).props("dense")

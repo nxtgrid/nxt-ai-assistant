@@ -829,21 +829,31 @@ async def _open_edit_dialog(
         doc_ref_input.on("blur", _refresh_preview, [])
         doc_tab_input.on("blur", _refresh_preview, [])
 
-        prompt_options = {
-            pid: prompt_option_label(pid, PROMPTS.spec(pid).description)
-            for pid in sorted(PROMPTS.ids())
+        from nicegui_app.pages.knowledge_picker import PickerRow, render_entity_picker
+
+        existing_prompt_pins = {
+            pid for pid in existing_pins if not pid.startswith(SKILL_PIN_PREFIX)
         }
-        prompts_select = ui.select(
-            prompt_options,
-            value=list(existing_pins),
-            multiple=True,
-            label="Used by these prompts",
-        ).classes("w-full").props("use-chips")
+        prompt_rows = [
+            PickerRow(
+                slug=pid, title=pid, chars=0,
+                checked=(pid in existing_prompt_pins),
+                summary=PROMPTS.spec(pid).description,
+            )
+            for pid in sorted(PROMPTS.ids())
+        ]
 
         def _refresh_audience_warning() -> None:
             audience_warning.set_text(
-                describe_audience(audience_select.value, list(prompts_select.value or [])) or ""
+                describe_audience(audience_select.value, get_selected_prompts()) or ""
             )
+
+        get_selected_prompts = render_entity_picker(
+            prompt_rows,
+            label="Used by these prompts",
+            search_placeholder="Search prompts…",
+            on_change=_refresh_audience_warning,
+        )
 
         async def _on_audience_change(_e) -> None:
             _refresh_audience_warning()
@@ -853,7 +863,6 @@ async def _open_edit_dialog(
             await _refresh_preview()
 
         audience_select.on_value_change(_on_audience_change)
-        prompts_select.on_value_change(lambda _e: _refresh_audience_warning())
         _refresh_audience_warning()
 
         async def save() -> None:
@@ -930,7 +939,7 @@ async def _open_edit_dialog(
                     result = store._client.table("knowledge_modules").insert(row).execute()
                     module_id = result.data[0]["id"]
                 store.set_prompt_pins(
-                    module_id, list(prompts_select.value or []), actor=user_email
+                    module_id, list(get_selected_prompts() or []), actor=user_email
                 )
                 ui.notify("Saved", type="positive")
                 dialog.close()
