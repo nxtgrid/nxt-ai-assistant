@@ -838,7 +838,7 @@ async def _open_edit_dialog(
         doc_ref_input.on("blur", _refresh_preview, [])
         doc_tab_input.on("blur", _refresh_preview, [])
 
-        from nicegui_app.pages.knowledge_picker import PickerRow, render_entity_picker
+        from nicegui_app.pages.knowledge_picker import PickerRow, render_entity_select
 
         existing_prompt_pins = {
             pid for pid in existing_pins if not pid.startswith(SKILL_PIN_PREFIX)
@@ -857,10 +857,9 @@ async def _open_edit_dialog(
                 describe_audience(audience_select.value, get_selected_prompts()) or ""
             )
 
-        get_selected_prompts = render_entity_picker(
+        get_selected_prompts = render_entity_select(
             prompt_rows,
             label="Used by these prompts",
-            search_placeholder="Search prompts…",
             on_change=_refresh_audience_warning,
         )
 
@@ -878,8 +877,8 @@ async def _open_edit_dialog(
             )
             for s in sorted(all_skills, key=lambda s: s.title)
         ]
-        get_selected_skills = render_entity_picker(
-            skill_rows, label="Used by these skills", search_placeholder="Search skills…"
+        get_selected_skills = render_entity_select(
+            skill_rows, label="Used by these skills"
         )
 
         async def _on_audience_change(_e) -> None:

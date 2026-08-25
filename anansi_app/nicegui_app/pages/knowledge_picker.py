@@ -65,54 +65,27 @@ def filter_picker_rows(rows: List[PickerRow], query: str) -> List[PickerRow]:
     ]
 
 
-# How many not-yet-pinned rows rows_to_display fills the empty-query view
-# with, on top of whatever's already pinned. Fixed and small on purpose: it
-# must never grow with the candidate pool -- render_entity_picker can face
-# dozens of candidates (every registered prompt id today, every skill ever
-# created tomorrow), and a default view whose size scales with that pool is
-# exactly the shape of thing that risks pushing a single websocket update
-# past NiceGUI's own message-size limit. A fixed cap keeps the default view
-# safely small forever, however large the underlying catalog grows.
-UNPINNED_PREVIEW_LIMIT = 8
+def entity_select_options(rows: List[PickerRow]) -> "dict[str, str]":
+    """{id to save: label to read} for render_entity_select's dropdown.
 
+    The key is the id that ends up in prompt_knowledge_overrides; the value
+    exists only to be read by a human. The first version of this dropdown
+    used the id for both, so it listed bare strings like "customer.system"
+    -- accurate and unreadable, which is what got it replaced in the first
+    place. Leading with the title and appending the summary (a prompt's
+    description, or a skill's "/slug · status") makes each option say what
+    it actually is.
 
-def rows_to_display(rows: List[Any], selected: "set[str]", query: str) -> List[PickerRow]:
-    """Which rows render_entity_picker shows right now.
-
-    Typing a query always searches every candidate (filter_picker_rows,
-    matching slug/title/summary) regardless of what's pinned -- a new pin
-    must stay discoverable, and a search result is never truncated.
-
-    An empty query shows every currently-pinned row -- never capped; an
-    operator must always be able to see and unpin everything already
-    pinned -- topped up with a small, fixed-size, alphabetical sample of
-    not-yet-pinned rows (UNPINNED_PREVIEW_LIMIT) when there's room. Without
-    that sample, a module with nothing pinned yet (every module, the first
-    time this shipped) rendered a picker that looked completely inert: a
-    plain text box with no rows and nothing to suggest there was anything
-    to find, unlike the native dropdowns elsewhere in the same dialog that
-    visibly pop open the moment you click them. The sample is capped, not
-    proportional to the candidate pool, so it can't reintroduce the
-    scaling hazard described above.
-
-    ``rows`` may be the raw ``PickerRow``s passed into render_entity_picker
-    (whose own ``checked`` is a snapshot from dialog-open time) -- this
-    always re-derives ``checked`` from ``selected``, the live, mutated set,
-    so a row just ticked or unticked shows correctly without needing rows
-    itself rebuilt.
+    Falls back to the id when a row carries no title, so a skill saved with
+    an empty title still renders as something pickable rather than a blank
+    line -- and keeps its summary alongside, since "/slug · status" is the
+    only part of that row still worth reading.
     """
-    current = [
-        PickerRow(slug=r.slug, title=r.title, chars=r.chars, checked=(r.slug in selected), summary=r.summary)
-        for r in rows
-    ]
-    if query.strip():
-        return filter_picker_rows(current, query)
-    checked = [r for r in current if r.checked]
-    remaining = UNPINNED_PREVIEW_LIMIT - len(checked)
-    if remaining <= 0:
-        return checked
-    sample = [r for r in current if not r.checked][:remaining]
-    return checked + sample
+    labels = {}
+    for r in rows:
+        name = r.title or r.slug
+        labels[r.slug] = f"{name} — {r.summary}" if r.summary else name
+    return labels
 
 
 def render_module_picker(
@@ -148,7 +121,19 @@ def render_module_picker(
 
     search = ui.input(placeholder="Search modules…").classes("w-full").props("clearable dense")
     picked_label = ui.label().classes("text-caption text-bold")
-    options = ui.column().classes("w-full gap-0").style("max-height: 340px; overflow-y: auto")
+    # flex-shrink: 0 is load-bearing. overflow-y: auto drops this element's
+    # flex automatic minimum size to 0 (min-height:auto only resolves to the
+    # content size while overflow is `visible`), so inside a height-capped
+    # flex column -- skills.py's Context card, the Prompts page's Context tab
+    # -- the default flex-shrink:1 would crush it to zero height with every
+    # row still in the DOM. That exact collapse is what made the modules
+    # dialog's sibling picker render as an empty box; let the container
+    # scroll instead, which it is already set up to do.
+    options = (
+        ui.column()
+        .classes("w-full gap-0")
+        .style("max-height: 340px; overflow-y: auto; flex-shrink: 0")
+    )
 
     def redraw() -> None:
         options.clear()
@@ -202,90 +187,65 @@ def render_module_picker(
         ui.button("Save context", on_click=save_pins).props("color=primary")
 
 
-def render_entity_picker(
+def render_entity_select(
     rows: List[PickerRow],
     *,
     label: str,
-    search_placeholder: str = "Search…",
     on_change: "Callable[[], None] | None" = None,
 ) -> "Callable[[], List[str]]":
-    """Search + tick which entities (prompts, or skills) use ONE module --
-    the reverse direction from render_module_picker. No budget footer: a
-    module's own size is shown elsewhere on the same form.
+    """Pick which entities (prompts, or skills) use ONE module -- the reverse
+    direction from render_module_picker. No budget footer: a module's own
+    size is shown elsewhere on the same form.
 
-    `on_change`, if given, fires after every tick/untick -- for a caller
-    that needs to react live to the selection (e.g. knowledge_modules.py's
-    audience warning, which used to re-check on the native ui.select's own
-    on_value_change).
+    A native multi-select, not an inline list of checkboxes, and that choice
+    is structural rather than cosmetic. This renders inside
+    knowledge_modules.py's `_open_edit_dialog` card -- a flex column capped
+    at `max-height: calc(100dvh - 32px)`. Any inline list tall enough to
+    need `overflow-y: auto` becomes a flex item whose automatic minimum size
+    is 0, so once the dialog's other fields outgrow the viewport the card's
+    default flex-shrink:1 collapses it to *zero height* with every row still
+    in the DOM: an operator sees a label, a count and nothing else. Quasar
+    portals a select's popup to <body>, where no ancestor's height cap can
+    reach it. (render_module_picker keeps its inline list, pinned open with
+    an explicit flex-shrink: 0 -- see the comment there.)
 
-    Returns a zero-argument getter for the currently-ticked slugs/ids,
-    rather than a Save button -- knowledge_modules.py must union this
-    picker's selection with a second one (skills) before writing once (see
-    resolve_pins_to_save; two separate saves would have the second call's
-    diff delete the first call's pins).
+    `with_input` keeps the popup searchable, so the ~30 registered prompt
+    ids stay findable by typing rather than by scrolling; `use-chips` shows
+    what's currently picked without a separate running count.
 
-    Shows every pinned row plus a small fixed-size sample of everything
-    else until the operator types a search -- see rows_to_display's own
-    docstring for why a *fixed* sample (not "everything"): with dozens of
-    candidates, rendering all of them unfiltered on open risks pushing a
-    single websocket message past NiceGUI's size limit and blanking the
-    whole dialog.
+    `on_change`, if given, fires after every pick -- for a caller that needs
+    to react live to the selection (knowledge_modules.py's audience
+    warning).
+
+    Returns a zero-argument getter for the currently-picked ids rather than
+    a Save button: knowledge_modules.py must union this selection with a
+    second one (skills) before writing once (see resolve_pins_to_save; two
+    separate saves would have the second call's diff delete the first
+    call's pins).
     """
-    selected: "set[str]" = {r.slug for r in rows if r.checked}
-
-    ui.label(label).classes("text-caption text-bold")
-    picked_label = ui.label().classes("text-caption")
-    search = ui.input(placeholder=search_placeholder).classes("w-full").props("clearable dense")
-    options = ui.column().classes("w-full gap-0").style("max-height: 260px; overflow-y: auto")
-
-    def _update_picked_label() -> None:
-        # A tick/untick here has no other feedback -- no toast, no Save
-        # button of its own (the caller saves once, later, after unioning
-        # this with a second picker) -- so this is the only visible
-        # confirmation that a click actually registered.
-        picked_label.text = f"{len(selected)} selected" if selected else "Nothing selected yet"
-
-    def redraw() -> None:
-        options.clear()
-        query = search.value or ""
-        visible = rows_to_display(rows, selected, query)
-        hidden = len(rows) - len(visible) if not query.strip() else 0
-        with options:
-            if not visible:
-                ui.label(
-                    "No matches." if query.strip() else "Nothing to pin yet."
-                ).classes("text-italic text-caption")
-            else:
-                if hidden > 0:
-                    ui.label(
-                        f"Showing {len(visible)} of {len(rows)} — type to search the rest."
-                    ).classes("text-caption text-grey")
-                for r in visible:
-                    def toggle(e, slug=r.slug) -> None:
-                        if e.value:
-                            selected.add(slug)
-                        else:
-                            selected.discard(slug)
-                        _update_picked_label()
-                        if on_change:
-                            on_change()
-
-                    with ui.row().classes("items-center no-wrap w-full"):
-                        ui.checkbox(value=r.checked, on_change=toggle).props("dense")
-                        ui.label(f"{r.title}  ·  {r.summary}" if r.summary else r.title)
-
-    search.on_value_change(redraw)
-    _update_picked_label()
-    redraw()
-    return lambda: sorted(selected)
+    select = (
+        ui.select(
+            entity_select_options(rows),
+            value=[r.slug for r in rows if r.checked],
+            label=label,
+            multiple=True,
+            with_input=True,
+        )
+        .classes("w-full")
+        .props("use-chips options-dense clearable")
+    )
+    if on_change:
+        select.on_value_change(lambda _e: on_change())
+    # `or []` because clearable hands back None, not an empty list, once the
+    # operator empties the field -- sorted(None) would crash the save.
+    return lambda: sorted(select.value or [])
 
 
 __all__ = [
     "PickerRow",
-    "UNPINNED_PREVIEW_LIMIT",
     "build_picker_rows",
+    "entity_select_options",
     "filter_picker_rows",
-    "render_entity_picker",
+    "render_entity_select",
     "render_module_picker",
-    "rows_to_display",
 ]

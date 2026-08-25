@@ -121,14 +121,20 @@ def test_save_rejects_a_colliding_slug_by_name():
     assert "taken_slugs=taken_slugs" in src
 
 
-def test_prompts_picker_uses_the_shared_searchable_widget_not_a_chip_select():
+def test_prompts_picker_uses_the_shared_searchable_widget():
+    """The picker must stay the shared widget rather than this page growing
+    its own copy -- both directions of the pin have to agree on what an id
+    means. It is a searchable dropdown again (render_entity_select): the
+    inline tick-list it briefly replaced sits in a flex column capped at
+    calc(100dvh - 32px) and collapsed to zero height there, so its rows were
+    in the DOM but never on screen. See knowledge_picker.py's own docstring
+    for the mechanism."""
     src = KNOWLEDGE_MODULES_PATH.read_text()
 
-    assert "use-chips" not in src
-    # Not a single exact-formatting substring: render_entity_picker's real
-    # call wraps across lines (ruff/black would reformat a one-liner here
-    # anyway), so check the call and its argument are both present instead.
-    assert "render_entity_picker(" in src
+    # Not a single exact-formatting substring: the real call wraps across
+    # lines (ruff/black would reformat a one-liner here anyway), so check the
+    # call and its argument are both present instead.
+    assert "render_entity_select(" in src
     assert "prompt_rows," in src
 
 
