@@ -20,7 +20,6 @@ from orchestrator.experts.handlers.context_expert.select_prompts import (
 )
 from orchestrator.experts.handlers.context_expert.store_module import (
     build_module_payload,
-    resolve_mode,
 )
 
 
@@ -115,33 +114,30 @@ def test_build_approval_text_shows_identity_and_targets():
         title="Azimuth Calculation",
         summary="How PV azimuth is measured.",
         body="A" * 500,
-        mode="on_demand",
         prompt_ids=["staff.system"],
     )
     assert "azimuth-calculation" in text
     assert "How PV azimuth is measured." in text
-    assert "on_demand" in text
     assert "staff.system" in text
     assert "500 chars" in text
+    # No tier to report: an attached module is inlined in full.
+    assert "Mode" not in text
 
 
 def test_build_approval_text_warns_when_unattached():
     text = build_approval_text(
-        slug="x", title="X", summary="s", body="b", mode="on_demand", prompt_ids=[]
+        slug="x", title="X", summary="s", body="b", prompt_ids=[]
     )
     assert "not attached to any prompt" in text
-
-
-def test_resolve_mode_defaults_to_on_demand():
-    assert resolve_mode("A" * 100) == "on_demand"
-    assert resolve_mode("A" * 5000) == "on_demand"
 
 
 def test_build_module_payload_shape():
     payload = build_module_payload(
         slug="azimuth", title="Azimuth", summary="s", body="b",
-        mode="on_demand", actor="ops@example.com",
+        actor="ops@example.com",
     )
+    # No "mode" key: nothing reads that column any more, and it has a NOT
+    # NULL DEFAULT, so omitting it works with or without migration 0029.
     assert payload == {
         "slug": "azimuth",
         "title": "Azimuth",
@@ -149,7 +145,6 @@ def test_build_module_payload_shape():
         "body": "b",
         "tags": [],
         "scope": "global",
-        "mode": "on_demand",
         "source": "manual",
         "updated_by": "ops@example.com",
     }
@@ -158,7 +153,7 @@ def test_build_module_payload_shape():
 def test_a_typed_module_payload_is_unchanged():
     payload = build_module_payload(
         slug="s", title="T", summary="x", body="typed body",
-        mode="on_demand", actor="tech@example.com",
+        actor="tech@example.com",
     )
 
     assert payload["source"] == "manual"
@@ -170,7 +165,7 @@ def test_a_doc_linked_payload_stores_no_body():
     """The document is the source of truth; a stored copy would only drift."""
     payload = build_module_payload(
         slug="s", title="T", summary="x", body="ignored",
-        mode="on_demand", actor="tech@example.com",
+        actor="tech@example.com",
         source="gdoc", source_ref="doc-1", source_tab="Errors",
     )
 
@@ -184,7 +179,7 @@ def test_a_doc_linked_payload_stores_no_body():
 
 def test_a_doc_linked_payload_can_be_published():
     payload = build_module_payload(
-        slug="s", title="T", summary="x", body="", mode="on_demand",
+        slug="s", title="T", summary="x", body="",
         actor="tech@example.com", source="gdoc", source_ref="doc-1",
         doc_audience="published",
     )

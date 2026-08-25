@@ -16,7 +16,7 @@ def _module(slug, title, summary, body):
 
     return KnowledgeModule(
         id=slug, slug=slug, title=title, summary=summary, body=body,
-        tags=["procedure"], mode="on_demand",
+        tags=["procedure"],
     )
 
 

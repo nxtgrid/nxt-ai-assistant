@@ -6,7 +6,7 @@ request that pins this module.
 
 Grid is preferred over organization when the scope names both: it is the more
 specific anchor, matching how site-scoped knowledge modules already beat
-sector-scoped ones in budget_pinned.
+sector-scoped ones in budget_inlined.
 """
 
 from __future__ import annotations

@@ -2,15 +2,17 @@
 
 Reads the 14 curated `doc_type='technical'` documents (excluding CET-rules.pdf),
 reassembles each body from its chunks, drafts a summary with the LLM, and
-writes `knowledge_modules` rows with mode='on_demand'.
+writes `knowledge_modules` rows.
 
 Bodies come from `chunks` joined on chunk_index -- NOT from `documents.raw_content`,
 which stores a deliberate 500-char preview, nor `documents.content`, which is an
 empty string on rows ingested before that column existed.
 
-All 14 land as on_demand: together they are 19,583 chars against a 20,000-char
-pinned budget (shared/prompts/knowledge.py PINNED_BUDGET_CHARS), so pinning them
-would starve the budget and silently drop modules.
+Together the 14 are 19,583 chars against the 20,000-char inline budget
+(shared/prompts/knowledge.py INLINE_BUDGET_CHARS). Every module attached to a
+prompt is inlined in full, so attaching all 14 to one prompt consumes
+essentially the whole budget for it -- attach them selectively, and watch the
+character counter on that prompt's Context tab.
 
 Usage:
     python -m scripts.migrate_rag_docs_to_modules              # dry run, prints everything
@@ -39,8 +41,8 @@ EXCLUDED_TITLES = {"CET-rules.pdf"}
 # sentence fallback produced weak or truncated results (e.g. "Fuses vs." cut off
 # mid-title) -- these overrides replace that fallback with a summary that
 # actually names the specific equipment/standard/calculation, which is the only
-# thing an on_demand module shows the model before it decides whether to fetch
-# the body. main() prefers this key when present; draft_summary() is only
+# thing identifying a module in the picker without opening it. main() prefers
+# this key when present; draft_summary() is only
 # consulted for a document that has none.
 CURATED: Dict[str, Dict[str, str]] = {
     "NXT Grid Power Plant Smoke Detector Battery": {
@@ -140,7 +142,6 @@ def build_module_row(doc: Dict[str, Any], body: str, summary: str) -> Dict[str, 
         "body": body,
         "tags": [],
         "scope": "sector",
-        "mode": "on_demand",
         "source": "ingested",
         "source_ref": doc["id"],
         "updated_by": "migration:rag-docs-to-modules",
@@ -249,7 +250,7 @@ async def main() -> None:
         print(f"  summary: {row['summary']} [{summary_source}]")
 
     total = sum(len(r["body"]) for r in rows)
-    print(f"\nTotal body chars: {total} (pinned budget is 20000; all rows are on_demand)")
+    print(f"\nTotal body chars: {total} (the inline budget is 20000 per prompt)")
 
     if args.delete_source:
         ids = [r["source_ref"] for r in rows]

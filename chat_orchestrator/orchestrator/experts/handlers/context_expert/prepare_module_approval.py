@@ -22,21 +22,26 @@ CANCEL_WORDS = {"cancel", "no", "skip", "abort", "quit", "exit", "stop", "2"}
 
 
 def build_approval_text(
-    slug: str, title: str, summary: str, body: str, mode: str, prompt_ids: List[str]
+    slug: str, title: str, summary: str, body: str, prompt_ids: List[str]
 ) -> str:
-    """Approval summary for a proposed context module."""
+    """Approval summary for a proposed context module.
+
+    No mode line: every attached module is inlined in full, so there is no
+    longer a choice to report here.
+    """
     lines = [
         "**Ready to save this context module**",
         "",
         f"**Title:** {title}",
         f"**Slug:** `{slug}`",
         f"**Summary:** {summary}",
-        f"**Mode:** {mode}",
         f"**Size:** {len(body)} chars",
         "",
     ]
     if prompt_ids:
-        lines.append(f"**Used by:** {', '.join(prompt_ids)}")
+        lines.append(
+            f"**Used by:** {', '.join(prompt_ids)} — inlined in full into each."
+        )
     else:
         lines.append(
             "⚠️ This module is **not attached to any prompt**, so the bot will not see it "
@@ -74,7 +79,6 @@ async def prepare_module_approval(context: StepContext) -> StepResult:
         title=context.get_state("module_title") or "",
         summary=context.get_state("module_summary") or "",
         body=context.get_state("module_body") or "",
-        mode=context.get_state("module_mode") or "on_demand",
         prompt_ids=context.get_state("module_prompt_ids") or [],
     )
     return StepResult(

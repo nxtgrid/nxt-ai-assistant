@@ -1,12 +1,19 @@
 """Knowledge modules — curated context composed into prompts.
 
-A module is selected for a prompt by explicit per-prompt pin, not by tag:
-an operator picks which modules a prompt uses in the admin UI, and that
-choice is stored in ``prompt_knowledge_overrides``. Two tiers. Pinned modules
-are inlined in full, ordered so the most specific survives when the budget
-binds. On-demand modules contribute one catalog line each; the model fetches
-a body through the knowledge MCP tool when it needs one, which keeps the long
-tail out of a window an agent loop re-sends every step.
+A module is selected for a prompt by explicit per-prompt attachment, not by
+tag: an operator picks which modules a prompt uses in the admin UI, and that
+choice is stored in ``prompt_knowledge_overrides``. One tier -- every attached
+module is inlined in full, ordered so the most specific survives when the
+budget binds.
+
+There used to be a second tier ('on_demand') that contributed a summary line
+to a catalog the model could fetch from with get_knowledge_module. It was
+removed: attaching a module and having its content actually reach the prompt
+were two different things, which is not what operators attaching a module
+expect. The `mode` column still exists in the database (see
+db/migrations/0006_prompt_library.sql) but nothing reads it -- 0029 backfills
+it so it stops disagreeing with behaviour. get_knowledge_module survives as a
+by-name lookup tool; it just is not fed a catalog any more.
 """
 
 from __future__ import annotations
@@ -19,7 +26,7 @@ from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
-PINNED_BUDGET_CHARS = 20000
+INLINE_BUDGET_CHARS = 20000
 
 # Sources whose body is produced per-request rather than stored. All of them
 # need the caller's identity: graph/directory/episodic filter database rows by
@@ -77,7 +84,6 @@ class KnowledgeModule:
     body: Optional[str] = None
     tags: List[str] = field(default_factory=list)
     scope: str = "global"
-    mode: str = "pinned"
     source: str = "manual"
     source_ref: Optional[str] = None
     source_tab: Optional[str] = None
@@ -125,13 +131,18 @@ def diff_prompt_pins(current: "set[str]", selected: "set[str]") -> "tuple[set[st
     return selected - current, current - selected
 
 
-def budget_pinned(
-    modules: List[KnowledgeModule], limit: int = PINNED_BUDGET_CHARS
+def budget_inlined(
+    modules: List[KnowledgeModule], limit: int = INLINE_BUDGET_CHARS
 ) -> Tuple[List[KnowledgeModule], List[KnowledgeModule]]:
-    """Fit pinned modules into the budget by dropping whole modules.
+    """Fit a prompt's attached modules into the budget by dropping whole ones.
 
     Site-scoped material is kept first: it is the most specific and the least
     replaceable. Nothing is ever cut mid-document.
+
+    Every module a prompt attaches is inlined in full, so this is the only
+    thing standing between an over-attached prompt and an oversized render.
+    A drop is logged here and surfaced in the Context tab's character
+    counter, which turns red past the budget.
     """
     ordered = sorted(modules, key=lambda m: (not m.is_site_scoped, m.slug))
     kept: List[KnowledgeModule] = []
@@ -148,13 +159,20 @@ def budget_pinned(
             dropped.append(module)
     if dropped:
         LOGGER.warning(
-            f"Pinned knowledge exceeded the {limit}-char budget; dropped "
+            f"Attached knowledge exceeded the {limit}-char budget; dropped "
             f"{len(dropped)} module(s): {', '.join(m.slug for m in dropped)}"
         )
     return kept, dropped
 
 
-def render_pinned(modules: List[KnowledgeModule]) -> Optional[str]:
+def render_inlined(modules: List[KnowledgeModule]) -> Optional[str]:
+    """Every module's body in full, under one heading.
+
+    There is no summary-only variant. A module attached to a prompt is part
+    of that prompt; the get_knowledge_module tool remains for looking one up
+    by name on demand, but nothing is offered to the model as a catalog it
+    has to decide to fetch.
+    """
     if not modules:
         return None
     # A JIT module whose body hasn't resolved yet (or failed to) contributes
@@ -163,18 +181,6 @@ def render_pinned(modules: List[KnowledgeModule]) -> Optional[str]:
     if not parts:
         return None
     return "# Technical Knowledge\n\n" + "\n\n".join(parts)
-
-
-def render_catalog(modules: List[KnowledgeModule]) -> Optional[str]:
-    """Names and one-liners only — never bodies."""
-    if not modules:
-        return None
-    lines = [f"- `{m.slug}` — {m.summary}" for m in modules]
-    return (
-        "# Available Knowledge\n\n"
-        "Fetch any of these with the `get_knowledge_module` tool when relevant:\n\n"
-        + "\n".join(lines)
-    )
 
 
 class KnowledgeStore:
@@ -220,7 +226,7 @@ class KnowledgeStore:
             result = (
                 self._client.table("knowledge_modules")
                 .select(
-                    "id, slug, title, summary, body, tags, scope, mode, source, "
+                    "id, slug, title, summary, body, tags, scope, source, "
                     "source_ref, source_tab, doc_audience, doc_audience_set_by"
                 )
                 .eq("is_active", True)
@@ -323,11 +329,10 @@ class KnowledgeStore:
         outcome one of "exists", "created", or "failed: <error>", for the
         caller to report.
 
-        A created row is mode='pinned' but attached to no prompt -- pinned
-        only decides how a module behaves once a prompt actually uses it;
-        prompt_knowledge_overrides decides whether any prompt does, and this
-        method never touches that table. Bootstrapping existence and
-        attaching it to a prompt stay two separate, deliberate steps.
+        A created row is attached to no prompt: prompt_knowledge_overrides
+        decides which prompts use it, and this method never touches that
+        table. Bootstrapping existence and attaching it to a prompt stay two
+        separate, deliberate steps.
         """
         if not self._client:
             return {}
@@ -346,7 +351,6 @@ class KnowledgeStore:
                 "body": None,
                 "tags": [],
                 "scope": "global",
-                "mode": "pinned",
                 "source": source,
                 "updated_by": actor,
                 "is_active": True,

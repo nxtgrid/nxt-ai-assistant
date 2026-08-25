@@ -209,7 +209,7 @@ def test_all_modules_reads_source_columns():
         data = [
             {
                 "id": "1", "slug": "graph-overview", "title": "Graph", "summary": "s",
-                "body": None, "tags": [], "scope": "sector", "mode": "pinned",
+                "body": None, "tags": [], "scope": "sector",
                 "source": "graph", "source_ref": None,
             }
         ]
@@ -313,7 +313,7 @@ def test_ensure_singleton_modules_only_creates_whats_missing(store):
     store._client.table("knowledge_modules").insert(
         {
             "slug": "graph", "title": "Graph (hand-edited)", "summary": "s",
-            "body": None, "scope": "global", "mode": "pinned", "source": "graph",
+            "body": None, "scope": "global", "source": "graph",
             "is_active": True,
         }
     ).execute()
@@ -334,12 +334,12 @@ def test_ensure_singleton_modules_created_rows_exist_but_are_not_attached_to_any
 
     directory = next(m for m in store.all_modules() if m.source == "directory")
     assert directory.slug == "directory"
-    assert directory.mode == "pinned"
     assert directory.scope == "global"
     assert directory.body is None
-    assert directory.summary  # on_demand or pinned, a blank summary helps no one
-    # mode='pinned' only shapes a module once a prompt uses it -- existence
-    # is not attachment, and this method never writes prompt_knowledge_overrides.
+    assert directory.summary  # a blank summary helps nobody find it in the picker
+    # Existence is not attachment: this method never writes
+    # prompt_knowledge_overrides, so a bootstrapped module reaches no prompt
+    # until someone ticks it.
     assert store.overrides_for("staff.system") == {}
 
     graph = next(m for m in store.all_modules() if m.source == "graph")

@@ -40,14 +40,14 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
   'visible_to_customer': False},
  {'name': 'get_knowledge_module',
   'description': "[READ-ONLY] Fetch the full body of a technical knowledge module by slug. "
-                 "System prompts pin a catalog of on-demand modules (slug and one-line summary "
-                 "only) under a '# Available Knowledge' section when relevant -- call this to "
-                 "retrieve a module's full content once you've decided it's relevant to the "
-                 "current question.",
+                 "Modules attached to your system prompt are already inlined in full under "
+                 "'# Technical Knowledge' / '# Live Context', so you rarely need this -- use it "
+                 "to read a module by name that is NOT already in your context, for example one "
+                 "referenced by slug in a document or by a colleague.",
   'inputSchema': {'type': 'object',
                   'properties': {'slug': {'type': 'string',
-                                          'description': 'Module slug from the Available '
-                                                         'Knowledge catalog.'}},
+                                          'description': 'Exact module slug, e.g. '
+                                                         '"azimuth-calculation".'}},
                   'required': ['slug']},
   'visible_to_customer': False},
  {'name': 'get_grid_review_history',

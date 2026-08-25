@@ -1,8 +1,8 @@
 """Propose a context module's identity (slug, title, summary) from its body.
 
-The summary is the load-bearing field: an on_demand module shows only its
-summary in the prompt catalog, so it is the sole basis on which the model
-decides whether to fetch the body.
+The summary is how an operator recognises this module in the Context picker
+and on the Prompts page without opening it -- the body itself is inlined into
+every prompt the module is attached to.
 """
 
 import json

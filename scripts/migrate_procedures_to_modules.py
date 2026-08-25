@@ -57,14 +57,14 @@ def procedure_to_module(procedure: Any, summary: str = "") -> Dict[str, Any]:
     """Map one parsed Procedure to a knowledge_modules row.
 
     `summary` overrides the procedure's ### Purpose text -- the migration
-    generates a symptom-first line and a human reviews it, because an
-    on_demand module is selected from its summary alone.
+    generates a symptom-first line and a human reviews it, because the summary
+    is how an operator recognises the module in the picker.
     """
     resolved = (summary or getattr(procedure, "purpose", "") or "").strip()
     if not resolved:
         raise ValueError(
             f"procedure '{procedure.title}' has no ### Purpose and no generated "
-            f"summary; an on_demand module without a summary is invisible to the model"
+            f"summary; a module without one is unrecognisable in the picker"
         )
     return {
         "slug": slug_for_title(procedure.title),
@@ -73,7 +73,6 @@ def procedure_to_module(procedure: Any, summary: str = "") -> Dict[str, Any]:
         "body": procedure.full_text.strip(),
         "tags": ["procedure", "troubleshooting"],
         "scope": "sector",
-        "mode": "on_demand",
         "source": "manual",
     }
 

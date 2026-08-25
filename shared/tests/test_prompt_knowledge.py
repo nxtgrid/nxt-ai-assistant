@@ -1,17 +1,18 @@
-"""Knowledge module selection, tiering and budgeting."""
+"""Knowledge module selection and budgeting."""
+
+import pytest
 
 from shared.prompts.knowledge import (
     KnowledgeModule,
-    budget_pinned,
+    budget_inlined,
     diff_prompt_pins,
-    render_catalog,
-    render_pinned,
+    render_inlined,
     select_for_prompt,
 )
 from shared.prompts.types import RequestScope
 
 
-def _module(slug, tags=("grid_ops",), scope="sector", mode="pinned", body="B"):
+def _module(slug, tags=("grid_ops",), scope="sector", body="B"):
     return KnowledgeModule(
         id=slug,
         slug=slug,
@@ -20,7 +21,6 @@ def _module(slug, tags=("grid_ops",), scope="sector", mode="pinned", body="B"):
         body=body,
         tags=list(tags),
         scope=scope,
-        mode=mode,
     )
 
 
@@ -59,42 +59,52 @@ def test_selection_is_slug_sorted():
 def test_budget_keeps_site_scoped_modules_first():
     site = _module("site", scope="site:ABC", body="x" * 60)
     sector = _module("sector", body="y" * 60)
-    kept, dropped = budget_pinned([sector, site], limit=100)
+    kept, dropped = budget_inlined([sector, site], limit=100)
     assert [m.slug for m in kept] == ["site"]
     assert [m.slug for m in dropped] == ["sector"]
 
 
 def test_budget_drops_whole_modules_never_partial():
     modules = [_module("a", body="x" * 200)]
-    kept, dropped = budget_pinned(modules, limit=100)
+    kept, dropped = budget_inlined(modules, limit=100)
     assert kept == []
     assert [m.slug for m in dropped] == ["a"]
 
 
 def test_budget_within_limit_keeps_everything():
     modules = [_module("a", body="x"), _module("b", body="y")]
-    kept, dropped = budget_pinned(modules, limit=1000)
+    kept, dropped = budget_inlined(modules, limit=1000)
     assert len(kept) == 2 and dropped == []
 
 
-def test_render_pinned_has_a_stable_heading():
-    out = render_pinned([_module("a", body="Body text.")])
+def test_render_inlined_has_a_stable_heading():
+    out = render_inlined([_module("a", body="Body text.")])
     assert out.startswith("# Technical Knowledge")
     assert "Body text." in out
 
 
-def test_render_pinned_of_nothing_is_none():
-    assert render_pinned([]) is None
+def test_render_inlined_of_nothing_is_none():
+    assert render_inlined([]) is None
 
 
-def test_catalog_lists_slug_and_summary_only():
-    out = render_catalog([_module("a", mode="on_demand", body="SECRET BODY")])
-    assert "SECRET BODY" not in out
-    assert "About a." in out
+def test_a_module_has_no_mode_field():
+    """The on-demand tier is gone; nothing may reintroduce a second tier.
+
+    Every attached module is inlined in full, so a `mode` that some code
+    path could branch on is exactly the drift this guards against.
+    """
+    assert not hasattr(_module("a"), "mode")
+    with pytest.raises(TypeError):
+        KnowledgeModule(id="a", slug="a", title="A", summary="s", mode="on_demand")
 
 
-def test_catalog_of_nothing_is_none():
-    assert render_catalog([]) is None
+def test_render_inlines_every_module_body_in_full():
+    """Attaching a module means its content reaches the prompt, not a summary."""
+    out = render_inlined([_module("a", body="FULL BODY A"), _module("b", body="FULL BODY B")])
+    assert "FULL BODY A" in out
+    assert "FULL BODY B" in out
+    # The old catalog offered a fetch-this-later list instead of content.
+    assert "get_knowledge_module" not in out
 
 
 def test_diff_prompt_pins_adds_newly_selected():
@@ -145,16 +155,16 @@ def test_budget_treats_unresolved_body_as_zero_cost():
     jit = KnowledgeModule(
         id="g", slug="graph", title="Graph", summary="s", body=None, source="graph"
     )
-    kept, dropped = budget_pinned([jit])
+    kept, dropped = budget_inlined([jit])
     assert kept == [jit]
     assert dropped == []
 
 
-def test_render_pinned_skips_unresolved_bodies():
+def test_render_inlined_skips_unresolved_bodies():
     jit = KnowledgeModule(
         id="g", slug="graph", title="Graph", summary="s", body=None, source="graph"
     )
-    assert render_pinned([jit]) is None
+    assert render_inlined([jit]) is None
 
 
 def test_a_module_carries_its_audience_and_tab():

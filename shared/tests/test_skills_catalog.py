@@ -50,7 +50,7 @@ class TestRenderSkillCatalog:
         assert render_skill_catalog([]) is None
 
     def test_renders_own_labeled_block_distinct_from_knowledge(self):
-        # Must never be mistaken for or merged with knowledge.render_catalog's
+        # Must never be mistaken for or merged with knowledge.render_inlined's
         # "# Available Knowledge" block -- see this module's docstring.
         block = render_skill_catalog([_skill()])
 

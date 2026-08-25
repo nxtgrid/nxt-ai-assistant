@@ -51,7 +51,6 @@ def propose_modules(text: str) -> List[Dict[str, object]]:
                 "body": body,
                 "tags": [],
                 "scope": f"site:{site.group(1).upper()}" if site else "sector",
-                "mode": "pinned",
             }
         )
     return modules

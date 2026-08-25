@@ -1,9 +1,18 @@
-"""Context admin page: CRUD for curated context modules.
+"""Context admin page: CRUD for context modules.
 
-A context module is named, addressable content a prompt can deliberately pin
-(inlined in full) or leave on-demand (name + summary only, fetched via the
-get_knowledge_module MCP tool when the model decides it's relevant). Selection
-is explicit per prompt -- see the Context tab on the Prompts page.
+A context module is named, addressable content a prompt can be given.
+Attaching one to a prompt inlines its body into that prompt in full --
+there is no summary-only tier any more, because "attached but not actually
+present" is not what attaching a module reads as. Selection is explicit per
+prompt -- see the Context tab on the Prompts page.
+
+Modules are grouped by where their body comes from:
+
+* **Built-in** -- directory, entity-graph and episodic. Defined by the code,
+  generated fresh per request and filtered to what the caller may see. You
+  choose which prompts use them; you cannot create, delete or write one.
+* **Curated** -- what an operator authors: a body typed in here, or an
+  attached Google Doc / Sheet.
 """
 
 from __future__ import annotations
@@ -15,9 +24,8 @@ from typing import Any, List, Tuple
 
 from nicegui import ui
 
-from shared.prompts.knowledge import SINGLETON_SOURCES
+from shared.prompts.knowledge import INLINE_BUDGET_CHARS, SINGLETON_SOURCES
 
-VALID_MODES = {"pinned", "on_demand"}
 VALID_SOURCES = {"manual", "gdoc", "ingested"}
 
 VALID_SCOPES_PREFIXED = ("site:", "org:")
@@ -115,8 +123,21 @@ def compose_scope(kind: str, detail: str) -> str:
         return "global"
     return f"{kind}{detail}"
 
-MODE_LABELS = {"pinned": "Pinned", "on_demand": "On-demand"}
-MODE_ORDER = ["pinned", "on_demand"]
+# The list groups by where a body comes from, which is the only axis a
+# module still varies on. "Built-in" is the code-defined singletons; anything
+# else is something an operator wrote or attached.
+BUILT_IN_LABEL = "Built-in"
+CURATED_LABEL = "Curated"
+GROUP_ORDER = [BUILT_IN_LABEL, CURATED_LABEL]
+
+SOURCE_LABELS = {
+    "manual": "typed here",
+    "gdoc": "Google Doc or Sheet",
+    "directory": "built-in · directory",
+    "graph": "built-in · knowledge graph",
+    "episodic": "built-in · episodic memory",
+    "ingested": "ingested",
+}
 
 # Same disclosure-triangle convention as the Prompts and Settings pages:
 # pointing right while collapsed, down once expanded.
@@ -173,7 +194,6 @@ class ModuleRow:
     title: str
     tags: List[str]
     scope: str
-    mode: str
     chars: int
     source: str = "manual"
     size_label: str = ""
@@ -193,7 +213,7 @@ def build_module_rows(modules: List[Any]) -> List[ModuleRow]:
         rows.append(
             ModuleRow(
                 slug=m.slug, title=m.title, tags=list(m.tags), scope=m.scope,
-                mode=m.mode, chars=chars, source=source,
+                chars=chars, source=source,
                 # A provider body has no size until it resolves, and it
                 # resolves differently per caller -- a number here would be
                 # a fiction.
@@ -205,20 +225,27 @@ def build_module_rows(modules: List[Any]) -> List[ModuleRow]:
     return rows
 
 
+def group_label(source: str) -> str:
+    """Which section of the list a module belongs in.
+
+    Built-in is defined by SINGLETON_SOURCES, not by a hardcoded list here,
+    so a provider added later lands in the right section without a second
+    place to remember to update.
+    """
+    return BUILT_IN_LABEL if source in SINGLETON_SOURCES else CURATED_LABEL
+
+
 def group_module_rows(rows: List[ModuleRow]) -> List[Tuple[str, List[ModuleRow]]]:
-    """Bucket rows by mode -- pinned, then on-demand -- as ``(label, rows)``.
+    """Bucket rows into Built-in then Curated, as ``(label, rows)``.
 
     Each bucket stays slug-sorted because ``rows`` already is (see
     ``build_module_rows``).
     """
-    by_mode: "defaultdict[str, List[ModuleRow]]" = defaultdict(list)
+    by_group: "defaultdict[str, List[ModuleRow]]" = defaultdict(list)
     for row in rows:
-        by_mode[row.mode].append(row)
+        by_group[group_label(row.source)].append(row)
 
-    order = [m for m in MODE_ORDER if m in by_mode]
-    order += sorted(m for m in by_mode if m not in MODE_LABELS)
-
-    return [(MODE_LABELS.get(m, m), by_mode[m]) for m in order]
+    return [(label, by_group[label]) for label in GROUP_ORDER if label in by_group]
 
 
 def filter_context_rows(rows: List[ModuleRow], query: str) -> List[ModuleRow]:
@@ -258,7 +285,6 @@ def validate_module(
     summary: str,
     body: str,
     scope: str = "global",
-    mode: str = "pinned",
     require_body: bool = True,
     source: str = "manual",
     source_ref: str = "",
@@ -272,12 +298,10 @@ def validate_module(
     """
     if not slug or not title or (require_body and not body):
         raise ValueError("slug, title and body are required")
-    if mode not in VALID_MODES:
-        raise ValueError(f"mode must be one of {sorted(VALID_MODES)}")
-    if mode == "on_demand" and not summary.strip():
+    if not summary.strip():
         raise ValueError(
-            "an on_demand module needs a summary: it is the only thing the model "
-            "sees before deciding to fetch the body"
+            "a summary is required: it is how you and anyone else recognise this "
+            "module in the picker without opening it"
         )
     if scope not in LEGACY_GLOBAL_SCOPES and not scope.startswith(VALID_SCOPES_PREFIXED):
         raise ValueError("scope must be 'global', 'site:<name>' or 'org:<id>'")
@@ -295,11 +319,11 @@ async def render(user_email: str) -> None:
 
     ui.label("🧠 Context").classes("text-h5")
     ui.label(
-        "Curated facts the bot is told directly — the context it works from. Pinned "
-        "modules are inlined into a prompt in full; on-demand modules contribute only "
-        "their summary, and the model fetches the body with a tool when it decides "
-        "it's relevant. Attach modules to prompts here or from the Context tab of any "
-        "prompt."
+        "Facts the bot is told directly — the context it works from. A module "
+        "attached to a prompt is inlined into that prompt in full. Built-in modules "
+        "are generated by the system per request and filtered to what the caller may "
+        "see; curated ones are what you write here or attach from Google Drive. "
+        "Attach modules to prompts here or from the Context tab of any prompt."
     ).classes("text-caption")
 
     store = KnowledgeStore.from_env()
@@ -390,7 +414,8 @@ def _render_row(row: ModuleRow, store: Any, refresh, user_email: str) -> None:
             with ui.column().classes("gap-0").style("flex: 3"):
                 ui.label(row.title).classes("text-bold")
                 ui.label(
-                    f"{row.slug} · {row.source} · {row.scope} · {row.mode} · {row.size_label}"
+                    f"{row.slug} · {SOURCE_LABELS.get(row.source, row.source)} · "
+                    f"{row.scope} · {row.size_label}"
                 ).classes("text-caption")
                 if row.tags:
                     ui.label(f"tags (legacy): {', '.join(row.tags)}").classes("text-caption")
@@ -418,7 +443,20 @@ async def _open_edit_dialog(
     with ui.dialog() as dialog, ui.card().classes("w-full").style(
         "max-width: 700px; max-height: calc(100dvh - 32px); overflow-y: auto"
     ):
+        is_built_in = source in SINGLETON_SOURCES
         ui.label("Edit module" if existing else "New module").classes("text-h6")
+        if is_built_in:
+            # Every field below except the prompt picker is either fixed by
+            # the code or generated per request. Say that once, at the top,
+            # rather than leaving an operator to work it out from a screen
+            # of disabled inputs.
+            ui.label(
+                "Built-in module. Its content is generated by the system for each "
+                "request and filtered to what that caller may see, so there is "
+                "nothing to write here — but you choose which prompts use it, and "
+                "you can preview what it resolves to for you below."
+            ).classes("text-caption text-grey")
+
         slug_input = ui.input("Slug", value=existing.slug if existing else "").classes("w-full")
         slug_input.set_enabled(existing is None)  # slug is the identity; don't let it drift
         title_input = ui.input("Title", value=existing.title if existing else "").classes(
@@ -428,9 +466,15 @@ async def _open_edit_dialog(
             "w-full"
         )
 
+        # A built-in's source is neither of the two an operator can pick, so
+        # offer its real name rather than mislabelling it "Typed here" --
+        # which is what a two-option picker defaulting to `manual` did.
+        source_options = {"manual": "Typed here", "gdoc": "Google Doc or Sheet"}
+        if is_built_in:
+            source_options = {source: SOURCE_LABELS.get(source, source)}
         source_select = ui.select(
-            {"manual": "Typed here", "gdoc": "Google Doc or Sheet"},
-            value="gdoc" if source == "gdoc" else "manual",
+            source_options,
+            value=source if is_built_in else ("gdoc" if source == "gdoc" else "manual"),
             label="Source",
         ).classes("w-full")
         # The slug is the identity and the source decides the storage shape;
@@ -477,9 +521,15 @@ async def _open_edit_dialog(
         scope_select.on_value_change(lambda _e: _on_scope_change())
         _on_scope_change()
 
-        mode_select = ui.select(
-            sorted(VALID_MODES), value=existing.mode if existing else "pinned", label="Mode"
-        ).classes("w-full")
+        # No mode picker: a module attached to a prompt is inlined in full,
+        # full stop. Say so where the picker used to be, so the absence reads
+        # as a decision rather than something missing.
+        ui.label(
+            "Attached to a prompt, this module's content is inlined into that "
+            f"prompt in full (up to a shared {INLINE_BUDGET_CHARS:,}-character budget "
+            "across everything one prompt uses)."
+        ).classes("text-caption text-grey")
+
         with ui.row().classes("items-center justify-between w-full"):
             ui.label("Body").classes("text-caption")
             # Defaults to Preview -- opening a module is almost always to
@@ -499,12 +549,28 @@ async def _open_edit_dialog(
         )
 
         async def _resolved_body() -> str:
-            """The live document, as this operator would actually receive it."""
-            from orchestrator.services.jit_context_resolver import build_default_registry
+            """The live body, as this operator would actually receive it.
 
+            Imported from `shared`, not from the orchestrator: this page runs
+            in anansi_app, whose image ships only anansi_app/ and shared/
+            (see anansi_app/Dockerfile). This import used to name
+            orchestrator.services.jit_context_resolver, which raised
+            ModuleNotFoundError here in production -- and because it runs
+            while the dialog is still being built, below, the exception
+            escaped before dialog.open() and the Edit button did nothing at
+            all for every built-in and document-backed module.
+
+            Never raises: a provider that cannot be built is reported as
+            missing, and preview_module_body catches a failing resolve.
+            """
             if existing is None:
-                return "_Save the module first to preview its document._"
-            provider = build_default_registry().get(source)
+                return "_Save the module first to preview it._"
+            try:
+                from shared.prompts.providers import build_default_registry
+
+                provider = build_default_registry().get(source)
+            except Exception as e:  # noqa: BLE001 -- a broken preview must not block editing
+                return f"Could not build the context providers: {e}"
             if provider is None:
                 return f"No '{source}' provider is available in this process."
             return await preview_module_body(existing, provider, user_email=user_email)
@@ -558,7 +624,6 @@ async def _open_edit_dialog(
                     summary=summary_input.value.strip(),
                     body=body_input.value,
                     scope=scope_value,
-                    mode=mode_select.value,
                     require_body=body_is_editable(chosen_source),
                     source=chosen_source,
                     source_ref=doc_ref_input.value,
@@ -574,7 +639,10 @@ async def _open_edit_dialog(
                 "summary": summary_input.value.strip(),
                 "tags": list(existing.tags) if existing else [],
                 "scope": scope_value,
-                "mode": mode_select.value,
+                # `mode` is deliberately absent: nothing reads it any more
+                # (see shared/prompts/knowledge.py) and the column has a
+                # NOT NULL DEFAULT, so leaving it out keeps this working
+                # whether or not 0029 has been applied.
                 "source": chosen_source,
                 "updated_by": user_email,
             }

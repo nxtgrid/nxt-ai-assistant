@@ -55,11 +55,13 @@ def test_module_carries_title_body_and_slug():
     assert module["body"] == "## Procedure 1: Commissioning Failed\n\nSteps..."
 
 
-def test_module_is_on_demand_and_manual():
+def test_module_is_manual_and_writes_no_mode():
     module = procedure_to_module(_proc())
-    assert module["mode"] == "on_demand"
     assert module["source"] == "manual"
     assert module["scope"] == "sector"
+    # `mode` is retired (migration 0029): nothing reads it, and the column
+    # has a NOT NULL DEFAULT, so the row must not carry one.
+    assert "mode" not in module
 
 
 def test_purpose_becomes_the_summary_when_no_override_is_given():

@@ -55,7 +55,6 @@ def test_heading_with_no_body_is_skipped():
             "body": "Some text.",
             "tags": [],
             "scope": "sector",
-            "mode": "pinned",
         }
     ]
 

@@ -17,17 +17,21 @@ import asyncio
 from typing import List, Optional, Tuple
 
 from shared.prompts.knowledge import KnowledgeModule, select_for_prompt
-from shared.prompts.providers import ProviderRegistry, ResolutionContext
+from shared.prompts.providers import (
+    ProviderRegistry,
+    ResolutionContext,
+    build_default_registry,
+)
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 
 DEFAULT_TIMEOUT_SECONDS = 5.0
 
-# Matches PromptLibrary's PINNED_BUDGET_CHARS. budget_pinned never sees these
+# Matches PromptLibrary's INLINE_BUDGET_CHARS. budget_inlined never sees these
 # bodies -- a provider body has no length until it resolves, which happens
-# here -- so without this one large document uncaps every prompt it is pinned
-# to.
+# here -- so without this one large document uncaps every prompt it is
+# attached to.
 JIT_BUDGET_CHARS = 20000
 
 
@@ -35,7 +39,7 @@ def budget_resolved(resolved, limit: int = JIT_BUDGET_CHARS):
     """Fit resolved bodies into the budget by dropping whole modules.
 
     Site-scoped material is kept first: most specific, least replaceable.
-    Mirrors shared.prompts.knowledge.budget_pinned, including never cutting
+    Mirrors shared.prompts.knowledge.budget_inlined, including never cutting
     a document in half.
     """
     kept, dropped, used = [], [], 0
@@ -84,57 +88,18 @@ class JitContextResolver:
         if not chosen:
             return "", []
 
-        pinned = [m for m in chosen if m.mode == "pinned"]
-        on_demand = await self._visible_only([m for m in chosen if m.mode != "pinned"], ctx)
+        # Every attached module is inlined in full. Authorization is not
+        # weakened by dropping the old catalog branch: resolve() is the
+        # authoritative gate and always was (GDocProvider.resolve calls its
+        # own visible_to; graph/directory/episodic filter rows by permission
+        # inside resolve), and with no summary-only catalog there is nothing
+        # left that could name a module ahead of that gate.
+        resolved = budget_resolved(await self._resolve_all(chosen, ctx))
+        if not resolved:
+            return "", []
 
-        resolved = budget_resolved(await self._resolve_all(pinned, ctx))
-
-        blocks: List[str] = []
-        used: List[str] = []
-
-        if resolved:
-            body = "\n\n".join(f"## {m.title}\n\n{text.strip()}" for m, text in resolved)
-            blocks.append(f"# Live Context\n\n{body}")
-            used.extend(m.slug for m, _ in resolved)
-
-        if on_demand:
-            lines = "\n".join(
-                f"- `{m.slug}` — {m.summary}" for m in sorted(on_demand, key=lambda m: m.slug)
-            )
-            blocks.append(
-                "# Available Live Context\n\n"
-                "Fetch any of these with the `get_knowledge_module` tool when relevant:\n\n"
-                + lines
-            )
-            used.extend(m.slug for m in on_demand)
-
-        return "\n\n".join(blocks), used
-
-    async def _visible_only(
-        self, modules: List[KnowledgeModule], ctx: ResolutionContext
-    ) -> List[KnowledgeModule]:
-        """Drop on-demand modules this caller may not fetch.
-
-        A catalog line carries the module's summary, which can itself be
-        sensitive -- and listing something the caller will be refused wastes
-        a model turn. Providers without a visible_to (graph, directory,
-        episodic) filter inside resolve() instead and pass through here.
-        """
-        out: List[KnowledgeModule] = []
-        for module in modules:
-            provider = self._registry.get(module.source)
-            check = getattr(provider, "visible_to", None) if provider else None
-            if check is None:
-                out.append(module)
-                continue
-            try:
-                if await asyncio.wait_for(check(module, ctx), timeout=self.timeout_seconds):
-                    out.append(module)
-            except Exception:
-                LOGGER.opt(exception=True).warning(
-                    f"Visibility check failed for '{module.slug}'; withholding",
-                )
-        return out
+        body = "\n\n".join(f"## {m.title}\n\n{text.strip()}" for m, text in resolved)
+        return f"# Live Context\n\n{body}", [m.slug for m, _ in resolved]
 
     async def _resolve_all(
         self, modules: List[KnowledgeModule], ctx: ResolutionContext
@@ -175,41 +140,6 @@ class JitContextResolver:
         )
 
 
-def build_default_registry() -> ProviderRegistry:
-    """Every provider that can be constructed in this process.
-
-    A provider whose dependencies are missing is omitted rather than
-    registered-and-broken: a module naming it then logs one clear "no
-    registered provider" warning per request instead of a stack trace.
-    """
-    registry = ProviderRegistry()
-    try:
-        from shared.prompts.providers_gdoc import GDocProvider
-
-        registry.register(GDocProvider())
-    except Exception:
-        LOGGER.opt(exception=True).warning("GDocProvider unavailable")
-    try:
-        from orchestrator.services.providers.directory_provider import DirectoryProvider
-
-        registry.register(DirectoryProvider())
-    except Exception:
-        LOGGER.opt(exception=True).warning("DirectoryProvider unavailable")
-    try:
-        from orchestrator.services.providers.graph_provider import GraphProvider
-
-        registry.register(GraphProvider())
-    except Exception:
-        LOGGER.opt(exception=True).warning("GraphProvider unavailable")
-    try:
-        from orchestrator.services.providers.episodic_provider import EpisodicProvider
-
-        registry.register(EpisodicProvider())
-    except Exception:
-        LOGGER.opt(exception=True).warning("EpisodicProvider unavailable")
-    return registry
-
-
 _RESOLVER: Optional[JitContextResolver] = None
 
 
@@ -226,4 +156,14 @@ def get_jit_resolver() -> JitContextResolver:
     return _RESOLVER
 
 
-__all__ = ["JitContextResolver", "build_default_registry", "get_jit_resolver"]
+# build_default_registry is re-exported, not defined here: it lives in
+# shared.prompts.providers so anansi_app (whose image has no `orchestrator`
+# package -- see anansi_app/Dockerfile) can build the same registry for the
+# Context page's preview pane. Kept importable from this path because
+# prepare_context.py and this module's tests already name it.
+__all__ = [
+    "JitContextResolver",
+    "budget_resolved",
+    "build_default_registry",
+    "get_jit_resolver",
+]

@@ -14,9 +14,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.prompts.bundled import BundledStore
 from shared.prompts.knowledge import (
-    budget_pinned,
-    render_catalog,
-    render_pinned,
+    budget_inlined,
+    render_inlined,
     select_for_prompt,
 )
 from shared.prompts.render import render_body, split_sections
@@ -188,12 +187,10 @@ class PromptLibrary:
         chosen = [m for m in chosen if not m.is_jit]
         chosen = [m for m in chosen if m.body]
 
-        pinned, _dropped = budget_pinned([m for m in chosen if m.mode == "pinned"])
-        on_demand = [m for m in chosen if m.mode == "on_demand"]
-
-        blocks = [b for b in (render_pinned(pinned), render_catalog(on_demand)) if b]
-        used = [m.slug for m in pinned] + [m.slug for m in on_demand]
-        return ("\n\n".join(blocks) or None), used
+        # Every attached module is inlined in full -- the budget is the only
+        # thing that can hold one back, and it drops whole modules.
+        inlined, _dropped = budget_inlined(chosen)
+        return render_inlined(inlined), [m.slug for m in inlined]
 
     def resolve(self, prompt_id: str) -> Tuple[str, PromptSource, Optional[int]]:
         """The current body exactly as stored (DB, then Doc, then bundled).

@@ -9,6 +9,7 @@ from nicegui_app.pages.knowledge_modules import (
     describe_audience,
     extract_drive_id,
     filter_context_rows,
+    group_label,
     group_module_rows,
     module_is_deletable,
     preview_module_body,
@@ -21,7 +22,7 @@ from nicegui_app.pages.prompts import KnowledgeTabRow, build_knowledge_tab, filt
 from shared.prompts.knowledge import KnowledgeModule
 
 
-def _module(slug, tags=("grid_ops",), mode="pinned", summary="s", body="b" * 40):
+def _module(slug, tags=("grid_ops",), summary="s", body="b" * 40, source="manual"):
     return KnowledgeModule(
         id=slug,
         slug=slug,
@@ -30,7 +31,7 @@ def _module(slug, tags=("grid_ops",), mode="pinned", summary="s", body="b" * 40)
         body=body,
         tags=list(tags),
         scope="sector",
-        mode=mode,
+        source=source,
     )
 
 
@@ -38,7 +39,7 @@ def test_build_module_rows_reports_size():
     rows = build_module_rows([_module("comms")])
     assert rows == [
         ModuleRow(
-            slug="comms", title="Comms", tags=["grid_ops"], scope="sector", mode="pinned",
+            slug="comms", title="Comms", tags=["grid_ops"], scope="sector",
             chars=40, source="manual", size_label="40 chars",
             summary="s", body="b" * 40,
         )
@@ -86,15 +87,11 @@ def test_filter_context_rows_no_match_returns_empty():
     assert filter_context_rows(rows, "no such module") == []
 
 
-def test_knowledge_tab_lists_all_modules_with_pinned_state():
-    rows = build_knowledge_tab([_module("beta"), _module("alpha", mode="on_demand")], {"alpha": True})
+def test_knowledge_tab_lists_all_modules_with_attached_state():
+    rows = build_knowledge_tab([_module("beta"), _module("alpha")], {"alpha": True})
     assert rows == [
-        KnowledgeTabRow(
-            slug="alpha", title="Alpha", mode="on_demand", chars=40, checked=True, summary="s"
-        ),
-        KnowledgeTabRow(
-            slug="beta", title="Beta", mode="pinned", chars=40, checked=False, summary="s"
-        ),
+        KnowledgeTabRow(slug="alpha", title="Alpha", chars=40, checked=True, summary="s"),
+        KnowledgeTabRow(slug="beta", title="Beta", chars=40, checked=False, summary="s"),
     ]
 
 
@@ -114,20 +111,21 @@ def _knowledge_tab_rows_fixture():
     return [
         KnowledgeTabRow(
             slug="azimuth-calculation", title="Azimuth Calculation",
-            mode="on_demand", chars=318, checked=False,
+            chars=318, checked=False,
             summary="How PV azimuth is measured.",
         ),
         KnowledgeTabRow(
             slug="victron-led", title="Victron Quattro Codes",
-            mode="on_demand", chars=2438, checked=True,
+            chars=2438, checked=True,
             summary="Decoding inverter LED error states.",
         ),
     ]
 
 
-def test_validate_module_requires_a_summary_for_on_demand():
+def test_validate_module_requires_a_summary():
+    """The summary is how a module is recognised in the picker."""
     with pytest.raises(ValueError, match="summary"):
-        validate_module(slug="a", title="A", summary="", body="b", mode="on_demand")
+        validate_module(slug="a", title="A", summary="", body="b")
 
 
 def test_validate_module_rejects_a_bad_scope():
@@ -148,18 +146,29 @@ def test_validate_module_requires_slug_title_and_body():
         validate_module(slug="", title="A", summary="s", body="b")
 
 
-def test_validate_module_rejects_a_bad_mode():
-    with pytest.raises(ValueError, match="mode"):
-        validate_module(slug="a", title="A", summary="s", body="b", mode="sometimes")
+def test_validate_module_no_longer_takes_a_mode():
+    """The on-demand tier is gone; a caller still passing mode= must break loudly."""
+    with pytest.raises(TypeError):
+        validate_module(slug="a", title="A", summary="s", body="b", mode="on_demand")
 
 
-def test_group_module_rows_orders_pinned_before_on_demand():
+def test_group_label_splits_built_in_from_curated():
+    assert group_label("directory") == "Built-in"
+    assert group_label("graph") == "Built-in"
+    assert group_label("episodic") == "Built-in"
+    # A doc an operator attached is theirs, not the system's.
+    assert group_label("gdoc") == "Curated"
+    assert group_label("manual") == "Curated"
+
+
+def test_group_module_rows_orders_built_in_before_curated():
     rows = [
-        _row_for_grouping("catalog", mode="on_demand"),
-        _row_for_grouping("comms", mode="pinned"),
+        _row_for_grouping("comms", source="manual"),
+        _row_for_grouping("directory", source="directory"),
     ]
     groups = group_module_rows(rows)
-    assert [label for label, _ in groups] == ["Pinned", "On-demand"]
+    assert [label for label, _ in groups] == ["Built-in", "Curated"]
+    assert [r.slug for r in groups[0][1]] == ["directory"]
 
 
 def test_group_module_rows_keeps_slug_order_within_a_group():
@@ -169,12 +178,14 @@ def test_group_module_rows_keeps_slug_order_within_a_group():
 
 
 def test_group_module_rows_omits_empty_buckets():
-    groups = group_module_rows([_row_for_grouping("a", mode="pinned")])
-    assert [label for label, _ in groups] == ["Pinned"]
+    groups = group_module_rows([_row_for_grouping("a", source="manual")])
+    assert [label for label, _ in groups] == ["Curated"]
 
 
-def _row_for_grouping(slug: str, mode: str = "pinned") -> ModuleRow:
-    return ModuleRow(slug=slug, title=slug.title(), tags=[], scope="sector", mode=mode, chars=0)
+def _row_for_grouping(slug: str, source: str = "manual") -> ModuleRow:
+    return ModuleRow(
+        slug=slug, title=slug.title(), tags=[], scope="sector", chars=0, source=source
+    )
 
 
 def test_prompt_option_label_combines_id_and_description():

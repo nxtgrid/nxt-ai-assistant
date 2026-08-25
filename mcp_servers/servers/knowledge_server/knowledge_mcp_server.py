@@ -262,8 +262,10 @@ async def fetch_knowledge_module(
 ) -> str:
     """Return one knowledge module's full body by slug, for this caller.
 
-    Backs the on-demand tier: the model sees only slug and summary in context
-    and calls this when it decides a module is relevant.
+    A by-name lookup, not a tier. Every module attached to a prompt is now
+    inlined into that prompt in full, so this exists for the module that is
+    NOT attached -- one named by slug in a document or by a colleague. The
+    catalog of slug+summary lines this used to back is gone.
 
     A gdoc module is gated on the caller's Drive access -- without that this
     tool is a read primitive for every attached document, since the model

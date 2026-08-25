@@ -1,7 +1,7 @@
 {
   "$schema": "tool_definitions_schema.json",
   "version": "1.0.0",
-  "exported_at": "2026-08-21T13:37:46.096295Z",
+  "exported_at": "2026-08-25T10:18:06.652151+00:00",
   "tools": {
     "equipment_diagnostics": [
       {
@@ -2358,13 +2358,13 @@
       },
       {
         "name": "get_knowledge_module",
-        "description": "[READ-ONLY] Fetch the full body of a technical knowledge module by slug. System prompts pin a catalog of on-demand modules (slug and one-line summary only) under a '# Available Knowledge' section when relevant -- call this to retrieve a module's full content once you've decided it's relevant to the current question.",
+        "description": "[READ-ONLY] Fetch the full body of a technical knowledge module by slug. Modules attached to your system prompt are already inlined in full under '# Technical Knowledge' / '# Live Context', so you rarely need this -- use it to read a module by name that is NOT already in your context, for example one referenced by slug in a document or by a colleague.",
         "inputSchema": {
           "type": "object",
           "properties": {
             "slug": {
               "type": "string",
-              "description": "Module slug from the Available Knowledge catalog."
+              "description": "Exact module slug, e.g. \"azimuth-calculation\"."
             }
           },
           "required": [
