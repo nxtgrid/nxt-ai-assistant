@@ -42,8 +42,13 @@ from orchestrator.experts.workflow_executor import (
     WorkflowExecutor,
 )
 from orchestrator.graphs.state import ConversationState
+from orchestrator.services.jit_context_resolver import resolve_jit_context_for
 from orchestrator.services.supabase_client import get_supabase_client
 from orchestrator.services.work_packet_service import WorkPacketService
+from shared.grid_scope import resolve_scope_grid_from_user_context
+from shared.prompts.knowledge import KNOWLEDGE_STORE, compose_knowledge_text
+from shared.prompts.skills import skill_prompt_id
+from shared.prompts.types import RequestScope
 from shared.utils.logging import get_logger
 from shared.utils.telegram_send import send_telegram_message
 
@@ -68,13 +73,19 @@ class _SyntheticExpertConfig:
     """Minimal ExpertConfig stand-in for a skill run.
 
     execute_workflow only reads .system_instructions (the LLM step's system
-    prompt -- skill steps carry their own instructions inline via
-    is_skill_step, so this stays empty) and .display_name/.model. .tools
-    and .get_workflow are never consulted for a skill run (pre_parsed_steps
-    bypasses get_workflow entirely; per-step tool filtering is
+    prompt) and .display_name/.model. .tools and .get_workflow are never
+    consulted for a skill run (pre_parsed_steps bypasses get_workflow
+    entirely; per-step tool filtering is
     skill_step_bindings.filter_tools_for_step, driven by each ParsedStep's
     own allow_write, not this object) -- both are still implemented so
     anything that duck-types a real ExpertConfig doesn't break.
+
+    system_instructions defaults to "" (a skill step's own instruction is
+    still what carries the step's actual task, via is_skill_step -- that
+    part is unchanged), but run_skill_packet now populates it with this
+    skill's composed knowledge modules (see
+    _resolve_skill_system_instructions) before constructing this object, so
+    it is not always empty any more.
     """
 
     expert_id: str
@@ -213,6 +224,38 @@ class _ResponseBuffer:
         self._buffered_summaries = []
 
 
+async def _resolve_skill_system_instructions(
+    skill_id: str,
+    user_context: Optional[Any],
+    skill_inputs: Dict[str, Any],
+) -> str:
+    """This skill's knowledge modules (inline + JIT), composed once for this
+    run. Empty string when none are pinned or knowledge storage is
+    unavailable -- matches the pre-existing default exactly.
+
+    Grid preference: an explicit grid on the skill's own inputs first (a
+    grid-anchored skill knows what it's about), falling back to the same
+    chat-channel/permission-based resolver a live conversation uses. Never
+    guessed -- see shared/grid_scope.py.
+    """
+    grid = (skill_inputs.get("grid") or {}).get("grid_name")
+    if not grid:
+        grid = await resolve_scope_grid_from_user_context(user_context)
+
+    org_id_str = (
+        user_context.organization_ids[0]
+        if user_context and user_context.organization_ids
+        else None
+    )
+    scope = RequestScope(organization_id=org_id_str, grid=grid)
+    prompt_id = skill_prompt_id(skill_id)
+
+    inline_text, _inline_used = compose_knowledge_text(KNOWLEDGE_STORE, prompt_id, scope)
+    jit_text, _jit_used = await resolve_jit_context_for(prompt_id, user_context, grid=grid)
+
+    return "\n\n".join(t for t in (inline_text, jit_text) if t)
+
+
 async def run_skill_packet(
     state: ConversationState,
     expert_id: str,
@@ -261,17 +304,21 @@ async def run_skill_packet(
             "expert_executed": False,
         }
 
-    expert_config = _SyntheticExpertConfig(
-        expert_id=expert_id,
-        display_name=skill.get("title") or skill_id,
-    )
-
     org_id = None
     if user_context and user_context.organization_ids:
         org_id = int(user_context.organization_ids[0])
 
     metadata = state.get("metadata") or {}
     skill_inputs = metadata.get("skill_inputs") or {}
+
+    system_instructions = await _resolve_skill_system_instructions(
+        skill_id, user_context, skill_inputs
+    )
+    expert_config = _SyntheticExpertConfig(
+        expert_id=expert_id,
+        display_name=skill.get("title") or skill_id,
+        system_instructions=system_instructions,
+    )
     # dry_run: Phase 5 of docs/superpowers/plans/2026-08-20-expert-steps-as-
     # skill-tools.md's run-wide mock-mode baseline (StepContext.dry_run) --
     # read from metadata rather than a new parameter on this function so

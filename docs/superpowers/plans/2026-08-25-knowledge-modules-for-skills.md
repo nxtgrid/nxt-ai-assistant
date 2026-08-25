@@ -618,7 +618,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Modify: `chat_orchestrator/orchestrator/experts/skill_runner.py`
 - Test: `chat_orchestrator/tests/experts/test_skill_runner.py`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add a new test class to `chat_orchestrator/tests/experts/test_skill_runner.py`
 (it already imports `AsyncMock, MagicMock, patch` from `unittest.mock`, and
@@ -697,12 +697,12 @@ implements: `compose_knowledge_text(KNOWLEDGE_STORE, prompt_id, scope)`
 `resolve_jit_context_for(prompt_id, user_context, grid=grid)` (`grid` passed
 by keyword).
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd chat_orchestrator && uv run pytest tests/experts/test_skill_runner.py -q -k ResolveSkillSystemInstructions`
 Expected: FAIL with `ImportError: cannot import name '_resolve_skill_system_instructions'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 Add these imports near the top of `skill_runner.py` (alongside the existing
 `from orchestrator...` / `from shared...` import block):
@@ -795,7 +795,7 @@ own `organization_id` column) — `RequestScope.organization_id` is
 modules, so reusing the int-cast variable there would silently break that
 match.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd chat_orchestrator
@@ -805,7 +805,7 @@ uv run pytest tests/ -q
 ```
 Expected: PASS, full chat_orchestrator suite still green (2259+ passed).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add chat_orchestrator/orchestrator/experts/skill_runner.py \
