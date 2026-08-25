@@ -69,7 +69,7 @@ via SQL today and a skill run would already pick it up once this phase lands.
 - Modify: `shared/prompts/skills.py`
 - Test: `shared/tests/test_skills_catalog.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `shared/tests/test_skills_catalog.py` (new top-level test, anywhere
 after the imports):
@@ -88,12 +88,12 @@ def test_skill_pin_prefix_is_the_literal_prefix_used():
     assert SKILL_PIN_PREFIX == "skill:"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd chat_orchestrator && uv run pytest ../shared/tests/test_skills_catalog.py -q -k skill_prompt_id`
 Expected: FAIL with `ImportError: cannot import name 'SKILL_PIN_PREFIX'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `shared/prompts/skills.py`, add right after the module docstring (before
 `from __future__ import annotations` stays first; add these lines after the
@@ -127,12 +127,12 @@ __all__ = [
 ]
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 Run: `cd chat_orchestrator && uv run pytest ../shared/tests/test_skills_catalog.py -q`
 Expected: PASS, full file green (no regressions in the rest of the file)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add shared/prompts/skills.py shared/tests/test_skills_catalog.py
