@@ -7,6 +7,7 @@ import ast
 from pathlib import Path
 
 from nicegui_app.pages.knowledge_picker import (
+    UNPINNED_PREVIEW_LIMIT,
     PickerRow,
     build_picker_rows,
     filter_picker_rows,
@@ -68,22 +69,77 @@ def test_filter_picker_rows_matches_slug_title_and_summary():
     assert len(filter_picker_rows(rows, "")) == 2
 
 
-# ── The reverse-direction picker's own scaling hazard ───────────────────────
+# ── The reverse-direction picker's own scaling hazard, and its discoverability
+# gap ────────────────────────────────────────────────────────────────────────
 # render_entity_picker (knowledge_modules.py's "Used by these prompts"/"these
 # skills") can face dozens of candidates -- every registered prompt id today,
-# every skill ever created tomorrow. Rendering all of them, unfiltered, the
-# moment the Edit-module dialog opens produced a single websocket update big
-# enough to trip NiceGUI's own message-size limit -- the dialog would open
-# with the connection dropping mid-render, leaving both "Used by" sections
-# (and everything below them) blank with no error the operator could see.
-# rows_to_display is the fix: an empty search shows only what's already
-# pinned (always small in practice), and typing a query searches the full
-# candidate set regardless of pinned state, so a new pin stays discoverable.
+# every skill ever created tomorrow -- so its default (no-query) view must
+# never grow proportionally to the candidate pool: rows_to_display keeps it
+# capped at UNPINNED_PREVIEW_LIMIT no matter how large that pool gets.
+#
+# An earlier version of that cap showed *only* whatever was already pinned
+# and nothing else until you typed -- for a module with nothing pinned yet
+# (every module, the day this shipped) the picker opened looking completely
+# inert: a plain text box with no rows and no indication anything was there
+# to find, unlike the native dropdowns elsewhere in the same dialog that
+# visibly pop open on click. rows_to_display now always tops up to
+# UNPINNED_PREVIEW_LIMIT with a small, deterministic (alphabetical) sample of
+# not-yet-pinned rows too, so there's always something to see and click the
+# moment the dialog opens -- capped, not proportional, so it can't
+# reintroduce the original scaling problem.
 
 
-def test_rows_to_display_with_empty_query_shows_only_selected_rows():
-    rows = _picker_rows_fixture()  # azimuth-calculation, victron-led
-    assert [r.slug for r in rows_to_display(rows, {"victron-led"}, "")] == ["victron-led"]
+def _rows(*slugs_and_checked):
+    """N distinct rows from (slug, checked) pairs, for the preview-limit
+    tests below -- knowledge_modules.py always hands render_entity_picker
+    its rows pre-sorted (alphabetically by prompt id, or by skill title), so
+    these fixtures do too."""
+    return [
+        PickerRow(slug=slug, title=slug, chars=0, checked=checked, summary="")
+        for slug, checked in slugs_and_checked
+    ]
+
+
+def test_rows_to_display_with_empty_query_and_room_shows_pinned_plus_a_sample():
+    rows = _picker_rows_fixture()  # 2 rows total, well under the preview limit
+    # victron-led is pinned; azimuth-calculation isn't -- both now fit under
+    # the cap, so an empty query shows both, not just the pinned one.
+    assert {r.slug for r in rows_to_display(rows, {"victron-led"}, "")} == {
+        "victron-led",
+        "azimuth-calculation",
+    }
+
+
+def test_rows_to_display_with_more_unpinned_rows_than_the_limit_caps_the_sample():
+    rows = _rows(*[(f"prompt-{i}", False) for i in range(20)])
+    visible = rows_to_display(rows, set(), "")
+    assert len(visible) == UNPINNED_PREVIEW_LIMIT
+    # Deterministic and stable -- the same alphabetical prefix every time,
+    # not a random/rotating sample, so an unrelated redraw doesn't reshuffle
+    # what's already on screen.
+    assert [r.slug for r in visible] == [f"prompt-{i}" for i in range(UNPINNED_PREVIEW_LIMIT)]
+
+
+def test_rows_to_display_always_shows_every_pinned_row_even_past_the_limit():
+    # 12 pinned rows, over the 8-row cap -- pinned rows are never hidden;
+    # the cap only ever applies to the sample of *unpinned* rows.
+    rows = _rows(*[(f"prompt-{i}", True) for i in range(12)])
+    visible = rows_to_display(rows, {f"prompt-{i}" for i in range(12)}, "")
+    assert len(visible) == 12
+
+
+def test_rows_to_display_tops_up_pinned_rows_with_unpinned_ones_up_to_the_limit():
+    rows = _rows(("pinned-a", True), *[(f"unpinned-{i}", False) for i in range(20)])
+    visible = rows_to_display(rows, {"pinned-a"}, "")
+    assert len(visible) == UNPINNED_PREVIEW_LIMIT
+    assert visible[0].slug == "pinned-a"
+    assert [r.slug for r in visible[1:]] == [
+        f"unpinned-{i}" for i in range(UNPINNED_PREVIEW_LIMIT - 1)
+    ]
+
+
+def test_rows_to_display_with_no_candidates_at_all_is_empty():
+    assert rows_to_display([], set(), "") == []
 
 
 def test_rows_to_display_with_a_query_searches_every_row_regardless_of_selection():
@@ -91,9 +147,13 @@ def test_rows_to_display_with_a_query_searches_every_row_regardless_of_selection
     assert [r.slug for r in rows_to_display(rows, set(), "azimuth")] == ["azimuth-calculation"]
 
 
-def test_rows_to_display_with_nothing_selected_and_empty_query_is_empty():
-    rows = _picker_rows_fixture()
-    assert rows_to_display(rows, set(), "") == []
+def test_rows_to_display_with_a_query_is_not_capped_by_the_preview_limit():
+    # Typing a query bypasses the preview cap entirely -- every match must
+    # stay reachable however many there are; only the empty-query default
+    # view is capped.
+    rows = _rows(*[(f"prompt-{i}", False) for i in range(20)])
+    visible = rows_to_display(rows, set(), "prompt")
+    assert len(visible) == 20
 
 
 # ── The same null-body / JIT hazard build_module_rows has ──────────────────
@@ -197,3 +257,61 @@ def test_render_entity_picker_returns_a_getter_seeded_from_checked_rows(monkeypa
     get_selected = knowledge_picker.render_entity_picker(rows, label="Used by these prompts")
 
     assert get_selected() == ["a"]
+
+
+def _record_label(sink):
+    element = _FakeElement()
+    sink.append(element)
+    return element
+
+
+def _record_checkbox(sink, kwargs):
+    element = _FakeElement()
+    sink.append((element, kwargs.get("on_change")))
+    return element
+
+
+def test_render_entity_picker_toggling_a_row_updates_the_live_selected_count(monkeypatch):
+    """A tick/untick here has no Save button of its own and no other
+    feedback (see render_entity_picker's toggle) -- the running "N selected"
+    label is the only visible confirmation a click registered at all, so it
+    must actually move when a row is ticked, not just exist."""
+    from types import SimpleNamespace
+
+    import nicegui_app.pages.knowledge_picker as knowledge_picker
+
+    created_labels: list = []
+    created_checkboxes: list = []
+
+    fake_ui = type(
+        "FakeUi",
+        (),
+        {
+            "label": staticmethod(lambda *a, **k: _record_label(created_labels)),
+            "input": staticmethod(lambda *a, **k: _FakeElement()),
+            "column": staticmethod(lambda *a, **k: _FakeElement()),
+            "row": staticmethod(lambda *a, **k: _FakeElement()),
+            "checkbox": staticmethod(lambda *a, **k: _record_checkbox(created_checkboxes, k)),
+        },
+    )()
+    monkeypatch.setattr(knowledge_picker, "ui", fake_ui, raising=False)
+
+    rows = [
+        PickerRow(slug="a", title="A", chars=0, checked=True, summary=""),
+        PickerRow(slug="b", title="B", chars=0, checked=False, summary=""),
+    ]
+    knowledge_picker.render_entity_picker(rows, label="Used by these prompts")
+
+    # created_labels[0] is the "Used by these prompts" heading; [1] is the
+    # running count -- both created once, up front, before redraw() ever
+    # touches the row list itself.
+    picked_label = created_labels[1]
+    assert picked_label.text == "1 selected"
+
+    # created_checkboxes[0] is row "a" (already checked); [1] is row "b".
+    # Simulate ticking it the same way a real click would: invoke the
+    # on_change NiceGUI itself hands to toggle().
+    _, toggle_b = created_checkboxes[1]
+    toggle_b(SimpleNamespace(value=True))
+
+    assert picked_label.text == "2 selected"
