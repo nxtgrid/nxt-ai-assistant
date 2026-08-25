@@ -2052,7 +2052,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Full backend suites**
+- [x] **Step 1: Full backend suites**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills/chat_orchestrator
@@ -2063,7 +2063,7 @@ uv run pytest ../shared -q -n auto
 Expected: all green, no regressions vs. the 2259 / 839 baseline (higher
 counts now, from this plan's new tests).
 
-- [ ] **Step 2: Full anansi_app suite**
+- [x] **Step 2: Full anansi_app suite**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills
@@ -2071,7 +2071,7 @@ PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests -q
 ```
 Expected: all green, no regressions vs. the 426 baseline.
 
-- [ ] **Step 3: pre-commit**
+- [x] **Step 3: pre-commit**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills

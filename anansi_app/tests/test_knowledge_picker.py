@@ -7,6 +7,7 @@ import ast
 from pathlib import Path
 
 from nicegui_app.pages.knowledge_picker import PickerRow, build_picker_rows, filter_picker_rows
+
 from shared.prompts.knowledge import KnowledgeModule
 
 KNOWLEDGE_PICKER_PATH = (

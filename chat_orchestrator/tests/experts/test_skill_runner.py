@@ -13,8 +13,8 @@ import pytest
 from orchestrator.experts.skill_runner import (
     SKILL_EXPERT_PREFIX,
     SKILL_PACKET_TYPE,
-    _ResponseBuffer,
     _resolve_skill_system_instructions,
+    _ResponseBuffer,
     build_parsed_steps,
     is_skill_expert_id,
     run_skill_packet,

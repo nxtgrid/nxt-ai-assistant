@@ -1,10 +1,9 @@
 """JIT context resolution: selection, concurrency, fail-open, rendering."""
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
-
-from unittest.mock import patch
 
 from orchestrator.services.jit_context_resolver import JitContextResolver, resolve_jit_context_for
 from shared.prompts.knowledge import KnowledgeModule
