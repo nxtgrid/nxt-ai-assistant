@@ -163,3 +163,97 @@ async def test_an_api_explosion_fails_closed(patched_drive):
     patched_drive["service"] = _FakeService()
     dp.get_drive_credentials = _boom
     assert await user_can_access("file-1", "tech@example.com", strict=True) is False
+
+
+# ── check_access: same decisions as user_can_access, plus a reason a caller
+# can show a human. user_can_access delegates to this now (see the module
+# docstring); the seven tests above already pin every allowed/denied outcome
+# it must preserve, so these only add the .reason assertions on top. ────────
+
+
+@pytest.mark.asyncio
+async def test_check_access_reports_no_email_without_hitting_the_api(patched_drive):
+    from shared.utils.drive_permissions import check_access
+
+    patched_drive["service"] = _FakeService()
+    result = await check_access("file-1", None)
+    assert result.allowed is False
+    assert "signed in" in result.reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_check_access_names_the_checked_email_on_a_strict_withhold(patched_drive):
+    """The exact bug report this exists for: an operator who shared a doc
+    with the bot but not with themself sees a denial that doesn't say who
+    it checked or that the bot itself could open the file fine."""
+    from shared.utils.drive_permissions import check_access
+
+    patched_drive["service"] = _FakeService(
+        list_error=RuntimeError("403"),
+        get_result={"id": "file-1", "permissions": []},
+    )
+    result = await check_access("file-1", "tech@example.com", strict=True)
+    assert result.allowed is False
+    assert "tech@example.com" in result.reason
+    assert "group" in result.reason.lower()  # the known Groups blind spot, named
+
+
+@pytest.mark.asyncio
+async def test_check_access_explains_a_denial_with_no_drive_info_at_all(patched_drive):
+    from shared.utils.drive_permissions import check_access
+
+    patched_drive["service"] = _FakeService(
+        list_result={"permissions": [{"type": "user", "emailAddress": "other@example.com", "role": "reader"}]}
+    )
+    result = await check_access("file-1", "tech@example.com", strict=True)
+    assert result.allowed is False
+    assert "tech@example.com" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_check_access_explains_an_exception_with_the_real_error(patched_drive):
+    from shared.utils.drive_permissions import check_access
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError("network down")
+
+    import shared.utils.drive_permissions as dp
+
+    patched_drive["service"] = _FakeService()
+    dp.get_drive_credentials = _boom
+    result = await check_access("file-1", "tech@example.com", strict=True)
+    assert result.allowed is False
+    assert "network down" in result.reason
+
+
+@pytest.mark.asyncio
+async def test_check_access_reports_a_reason_when_granted_too(patched_drive):
+    from shared.utils.drive_permissions import check_access
+
+    patched_drive["service"] = _FakeService(
+        list_result={
+            "permissions": [
+                {"type": "user", "emailAddress": "tech@example.com", "role": "reader"}
+            ]
+        }
+    )
+    result = await check_access("file-1", "tech@example.com", strict=True)
+    assert result.allowed is True
+    assert result.reason
+
+
+@pytest.mark.asyncio
+async def test_user_can_access_still_returns_a_plain_bool(patched_drive):
+    """The existing, widely-called contract must not change shape."""
+    from shared.utils.drive_permissions import user_can_access
+
+    patched_drive["service"] = _FakeService(
+        list_result={
+            "permissions": [
+                {"type": "user", "emailAddress": "tech@example.com", "role": "reader"}
+            ]
+        }
+    )
+    result = await user_can_access("file-1", "tech@example.com", strict=True)
+    assert result is True
+    assert isinstance(result, bool)

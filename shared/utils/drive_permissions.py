@@ -19,6 +19,7 @@ fallback only grants read.
 
 import asyncio
 import logging
+from dataclasses import dataclass
 
 from googleapiclient.discovery import build
 
@@ -68,30 +69,61 @@ def _permission_grants(
     return False
 
 
-async def user_can_access(
+@dataclass(frozen=True)
+class AccessCheck:
+    """The outcome of an access check, with enough detail to explain a denial.
+
+    ``user_can_access`` collapses this to a bool, which is right for its many
+    existing callers (signing, ingestion, the knowledge MCP server, the gdoc
+    context provider) -- they only ever branch on allowed/denied. Anywhere
+    that shows the result to a human instead -- the Context admin dialog
+    attaching a document, for one -- should call ``check_access`` directly,
+    so a denial can say why rather than just no. ``reason`` is always safe to
+    show a user; it never carries anything ``_permission_grants`` didn't
+    already have to look at to make the decision.
+    """
+
+    allowed: bool
+    reason: str
+
+
+async def check_access(
     file_id: str,
     user_email: str | None,
     need_write: bool = False,
     strict: bool = False,
-) -> bool:
-    """Check if a user has access to a Google Drive file.
+) -> AccessCheck:
+    """Like ``user_can_access``, but with a human-readable reason either way.
 
-    Returns False (fail-closed) if email is None. Logs denied access at
-    WARNING level for audit.
-
-    ``strict=True`` removes only the final "service account could reach the
-    file, so allow read" fallback. Everything else -- explicit email match,
-    'anyone' link sharing, domain-wide sharing, and the files.get() retry when
-    permissions.list() is unavailable -- behaves identically. Callers that
-    surface document *content* to an end user must pass strict=True: without
-    it, any link-shared or Shared Drive file is readable by everyone.
+    Every branch here existed in ``user_can_access`` already, as a bool plus
+    a LOGGER call; this only attaches a reason string to each, without
+    changing which branch is taken or what it decides. See that function's
+    docstring for what ``strict``/``need_write`` mean.
     """
     if not user_email:
         LOGGER.warning(f"Drive access denied: no user email for file={file_id}")
-        return False
+        return AccessCheck(False, "You're not signed in, so access can't be checked.")
 
     required = "writer" if need_write else "reader"
     required_rank = ROLE_RANK[required]
+
+    def _no_match_reason() -> str:
+        # Reached only after at least one Drive call above succeeded (a
+        # throw goes to the except block below instead), so the bot itself
+        # could see something about this file -- the gap is specifically
+        # that no permission entry names this user.
+        if need_write:
+            return (
+                f"Write access is required, but no sharing entry grants "
+                f"{user_email} writer (or owner) on this file."
+            )
+        return (
+            f"The bot's Google account can see this file's sharing list, but no "
+            f"entry names {user_email} directly. Sharing it with the bot alone "
+            f"isn't enough — share it with {user_email} too. (Access only "
+            f"through a Google Group isn't detected here; share directly with "
+            f"your email instead.)"
+        )
 
     try:
         creds = get_drive_credentials()
@@ -122,7 +154,7 @@ async def user_can_access(
         if permissions:
             for perm in permissions:
                 if _permission_grants(perm, user_email, required_rank, need_write):
-                    return True
+                    return AccessCheck(True, "Access confirmed via the file's sharing list.")
 
         # Fall back to files.get() when permissions.list() failed or returned
         # empty (Shared Drive files don't enumerate inherited permissions).
@@ -141,7 +173,7 @@ async def user_can_access(
             )
             for perm in meta.get("permissions", []):
                 if _permission_grants(perm, user_email, required_rank, need_write):
-                    return True
+                    return AccessCheck(True, "Access confirmed via the file's sharing list.")
 
             # Service account reached the file but sees no matching permission
             # → inherited/link-share access. Grant read; write still requires
@@ -154,16 +186,45 @@ async def user_can_access(
                         f"Strict check withheld {file_id} from {user_email}: reachable "
                         f"by the service account but no permission entry matches"
                     )
-                else:
-                    LOGGER.info(
-                        f"Drive fallback: granting read access to {user_email} for {file_id}"
-                        " (service account can access file — link or inherited share)"
-                    )
-                    return True
+                    return AccessCheck(False, _no_match_reason())
+                LOGGER.info(
+                    f"Drive fallback: granting read access to {user_email} for {file_id}"
+                    " (service account can access file — link or inherited share)"
+                )
+                return AccessCheck(
+                    True,
+                    "The bot's Google account can open this file (link or inherited share).",
+                )
 
         LOGGER.warning(f"Drive access denied: user={user_email} file={file_id} required={required}")
-        return False
+        return AccessCheck(False, _no_match_reason())
 
     except Exception as e:
         LOGGER.error(f"Permission check failed for file={file_id}: {e}")
-        return False  # Fail closed
+        return AccessCheck(False, f"Couldn't check access to this file: {e}")  # Fail closed
+
+
+async def user_can_access(
+    file_id: str,
+    user_email: str | None,
+    need_write: bool = False,
+    strict: bool = False,
+) -> bool:
+    """Check if a user has access to a Google Drive file.
+
+    Returns False (fail-closed) if email is None. Logs denied access at
+    WARNING level for audit.
+
+    ``strict=True`` removes only the final "service account could reach the
+    file, so allow read" fallback. Everything else -- explicit email match,
+    'anyone' link sharing, domain-wide sharing, and the files.get() retry when
+    permissions.list() is unavailable -- behaves identically. Callers that
+    surface document *content* to an end user must pass strict=True: without
+    it, any link-shared or Shared Drive file is readable by everyone.
+
+    A thin bool-shaped wrapper around ``check_access`` (see there for the
+    actual decision logic) -- kept as its own function so the several
+    existing callers that only ever branch on true/false don't need to
+    learn about ``AccessCheck``.
+    """
+    return (await check_access(file_id, user_email, need_write, strict)).allowed
