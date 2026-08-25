@@ -65,19 +65,35 @@ def filter_picker_rows(rows: List[PickerRow], query: str) -> List[PickerRow]:
     ]
 
 
+# How many not-yet-pinned rows rows_to_display fills the empty-query view
+# with, on top of whatever's already pinned. Fixed and small on purpose: it
+# must never grow with the candidate pool -- render_entity_picker can face
+# dozens of candidates (every registered prompt id today, every skill ever
+# created tomorrow), and a default view whose size scales with that pool is
+# exactly the shape of thing that risks pushing a single websocket update
+# past NiceGUI's own message-size limit. A fixed cap keeps the default view
+# safely small forever, however large the underlying catalog grows.
+UNPINNED_PREVIEW_LIMIT = 8
+
+
 def rows_to_display(rows: List[Any], selected: "set[str]", query: str) -> List[PickerRow]:
     """Which rows render_entity_picker shows right now.
 
-    An empty query shows only the currently-selected rows, never the full
-    candidate list -- render_entity_picker can face dozens of candidates
-    (every registered prompt id today, every skill ever created tomorrow),
-    and pushing all of them, unfiltered, into the Edit-module dialog's
-    initial paint produced one websocket update large enough to trip
-    NiceGUI's own message-size limit: the dialog would open with the
-    connection dropping mid-render, leaving both "Used by" sections (and
-    everything below them, since the dialog builds top-to-bottom in one
-    pass) blank with no error the operator could ever see. A query searches
-    every row regardless of selection, so a new pin is still discoverable.
+    Typing a query always searches every candidate (filter_picker_rows,
+    matching slug/title/summary) regardless of what's pinned -- a new pin
+    must stay discoverable, and a search result is never truncated.
+
+    An empty query shows every currently-pinned row -- never capped; an
+    operator must always be able to see and unpin everything already
+    pinned -- topped up with a small, fixed-size, alphabetical sample of
+    not-yet-pinned rows (UNPINNED_PREVIEW_LIMIT) when there's room. Without
+    that sample, a module with nothing pinned yet (every module, the first
+    time this shipped) rendered a picker that looked completely inert: a
+    plain text box with no rows and nothing to suggest there was anything
+    to find, unlike the native dropdowns elsewhere in the same dialog that
+    visibly pop open the moment you click them. The sample is capped, not
+    proportional to the candidate pool, so it can't reintroduce the
+    scaling hazard described above.
 
     ``rows`` may be the raw ``PickerRow``s passed into render_entity_picker
     (whose own ``checked`` is a snapshot from dialog-open time) -- this
@@ -89,9 +105,14 @@ def rows_to_display(rows: List[Any], selected: "set[str]", query: str) -> List[P
         PickerRow(slug=r.slug, title=r.title, chars=r.chars, checked=(r.slug in selected), summary=r.summary)
         for r in rows
     ]
-    if not query.strip():
-        return [r for r in current if r.checked]
-    return filter_picker_rows(current, query)
+    if query.strip():
+        return filter_picker_rows(current, query)
+    checked = [r for r in current if r.checked]
+    remaining = UNPINNED_PREVIEW_LIMIT - len(checked)
+    if remaining <= 0:
+        return checked
+    sample = [r for r in current if not r.checked][:remaining]
+    return checked + sample
 
 
 def render_module_picker(
@@ -203,46 +224,65 @@ def render_entity_picker(
     resolve_pins_to_save; two separate saves would have the second call's
     diff delete the first call's pins).
 
-    Shows only the currently-ticked rows until the operator types a search
-    -- see rows_to_display's own docstring for why: with dozens of
-    candidates, rendering all of them unfiltered on open can push a single
-    websocket message past NiceGUI's size limit and blank the whole dialog.
+    Shows every pinned row plus a small fixed-size sample of everything
+    else until the operator types a search -- see rows_to_display's own
+    docstring for why a *fixed* sample (not "everything"): with dozens of
+    candidates, rendering all of them unfiltered on open risks pushing a
+    single websocket message past NiceGUI's size limit and blanking the
+    whole dialog.
     """
     selected: "set[str]" = {r.slug for r in rows if r.checked}
 
     ui.label(label).classes("text-caption text-bold")
+    picked_label = ui.label().classes("text-caption")
     search = ui.input(placeholder=search_placeholder).classes("w-full").props("clearable dense")
     options = ui.column().classes("w-full gap-0").style("max-height: 260px; overflow-y: auto")
+
+    def _update_picked_label() -> None:
+        # A tick/untick here has no other feedback -- no toast, no Save
+        # button of its own (the caller saves once, later, after unioning
+        # this with a second picker) -- so this is the only visible
+        # confirmation that a click actually registered.
+        picked_label.text = f"{len(selected)} selected" if selected else "Nothing selected yet"
 
     def redraw() -> None:
         options.clear()
         query = search.value or ""
         visible = rows_to_display(rows, selected, query)
+        hidden = len(rows) - len(visible) if not query.strip() else 0
         with options:
             if not visible:
                 ui.label(
-                    "No matches." if query.strip() else "Nothing pinned yet — type to search."
+                    "No matches." if query.strip() else "Nothing to pin yet."
                 ).classes("text-italic text-caption")
-            for r in visible:
-                def toggle(e, slug=r.slug) -> None:
-                    if e.value:
-                        selected.add(slug)
-                    else:
-                        selected.discard(slug)
-                    if on_change:
-                        on_change()
+            else:
+                if hidden > 0:
+                    ui.label(
+                        f"Showing {len(visible)} of {len(rows)} — type to search the rest."
+                    ).classes("text-caption text-grey")
+                for r in visible:
+                    def toggle(e, slug=r.slug) -> None:
+                        if e.value:
+                            selected.add(slug)
+                        else:
+                            selected.discard(slug)
+                        _update_picked_label()
+                        if on_change:
+                            on_change()
 
-                with ui.row().classes("items-center no-wrap w-full"):
-                    ui.checkbox(value=r.checked, on_change=toggle).props("dense")
-                    ui.label(f"{r.title}  ·  {r.summary}" if r.summary else r.title)
+                    with ui.row().classes("items-center no-wrap w-full"):
+                        ui.checkbox(value=r.checked, on_change=toggle).props("dense")
+                        ui.label(f"{r.title}  ·  {r.summary}" if r.summary else r.title)
 
     search.on_value_change(redraw)
+    _update_picked_label()
     redraw()
     return lambda: sorted(selected)
 
 
 __all__ = [
     "PickerRow",
+    "UNPINNED_PREVIEW_LIMIT",
     "build_picker_rows",
     "filter_picker_rows",
     "render_entity_picker",
