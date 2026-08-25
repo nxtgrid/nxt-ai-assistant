@@ -318,10 +318,18 @@ async def _open_detail_dialog(row: PromptRow, store: OverrideStore, refresh, use
                     .style("height: 26rem")
                 )
                 body_input.set_visibility(False)
+                # max-height + overflow-y matches body_input's fixed 26rem
+                # above -- without it, a long prompt body grows this box
+                # unbounded past the tab panel's own scroll, the same
+                # "preview overflowing" bug fixed in knowledge_modules.py's
+                # identical Edit/Preview pair.
                 body_preview = (
                     ui.markdown(current_body)
                     .classes("w-full")
-                    .style("min-height: 26rem; border: 1px solid #e0e0e0; padding: 0.5rem;")
+                    .style(
+                        "min-height: 26rem; max-height: 26rem; overflow-y: auto; "
+                        "border: 1px solid #e0e0e0; padding: 0.5rem;"
+                    )
                 )
 
                 def _switch_view(e) -> None:
