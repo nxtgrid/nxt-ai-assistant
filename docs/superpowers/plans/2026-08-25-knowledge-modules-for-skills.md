@@ -501,7 +501,7 @@ Co-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>"
 - Modify: `chat_orchestrator/orchestrator/graphs/nodes/prepare_context.py:224-241`
 - Test: `shared/tests/test_grid_scope.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `shared/tests/test_grid_scope.py`. Its existing tests patch
 dependencies via `monkeypatch.setattr("<module path as a string>", ...)`
@@ -545,12 +545,12 @@ async def test_resolve_scope_grid_from_user_context_unpacks_the_right_fields(mon
     }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cd chat_orchestrator && uv run pytest ../shared/tests/test_grid_scope.py -q -k resolve_scope_grid_from_user_context`
 Expected: FAIL with `ImportError`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `shared/grid_scope.py`, add after `resolve_scope_grid`:
 
@@ -592,7 +592,7 @@ async def _resolve_scope_grid(user_context: Optional[UserContext]) -> Optional[s
     return await resolve_scope_grid_from_user_context(user_context)
 ```
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd chat_orchestrator
@@ -600,7 +600,7 @@ uv run pytest ../shared/tests/test_grid_scope.py -q
 ```
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add shared/grid_scope.py chat_orchestrator/orchestrator/graphs/nodes/prepare_context.py \

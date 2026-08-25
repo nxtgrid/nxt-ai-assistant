@@ -11,7 +11,12 @@ worse than attaching none.
 import pytest
 
 from shared import grid_scope
-from shared.grid_scope import build_channel_map, grid_from_channel, resolve_scope_grid
+from shared.grid_scope import (
+    build_channel_map,
+    grid_from_channel,
+    resolve_scope_grid,
+    resolve_scope_grid_from_user_context,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -207,3 +212,35 @@ async def test_an_empty_enumeration_is_not_cached(monkeypatch):
     await resolve_scope_grid(chat_id="-100123")
     await resolve_scope_grid(chat_id="-100123")
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_grid_from_user_context_returns_none_for_no_context():
+    assert await resolve_scope_grid_from_user_context(None) is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_scope_grid_from_user_context_unpacks_the_right_fields(monkeypatch):
+    from types import SimpleNamespace
+
+    captured = {}
+
+    async def fake_resolve_scope_grid(chat_id, topic_id, organization_ids, is_staff):
+        captured.update(
+            chat_id=chat_id, topic_id=topic_id,
+            organization_ids=organization_ids, is_staff=is_staff,
+        )
+        return "grid-a"
+
+    monkeypatch.setattr("shared.grid_scope.resolve_scope_grid", fake_resolve_scope_grid)
+
+    user_context = SimpleNamespace(
+        chat_id="-100999", topic_id="42", organization_ids=["7"], is_staff=False,
+    )
+    result = await resolve_scope_grid_from_user_context(user_context)
+
+    assert result == "grid-a"
+    assert captured == {
+        "chat_id": "-100999", "topic_id": "42",
+        "organization_ids": ["7"], "is_staff": False,
+    }
