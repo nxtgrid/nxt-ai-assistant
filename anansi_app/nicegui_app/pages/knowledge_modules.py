@@ -561,17 +561,32 @@ async def _open_edit_dialog(
             # Defaults to Preview -- opening a module is almost always to
             # read it; Edit is one click away for the times it isn't.
             view_toggle = ui.toggle(["Edit", "Preview"], value="Preview").props("dense")
-        body_input = ui.codemirror(
-            value=existing_body,
-            language="Markdown",
-            theme="vscodeLight",
-            line_wrapping=True,
-        ).classes("w-full")
+        # max-height + overflow-y here is load-bearing, not cosmetic: a
+        # built-in's resolved body (directory, in particular -- see
+        # providers_directory.py) can be an uncapped, unbroken wall of text
+        # -- every grid, org and staff/test account in the system, one
+        # paragraph, no line breaks. With only min-height, that content grew
+        # this box without bound, and the dialog's own scroll (the ui.card()
+        # above already has max-height + overflow-y: auto) wasn't enough to
+        # keep the rest of the form -- notably Save/Cancel -- reachable or
+        # even legible. Bounding both panes to the same height so switching
+        # Edit/Preview doesn't jump the dialog's size.
+        _BODY_PANE_STYLE = "max-height: 24rem; overflow-y: auto"
+        body_input = (
+            ui.codemirror(
+                value=existing_body,
+                language="Markdown",
+                theme="vscodeLight",
+                line_wrapping=True,
+            )
+            .classes("w-full")
+            .style(_BODY_PANE_STYLE)
+        )
         body_input.set_visibility(False)
         body_preview = (
             ui.markdown(existing_body)
             .classes("w-full")
-            .style("min-height: 16rem; border: 1px solid #e0e0e0; padding: 0.5rem;")
+            .style(f"min-height: 16rem; {_BODY_PANE_STYLE}; border: 1px solid #e0e0e0; padding: 0.5rem;")
         )
 
         async def _resolved_body() -> str:
