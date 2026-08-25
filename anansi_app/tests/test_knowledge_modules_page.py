@@ -64,6 +64,26 @@ def test_a_module_no_pin_row_mentions_is_unused():
     assert rows[0].used_by == []
 
 
+def test_build_module_rows_resolves_a_skill_pin_to_its_title():
+    rows = build_module_rows(
+        [_module("comms")],
+        {"comms": ["customer.system", "skill:11111111-1111-1111-1111-111111111111"]},
+        skill_titles={"11111111-1111-1111-1111-111111111111": "Find Tickets"},
+    )
+    assert rows[0].used_by == ["customer.system", "🎬 Find Tickets"]
+
+
+def test_build_module_rows_falls_back_to_the_raw_id_for_an_unknown_skill():
+    """E.g. a skill deleted after the pin was made -- prompt_knowledge_overrides
+    has no FK on skill ids, so a stale pin can outlive its skill."""
+    rows = build_module_rows(
+        [_module("comms")],
+        {"comms": ["skill:22222222-2222-2222-2222-222222222222"]},
+        skill_titles={},
+    )
+    assert rows[0].used_by == ["🎬 22222222-2222-2222-2222-222222222222"]
+
+
 def test_describe_usage_names_the_prompts():
     assert describe_usage(["staff.system"]) == "used by: staff.system"
 

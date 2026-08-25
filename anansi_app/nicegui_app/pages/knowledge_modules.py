@@ -29,6 +29,7 @@ from typing import Any, List, Tuple
 from nicegui import ui
 
 from shared.prompts.knowledge import INLINE_BUDGET_CHARS, SINGLETON_SOURCES, KnowledgeModule
+from shared.prompts.skills import SKILL_CATALOG, SKILL_PIN_PREFIX
 
 VALID_SOURCES = {"manual", "gdoc", "ingested"}
 
@@ -281,16 +282,33 @@ def describe_usage(used_by: List[str]) -> str:
     return f"used by: {', '.join(used_by)}"
 
 
+def resolve_pin_label(pin_id: str, skill_titles: "dict[str, str]") -> str:
+    """A prompt id shows as-is; a skill:<uuid> id shows its title (falling
+    back to the raw id if the skill's title isn't known -- e.g. a skill
+    deleted after the pin was made; prompt_knowledge_overrides has no FK on
+    skill ids to clean this up automatically, matching how a retired
+    prompt id's stale pin already behaved before skills existed)."""
+    if pin_id.startswith(SKILL_PIN_PREFIX):
+        skill_id = pin_id[len(SKILL_PIN_PREFIX):]
+        return f"🎬 {skill_titles.get(skill_id, skill_id)}"
+    return pin_id
+
+
 def build_module_rows(
-    modules: List[Any], pins: "dict[str, List[str]] | None" = None
+    modules: List[Any],
+    pins: "dict[str, List[str]] | None" = None,
+    skill_titles: "dict[str, str] | None" = None,
 ) -> List[ModuleRow]:
-    """Rows for the list. ``pins`` is module_id -> prompt ids, fetched once.
+    """Rows for the list. ``pins`` is module_id -> prompt/skill ids, fetched
+    once. ``skill_titles`` is skill_id -> title, for resolving a skill pin
+    to something readable (see resolve_pin_label).
 
     Optional so callers that only need identity/size (and every test that
     predates usage display) keep working; omitting it renders every module
     as unattached, which is why the page itself always passes it.
     """
     pins = pins or {}
+    skill_titles = skill_titles or {}
     rows = []
     for m in sorted(modules, key=lambda m: m.slug):
         body = m.body or ""
@@ -306,7 +324,7 @@ def build_module_rows(
                 size_label="live" if source in PROVIDER_SOURCES else f"{chars} chars",
                 summary=m.summary,
                 body=body,
-                used_by=list(pins.get(m.id, [])),
+                used_by=[resolve_pin_label(pid, skill_titles) for pid in pins.get(m.id, [])],
             )
         )
     return rows
@@ -457,8 +475,10 @@ async def render(user_email: str) -> None:
     def refresh() -> None:
         list_container.clear()
         store.invalidate()
+        SKILL_CATALOG.invalidate()
         # One query for every row's usage, not one per row.
-        rows = build_module_rows(store.all_modules(), store.all_prompt_pins())
+        skill_titles = {s.id: s.title for s in SKILL_CATALOG.all_skills(active_only=False)}
+        rows = build_module_rows(store.all_modules(), store.all_prompt_pins(), skill_titles)
         all_empty = not rows
         rows = filter_context_rows(rows, search_input.value or "")
         with list_container:

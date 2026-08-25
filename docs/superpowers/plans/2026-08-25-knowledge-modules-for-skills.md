@@ -1524,7 +1524,7 @@ otherwise silently introduce. Fixing it here, before the picker that creates
 skill pins even exists, so there's never a window where a pinned skill shows
 as a raw uuid.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `anansi_app/tests/test_knowledge_modules_page.py`:
 
@@ -1549,13 +1549,13 @@ def test_build_module_rows_falls_back_to_the_raw_id_for_an_unknown_skill():
     assert rows[0].used_by == ["🎬 22222222-2222-2222-2222-222222222222"]
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests/test_knowledge_modules_page.py -q -k skill_pin`
 (from the worktree root)
 Expected: FAIL with `TypeError: build_module_rows() got an unexpected keyword argument 'skill_titles'`
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `anansi_app/nicegui_app/pages/knowledge_modules.py`, add near the top
 (with the other module-level imports) — this needs `SKILL_PIN_PREFIX`:
@@ -1637,7 +1637,7 @@ And change `refresh()`:
 (the rest of `refresh()` is unchanged — only the two lines building `rows`
 and the new `skill_titles` line above them change).
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills
@@ -1646,7 +1646,7 @@ PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests -q
 ```
 Expected: PASS on both.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add anansi_app/nicegui_app/pages/knowledge_modules.py \
