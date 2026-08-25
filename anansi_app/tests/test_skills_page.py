@@ -498,3 +498,16 @@ def test_derive_steps_payload_carries_a_mock_toggle_edit_on_a_pending_step():
 
     assert steps[0]["mock"] is False
     assert steps[0]["handler"] == "write_review_section"  # untouched fields still ride through
+
+
+def test_editor_has_a_context_card_only_for_an_existing_workflow():
+    import inspect
+
+    from nicegui_app.pages import skills
+
+    src = inspect.getsource(skills._open_editor)
+
+    assert 'ui.label("Context")' in src
+    # Gated on `if row:` the same way title/slug already are -- a brand-new,
+    # unsaved workflow has no skill_id to key pins on.
+    assert "skill_prompt_id(row[" in src

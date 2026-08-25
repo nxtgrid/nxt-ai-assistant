@@ -1922,7 +1922,7 @@ PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests -q
 - Modify: `anansi_app/nicegui_app/pages/skills.py`
 - Test: `anansi_app/tests/test_skills_page.py`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `anansi_app/tests/test_skills_page.py`:
 
@@ -1940,13 +1940,13 @@ def test_editor_has_a_context_card_only_for_an_existing_workflow():
     assert "skill_prompt_id(row[" in src
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests/test_skills_page.py -q -k context_card`
 (from the worktree root)
 Expected: FAIL (neither string present yet)
 
-- [ ] **Step 3: Write minimal implementation**
+- [x] **Step 3: Write minimal implementation**
 
 In `anansi_app/nicegui_app/pages/skills.py`, find the end of the "Identity &
 schedule" card (the block ending with `first_run = ui.input(...)`, still
@@ -1983,7 +1983,7 @@ the surrounding ~40 lines after making the edit: the outer
 children in source order: `steps_card` (placeholder), the Identity &
 schedule card, and this new Context card, gated on `if row:`.
 
-- [ ] **Step 4: Run test to verify it passes**
+- [x] **Step 4: Run test to verify it passes**
 
 ```bash
 cd /Users/vaibha/Downloads/git/nxt-ai-assistant/wt-knowledge-modules-for-skills
@@ -1992,7 +1992,7 @@ PYTHONPATH="$PWD:$PWD/anansi_app" .venv-validate/bin/pytest anansi_app/tests -q
 ```
 Expected: PASS, full anansi_app suite green.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add anansi_app/nicegui_app/pages/skills.py anansi_app/tests/test_skills_page.py
