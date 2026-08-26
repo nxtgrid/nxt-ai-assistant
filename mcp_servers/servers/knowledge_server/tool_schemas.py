@@ -157,14 +157,16 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                   'required': ['document_id']},
   'visible_to_customer': False},
  {'name': 'edit_doc_section',
-  'description': '[ACTION - DESTRUCTIVE WRITE] Edit a section of a Google Doc or a cell of a '
-                 'Google Sheet, overwriting the existing content. Before calling: (1) confirm '
-                 'with the user which file and section will be edited, (2) never assume a '
-                 'file ID from context — require an explicit file ID. If the user provides a '
-                 'name, use find_document first. If find_document returns 2+ results, ask the '
-                 'user which one. For a Doc, replacement_markdown supports **bold**, *italic*, '
-                 '## headings, - bullets, 1. numbered lists, | tables |, [links](url) — for a '
-                 'Sheet, it is written as the cell\'s literal text with no markdown rendering.',
+  'description': '[ACTION - DESTRUCTIVE WRITE] Edit ONE section of a Google Doc or a cell of a '
+                 'Google Sheet, overwriting the existing content. To apply every pending '
+                 '@anansi-chatbot comment in a file, use process_doc_comments instead — it '
+                 'orders the edits and this tool does not. Before calling: (1) confirm with the '
+                 'user which file and section will be edited, (2) never assume a file ID from '
+                 'context — require an explicit file ID. If the user provides a name, use '
+                 'find_document first. If find_document returns 2+ results, ask the user which '
+                 'one. For a Doc, replacement_markdown supports **bold**, *italic*, ## headings, '
+                 '- bullets, 1. numbered lists, | tables |, [links](url) — for a Sheet, it is '
+                 'written as the cell\'s literal text with no markdown rendering.',
   'inputSchema': {'type': 'object',
                   'properties': {'document_id': {'type': 'string',
                                                  'description': 'Google Doc or Sheet file ID '
@@ -187,6 +189,24 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'summarize_knowledge',
                                                                          'not provided, the bot '
                                                                          'will generate it from '
                                                                          'the instruction.'}},
+                  'required': ['document_id']},
+  'visible_to_customer': False},
+ {'name': 'process_doc_comments',
+  'description': '[ACTION - DESTRUCTIVE WRITE] Apply EVERY pending @anansi-chatbot comment in a '
+                 'Google Doc in one batch, then resolve each comment. Prefer this over calling '
+                 'edit_doc_section once per comment: it reads the whole document, works out '
+                 'which comments depend on the finished text (e.g. "summarise the sections '
+                 'above") and writes those last, and edits bottom-to-top so one edit never '
+                 'moves the next one\'s anchor. Before calling: confirm the file with the user '
+                 'first; never assume a file ID from context. Use scan_doc_comments first if '
+                 'the user wants to preview what will change. Caps at 10 edits per run.\n'
+                 'Slow: takes up to ~2 min for a full batch — tell the user before calling.',
+  'inputSchema': {'type': 'object',
+                  'properties': {'document_id': {'type': 'string',
+                                                 'description': 'Google Doc file ID (required — '
+                                                                'not a document name). Use '
+                                                                'find_document to resolve a '
+                                                                'name first.'}},
                   'required': ['document_id']},
   'visible_to_customer': False},
  {'name': 'list_document_types',

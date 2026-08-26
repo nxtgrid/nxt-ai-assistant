@@ -991,6 +991,49 @@ async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
         ]
 
 
+@registry.tool("process_doc_comments", _SCHEMAS_BY_NAME["process_doc_comments"])
+async def _handle_process_doc_comments(arguments: dict) -> list[types.TextContent]:
+    """Apply every pending @anansibot comment in a Google Doc, in dependency order."""
+    doc_id = arguments.get("document_id", "").strip()
+    if not doc_id:
+        return [types.TextContent(type="text", text="Error: document_id is required")]
+
+    user_email = arguments.get("user_email")
+
+    try:
+        from shared.utils.drive_permissions import user_can_access
+
+        if not await user_can_access(doc_id, user_email, need_write=True):
+            return [
+                types.TextContent(
+                    type="text",
+                    text="You don't have permission to edit this file. "
+                    "Please ask the file owner to share it with you.",
+                )
+            ]
+    except Exception as e:
+        logger.error(f"Permission check failed for process_doc_comments: {e}")
+        return [types.TextContent(type="text", text="Permission check failed. Please try again.")]
+
+    try:
+        from shared.utils.doc_comment_batch import process_comments
+
+        summary = await process_comments(doc_id, user_email=user_email)
+    except Exception as e:
+        logger.error(f"process_doc_comments failed: {e}")
+        return [
+            types.TextContent(
+                type="text",
+                text="Could not apply the document's comments. Please try again.",
+            )
+        ]
+
+    if summary["edits"] == 0:
+        return [types.TextContent(type="text", text="No pending @anansibot comments found.")]
+
+    return [types.TextContent(type="text", text=json.dumps(summary, default=str))]
+
+
 # ── Agentic graph tools (P4 Phase 3) ────────────────────────────────────────
 #
 # Agency stays with the main LLM: these are plain read-only query tools, not
