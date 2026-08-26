@@ -233,12 +233,28 @@ async def _fetch_reference_docs(instruction: str, user_email: str | None = None)
     )
 
 
+def build_context_block(section_context: str, context_limit: int = 1500) -> str:
+    """The SURROUNDING CONTEXT block, truncated to the caller's budget.
+
+    The default is sized for a single instruction-driven edit, where the point
+    is "here is the paragraph around the bit you are rewriting". The
+    comment-driven batch passes the whole document and a much larger limit --
+    an instruction like "summarise the sections above" is unanswerable from
+    1500 characters, and answering it from nothing at all is what this
+    parameter exists to stop.
+    """
+    if not section_context:
+        return ""
+    return f"\nSURROUNDING CONTEXT:\n{section_context[:context_limit]}"
+
+
 async def generate_replacement_markdown(
     instruction: str,
     highlighted_text: str,
     section_context: str = "",
     expert_context: dict[str, Any] | None = None,
     user_email: str | None = None,
+    context_limit: int = 1500,
 ) -> str:
     """Use LLM to generate markdown replacement text for a doc section.
 
@@ -252,6 +268,9 @@ async def generate_replacement_markdown(
         section_context: Surrounding document context (optional)
         expert_context: Workflow state dict — only allowed keys are passed to LLM
         user_email: Requesting user's email (for permission checks on reference docs)
+        context_limit: How much of section_context to include. The default
+            suits a single section edit; the comment-driven batch raises it
+            so an instruction can refer to the whole document.
     """
     from orchestrator.config.settings import get_settings
     from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
@@ -274,9 +293,7 @@ async def generate_replacement_markdown(
                 f"{json.dumps(relevant, indent=2, default=str)[:2000]}"
             )
 
-    context_block = ""
-    if section_context:
-        context_block = f"\nSURROUNDING CONTEXT:\n{section_context[:1500]}"
+    context_block = build_context_block(section_context, context_limit)
 
     prompt = PROMPTS.text(
         "doc_editing.edit_highlighted",
