@@ -86,13 +86,24 @@ async def _apply_edits(
     context: StepContext, doc_id: str, comments: list[dict], markdown: str
 ) -> list[dict]:
     """Generate and write one replacement per comment, in the order given."""
+    from shared.prompts.types import RequestScope
     from shared.utils.doc_edit_ordering import DOC_CONTEXT_CHAR_LIMIT
-    from shared.utils.doc_editing import edit_section, generate_replacement_markdown
     from shared.utils.doc_edit_tools import executor_tool_runner
+    from shared.utils.doc_editing import edit_section, generate_replacement_markdown
 
     # The expert step uses the executor rather than the registry because a
     # StepContext already carries one, wired with the run's auth metadata.
     runner = executor_tool_runner(context.mcp_executor) if context.mcp_executor else None
+
+    # grid_name is the workflow's own already-resolved subject (the same
+    # field _ALLOWED_STATE_KEYS already trusts to reach the LLM directly);
+    # effective_org_id is StepContext's own resolved field, not a guess.
+    state = context.packet_state or {}
+    org_id = context.effective_org_id
+    scope = RequestScope(
+        grid=state.get("grid_name"),
+        organization_id=str(org_id) if org_id is not None else None,
+    )
 
     results = []
     for comment in comments:
@@ -112,6 +123,7 @@ async def _apply_edits(
                 user_email=context.effective_email,
                 context_limit=DOC_CONTEXT_CHAR_LIMIT,
                 tool_runner=runner,
+                scope=scope,
             )
 
             result = await edit_section(
@@ -229,9 +241,12 @@ async def process_doc_edits(context: StepContext) -> StepResult:
 
         target_text = section_match["text"]
 
+        from shared.prompts.types import RequestScope
         from shared.utils.doc_edit_tools import executor_tool_runner
 
         runner = executor_tool_runner(context.mcp_executor) if context.mcp_executor else None
+        mode2_state = context.packet_state or {}
+        mode2_org_id = context.effective_org_id
         replacement = await generate_replacement_markdown(
             instruction=instruction,
             highlighted_text=target_text,
@@ -239,6 +254,10 @@ async def process_doc_edits(context: StepContext) -> StepResult:
             expert_context=context.packet_state,
             user_email=context.effective_email,
             tool_runner=runner,
+            scope=RequestScope(
+                grid=mode2_state.get("grid_name"),
+                organization_id=str(mode2_org_id) if mode2_org_id is not None else None,
+            ),
         )
 
         await pin_revision(doc_id)

@@ -8,10 +8,14 @@ handlers and the doc_editor expert step.
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from shared.prompts import PROMPTS
 from shared.utils.apps_script_client import write_doc_markdown
+
+if TYPE_CHECKING:
+    from shared.prompts.types import RequestScope
+    from shared.utils.doc_edit_tools import ToolRunner
 
 LOGGER = logging.getLogger(__name__)
 
@@ -302,6 +306,38 @@ def _generation_gateway():
     return get_default_generation_gateway(default_model=get_settings().gemini.model)
 
 
+def _jit_resolver():
+    """The JIT context resolver, or None where orchestrator is absent."""
+    try:
+        from orchestrator.services.jit_context_resolver import JitContextResolver
+    except ImportError:
+        return None
+    return JitContextResolver()
+
+
+async def _live_knowledge(user_email: str | None, scope) -> str:
+    """Provider-backed modules pinned to this prompt, resolved for this caller.
+
+    PromptLibrary.render() drops every JIT module -- gdoc, graph, directory,
+    episodic -- because it is synchronous and carries no identity. A Google
+    Doc attached to the editor as a knowledge module would otherwise resolve
+    to nothing, which is the opposite of what attaching it means.
+    """
+    resolver = _jit_resolver()
+    if resolver is None:
+        return ""
+    try:
+        from shared.prompts.providers import ResolutionContext
+        from shared.prompts.types import RequestScope
+
+        ctx = ResolutionContext(scope=scope or RequestScope(), user_email=user_email)
+        text, _slugs = await resolver.resolve_for_prompt("doc_editing.edit_highlighted", ctx)
+        return f"\n\n{text}" if text else ""
+    except Exception:
+        LOGGER.warning("Live context resolution failed; editing without it", exc_info=True)
+        return ""
+
+
 def build_context_block(section_context: str, context_limit: int = 1500) -> str:
     """The SURROUNDING CONTEXT block, truncated to the caller's budget.
 
@@ -325,6 +361,7 @@ async def generate_replacement_markdown(
     user_email: str | None = None,
     context_limit: int = 1500,
     tool_runner: "ToolRunner | None" = None,
+    scope: "RequestScope | None" = None,
 ) -> str:
     """Use LLM to generate markdown replacement text for a doc section.
 
@@ -337,7 +374,9 @@ async def generate_replacement_markdown(
         highlighted_text: The text being replaced
         section_context: Surrounding document context (optional)
         expert_context: Workflow state dict — only allowed keys are passed to LLM
-        user_email: Requesting user's email (for permission checks on reference docs)
+        user_email: Requesting user's email (for permission checks on reference docs,
+            and for resolving Google-Doc-backed knowledge modules attached to
+            this prompt)
         context_limit: How much of section_context to include. The default
             suits a single section edit; the comment-driven batch raises it
             so an instruction can refer to the whole document.
@@ -346,6 +385,9 @@ async def generate_replacement_markdown(
             answering from nothing. Omit it for a purely editorial rewrite --
             the untooled single call is both cheaper and the long-standing
             behaviour for Sheets.
+        scope: The entity context (grid/org) this edit is running in. Lets a
+            site-scoped knowledge module attached to this prompt apply. Global
+            modules apply regardless of scope.
     """
     from orchestrator.config.settings import get_settings
     from shared.llm import GenerationOptions, LLMMessage, ToolResult
@@ -370,15 +412,22 @@ async def generate_replacement_markdown(
     context_block = build_context_block(section_context, context_limit)
 
     tools = build_tool_specs(_tool_manifest()) if tool_runner else None
-    prompt = PROMPTS.text(
+    rendered = PROMPTS.render(
         "doc_editing.edit_highlighted",
-        instruction=instruction,
-        highlighted_text=highlighted_text,
-        context_block=context_block,
-        context_summary=context_summary,
-        reference_block=reference_block,
-        tool_guidance=_TOOL_GUIDANCE if tools else "",
+        vars={
+            "instruction": instruction,
+            "highlighted_text": highlighted_text,
+            "context_block": context_block,
+            "context_summary": context_summary,
+            "reference_block": reference_block,
+            "tool_guidance": _TOOL_GUIDANCE if tools else "",
+        },
+        scope=scope,
     )
+    prompt = rendered.system_text
+    if rendered.context_text:
+        prompt = f"{prompt}\n\n{rendered.context_text}"
+    prompt += await _live_knowledge(user_email, scope)
 
     options = GenerationOptions(
         model=settings.gemini.model,
