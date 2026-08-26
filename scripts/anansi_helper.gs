@@ -491,8 +491,16 @@ function writeDocMarkdown(params) {
   if (!params.markdown) {
     return { error: 'Missing markdown' };
   }
-  if (params.markdown.length > 50000) {
+  // Size guard. Image payloads are excluded from the prose budget: one
+  // base64 chart is several times the whole 50KB limit on its own, and it
+  // is not document text. The total is still capped so a runaway payload
+  // cannot hang the script.
+  var proseLength = params.markdown.replace(/!\[[^\]]*\]\(base64:[^)]*\)/g, '').length;
+  if (proseLength > 50000) {
     return { error: 'Markdown exceeds 50KB limit' };
+  }
+  if (params.markdown.length > 8 * 1024 * 1024) {
+    return { error: 'Markdown with images exceeds the 8MB limit' };
   }
 
   var doc;

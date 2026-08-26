@@ -7,7 +7,7 @@ overridable: true
 model: fast
 output: text
 sections: []
-variables: [instruction, highlighted_text, context_block, context_summary, reference_block, tool_guidance]
+variables: [instruction, highlighted_text, context_block, context_summary, reference_block, tool_guidance, image_guidance]
 access:
   view: [ops, eng]
   edit: []
@@ -23,7 +23,8 @@ Supported formatting:
 - Tables (| col1 | col2 |)
 - [Links](url)
 
-Do NOT use: H1 headings, images, footnotes, HTML tags, code blocks.
+Do NOT use: H1 headings, footnotes, HTML tags, code blocks.
+{{image_guidance}}
 If the original text is a simple sentence, keep it as a plain paragraph.
 
 INSTRUCTION: {{instruction}}

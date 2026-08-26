@@ -46,6 +46,7 @@ SAMPLE_VARS = {
         "context_summary": "",
         "reference_block": "",
         "tool_guidance": "",
+        "image_guidance": "Do NOT use images.",
     },
     "doc_editor.locate_edits": {"instruction": "fix the intro", "markdown": "# Title\n\nBody"},
     "doc_editor.order_edits": {

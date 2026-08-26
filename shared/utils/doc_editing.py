@@ -268,6 +268,17 @@ _TOOL_GUIDANCE = (
     "figure was unavailable rather than guessing one."
 )
 
+_NO_IMAGES = "Do NOT use images."
+
+_IMAGE_GUIDANCE = (
+    "To place a chart you fetched with generate_power_chart, write "
+    "![Short caption](anansi-chart:N) on its own line, where N is 1 for the "
+    "first chart you fetched, 2 for the second, and so on. Do not paste image "
+    "data — the reference is replaced with the real chart after you answer. "
+    "Never write an anansi-chart reference for a chart you did not actually "
+    "fetch."
+)
+
 
 def _tool_manifest() -> dict[str, dict]:
     """The served tool manifest, flattened to server-prefixed names.
@@ -421,6 +432,7 @@ async def generate_replacement_markdown(
             "context_summary": context_summary,
             "reference_block": reference_block,
             "tool_guidance": _TOOL_GUIDANCE if tools else "",
+            "image_guidance": _IMAGE_GUIDANCE if tools else _NO_IMAGES,
         },
         scope=scope,
     )
@@ -438,6 +450,7 @@ async def generate_replacement_markdown(
     response = await gateway.generate(messages, options, tools=tools)
 
     allowed = set(DOC_EDIT_TOOLS)
+    images: list[str] = []
     for _ in range(MAX_TOOL_ROUNDS):
         if not response.tool_calls:
             break
@@ -455,6 +468,7 @@ async def generate_replacement_markdown(
                 )
                 continue
             outcome = await tool_runner(call.name, dict(call.args or {}))
+            images.extend(outcome.images)
             results.append(
                 ToolResult(
                     call_id=call.id,
@@ -471,4 +485,6 @@ async def generate_replacement_markdown(
             conversation_state=response.conversation_state,
         )
 
-    return str(response.text).strip()
+    from shared.utils.doc_edit_images import substitute_chart_refs
+
+    return substitute_chart_refs(str(response.text or "").strip(), images)
