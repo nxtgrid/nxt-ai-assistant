@@ -9,6 +9,7 @@ Delegates to shared functions in shared.utils.doc_editing for comment scanning,
 replacement generation, verification, section editing, and revision pinning.
 """
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict
@@ -67,6 +68,88 @@ async def _identify_section(markdown: str, instruction: str) -> Dict[str, Any]:
     except (json.JSONDecodeError, ValueError, IndexError) as e:
         LOGGER.warning(f"Could not parse section identification response: {e}")
         return {"text": "", "confidence": 0.0, "reasoning": f"Parse error: {e}"}
+
+
+async def _fetch_markdown(doc_id: str) -> str:
+    """The document as markdown, off the event loop.
+
+    fetch_google_doc_markdown is a blocking Drive call. Mode 2 has always
+    called it inline; the comment-driven batch calls it twice per run, so it
+    goes through a thread.
+    """
+    from shared.utils.gdrive_doc_fetcher import fetch_google_doc_markdown
+
+    markdown = await asyncio.to_thread(fetch_google_doc_markdown, doc_id)
+    if not markdown:
+        LOGGER.warning(f"Could not fetch {doc_id} as markdown — editing without document context")
+    return markdown or ""
+
+
+async def _refresh_second_pass(doc_id: str, second_pass: list[dict]) -> list[dict]:
+    """Re-scan so the second pass matches text as it stands after pass one.
+
+    One comments.list call rather than one comments.get per comment. A comment
+    that pass one resolved, or that a human resolved mid-run, simply stops
+    coming back and is dropped -- the correct outcome either way.
+    """
+    from shared.utils.doc_editing import scan_comments
+
+    wanted = {comment["comment_id"] for comment in second_pass}
+    return [comment for comment in await scan_comments(doc_id) if comment["comment_id"] in wanted]
+
+
+async def _apply_edits(
+    context: StepContext, doc_id: str, comments: list[dict], markdown: str
+) -> list[dict]:
+    """Generate and write one replacement per comment, in the order given."""
+    from orchestrator.experts.handlers.doc_editor.edit_ordering import DOC_CONTEXT_CHAR_LIMIT
+    from shared.utils.doc_editing import edit_section, generate_replacement_markdown
+
+    results = []
+    for comment in comments:
+        highlighted = comment["highlighted_text"]
+        comment_id = comment["comment_id"]
+
+        if not highlighted:
+            results.append({"comment_id": comment_id, "status": "skipped"})
+            continue
+
+        try:
+            replacement = await generate_replacement_markdown(
+                instruction=comment["instruction"],
+                highlighted_text=highlighted,
+                section_context=markdown,
+                expert_context=context.packet_state,
+                user_email=context.effective_email,
+                context_limit=DOC_CONTEXT_CHAR_LIMIT,
+            )
+
+            result = await edit_section(
+                doc_id=doc_id,
+                target_text=highlighted,
+                replacement_markdown=replacement,
+                comment_id=comment_id,
+            )
+
+            if result.get("success"):
+                results.append({"comment_id": comment_id, "status": "done"})
+            else:
+                results.append(
+                    {"comment_id": comment_id, "status": "failed", "error": result.get("error")}
+                )
+
+        except Exception as e:
+            LOGGER.error(f"Edit failed for comment {comment_id}: {e}")
+            from shared.utils.error_messages import sanitize_error_for_user
+
+            results.append(
+                {
+                    "comment_id": comment_id,
+                    "status": "failed",
+                    "error": sanitize_error_for_user(str(e)),
+                }
+            )
+    return results
 
 
 @register_step(
@@ -135,9 +218,7 @@ async def process_doc_edits(context: StepContext) -> StepResult:
         # ── MODE 2: Instruction-driven ──
         await context.send_progress_to_user("Analyzing document to find target section...")
 
-        from shared.utils.gdrive_doc_fetcher import fetch_google_doc_markdown
-
-        markdown = fetch_google_doc_markdown(doc_id)
+        markdown = await _fetch_markdown(doc_id)
         if not markdown:
             return StepResult(error="Could not fetch document as markdown.")
 
@@ -196,68 +277,49 @@ async def process_doc_edits(context: StepContext) -> StepResult:
             LOGGER.warning(f"Capping edits from {len(comments)} to {MAX_EDITS_PER_RUN}")
             comments = comments[:MAX_EDITS_PER_RUN]
 
-        # Process in reverse order so earlier edits don't shift positions
-        # of later target text. Comments are returned in creation order;
-        # reversing approximates bottom-to-top document order.
-        comments = list(reversed(comments))
+        from orchestrator.experts.handlers.doc_editor import edit_ordering
+
+        markdown = await _fetch_markdown(doc_id)
+
+        # Classify against the scan-order list, because the prompt numbers the
+        # comments by their position in it. Only then sort into document order.
+        deferred = await edit_ordering.classify_deferred(comments, markdown) if markdown else set()
+        first_pass, second_pass = edit_ordering.partition_by_pass(comments, deferred)
+        first_pass = edit_ordering.order_by_position(first_pass, markdown)
 
         await context.send_progress_to_user(f"Processing {len(comments)} edit(s)...")
 
         requester = context.effective_email or "unknown"
-        LOGGER.info(f"Doc editor: {requester} editing doc {doc_id} ({len(comments)} edits)")
+        LOGGER.info(
+            f"Doc editor: {requester} editing doc {doc_id} "
+            f"({len(first_pass)} now, {len(second_pass)} after the rest)"
+        )
 
         # Pin revision once before the batch
         await pin_revision(doc_id)
 
-        results = []
-        for comment in comments:
-            highlighted = comment["highlighted_text"]
-            comment_instruction = comment["instruction"]
-            comment_id = comment["comment_id"]
+        results = await _apply_edits(context, doc_id, first_pass, markdown)
 
-            if not highlighted:
-                results.append({"comment_id": comment_id, "status": "skipped"})
-                continue
-
-            try:
-                replacement = await generate_replacement_markdown(
-                    instruction=comment_instruction,
-                    highlighted_text=highlighted,
-                    expert_context=context.packet_state,
-                    user_email=context.effective_email,
-                )
-
-                result = await edit_section(
-                    doc_id=doc_id,
-                    target_text=highlighted,
-                    replacement_markdown=replacement,
-                    comment_id=comment_id,
-                )
-
-                if result.get("success"):
-                    results.append({"comment_id": comment_id, "status": "done"})
-                else:
-                    results.append(
-                        {"comment_id": comment_id, "status": "failed", "error": result.get("error")}
-                    )
-
-            except Exception as e:
-                LOGGER.error(f"Edit failed for comment {comment_id}: {e}")
-                from shared.utils.error_messages import sanitize_error_for_user
-
-                results.append(
-                    {
-                        "comment_id": comment_id,
-                        "status": "failed",
-                        "error": sanitize_error_for_user(str(e)),
-                    }
-                )
+        deferred_count = len(second_pass)
+        if second_pass:
+            await context.send_progress_to_user(
+                f"Writing {deferred_count} edit(s) that needed the finished document..."
+            )
+            fresh_markdown = await _fetch_markdown(doc_id) or markdown
+            second_pass = await _refresh_second_pass(doc_id, second_pass)
+            second_pass = edit_ordering.order_by_position(second_pass, fresh_markdown)
+            results += await _apply_edits(context, doc_id, second_pass, fresh_markdown)
 
         succeeded = sum(1 for r in results if r["status"] == "done")
         failed = sum(1 for r in results if r["status"] == "failed")
 
         return StepResult(
-            data={"edit_results": results, "succeeded": succeeded, "failed": failed},
+            data={
+                "edit_results": results,
+                "succeeded": succeeded,
+                "failed": failed,
+                "deferred": deferred_count,
+            },
             progress_message=f"Edited {succeeded} section(s)"
             + (f", {failed} failed" if failed else ""),
         )

@@ -47,6 +47,10 @@ SAMPLE_VARS = {
         "reference_block": "",
     },
     "doc_editor.locate_edits": {"instruction": "fix the intro", "markdown": "# Title\n\nBody"},
+    "doc_editor.order_edits": {
+        "comments_block": '1. instruction: "summarise the above"\n   quoted text: "TBD"',
+        "markdown": "# Title\n\nBody",
+    },
     "episodic.distill": {
         "anchor_name": "Alpha",
         "messages_text": "- inverter tripped\n- replaced fuse",

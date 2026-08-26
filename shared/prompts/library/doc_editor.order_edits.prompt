@@ -1,0 +1,50 @@
+---
+id: doc_editor.order_edits
+description: Decides which document comments can only be answered once the other comments have been applied.
+owner: eng
+component: shared
+overridable: true
+model: fast
+output: json
+schema:
+  type: array
+  items:
+    type: object
+    required: [request, deferred]
+    properties:
+      request: {type: integer}
+      deferred: {type: boolean}
+      reason: {type: string}
+sections: []
+variables: [comments_block, markdown]
+access:
+  view: [ops, eng]
+  edit: []
+  publish: []
+---
+Someone left comments on a Google Doc asking for edits, and they are about to
+be applied automatically. Decide which of them can only be answered once the
+OTHER comments in this batch have already been applied.
+
+DOCUMENT (may be truncated):
+{{markdown}}
+
+COMMENTS
+{{comments_block}}
+
+Defer a comment when answering it needs the rest of the document to be
+finished — "summarise the sections above", "add an executive summary once the
+rest is written", "list every recommendation made below", "write the
+conclusion last".
+
+Do NOT defer a comment just because it sits near the top of the document,
+names another section, or is long. Rewriting a paragraph, filling in a figure,
+fixing tone, tightening a list: all ordinary edits, none of them deferred.
+
+Default to not deferred. Deferring costs the writer a second pass, and is only
+worth it when the answer genuinely depends on text another comment in this
+batch is going to produce.
+
+Return ONLY a JSON array, one object per comment, in the same order, no fences:
+[{"request": 1, "deferred": false, "reason": "rewrites one paragraph in place"},
+ {"request": 2, "deferred": true, "reason": "summarises the finished document"}]
