@@ -27,10 +27,10 @@ comment someone left on a specific cell or section, saying what value belongs
 there. Match each request to exactly one entry in the value catalogue.
 
 VALUE CATALOGUE — the only values available. Match on the description.
-{catalogue_block}
+{{catalogue_block}}
 
 REQUESTS
-{requests_block}
+{{requests_block}}
 
 Rules:
 - Match on meaning, not on wording. "the total peak capacity" matches an entry
@@ -41,5 +41,5 @@ Rules:
 - Never invent a value. Values come only from the catalogue.
 
 Return ONLY a JSON array, one object per request, in the same order:
-[{{"request": 1, "path": "energy.total_kwp", "confidence": 0.95}},
- {{"request": 2, "path": null, "confidence": 0.0}}]
+[{"request": 1, "path": "energy.total_kwp", "confidence": 0.95},
+ {"request": 2, "path": null, "confidence": 0.0}]
