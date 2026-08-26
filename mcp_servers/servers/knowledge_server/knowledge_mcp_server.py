@@ -870,6 +870,18 @@ async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
 
     logger.info(f"edit_doc_section: resolved target_text={target_text[:80]!r}")
 
+    # Resolve the file type before generating: a Doc gets its own markdown as
+    # context (an instruction can refer to sections it is not replacing), a
+    # Sheet has no markdown to fetch.
+    from shared.utils.file_annotations import MIME_SHEET, get_file_mime_type
+
+    try:
+        mime = await get_file_mime_type(doc_id)
+    except Exception:
+        logger.warning(f"Could not resolve mime type for {doc_id}; treating as a Doc")
+        mime = None
+    is_sheet = mime == MIME_SHEET
+
     # Generate replacement markdown if not provided
     if not replacement_markdown:
         if not instruction:
@@ -880,10 +892,16 @@ async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
                 )
             ]
         try:
-            from shared.utils.doc_editing import generate_replacement_markdown
+            from shared.utils import doc_editing
+            from shared.utils.doc_edit_ordering import DOC_CONTEXT_CHAR_LIMIT
 
-            replacement_markdown = await generate_replacement_markdown(
-                instruction, target_text, user_email=user_email
+            markdown = "" if is_sheet else await doc_editing.fetch_doc_markdown(doc_id)
+            replacement_markdown = await doc_editing.generate_replacement_markdown(
+                instruction=instruction,
+                highlighted_text=target_text,
+                section_context=markdown,
+                context_limit=DOC_CONTEXT_CHAR_LIMIT,
+                user_email=user_email,
             )
         except Exception as e:
             logger.error(f"Failed to generate replacement: {e}")
@@ -897,11 +915,7 @@ async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
 
     # Pin revision once before editing, then execute via Apps Script
     try:
-        from shared.utils.file_annotations import MIME_SHEET, get_file_mime_type
-
-        mime = await get_file_mime_type(doc_id)
-
-        if mime == MIME_SHEET:
+        if is_sheet:
             from shared.utils.file_annotations import reply_and_resolve, reply_without_resolving
             from shared.utils.sheet_editing import (
                 fetch_all_grids,
@@ -975,6 +989,49 @@ async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
                 "Please try again or edit the document manually.",
             )
         ]
+
+
+@registry.tool("process_doc_comments", _SCHEMAS_BY_NAME["process_doc_comments"])
+async def _handle_process_doc_comments(arguments: dict) -> list[types.TextContent]:
+    """Apply every pending @anansibot comment in a Google Doc, in dependency order."""
+    doc_id = arguments.get("document_id", "").strip()
+    if not doc_id:
+        return [types.TextContent(type="text", text="Error: document_id is required")]
+
+    user_email = arguments.get("user_email")
+
+    try:
+        from shared.utils.drive_permissions import user_can_access
+
+        if not await user_can_access(doc_id, user_email, need_write=True):
+            return [
+                types.TextContent(
+                    type="text",
+                    text="You don't have permission to edit this file. "
+                    "Please ask the file owner to share it with you.",
+                )
+            ]
+    except Exception as e:
+        logger.error(f"Permission check failed for process_doc_comments: {e}")
+        return [types.TextContent(type="text", text="Permission check failed. Please try again.")]
+
+    try:
+        from shared.utils.doc_comment_batch import process_comments
+
+        summary = await process_comments(doc_id, user_email=user_email)
+    except Exception as e:
+        logger.error(f"process_doc_comments failed: {e}")
+        return [
+            types.TextContent(
+                type="text",
+                text="Could not apply the document's comments. Please try again.",
+            )
+        ]
+
+    if summary["edits"] == 0:
+        return [types.TextContent(type="text", text="No pending @anansibot comments found.")]
+
+    return [types.TextContent(type="text", text=json.dumps(summary, default=str))]
 
 
 # ── Agentic graph tools (P4 Phase 3) ────────────────────────────────────────

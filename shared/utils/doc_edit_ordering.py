@@ -1,5 +1,10 @@
 """Deciding what order a document's comment edits run in.
 
+Lives in shared/ because both edit routes need it: the expert step
+(process_doc_edits) and the MCP tool (process_doc_comments). mcp_servers'
+own image copies only mcp_servers/ and shared/, so anything it imports has
+to be reachable without orchestrator/ on the path.
+
 Two separate problems live here and they are solved differently on purpose.
 
 *Position* -- an edit that rewrites text shifts everything below it, so edits

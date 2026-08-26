@@ -9,7 +9,6 @@ Delegates to shared functions in shared.utils.doc_editing for comment scanning,
 replacement generation, verification, section editing, and revision pinning.
 """
 
-import asyncio
 import json
 import logging
 from typing import Any, Dict
@@ -70,21 +69,6 @@ async def _identify_section(markdown: str, instruction: str) -> Dict[str, Any]:
         return {"text": "", "confidence": 0.0, "reasoning": f"Parse error: {e}"}
 
 
-async def _fetch_markdown(doc_id: str) -> str:
-    """The document as markdown, off the event loop.
-
-    fetch_google_doc_markdown is a blocking Drive call. Mode 2 has always
-    called it inline; the comment-driven batch calls it twice per run, so it
-    goes through a thread.
-    """
-    from shared.utils.gdrive_doc_fetcher import fetch_google_doc_markdown
-
-    markdown = await asyncio.to_thread(fetch_google_doc_markdown, doc_id)
-    if not markdown:
-        LOGGER.warning(f"Could not fetch {doc_id} as markdown — editing without document context")
-    return markdown or ""
-
-
 async def _refresh_second_pass(doc_id: str, second_pass: list[dict]) -> list[dict]:
     """Re-scan so the second pass matches text as it stands after pass one.
 
@@ -102,7 +86,7 @@ async def _apply_edits(
     context: StepContext, doc_id: str, comments: list[dict], markdown: str
 ) -> list[dict]:
     """Generate and write one replacement per comment, in the order given."""
-    from orchestrator.experts.handlers.doc_editor.edit_ordering import DOC_CONTEXT_CHAR_LIMIT
+    from shared.utils.doc_edit_ordering import DOC_CONTEXT_CHAR_LIMIT
     from shared.utils.doc_editing import edit_section, generate_replacement_markdown
 
     results = []
@@ -203,6 +187,7 @@ async def process_doc_edits(context: StepContext) -> StepResult:
     """
     from shared.utils.doc_editing import (
         edit_section,
+        fetch_doc_markdown,
         generate_replacement_markdown,
         pin_revision,
         scan_comments,
@@ -218,7 +203,7 @@ async def process_doc_edits(context: StepContext) -> StepResult:
         # ── MODE 2: Instruction-driven ──
         await context.send_progress_to_user("Analyzing document to find target section...")
 
-        markdown = await _fetch_markdown(doc_id)
+        markdown = await fetch_doc_markdown(doc_id)
         if not markdown:
             return StepResult(error="Could not fetch document as markdown.")
 
@@ -277,9 +262,9 @@ async def process_doc_edits(context: StepContext) -> StepResult:
             LOGGER.warning(f"Capping edits from {len(comments)} to {MAX_EDITS_PER_RUN}")
             comments = comments[:MAX_EDITS_PER_RUN]
 
-        from orchestrator.experts.handlers.doc_editor import edit_ordering
+        from shared.utils import doc_edit_ordering as edit_ordering
 
-        markdown = await _fetch_markdown(doc_id)
+        markdown = await fetch_doc_markdown(doc_id)
 
         # Classify against the scan-order list, because the prompt numbers the
         # comments by their position in it. Only then sort into document order.
@@ -305,7 +290,7 @@ async def process_doc_edits(context: StepContext) -> StepResult:
             await context.send_progress_to_user(
                 f"Writing {deferred_count} edit(s) that needed the finished document..."
             )
-            fresh_markdown = await _fetch_markdown(doc_id) or markdown
+            fresh_markdown = await fetch_doc_markdown(doc_id) or markdown
             second_pass = await _refresh_second_pass(doc_id, second_pass)
             second_pass = edit_ordering.order_by_position(second_pass, fresh_markdown)
             results += await _apply_edits(context, doc_id, second_pass, fresh_markdown)
