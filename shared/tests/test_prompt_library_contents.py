@@ -2,8 +2,20 @@
 
 import pytest
 
-from shared.prompts import PROMPTS
+from shared.prompts import PromptLibrary
 from shared.prompts.components import COMPONENT_LABELS
+
+# A bare PromptLibrary(), not the shared.prompts.PROMPTS singleton: PROMPTS
+# resolves DB/GDoc overrides whenever real credentials happen to be in the
+# environment (e.g. a chat_orchestrator/.env copied into a worktree for
+# unrelated reasons), which would make these content assertions check
+# whatever's live instead of the bundled file being tested -- especially
+# risky here, since customer.system/staff.system/ticketing.correlation are
+# exactly the prompts most likely to carry a real live override. See
+# chat_orchestrator/tests/test_prompt_parity.py and this repo's CLAUDE.md
+# ("A local .env with real credentials makes some tests silently
+# non-hermetic").
+PROMPTS = PromptLibrary()
 
 # Historically Google-Doc-driven (VERIFICATION_DOC_ID) with no bundled
 # fallback at all; kept overridable so the doc keeps working exactly as

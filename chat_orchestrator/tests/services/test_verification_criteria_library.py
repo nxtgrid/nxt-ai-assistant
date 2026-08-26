@@ -11,16 +11,24 @@ intact.
 """
 
 from orchestrator.api.app import _get_verification_criteria
-from shared.prompts import PROMPTS
+from shared.prompts import PromptLibrary
 
 
 def test_get_verification_criteria_returns_the_bundled_default():
-    """No CHAT_DB_URL / doc binding is configured in the test environment,
-    so this resolves to the bundled prompt body -- proving the function
-    reaches the library rather than returning "" or raising."""
+    """Compares against a bare PromptLibrary(), not shared.prompts.PROMPTS:
+    _get_verification_criteria() is `return PROMPTS.text("verification.criteria")`
+    verbatim, so comparing against that same live singleton would be
+    circular -- it would pass no matter what the resolved text says,
+    including a live DB/GDoc override picked up from real credentials in the
+    environment (e.g. a chat_orchestrator/.env copied in for unrelated
+    reasons; verification.criteria is one of the historically
+    Google-Doc-driven prompts, so this isn't hypothetical). Comparing against
+    a bare, always-bundled library instead makes this test actually prove
+    what its name claims -- that the function's output matches the committed
+    bundled default -- regardless of environment."""
     criteria = _get_verification_criteria()
     assert criteria.strip()
-    assert criteria == PROMPTS.text("verification.criteria")
+    assert criteria == PromptLibrary().text("verification.criteria")
 
 
 def test_get_verification_criteria_has_no_local_cache_global():

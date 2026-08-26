@@ -1,6 +1,16 @@
 """Extracted ingestion prompts still render exactly what the literals produced."""
 
-from shared.prompts import PROMPTS
+from shared.prompts import PromptLibrary
+
+# A bare PromptLibrary(), not the shared.prompts.PROMPTS singleton: PROMPTS
+# resolves DB/GDoc overrides whenever real credentials happen to be in the
+# environment (e.g. a chat_orchestrator/.env copied into a worktree for
+# unrelated reasons), which would make these content assertions check
+# whatever's live instead of the bundled file being tested. See
+# chat_orchestrator/tests/test_prompt_parity.py and this repo's CLAUDE.md
+# ("A local .env with real credentials makes some tests silently
+# non-hermetic").
+PROMPTS = PromptLibrary()
 
 # Unlocked (was overridable: false) but with no ops/eng grant added -- only
 # an admin can edit/publish these, via access.py's is_prompt_admin() bypass.
