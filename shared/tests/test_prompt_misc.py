@@ -3,6 +3,19 @@
 from shared.config import flag_registry
 from shared.prompts import PROMPTS, PromptLibrary
 
+# A bare PromptLibrary(), not the shared.prompts.PROMPTS singleton, for every
+# test below that asserts on rendered prompt *content*: PROMPTS resolves
+# DB/GDoc overrides whenever real credentials happen to be in the
+# environment (e.g. a chat_orchestrator/.env copied in for unrelated
+# reasons), which would make these tests check whatever's live instead of
+# the bundled file. See chat_orchestrator/tests/test_prompt_parity.py and
+# this repo's CLAUDE.md ("A local .env with real credentials makes some
+# tests silently non-hermetic"). Tests that only check registry-level facts
+# (ids/spec) are unaffected by overrides either way and stay on PROMPTS;
+# test_grafana_prompt_renders_without_the_env_var deliberately needs the
+# real singleton, since it's testing env-var-driven resolution itself.
+BUNDLED_PROMPTS = PromptLibrary()
+
 IDS = [
     "doc_editing.edit_highlighted",
     "doc_editor.locate_edits",
@@ -48,7 +61,7 @@ def test_no_prompt_text_remains_in_the_registry():
 
 
 def test_doc_editing_renders_with_optional_blocks_empty():
-    text = PROMPTS.text(
+    text = BUNDLED_PROMPTS.text(
         "doc_editing.edit_highlighted",
         instruction="make it formal",
         highlighted_text="hey there",
@@ -61,7 +74,7 @@ def test_doc_editing_renders_with_optional_blocks_empty():
 
 
 def test_doc_editor_locate_edits_json_example_has_single_braces():
-    text = PROMPTS.text(
+    text = BUNDLED_PROMPTS.text(
         "doc_editor.locate_edits", instruction="fix the intro", markdown="# Title\n\nBody"
     )
     assert '"text": "the exact text' in text
@@ -70,7 +83,7 @@ def test_doc_editor_locate_edits_json_example_has_single_braces():
 
 
 def test_knowledge_summarize_topic_renders_all_variables():
-    text = PROMPTS.text(
+    text = BUNDLED_PROMPTS.text(
         "knowledge.summarize_topic",
         topic="grid outages",
         chunks_text="[1] chunk one",
@@ -83,7 +96,7 @@ def test_knowledge_summarize_topic_renders_all_variables():
 
 
 def test_jira_issue_types_renders_without_operational_context():
-    text = PROMPTS.text(
+    text = BUNDLED_PROMPTS.text(
         "ticketing.jira_issue_types",
         catalogue_json="[]",
         summary="Grid down",
@@ -96,7 +109,7 @@ def test_jira_issue_types_renders_without_operational_context():
 
 
 def test_jira_issue_types_renders_with_operational_context():
-    text = PROMPTS.text(
+    text = BUNDLED_PROMPTS.text(
         "ticketing.jira_issue_types",
         catalogue_json="[]",
         summary="Grid down",
@@ -109,17 +122,12 @@ def test_jira_issue_types_renders_with_operational_context():
 def test_gtr_analysis_conversation_is_fully_static():
     spec = PROMPTS.spec("gtr.analysis_conversation")
     assert spec.variables == []
-    text = PROMPTS.text("gtr.analysis_conversation")
+    text = BUNDLED_PROMPTS.text("gtr.analysis_conversation")
     assert "grid technical reviewer" in text
 
 
 def test_annotations_prompt_renders_with_a_catalogue_and_requests():
-    # A bare PromptLibrary(), not the shared.prompts.PROMPTS singleton: PROMPTS
-    # resolves DB/GDoc overrides whenever real credentials happen to be in the
-    # environment (e.g. a chat_orchestrator/.env copied in for unrelated
-    # reasons), which would make this test check whatever is live instead of
-    # the bundled file. See chat_orchestrator/tests/test_prompt_parity.py.
-    text = PromptLibrary().text(
+    text = BUNDLED_PROMPTS.text(
         "annotations.resolve_values",
         catalogue_block="CATALOGUE_BLOCK_SENTINEL",
         requests_block="REQUESTS_BLOCK_SENTINEL",
