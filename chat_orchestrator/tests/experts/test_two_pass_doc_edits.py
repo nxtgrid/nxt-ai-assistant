@@ -30,7 +30,9 @@ class _FakeContext:
         self._inputs = inputs
         self.packet_state = {}
         self.effective_email = "editor@example.com"
+        self.effective_org_id = None
         self.progress = []
+        self.mcp_executor = None
 
     def get_input(self, key, default=None):
         return self._inputs.get(key, default)

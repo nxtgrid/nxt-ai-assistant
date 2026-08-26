@@ -68,6 +68,7 @@ def test_doc_editing_renders_with_optional_blocks_empty():
         context_block="",
         context_summary="",
         reference_block="",
+        tool_guidance="",
     )
     assert "make it formal" in text
     assert "hey there" in text

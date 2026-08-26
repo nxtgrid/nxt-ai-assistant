@@ -894,6 +894,7 @@ async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
         try:
             from shared.utils import doc_editing
             from shared.utils.doc_edit_ordering import DOC_CONTEXT_CHAR_LIMIT
+            from shared.utils.doc_edit_tools import default_tool_runner
 
             markdown = "" if is_sheet else await doc_editing.fetch_doc_markdown(doc_id)
             replacement_markdown = await doc_editing.generate_replacement_markdown(
@@ -902,6 +903,9 @@ async def _handle_edit_doc_section(arguments: dict) -> list[types.TextContent]:
                 section_context=markdown,
                 context_limit=DOC_CONTEXT_CHAR_LIMIT,
                 user_email=user_email,
+                # Sheets stay untooled: write_cells writes literal cell text,
+                # so a chart or a multi-paragraph answer is meaningless there.
+                tool_runner=None if is_sheet else default_tool_runner(),
             )
         except Exception as e:
             logger.error(f"Failed to generate replacement: {e}")

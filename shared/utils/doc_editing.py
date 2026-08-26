@@ -8,10 +8,14 @@ handlers and the doc_editor expert step.
 import asyncio
 import json
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from shared.prompts import PROMPTS
 from shared.utils.apps_script_client import write_doc_markdown
+
+if TYPE_CHECKING:
+    from shared.prompts.types import RequestScope
+    from shared.utils.doc_edit_tools import ToolRunner
 
 LOGGER = logging.getLogger(__name__)
 
@@ -256,6 +260,84 @@ async def fetch_doc_markdown(doc_id: str) -> str:
     return markdown or ""
 
 
+_TOOL_GUIDANCE = (
+    "\nYou may call the listed tools to get real figures before writing. "
+    "Do this whenever the instruction asks for live data (power, battery, "
+    "generation totals) — never estimate or invent a number that a tool can "
+    "give you. If a tool fails, say plainly in the replacement text that the "
+    "figure was unavailable rather than guessing one."
+)
+
+
+def _tool_manifest() -> dict[str, dict]:
+    """The served tool manifest, flattened to server-prefixed names.
+
+    Read from mcp_servers/tool_definitions.json -- the same file production
+    serves -- so a tool's schema here is the schema the model sees everywhere
+    else. Returns {} if mcp_servers is not on the path, which degrades the
+    editor to its untooled behaviour rather than failing the edit.
+    """
+    try:
+        import json as _json
+        from pathlib import Path
+
+        import mcp_servers
+
+        path = Path(mcp_servers.__file__).parent / "tool_definitions.json"
+        manifest = _json.loads(path.read_text())
+    except Exception:
+        LOGGER.warning("Tool manifest unavailable; editing without tools", exc_info=True)
+        return {}
+
+    flattened: dict[str, dict] = {}
+    for server, entries in (manifest.get("tools") or {}).items():
+        tools = entries if isinstance(entries, list) else entries.get("tools", [])
+        for tool in tools:
+            if isinstance(tool, dict) and "name" in tool:
+                flattened[f"{server}_{tool['name']}"] = tool
+    return flattened
+
+
+def _generation_gateway():
+    """The configured gateway. A function so tests can replace it."""
+    from orchestrator.config.settings import get_settings
+    from shared.llm import get_default_generation_gateway
+
+    return get_default_generation_gateway(default_model=get_settings().gemini.model)
+
+
+def _jit_resolver():
+    """The JIT context resolver, or None where orchestrator is absent."""
+    try:
+        from orchestrator.services.jit_context_resolver import JitContextResolver
+    except ImportError:
+        return None
+    return JitContextResolver()
+
+
+async def _live_knowledge(user_email: str | None, scope) -> str:
+    """Provider-backed modules pinned to this prompt, resolved for this caller.
+
+    PromptLibrary.render() drops every JIT module -- gdoc, graph, directory,
+    episodic -- because it is synchronous and carries no identity. A Google
+    Doc attached to the editor as a knowledge module would otherwise resolve
+    to nothing, which is the opposite of what attaching it means.
+    """
+    resolver = _jit_resolver()
+    if resolver is None:
+        return ""
+    try:
+        from shared.prompts.providers import ResolutionContext
+        from shared.prompts.types import RequestScope
+
+        ctx = ResolutionContext(scope=scope or RequestScope(), user_email=user_email)
+        text, _slugs = await resolver.resolve_for_prompt("doc_editing.edit_highlighted", ctx)
+        return f"\n\n{text}" if text else ""
+    except Exception:
+        LOGGER.warning("Live context resolution failed; editing without it", exc_info=True)
+        return ""
+
+
 def build_context_block(section_context: str, context_limit: int = 1500) -> str:
     """The SURROUNDING CONTEXT block, truncated to the caller's budget.
 
@@ -278,6 +360,8 @@ async def generate_replacement_markdown(
     expert_context: dict[str, Any] | None = None,
     user_email: str | None = None,
     context_limit: int = 1500,
+    tool_runner: "ToolRunner | None" = None,
+    scope: "RequestScope | None" = None,
 ) -> str:
     """Use LLM to generate markdown replacement text for a doc section.
 
@@ -290,18 +374,27 @@ async def generate_replacement_markdown(
         highlighted_text: The text being replaced
         section_context: Surrounding document context (optional)
         expert_context: Workflow state dict — only allowed keys are passed to LLM
-        user_email: Requesting user's email (for permission checks on reference docs)
+        user_email: Requesting user's email (for permission checks on reference docs,
+            and for resolving Google-Doc-backed knowledge modules attached to
+            this prompt)
         context_limit: How much of section_context to include. The default
             suits a single section edit; the comment-driven batch raises it
             so an instruction can refer to the whole document.
+        tool_runner: When supplied, the model may call the read-only tools in
+            DOC_EDIT_TOOLS (grid status, historical power, charts) instead of
+            answering from nothing. Omit it for a purely editorial rewrite --
+            the untooled single call is both cheaper and the long-standing
+            behaviour for Sheets.
+        scope: The entity context (grid/org) this edit is running in. Lets a
+            site-scoped knowledge module attached to this prompt apply. Global
+            modules apply regardless of scope.
     """
     from orchestrator.config.settings import get_settings
-    from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+    from shared.llm import GenerationOptions, LLMMessage, ToolResult
+    from shared.utils.doc_edit_tools import DOC_EDIT_TOOLS, MAX_TOOL_ROUNDS, build_tool_specs
 
     settings = get_settings()
-    gateway = get_default_generation_gateway(
-        default_model=settings.gemini.model,
-    )
+    gateway = _generation_gateway()
 
     # Fetch any reference documents linked in the instruction (with authz check)
     reference_block = await _fetch_reference_docs(instruction, user_email=user_email)
@@ -318,22 +411,64 @@ async def generate_replacement_markdown(
 
     context_block = build_context_block(section_context, context_limit)
 
-    prompt = PROMPTS.text(
+    tools = build_tool_specs(_tool_manifest()) if tool_runner else None
+    rendered = PROMPTS.render(
         "doc_editing.edit_highlighted",
-        instruction=instruction,
-        highlighted_text=highlighted_text,
-        context_block=context_block,
-        context_summary=context_summary,
-        reference_block=reference_block,
+        vars={
+            "instruction": instruction,
+            "highlighted_text": highlighted_text,
+            "context_block": context_block,
+            "context_summary": context_summary,
+            "reference_block": reference_block,
+            "tool_guidance": _TOOL_GUIDANCE if tools else "",
+        },
+        scope=scope,
     )
+    prompt = rendered.system_text
+    if rendered.context_text:
+        prompt = f"{prompt}\n\n{rendered.context_text}"
+    prompt += await _live_knowledge(user_email, scope)
 
-    response = await gateway.generate(
-        [LLMMessage(role="user", text=prompt)],
-        GenerationOptions(
-            model=settings.gemini.model,
-            temperature=0.3,
-            max_output_tokens=2000,
-        ),
+    options = GenerationOptions(
+        model=settings.gemini.model,
+        temperature=0.3,
+        max_output_tokens=2000,
     )
+    messages = [LLMMessage(role="user", text=prompt)]
+    response = await gateway.generate(messages, options, tools=tools)
+
+    allowed = set(DOC_EDIT_TOOLS)
+    for _ in range(MAX_TOOL_ROUNDS):
+        if not response.tool_calls:
+            break
+        results = []
+        for call in response.tool_calls:
+            if call.name not in allowed:
+                LOGGER.warning(f"Doc editor requested a tool outside its whitelist: {call.name}")
+                results.append(
+                    ToolResult(
+                        call_id=call.id,
+                        name=call.name,
+                        result=json.dumps({"error": f"Tool {call.name} is not available here"}),
+                        is_error=True,
+                    )
+                )
+                continue
+            outcome = await tool_runner(call.name, dict(call.args or {}))
+            results.append(
+                ToolResult(
+                    call_id=call.id,
+                    name=call.name,
+                    result=outcome.text,
+                    is_error=outcome.is_error,
+                )
+            )
+        response = await gateway.generate(
+            messages,
+            options,
+            tools=tools,
+            tool_results=results,
+            conversation_state=response.conversation_state,
+        )
 
     return str(response.text).strip()
