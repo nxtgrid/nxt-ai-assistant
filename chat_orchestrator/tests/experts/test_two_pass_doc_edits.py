@@ -31,6 +31,7 @@ class _FakeContext:
         self.packet_state = {}
         self.effective_email = "editor@example.com"
         self.progress = []
+        self.mcp_executor = None
 
     def get_input(self, key, default=None):
         return self._inputs.get(key, default)

@@ -46,6 +46,7 @@ async def _apply(
     comments: List[Dict[str, Any]],
     markdown: str,
     user_email: Optional[str],
+    tool_runner,
 ) -> List[Dict[str, Any]]:
     """Generate and write one replacement per comment, in the order given."""
     from shared.utils.error_messages import sanitize_error_for_user
@@ -66,6 +67,7 @@ async def _apply(
                 section_context=markdown,
                 context_limit=DOC_CONTEXT_CHAR_LIMIT,
                 user_email=user_email,
+                tool_runner=tool_runner,
             )
             result = await edit_section(
                 doc_id=doc_id,
@@ -108,6 +110,8 @@ async def _refresh(doc_id: str, second_pass: List[Dict[str, Any]]) -> List[Dict[
 
 async def process_comments(doc_id: str, user_email: Optional[str] = None) -> Dict[str, Any]:
     """Apply every pending comment. Returns a summary dict, never raises."""
+    from shared.utils.doc_edit_tools import default_tool_runner
+
     comments = await scan_comments(doc_id)
     if not comments:
         return {"edits": 0, "succeeded": 0, "failed": 0, "deferred": 0, "edit_results": []}
@@ -117,6 +121,7 @@ async def process_comments(doc_id: str, user_email: Optional[str] = None) -> Dic
         comments = comments[:MAX_EDITS_PER_RUN]
 
     markdown = await fetch_doc_markdown(doc_id)
+    tool_runner = default_tool_runner()
 
     # Classify against the scan-order list, because the prompt numbers the
     # comments by their position in it. Only then sort into document order.
@@ -130,14 +135,14 @@ async def process_comments(doc_id: str, user_email: Optional[str] = None) -> Dic
     )
 
     await pin_revision(doc_id)
-    results = await _apply(doc_id, first_pass, markdown, user_email)
+    results = await _apply(doc_id, first_pass, markdown, user_email, tool_runner)
 
     deferred_count = len(second_pass)
     if second_pass:
         fresh_markdown = await fetch_doc_markdown(doc_id) or markdown
         second_pass = await _refresh(doc_id, second_pass)
         second_pass = ordering.order_by_position(second_pass, fresh_markdown)
-        results += await _apply(doc_id, second_pass, fresh_markdown, user_email)
+        results += await _apply(doc_id, second_pass, fresh_markdown, user_email, tool_runner)
 
     succeeded = sum(1 for r in results if r["status"] == "done")
     failed = sum(1 for r in results if r["status"] == "failed")

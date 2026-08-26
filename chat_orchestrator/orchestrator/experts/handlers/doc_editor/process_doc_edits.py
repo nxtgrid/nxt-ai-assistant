@@ -88,6 +88,11 @@ async def _apply_edits(
     """Generate and write one replacement per comment, in the order given."""
     from shared.utils.doc_edit_ordering import DOC_CONTEXT_CHAR_LIMIT
     from shared.utils.doc_editing import edit_section, generate_replacement_markdown
+    from shared.utils.doc_edit_tools import executor_tool_runner
+
+    # The expert step uses the executor rather than the registry because a
+    # StepContext already carries one, wired with the run's auth metadata.
+    runner = executor_tool_runner(context.mcp_executor) if context.mcp_executor else None
 
     results = []
     for comment in comments:
@@ -106,6 +111,7 @@ async def _apply_edits(
                 expert_context=context.packet_state,
                 user_email=context.effective_email,
                 context_limit=DOC_CONTEXT_CHAR_LIMIT,
+                tool_runner=runner,
             )
 
             result = await edit_section(
@@ -223,12 +229,16 @@ async def process_doc_edits(context: StepContext) -> StepResult:
 
         target_text = section_match["text"]
 
+        from shared.utils.doc_edit_tools import executor_tool_runner
+
+        runner = executor_tool_runner(context.mcp_executor) if context.mcp_executor else None
         replacement = await generate_replacement_markdown(
             instruction=instruction,
             highlighted_text=target_text,
             section_context=markdown[:1500],
             expert_context=context.packet_state,
             user_email=context.effective_email,
+            tool_runner=runner,
         )
 
         await pin_revision(doc_id)
