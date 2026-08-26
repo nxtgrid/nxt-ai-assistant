@@ -66,7 +66,7 @@ def wired(monkeypatch):
     """Patch every I/O seam and record what the handler did, in order."""
     import shared.utils.doc_editing as doc_editing
     import shared.utils.gdrive_doc_fetcher as fetcher
-    from orchestrator.experts.handlers.doc_editor import edit_ordering
+    from shared.utils import doc_edit_ordering as edit_ordering
 
     calls = {"edits": [], "generated": [], "scans": 0, "pins": 0}
     fetches = [BEFORE, AFTER]

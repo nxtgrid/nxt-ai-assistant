@@ -102,7 +102,7 @@ async def _apply_edits(
     context: StepContext, doc_id: str, comments: list[dict], markdown: str
 ) -> list[dict]:
     """Generate and write one replacement per comment, in the order given."""
-    from orchestrator.experts.handlers.doc_editor.edit_ordering import DOC_CONTEXT_CHAR_LIMIT
+    from shared.utils.doc_edit_ordering import DOC_CONTEXT_CHAR_LIMIT
     from shared.utils.doc_editing import edit_section, generate_replacement_markdown
 
     results = []
@@ -277,7 +277,7 @@ async def process_doc_edits(context: StepContext) -> StepResult:
             LOGGER.warning(f"Capping edits from {len(comments)} to {MAX_EDITS_PER_RUN}")
             comments = comments[:MAX_EDITS_PER_RUN]
 
-        from orchestrator.experts.handlers.doc_editor import edit_ordering
+        from shared.utils import doc_edit_ordering as edit_ordering
 
         markdown = await _fetch_markdown(doc_id)
 

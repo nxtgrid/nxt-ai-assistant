@@ -2,7 +2,7 @@
 
 import pytest
 
-from orchestrator.experts.handlers.doc_editor.edit_ordering import (
+from shared.utils.doc_edit_ordering import (
     document_position,
     order_by_position,
 )
@@ -106,7 +106,7 @@ def test_the_ordering_prompt_actually_substitutes_its_variables():
 
 
 def test_parse_deferred_reads_a_plain_json_array():
-    from orchestrator.experts.handlers.doc_editor.edit_ordering import parse_deferred
+    from shared.utils.doc_edit_ordering import parse_deferred
 
     assert parse_deferred(
         '[{"request": 1, "deferred": false}, {"request": 2, "deferred": true}]'
@@ -114,19 +114,19 @@ def test_parse_deferred_reads_a_plain_json_array():
 
 
 def test_parse_deferred_strips_a_code_fence():
-    from orchestrator.experts.handlers.doc_editor.edit_ordering import parse_deferred
+    from shared.utils.doc_edit_ordering import parse_deferred
 
     assert parse_deferred('```json\n[{"request": 3, "deferred": true}]\n```') == {3}
 
 
 def test_parse_deferred_ignores_entries_that_are_not_deferred():
-    from orchestrator.experts.handlers.doc_editor.edit_ordering import parse_deferred
+    from shared.utils.doc_edit_ordering import parse_deferred
 
     assert parse_deferred('[{"request": 1}, {"request": 2, "deferred": "yes"}]') == set()
 
 
 def test_unparseable_ordering_degrades_to_a_single_pass():
-    from orchestrator.experts.handlers.doc_editor.edit_ordering import parse_deferred
+    from shared.utils.doc_edit_ordering import parse_deferred
 
     assert parse_deferred("I could not decide, sorry") == set()
     assert parse_deferred('{"request": 1}') == set()
@@ -136,7 +136,7 @@ def test_unparseable_ordering_degrades_to_a_single_pass():
 @pytest.mark.asyncio
 async def test_a_single_comment_never_costs_an_llm_call(monkeypatch):
     """Nothing to order, and this is the common case — it must stay free."""
-    from orchestrator.experts.handlers.doc_editor import edit_ordering
+    from shared.utils import doc_edit_ordering as edit_ordering
 
     async def _explode(*args, **kwargs):
         raise AssertionError("classify_deferred must not reach the model here")
@@ -148,7 +148,7 @@ async def test_a_single_comment_never_costs_an_llm_call(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_a_failing_classifier_never_blocks_the_edit_run(monkeypatch):
-    from orchestrator.experts.handlers.doc_editor import edit_ordering
+    from shared.utils import doc_edit_ordering as edit_ordering
 
     async def _boom(*args, **kwargs):
         raise RuntimeError("gateway down")
@@ -164,7 +164,7 @@ async def test_a_failing_classifier_never_blocks_the_edit_run(monkeypatch):
 
 
 def test_partition_splits_on_the_classifier_numbering():
-    from orchestrator.experts.handlers.doc_editor.edit_ordering import partition_by_pass
+    from shared.utils.doc_edit_ordering import partition_by_pass
 
     comments = [_comment("a", "x"), _comment("b", "y"), _comment("c", "z")]
     first, second = partition_by_pass(comments, {2})
@@ -173,7 +173,7 @@ def test_partition_splits_on_the_classifier_numbering():
 
 
 def test_nothing_deferred_leaves_a_single_pass():
-    from orchestrator.experts.handlers.doc_editor.edit_ordering import partition_by_pass
+    from shared.utils.doc_edit_ordering import partition_by_pass
 
     comments = [_comment("a", "x"), _comment("b", "y")]
     first, second = partition_by_pass(comments, set())
@@ -183,7 +183,7 @@ def test_nothing_deferred_leaves_a_single_pass():
 
 def test_a_request_number_out_of_range_is_ignored():
     """A hallucinated index must not drop a comment or crash the run."""
-    from orchestrator.experts.handlers.doc_editor.edit_ordering import partition_by_pass
+    from shared.utils.doc_edit_ordering import partition_by_pass
 
     comments = [_comment("a", "x")]
     first, second = partition_by_pass(comments, {7})
