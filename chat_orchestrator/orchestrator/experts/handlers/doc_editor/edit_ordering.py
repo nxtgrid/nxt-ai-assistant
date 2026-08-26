@@ -78,3 +78,85 @@ def order_by_position(comments: List[Dict[str, Any]], markdown: str) -> List[Dic
 
     located.sort(key=lambda pair: pair[0], reverse=True)
     return [comment for _, comment in located] + unlocated
+
+
+def parse_deferred(text: str) -> Set[int]:
+    """The 1-based request numbers the model marked deferred.
+
+    Deliberately tolerant. An ordering pass is an optimisation on top of work
+    the user actually asked for -- a response we cannot read degrades to a
+    single-pass run, which is exactly today's behaviour, never to a failed
+    edit run.
+    """
+    body = text.strip()
+    if "```" in body:
+        body = body.split("```")[1]
+        if body.startswith("json"):
+            body = body[4:]
+
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, ValueError, IndexError):
+        LOGGER.warning("Could not parse the edit ordering response; running a single pass")
+        return set()
+
+    if not isinstance(parsed, list):
+        return set()
+
+    return {
+        int(item["request"])
+        for item in parsed
+        if isinstance(item, dict) and item.get("deferred") is True and "request" in item
+    }
+
+
+def build_comments_block(comments: List[Dict[str, Any]]) -> str:
+    """The numbered request list the classifier prompt is built around.
+
+    The numbering is positional: `parse_deferred` maps the model's answers
+    back through it, so this must be built from the same list, in the same
+    order, that `partition_by_pass` is later given.
+    """
+    return "\n".join(
+        f'{i}. instruction: "{comment.get("instruction", "")}"\n'
+        f'   quoted text: "{(comment.get("highlighted_text") or "")[:200]}"'
+        for i, comment in enumerate(comments, start=1)
+    )
+
+
+async def _classify(comments_block: str, markdown: str) -> str:
+    """The raw model response. Split out so tests can fail it deliberately."""
+    from orchestrator.config.settings import get_settings
+    from shared.llm import GenerationOptions, LLMMessage, get_default_generation_gateway
+
+    settings = get_settings()
+    gateway = get_default_generation_gateway(default_model=settings.gemini.model)
+
+    prompt = PROMPTS.text(
+        "doc_editor.order_edits",
+        comments_block=comments_block,
+        markdown=markdown[:DOC_CONTEXT_CHAR_LIMIT],
+    )
+    response = await gateway.generate(
+        [LLMMessage(role="user", text=prompt)],
+        GenerationOptions(model=settings.gemini.model, temperature=0.1, max_output_tokens=1000),
+    )
+    return str(response.text)
+
+
+async def classify_deferred(comments: List[Dict[str, Any]], markdown: str) -> Set[int]:
+    """Which comments (1-based, in the given order) belong in the second pass.
+
+    One extra model call per run, skipped entirely below two comments -- there
+    is nothing to order, and one comment is the common case. Every failure
+    path returns an empty set: ordering must never be the reason an edit the
+    user asked for does not happen.
+    """
+    if len(comments) < 2:
+        return set()
+
+    try:
+        return parse_deferred(await _classify(build_comments_block(comments), markdown))
+    except Exception as e:
+        LOGGER.warning(f"Edit ordering pass failed; running every comment in one pass: {e}")
+        return set()

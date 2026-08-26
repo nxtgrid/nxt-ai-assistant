@@ -76,3 +76,85 @@ def test_unlocatable_comments_sort_last():
 
 def test_ordering_an_empty_batch_is_not_an_error():
     assert order_by_position([], MARKDOWN) == []
+
+
+# ── the deferral classifier ──────────────────────────────────────────────
+
+
+def test_the_ordering_prompt_actually_substitutes_its_variables():
+    """A bare PromptLibrary, and sentinels absent from the prompt's own text.
+
+    Both halves matter. The bare library (never the shared PROMPTS singleton)
+    keeps a developer's local .env from resolving this against the live
+    chat_db prompts table -- see the note atop test_prompt_parity.py. The
+    sentinels guard against the failure that annotations.resolve_values is
+    sitting in right now: single-brace {placeholders} that render() never
+    substitutes, under a test whose assertion strings happened to also appear
+    in the prompt's static body, so it passed while the model got nothing.
+    """
+    from shared.prompts import PromptLibrary
+
+    text = PromptLibrary().text(
+        "doc_editor.order_edits",
+        comments_block="ZZCOMMENTSENTINELZZ",
+        markdown="ZZMARKDOWNSENTINELZZ",
+    )
+    assert "ZZCOMMENTSENTINELZZ" in text
+    assert "ZZMARKDOWNSENTINELZZ" in text
+    assert "{{" not in text
+    assert "{comments_block}" not in text
+
+
+def test_parse_deferred_reads_a_plain_json_array():
+    from orchestrator.experts.handlers.doc_editor.edit_ordering import parse_deferred
+
+    assert parse_deferred(
+        '[{"request": 1, "deferred": false}, {"request": 2, "deferred": true}]'
+    ) == {2}
+
+
+def test_parse_deferred_strips_a_code_fence():
+    from orchestrator.experts.handlers.doc_editor.edit_ordering import parse_deferred
+
+    assert parse_deferred('```json\n[{"request": 3, "deferred": true}]\n```') == {3}
+
+
+def test_parse_deferred_ignores_entries_that_are_not_deferred():
+    from orchestrator.experts.handlers.doc_editor.edit_ordering import parse_deferred
+
+    assert parse_deferred('[{"request": 1}, {"request": 2, "deferred": "yes"}]') == set()
+
+
+def test_unparseable_ordering_degrades_to_a_single_pass():
+    from orchestrator.experts.handlers.doc_editor.edit_ordering import parse_deferred
+
+    assert parse_deferred("I could not decide, sorry") == set()
+    assert parse_deferred('{"request": 1}') == set()
+    assert parse_deferred("") == set()
+
+
+@pytest.mark.asyncio
+async def test_a_single_comment_never_costs_an_llm_call(monkeypatch):
+    """Nothing to order, and this is the common case — it must stay free."""
+    from orchestrator.experts.handlers.doc_editor import edit_ordering
+
+    async def _explode(*args, **kwargs):
+        raise AssertionError("classify_deferred must not reach the model here")
+
+    monkeypatch.setattr(edit_ordering, "_classify", _explode)
+    assert await edit_ordering.classify_deferred([_comment("a", "x")], MARKDOWN) == set()
+    assert await edit_ordering.classify_deferred([], MARKDOWN) == set()
+
+
+@pytest.mark.asyncio
+async def test_a_failing_classifier_never_blocks_the_edit_run(monkeypatch):
+    from orchestrator.experts.handlers.doc_editor import edit_ordering
+
+    async def _boom(*args, **kwargs):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(edit_ordering, "_classify", _boom)
+    result = await edit_ordering.classify_deferred(
+        [_comment("a", "x"), _comment("b", "y")], MARKDOWN
+    )
+    assert result == set()
