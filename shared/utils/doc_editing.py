@@ -233,6 +233,29 @@ async def _fetch_reference_docs(instruction: str, user_email: str | None = None)
     )
 
 
+async def fetch_doc_markdown(doc_id: str) -> str:
+    """The document as markdown, off the event loop. Never raises.
+
+    fetch_google_doc_markdown is a blocking Drive call, so it goes through a
+    thread. A document we cannot read degrades to "no context" -- editing
+    blind is worse than editing well, but it is much better than failing the
+    whole batch because one Drive call timed out.
+    """
+    from shared.utils import gdrive_doc_fetcher
+
+    try:
+        markdown = await asyncio.to_thread(gdrive_doc_fetcher.fetch_google_doc_markdown, doc_id)
+    except Exception:
+        LOGGER.warning(
+            f"Could not fetch {doc_id} as markdown -- editing without document context",
+            exc_info=True,
+        )
+        return ""
+    if not markdown:
+        LOGGER.warning(f"Could not fetch {doc_id} as markdown -- editing without document context")
+    return markdown or ""
+
+
 def build_context_block(section_context: str, context_limit: int = 1500) -> str:
     """The SURROUNDING CONTEXT block, truncated to the caller's budget.
 
