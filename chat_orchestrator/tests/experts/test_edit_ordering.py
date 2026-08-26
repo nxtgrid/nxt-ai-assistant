@@ -158,3 +158,34 @@ async def test_a_failing_classifier_never_blocks_the_edit_run(monkeypatch):
         [_comment("a", "x"), _comment("b", "y")], MARKDOWN
     )
     assert result == set()
+
+
+# ── partitioning ─────────────────────────────────────────────────────────
+
+
+def test_partition_splits_on_the_classifier_numbering():
+    from orchestrator.experts.handlers.doc_editor.edit_ordering import partition_by_pass
+
+    comments = [_comment("a", "x"), _comment("b", "y"), _comment("c", "z")]
+    first, second = partition_by_pass(comments, {2})
+    assert [c["comment_id"] for c in first] == ["a", "c"]
+    assert [c["comment_id"] for c in second] == ["b"]
+
+
+def test_nothing_deferred_leaves_a_single_pass():
+    from orchestrator.experts.handlers.doc_editor.edit_ordering import partition_by_pass
+
+    comments = [_comment("a", "x"), _comment("b", "y")]
+    first, second = partition_by_pass(comments, set())
+    assert len(first) == 2
+    assert second == []
+
+
+def test_a_request_number_out_of_range_is_ignored():
+    """A hallucinated index must not drop a comment or crash the run."""
+    from orchestrator.experts.handlers.doc_editor.edit_ordering import partition_by_pass
+
+    comments = [_comment("a", "x")]
+    first, second = partition_by_pass(comments, {7})
+    assert [c["comment_id"] for c in first] == ["a"]
+    assert second == []

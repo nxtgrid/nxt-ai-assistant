@@ -160,3 +160,21 @@ async def classify_deferred(comments: List[Dict[str, Any]], markdown: str) -> Se
     except Exception as e:
         LOGGER.warning(f"Edit ordering pass failed; running every comment in one pass: {e}")
         return set()
+
+
+def partition_by_pass(
+    comments: List[Dict[str, Any]], deferred: Set[int]
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Split into (first pass, second pass), preserving the order given.
+
+    `deferred` holds 1-based positions in `comments` exactly as the classifier
+    was shown them, so this must be called with the same list, in the same
+    order, that `build_comments_block` was given -- before any position sort
+    reorders it. A number outside the range is ignored rather than trusted:
+    the model does not get to drop a comment the user left.
+    """
+    first: List[Dict[str, Any]] = []
+    second: List[Dict[str, Any]] = []
+    for index, comment in enumerate(comments, start=1):
+        (second if index in deferred else first).append(comment)
+    return first, second
