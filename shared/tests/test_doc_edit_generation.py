@@ -116,3 +116,73 @@ async def test_the_loop_is_bounded(monkeypatch):
     )
 
     assert len(rounds) <= 3, f"loop ran {len(rounds)} rounds, expected at most 3"
+
+
+@pytest.mark.asyncio
+async def test_a_fetched_chart_is_substituted_into_the_markdown(monkeypatch):
+    from shared.llm.types import GenerateResult, ToolCall
+
+    gateway = _Gateway(
+        [
+            GenerateResult(
+                text="",
+                tool_calls=[
+                    ToolCall(
+                        id="1",
+                        name="equipment_diagnostics_generate_power_chart",
+                        args={"grid_name": "X", "chart_type": "power_timeline"},
+                    )
+                ],
+            ),
+            GenerateResult(
+                text="Output over 24 hours:\n\n![Power timeline](anansi-chart:1)",
+                tool_calls=[],
+            ),
+        ]
+    )
+    _install(monkeypatch, gateway)
+
+    async def _runner(name, args):
+        return ToolOutcome(text='{"chart_type": "power_timeline"}', images=("PNGDATA",))
+
+    out = await doc_editing.generate_replacement_markdown(
+        "add the performance graph", "{{Data}}", tool_runner=_runner
+    )
+
+    assert "![Power timeline](base64:PNGDATA)" in out
+    assert "anansi-chart" not in out
+
+
+@pytest.mark.asyncio
+async def test_base64_never_reaches_the_model(monkeypatch):
+    """The whole point of the placeholder: a chart payload in a tool result
+    would blow max_output_tokens immediately."""
+    from shared.llm.types import GenerateResult, ToolCall
+
+    seen_results = []
+
+    class _Recording(_Gateway):
+        async def generate(self, messages, options, **kwargs):
+            for result in kwargs.get("tool_results") or []:
+                seen_results.append(result.result)
+            return await super().generate(messages, options, **kwargs)
+
+    gateway = _Recording(
+        [
+            GenerateResult(
+                text="",
+                tool_calls=[
+                    ToolCall(id="1", name="equipment_diagnostics_generate_power_chart", args={})
+                ],
+            ),
+            GenerateResult(text="![C](anansi-chart:1)", tool_calls=[]),
+        ]
+    )
+    _install(monkeypatch, gateway)
+
+    async def _runner(name, args):
+        return ToolOutcome(text='{"ok": true}', images=("SECRETPNG",))
+
+    await doc_editing.generate_replacement_markdown("chart it", "{{Data}}", tool_runner=_runner)
+
+    assert not any("SECRETPNG" in r for r in seen_results)
