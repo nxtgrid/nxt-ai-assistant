@@ -1,7 +1,7 @@
 """The last prompts to leave code and env vars are in the library."""
 
 from shared.config import flag_registry
-from shared.prompts import PROMPTS
+from shared.prompts import PROMPTS, PromptLibrary
 
 IDS = [
     "doc_editing.edit_highlighted",
@@ -114,10 +114,23 @@ def test_gtr_analysis_conversation_is_fully_static():
 
 
 def test_annotations_prompt_renders_with_a_catalogue_and_requests():
-    text = PROMPTS.text(
+    # A bare PromptLibrary(), not the shared.prompts.PROMPTS singleton: PROMPTS
+    # resolves DB/GDoc overrides whenever real credentials happen to be in the
+    # environment (e.g. a chat_orchestrator/.env copied in for unrelated
+    # reasons), which would make this test check whatever is live instead of
+    # the bundled file. See chat_orchestrator/tests/test_prompt_parity.py.
+    text = PromptLibrary().text(
         "annotations.resolve_values",
-        catalogue_block="- energy.total_kwp (number): Peak capacity. [current value: 42.5]",
-        requests_block='1. "the total peak capacity"',
+        catalogue_block="CATALOGUE_BLOCK_SENTINEL",
+        requests_block="REQUESTS_BLOCK_SENTINEL",
     )
-    assert "energy.total_kwp" in text
-    assert "the total peak capacity" in text
+    # Neither sentinel appears anywhere in the prompt's static body (unlike
+    # "energy.total_kwp" and "the total peak capacity", which appear in the
+    # JSON example and Rules section regardless of whether substitution ran)
+    # -- so finding them proves the placeholders were actually substituted,
+    # and the explicit absence of the raw placeholders proves the model isn't
+    # shown literal template syntax.
+    assert "CATALOGUE_BLOCK_SENTINEL" in text
+    assert "REQUESTS_BLOCK_SENTINEL" in text
+    assert "{catalogue_block}" not in text
+    assert "{requests_block}" not in text
