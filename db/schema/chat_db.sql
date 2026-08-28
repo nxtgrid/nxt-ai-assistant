@@ -290,11 +290,15 @@ CREATE TABLE IF NOT EXISTS notify_alert_deliveries (
     ticket_ref              text,
     rendered_text           text NOT NULL,
     alert                   jsonb NOT NULL DEFAULT '{}',
+    downtime                boolean NOT NULL DEFAULT false,
     CONSTRAINT notify_alert_deliveries_chat_message_uniq
         UNIQUE (external_chat_id, external_message_id)
 );
 CREATE INDEX IF NOT EXISTS notify_alert_deliveries_grid_sent_idx
     ON notify_alert_deliveries (grid_name, sent_at DESC);
+CREATE INDEX IF NOT EXISTS notify_alert_deliveries_grid_downtime_sent_idx
+    ON notify_alert_deliveries (grid_name, sent_at DESC)
+    WHERE downtime;
 
 ALTER TABLE ticket_correlation_events ADD COLUMN IF NOT EXISTS judgment jsonb;
 ALTER TABLE ticket_correlation_events ADD COLUMN IF NOT EXISTS context_availability jsonb;

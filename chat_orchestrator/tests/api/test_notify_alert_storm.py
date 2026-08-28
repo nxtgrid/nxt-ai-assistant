@@ -346,6 +346,13 @@ def _reset_delivery_anchors():
 @pytest.mark.asyncio
 async def test_seven_alerts_on_seven_devices_collapse_onto_one_ticket_one_message(monkeypatch):
     monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+    # Pinned off deliberately. ALERT_LLM_JUDGMENT_ENABLED now defaults on, and
+    # under it every alert is judged rather than laddered -- a different
+    # decision path with its own coverage (see the fail-open storm test
+    # below). This test exists to guard the deterministic ladder itself,
+    # which is still what runs whenever judgment is disabled, so it has to
+    # ask for that path explicitly rather than inherit today's default.
+    monkeypatch.setenv("ALERT_LLM_JUDGMENT_ENABLED", "false")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
 
     tickets: Dict[str, Dict[str, Any]] = {}
@@ -416,3 +423,66 @@ async def test_seven_alerts_on_seven_devices_collapse_onto_one_ticket_one_messag
     # Zero LLM calls -- fully deterministic (B1 signature fix + B2 detection
     # + B3 signature-amend rung). _ExplodingGateway raising would have
     # already failed this test with an AssertionError if this weren't true.
+
+
+@pytest.mark.asyncio
+async def test_llm_outage_during_a_storm_still_files_and_posts_every_alert(monkeypatch):
+    """Fail-open under the LLM-first default: an internal error must never be
+    the reason an alert goes unseen.
+
+    With judgment on (the default) and the gateway dead, each of the seven
+    alerts falls back to its own ticket and its own Telegram post. That is
+    noisier than the deterministic ladder's single rolled-up message and
+    deliberately so -- during an LLM outage the correct failure is too many
+    alerts, never a silent one.
+    """
+    monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+
+    tickets: Dict[str, Dict[str, Any]] = {}
+    store = _FakeStore(tickets)
+    ticket_service = _FakeTicketService(tickets)
+    transport = _FakeTelegramTransport()
+
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+        lambda get_client=None: store,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.service.TicketService",
+        lambda get_supabase_client=None: ticket_service,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.delivery_repository.DeliveryRepository",
+        _FakeDeliveryRepository,
+    )
+    monkeypatch.setattr(
+        "shared.llm.get_default_generation_gateway",
+        lambda default_model=None: _ExplodingGateway(),
+    )
+    monkeypatch.setattr(
+        "shared.utils.telegram_send.send_telegram_message_with_fallback", transport.send
+    )
+    monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", transport.edit)
+
+    async def _noop_chat_db_log(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("orchestrator.api.app._log_notification_to_chat_db", _noop_chat_db_log)
+
+    import orchestrator.api.app as app_module
+
+    refs: List[Optional[str]] = []
+    send_decisions: List[str] = []
+    for subject in _SUBJECTS:
+        body = _body(subject)
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+        assert error is None, f"unexpected error for {subject!r}: {error}"
+        refs.append(ref)
+        send_decisions.append((extra or {}).get("send_decision", ""))
+        await app_module._deliver_notification(body, _target(), ref, delivery)
+
+    assert None not in refs
+    assert len(set(refs)) == len(_SUBJECTS)
+    assert len(transport.send_calls) == len(_SUBJECTS)
+    assert set(send_decisions) == {"send"}

@@ -57,9 +57,25 @@ class TestRegistryIntegrity:
     def test_urgent_live_output_timeout_defaults_to_three_seconds(self):
         assert fr.get("URGENT_ALERT_LIVE_OUTPUT_TIMEOUT_SECONDS", env={}) == 3
 
-    def test_llm_alert_judgment_flags_default_off_and_chain_dependencies(self):
-        assert fr.get("ALERT_LLM_JUDGMENT_ENABLED", env={}) is False
-        assert fr.get("ALERT_LLM_SUPPRESSION_ENFORCED", env={}) is False
+    def test_llm_alert_judgment_flags_default_on_and_chain_dependencies(self):
+        """One LLM judgment is *the* semantic decision for every
+        auto-correlated alert -- see approved decisions 1 and 7 in
+        docs/superpowers/specs/2026-08-21-llm-first-alert-correlation-design.md
+        -- not an opt-in. These shipped default-off as a rollout gate; left
+        that way, /notify keeps running the old deterministic ladder, where
+        code rather than the judgment owns suppression. That is how a
+        weeks-old MPPT ticket came to silently absorb every later alert on a
+        grid that was down (the 2026-08-28 incident).
+
+        Judgment without enforcement is shadow mode -- recorded, but every
+        alert still sends and the judgment decides nothing -- so both default
+        on together, with `decide_alert_delivery`'s fail-open gate (LLM
+        failure, invalid judgment, missing context source, or material status
+        change all force delivery) as the safety net. `ALERT_CORRELATION_ENABLED`
+        remains the operator kill switch for the whole path.
+        """
+        assert fr.get("ALERT_LLM_JUDGMENT_ENABLED", env={}) is True
+        assert fr.get("ALERT_LLM_SUPPRESSION_ENFORCED", env={}) is True
         assert fr.FLAGS["ALERT_LLM_JUDGMENT_ENABLED"].depends_on == "ALERT_CORRELATION_ENABLED"
         assert (
             fr.FLAGS["ALERT_LLM_SUPPRESSION_ENFORCED"].depends_on

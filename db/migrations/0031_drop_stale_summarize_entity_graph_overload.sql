@@ -1,0 +1,31 @@
+-- 0031: drop the stale uuid[] overload of summarize_entity_graph.
+--
+-- 0018 created summarize_entity_graph(p_org_ids uuid[], int, int). 0020
+-- corrected the org-id type and shipped the fix as
+--   CREATE OR REPLACE FUNCTION summarize_entity_graph(p_org_ids integer[], ...)
+-- but Postgres identifies a function by name *and* argument types, so that
+-- did not replace anything -- it added a second overload alongside the first.
+--
+-- Consequence, live in production from whenever 0020 was applied until
+-- 2026-08-28: PostgREST cannot choose between the two and rejects every call
+-- with PGRST203 ("Could not choose the best candidate function between:
+-- public.summarize_entity_graph(p_org_ids => integer[], ...),
+-- public.summarize_entity_graph(p_org_ids => uuid[], ...)"). The knowledge
+-- graph context module swallows that as a warning
+-- (shared/prompts/providers_graph.py's resolve()), so the graph summary
+-- silently stopped reaching any prompt while every request still succeeded.
+-- Nothing surfaced it until the anansi-bot run logs were read directly.
+--
+-- 0014_drop_persistent_agents.sql already documents this exact trap ("DROP
+-- FUNCTION IF EXISTS doesn't error on a non-matching overload") -- naming the
+-- argument types is what makes the drop hit only the intended overload.
+--
+-- Already applied by hand against production on 2026-08-28; this migration
+-- records it so the file history matches the database and a rebuilt
+-- environment converges to the same state. db/schema/chat_db.sql already
+-- carries only the integer[] signature, so a schema-built database never had
+-- the duplicate and this is a no-op there.
+--
+-- Safe to re-run.
+
+DROP FUNCTION IF EXISTS summarize_entity_graph(uuid[], integer, integer);

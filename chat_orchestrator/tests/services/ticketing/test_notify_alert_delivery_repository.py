@@ -268,3 +268,81 @@ async def test_recent_om_messages_is_scoped_to_one_active_topic_and_excludes_ale
 
     assert [row.content for row in rows] == ["Please check inverter 3"]
     assert rows[0].created_at == "2026-08-21T10:00:00+00:00"
+
+
+# --------------------------------------------------------------------------- #
+# Downtime clock -- the "at most one downtime alert per day" ledger
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_record_success_marks_a_downtime_delivery() -> None:
+    repo, client = _repo()
+
+    await repo.record_success(
+        grid_name="Acme Grid",
+        external_chat_id="-1001",
+        external_topic_id="42",
+        external_message_id=9001,
+        source="n8n",
+        dedup_key=None,
+        ticket_id=None,
+        ticket_ref=None,
+        rendered_text="Grid down",
+        alert={"subject": "Grid down"},
+        downtime=True,
+    )
+
+    assert client.tables["notify_alert_deliveries"][0]["downtime"] is True
+
+
+@pytest.mark.asyncio
+async def test_record_success_defaults_to_not_a_downtime_delivery() -> None:
+    repo, client = _repo()
+
+    await repo.record_success(
+        grid_name="Acme Grid",
+        external_chat_id="-1001",
+        external_topic_id=None,
+        external_message_id=9002,
+        source="n8n",
+        dedup_key=None,
+        ticket_id=None,
+        ticket_ref=None,
+        rendered_text="MPPT underperforming",
+        alert={"subject": "MPPT underperforming"},
+    )
+
+    assert client.tables["notify_alert_deliveries"][0]["downtime"] is False
+
+
+@pytest.mark.asyncio
+async def test_latest_downtime_sent_at_ignores_other_grids_and_non_downtime_rows() -> None:
+    repo, client = _repo()
+    client.tables["notify_alert_deliveries"] = [
+        {"grid_name": "Acme Grid", "sent_at": "2026-08-26T06:00:00+00:00", "downtime": True},
+        {"grid_name": "Acme Grid", "sent_at": "2026-08-28T09:00:00+00:00", "downtime": False},
+        {"grid_name": "Other Grid", "sent_at": "2026-08-28T11:00:00+00:00", "downtime": True},
+        {"grid_name": "Acme Grid", "sent_at": "2026-08-27T18:00:00+00:00", "downtime": True},
+    ]
+
+    assert await repo.latest_downtime_sent_at("Acme Grid") == "2026-08-27T18:00:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_latest_downtime_sent_at_is_none_when_the_grid_has_never_been_reported_down() -> None:
+    repo, client = _repo()
+    client.tables["notify_alert_deliveries"] = [
+        {"grid_name": "Acme Grid", "sent_at": "2026-08-28T09:00:00+00:00", "downtime": False},
+    ]
+
+    assert await repo.latest_downtime_sent_at("Acme Grid") is None
+
+
+@pytest.mark.asyncio
+async def test_latest_downtime_sent_at_fails_open_on_a_ledger_outage() -> None:
+    """No clock means no proof an alert already went out today -- the caller
+    must treat that as "send", never as "already told them"."""
+    repo, client = _repo()
+    client.fail_tables["notify_alert_deliveries"] = RuntimeError("ledger down")
+
+    assert await repo.latest_downtime_sent_at("Acme Grid") is None
+    assert delivery_history_failures_last_hour() > 0

@@ -410,6 +410,15 @@ def _notify_env(monkeypatch):
     monkeypatch.setenv("NOTIFY_SHARED_SECRET", "test-secret")
     monkeypatch.setenv("NOTIFY_ENDPOINT_ENABLED", "true")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+    # The TestResolveNotifyTicketAuto* suites below assert the deterministic
+    # ladder's own new/amend/duplicate/replay decisions. ALERT_LLM_JUDGMENT_ENABLED
+    # now defaults on, which routes `auto` to the judgment resolver instead --
+    # a different path, covered by test_auto_routes_to_llm_judgment_resolver_
+    # when_enabled (which re-enables it in-test, overriding this) and by the
+    # fail-open storm test in test_notify_alert_storm.py. Pinned off here so
+    # these suites keep testing the ladder they were written for, which is
+    # still what runs whenever judgment is disabled.
+    monkeypatch.setenv("ALERT_LLM_JUDGMENT_ENABLED", "false")
 
 
 @pytest.fixture(autouse=True)
@@ -2933,3 +2942,166 @@ def test_duplicate_delivery_is_silent():
     )
 
     assert delivery.suppress is True
+
+
+# ---------------------------------------------------------------------------
+# _deliver_notification -- the downtime delivery floor
+# ---------------------------------------------------------------------------
+
+
+class TestDowntimeDeliveryFloor:
+    """Correlation may silence equipment noise; it may not silence a dark grid.
+
+    A never-closed ticket on an unrelated component (the 2026-08-28
+    incident: a weeks-old MPPT ticket absorbing every later alert) must not stop
+    the topic hearing that the grid is down -- once when it goes down, and
+    once more for every day it stays down.
+    """
+
+    @staticmethod
+    def _context(*, site_status: str = "off", fresh: bool = True, phases: float = 0.0):
+        async def _read(_grid_name: str) -> Dict[str, Any]:
+            return {
+                "generation_management": "managed",
+                "grid_status": "off" if site_status == "off" else "fs_on",
+                "site_status": site_status,
+                "output_kw": 0.0,
+                "battery_voltage_v": 51.2,
+                "l1_voltage_v": phases,
+                "l2_voltage_v": phases,
+                "l3_voltage_v": phases,
+                "observed_at": "2026-08-28T10:00:00+00:00",
+                "fresh": fresh,
+            }
+
+        return build_urgent_alert_context(
+            subject="! Warning: MPPT A3 seems to perform lower !",
+            grid_name="Grid A",
+            read_telemetry=_read,
+        )
+
+    @staticmethod
+    def _patch_ledger(monkeypatch, last_sent_at, recorded: List[Dict[str, Any]]):
+        class _Repo:
+            def __init__(self, **_kwargs: Any) -> None:
+                pass
+
+            async def latest_downtime_sent_at(self, _grid_name: str):
+                return last_sent_at
+
+            async def record_success(self, **kwargs: Any):
+                recorded.append(kwargs)
+                return {"id": "row-1"}
+
+        monkeypatch.setattr(
+            "orchestrator.services.ticketing.notify_alert_delivery_repository"
+            ".NotifyAlertDeliveryRepository",
+            _Repo,
+        )
+
+    async def test_newly_down_grid_breaks_through_a_suppressed_duplicate(
+        self, fake_telegram_send, monkeypatch
+    ):
+        from orchestrator.api.app import _deliver_notification
+
+        recorded: List[Dict[str, Any]] = []
+        self._patch_ledger(monkeypatch, None, recorded)
+
+        await _deliver_notification(
+            _notify_body(text="! Warning: MPPT A3 seems to perform lower !"),
+            _target(),
+            "OPS-1001",
+            NotificationDelivery(suppress=True, alert_context=self._context()),
+        )
+
+        assert len(fake_telegram_send.calls) == 1
+        assert recorded and recorded[0]["downtime"] is True
+
+    async def test_still_down_a_day_later_breaks_through_again(
+        self, fake_telegram_send, monkeypatch
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        from orchestrator.api.app import _deliver_notification
+
+        recorded: List[Dict[str, Any]] = []
+        yesterday = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        self._patch_ledger(monkeypatch, yesterday, recorded)
+
+        await _deliver_notification(
+            _notify_body(), _target(), "OPS-1001",
+            NotificationDelivery(suppress=True, alert_context=self._context()),
+        )
+
+        assert len(fake_telegram_send.calls) == 1
+
+    async def test_second_downtime_alert_the_same_day_stays_suppressed(
+        self, fake_telegram_send, monkeypatch
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        from orchestrator.api.app import _deliver_notification
+
+        recorded: List[Dict[str, Any]] = []
+        earlier_today = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        self._patch_ledger(monkeypatch, earlier_today, recorded)
+
+        await _deliver_notification(
+            _notify_body(), _target(), "OPS-1001",
+            NotificationDelivery(suppress=True, alert_context=self._context()),
+        )
+
+        assert fake_telegram_send.calls == []
+
+    async def test_healthy_grid_keeps_todays_suppression_behavior(
+        self, fake_telegram_send, monkeypatch
+    ):
+        from orchestrator.api.app import _deliver_notification
+
+        recorded: List[Dict[str, Any]] = []
+        self._patch_ledger(monkeypatch, None, recorded)
+
+        await _deliver_notification(
+            _notify_body(), _target(), "OPS-1001",
+            NotificationDelivery(
+                suppress=True,
+                alert_context=self._context(site_status="on", phases=230.0),
+            ),
+        )
+
+        assert fake_telegram_send.calls == []
+
+    async def test_stale_telemetry_keeps_todays_suppression_behavior(
+        self, fake_telegram_send, monkeypatch
+    ):
+        """Unknowable is not "down": the floor only ever adds a send, so it
+        must leave the correlation decision alone when it cannot see."""
+        from orchestrator.api.app import _deliver_notification
+
+        recorded: List[Dict[str, Any]] = []
+        self._patch_ledger(monkeypatch, None, recorded)
+
+        await _deliver_notification(
+            _notify_body(), _target(), "OPS-1001",
+            NotificationDelivery(suppress=True, alert_context=self._context(fresh=False)),
+        )
+
+        assert fake_telegram_send.calls == []
+
+    async def test_an_ordinary_send_while_down_advances_the_daily_clock(
+        self, fake_telegram_send, monkeypatch
+    ):
+        """A downtime alert that was never suppressed still has to mark the
+        ledger, or the floor would re-post the same news minutes later."""
+        from orchestrator.api.app import _deliver_notification
+
+        recorded: List[Dict[str, Any]] = []
+        self._patch_ledger(monkeypatch, None, recorded)
+
+        await _deliver_notification(
+            _notify_body(), _target(), "OPS-1001",
+            NotificationDelivery(alert_context=self._context()),
+        )
+
+        assert len(fake_telegram_send.calls) == 1
+        assert recorded and recorded[0]["downtime"] is True

@@ -1009,6 +1009,24 @@ class AlertCorrelator:
         for summary in backend_summaries:
             if summary.ref in by_ref:
                 continue
+            summary_age_hours = _age_hours(getattr(summary, "created_at", None), now)
+            if summary_age_hours is not None and summary_age_hours > self._lookback_hours:
+                # Store-side candidates are already bounded by
+                # `open_candidate_window_hours`; this source was not, so one
+                # never-closed ticket stayed an eligible amend/duplicate
+                # target forever and silently absorbed every later alert on
+                # the grid. Age it out here (before adopting it, which is
+                # otherwise pointless I/O) so the window bounds both sources.
+                # Undated candidates are kept: only refuse when we positively
+                # know, or a missing `created_at` files a duplicate ticket.
+                LOGGER.info(
+                    "Dropping backend candidate {!r}: {:.0f}h old, outside the {}h "
+                    "correlation window",
+                    summary.ref,
+                    summary_age_hours,
+                    self._lookback_hours,
+                )
+                continue
             try:
                 adopted = await self._ticket_service.adopt_external(
                     ref=summary.ref,
@@ -1030,7 +1048,7 @@ class AlertCorrelator:
                 backend=summary.backend,
                 summary=summary.summary,
                 description=summary.description,
-                age_hours=_age_hours(getattr(summary, "created_at", None), now),
+                age_hours=summary_age_hours,
                 status=summary.status,
             )
 

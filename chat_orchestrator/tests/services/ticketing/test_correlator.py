@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -1572,3 +1572,60 @@ class TestPowerChainCascadeDecision:
         decision = await correlator.decide("Ogbinbiri", self._inverter_off_alert())
 
         assert decision.decision == "new"
+
+
+class TestStaleBackendCandidatesExcluded:
+    """A never-closed backend ticket must age out of candidacy.
+
+    Store-side candidates are already bounded by
+    ``open_candidate_window_hours``; ``TicketService.find_open_by_grid`` was
+    not, so one forgotten Jira ticket kept absorbing a grid's alerts
+    indefinitely -- every re-fire deduped onto it and stayed silent. The
+    window applies to both sources or it bounds nothing.
+    """
+
+    @staticmethod
+    def _summary(ref: str, created_at):
+        return TicketSummary(
+            ref=ref,
+            backend="jira",
+            summary="! Warning: MPPT A3 seems to perform lower !",
+            status="Open",
+            created_at=created_at,
+        )
+
+    @pytest.mark.asyncio
+    async def test_backend_candidate_older_than_the_window_is_not_offered(self):
+        correlator, _store, ts, _gw = _make_correlator(lookback_hours=168)
+        aged_out = (datetime.now(timezone.utc) - timedelta(hours=200)).isoformat()
+        ts.open_by_grid = [self._summary("OPS-1001", aged_out)]
+        ts.statuses["OPS-1001"] = TicketStatus(summary="stale", is_done=False)
+
+        candidates = await correlator._assemble_candidates("Grid A")
+
+        assert [c.ref for c in candidates] == []
+        assert ts.adopted_calls == []
+
+    @pytest.mark.asyncio
+    async def test_backend_candidate_inside_the_window_is_still_offered(self):
+        correlator, _store, ts, _gw = _make_correlator(lookback_hours=168)
+        recent = (datetime.now(timezone.utc) - timedelta(hours=20)).isoformat()
+        ts.open_by_grid = [self._summary("OPS-1002", recent)]
+        ts.statuses["OPS-1002"] = TicketStatus(summary="recent", is_done=False)
+
+        candidates = await correlator._assemble_candidates("Grid A")
+
+        assert [c.ref for c in candidates] == ["OPS-1002"]
+
+    @pytest.mark.asyncio
+    async def test_backend_candidate_without_a_created_at_is_kept(self):
+        """Only refuse when we positively know the candidate is too old --
+        mirrors the cross-kind guard's "can't be proven either way" rule.
+        Dropping an undated candidate would file a duplicate ticket."""
+        correlator, _store, ts, _gw = _make_correlator(lookback_hours=168)
+        ts.open_by_grid = [self._summary("OPS-9999", None)]
+        ts.statuses["OPS-9999"] = TicketStatus(summary="undated", is_done=False)
+
+        candidates = await correlator._assemble_candidates("Grid A")
+
+        assert [c.ref for c in candidates] == ["OPS-9999"]
