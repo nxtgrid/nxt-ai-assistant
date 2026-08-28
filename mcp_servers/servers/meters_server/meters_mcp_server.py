@@ -115,6 +115,27 @@ registry = ToolRegistry("meters")
 _SCHEMAS_BY_NAME = {s["name"]: s for s in TOOL_SCHEMAS}
 
 
+async def _auth_db_connect():
+    """One readonly connection to the auth database.
+
+    The auth DB is the system of record for meters, DCUs and their org
+    scoping (`rls_organization_id`); `statement_cache_size=0` is required
+    because AUTH_DB_PORT is PgBouncer. Kept as a module-level function so
+    tests can substitute it without a live database.
+    """
+    import asyncpg
+
+    return await asyncpg.connect(
+        host=os.getenv("AUTH_DB_HOST"),
+        port=int(os.getenv("AUTH_DB_PORT", "6543")),
+        user=os.getenv("AUTH_DB_USER"),
+        password=os.getenv("AUTH_DB_PASSWORD"),
+        database=os.getenv("AUTH_DB_NAME", "postgres"),
+        ssl="require",
+        statement_cache_size=0,
+    )
+
+
 class MeterType(Enum):
     """Meter type enumeration"""
 
@@ -275,13 +296,19 @@ class MetersAPIClient:
     # ===============================================
 
     async def get_meter_type(self, meter_no: str) -> MeterType:
-        """
-        Query Supabase 'meters' table to determine meter type.
-        Uses authenticated request that respects Row Level Security (RLS).
+        """Determine a meter's vendor protocol (calin_v1 / calin_v2 / lorawan).
 
-        Expected table structure:
-        - meter_no: text (primary key or unique)
-        - meter_type: text ('calin_v1', 'calin_v2', 'lorawan')
+        BROKEN -- and not fixable without a decision. This queries a `meters`
+        table in the *chat* database that does not exist: meters live in the
+        auth DB. Every call therefore returns UNKNOWN.
+
+        Porting it is not a matter of repointing the query. The auth DB has no
+        source for this value: `meters.meter_type` there is a commercial tier
+        ('HPS','FS'), and `dcus.communication_protocol`
+        ('CALIN_LORAWAN','CALIN_GPRS','SIMCOM') separates LoRaWAN but cannot
+        tell Calin V1 from V2 -- which is exactly the distinction the unified
+        layer branches on to pick a vendor API. Somewhere to read V1-vs-V2
+        from has to be decided before this can work.
         """
         try:
             # Get authenticated token (respects RLS)
@@ -328,9 +355,13 @@ class MetersAPIClient:
             return MeterType.UNKNOWN
 
     async def get_meter_info(self, meter_no: str) -> Dict[str, Any]:
-        """
-        Query Supabase 'meters' table to get complete meter information.
-        Uses authenticated request that respects Row Level Security (RLS).
+        """Fetch complete meter information.
+
+        BROKEN for the same reason as `get_meter_type` above: the `meters`
+        table it queries does not exist in the chat database, and several of
+        the columns it selects (dev_eui, gateway_id, customer_id) exist in no
+        database this service can reach. Callers raise "not found" on every
+        meter.
 
         Expected table structure:
         - meter_no: text (primary key or unique)
@@ -1741,40 +1772,79 @@ class MetersAPIClient:
         else:
             raise Exception(f"Unknown meter type for meter {meter_no}")
 
-    async def find_meters_by_device_id(self, device_id: str) -> List[Dict[str, Any]]:
-        """
-        Find meters served by a DCU/concentrator or LoRaWAN gateway (base station).
+    async def find_meters_by_device_id(
+        self, device_id: str, organization_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Find the meters served by a DCU/concentrator or LoRaWAN base station.
 
-        Queries the Supabase 'meters' table by dcu_id or gateway_id. Used to resolve
-        a device ID (as referenced in alert tickets) to a device type and the meters
-        it serves, without requiring a meter number up front.
+        Resolves a device id as it appears in an alert ticket ("DCU 230401080",
+        "Base Station a84041ffff29d4da") to the meters behind it, without
+        needing a meter number up front.
+
+        This used to GET ``{chat_db}/rest/v1/meters`` with a minted Supabase
+        JWT. The chat database has no ``meters`` table -- meters live in the
+        auth DB -- so the request could never succeed; it failed into a
+        warning and returned ``[]``, which every caller read as "this device
+        serves no meters".
+
+        The auth DB has no separate gateway entity and no ``meters.gateway_id``:
+        a LoRaWAN base station *is* a ``dcus`` row whose
+        ``communication_protocol`` is ``CALIN_LORAWAN``. Device kind therefore
+        comes from the protocol, and ``dcu_id``/``gateway_id`` are synthesized
+        to keep this function's existing return shape for its callers.
+
+        ``organization_id`` replaces the row-level security the minted JWT used
+        to carry; ``None`` means staff and is deliberately unscoped. Returns
+        ``[]`` on any failure -- callers treat this as best-effort enrichment.
         """
         try:
-            access_token = await self.supabase_ensure_token()
-            session = await self.get_session()
-
-            url = f"{SUPABASE_URL}/rest/v1/meters"
-            headers = {
-                "apikey": SUPABASE_ANON_KEY,
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            }
-            params = {
-                "or": f"(dcu_id.eq.{device_id},gateway_id.eq.{device_id})",
-                "select": "meter_no,meter_type,dcu_id,gateway_id",
-                "limit": "10",
-            }
-
-            async with session.get(url, headers=headers, params=params) as response:
-                if response.status != 200:
-                    logger.warning(
-                        f"Supabase device lookup failed for {device_id}: {response.status}"
-                    )
-                    return []
-                return list(await response.json() or [])
+            conn = await _auth_db_connect()
         except Exception as e:
-            logger.warning(f"Supabase device lookup failed for {device_id}: {e}")
+            logger.warning(f"Auth DB device lookup failed for {device_id}: {e}")
             return []
+
+        try:
+            device = await conn.fetchrow(
+                "SELECT id, communication_protocol FROM dcus "
+                "WHERE external_reference = $1 "
+                "AND ($2::int IS NULL OR rls_organization_id = $2) LIMIT 1",
+                device_id,
+                organization_id,
+            )
+            if not device:
+                return []
+            # meters.dcu_id is an integer FK to dcus.id, not the external
+            # reference an alert ticket carries -- the old query compared the
+            # ticket's id straight against dcu_id, which could never match.
+            rows = await conn.fetch(
+                "SELECT external_reference FROM meters "
+                "WHERE dcu_id = $1 AND deleted_at IS NULL "
+                "AND ($2::int IS NULL OR rls_organization_id = $2)",
+                device["id"],
+                organization_id,
+            )
+        except Exception as e:
+            logger.warning(f"Auth DB device lookup failed for {device_id}: {e}")
+            return []
+        finally:
+            await conn.close()
+
+        is_lorawan = str(device["communication_protocol"] or "").upper() == "CALIN_LORAWAN"
+        # meter_type here is the *vendor protocol* the unified layer branches
+        # on, never the auth DB's meters.meter_type -- that column is a
+        # commercial tier ('HPS','FS') and would silently route to the wrong
+        # vendor API. The protocol distinguishes LoRaWAN, but nothing in the
+        # auth DB separates Calin V1 from V2, so leave it blank rather than
+        # guess.
+        return [
+            {
+                "meter_no": row["external_reference"],
+                "meter_type": "lorawan" if is_lorawan else "",
+                "dcu_id": None if is_lorawan else device_id,
+                "gateway_id": device_id if is_lorawan else None,
+            }
+            for row in rows
+        ]
 
     async def unified_get_device_status_by_id(
         self,
@@ -1782,14 +1852,17 @@ class MetersAPIClient:
         user_email: str,
         device_type: Optional[str] = None,
         matched_meters: Optional[List[Dict[str, Any]]] = None,
+        organization_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Get online status for a DCU/concentrator or LoRaWAN base station by its
         device ID, without requiring a meter number (alert tickets reference the
         device ID directly, e.g. 'DCU 230401080' or 'Base Station a84041ffff29d4da').
 
-        Device type is resolved from the Supabase 'meters' table when not provided,
-        falling back to the ID format (gateway EUIs are 16-char hex, DCU IDs numeric).
+        Device type is resolved from the auth DB when not provided -- a base
+        station is a `dcus` row with communication_protocol CALIN_LORAWAN --
+        falling back to the ID format (gateway EUIs are 16-char hex, DCU IDs
+        numeric) only when the device is not on record.
 
         Args:
             device_id: DCU/concentrator ID or LoRaWAN gateway/base station ID
@@ -1800,7 +1873,9 @@ class MetersAPIClient:
         self.current_user_email = user_email
 
         if matched_meters is None:
-            matched_meters = await self.find_meters_by_device_id(device_id)
+            matched_meters = await self.find_meters_by_device_id(
+                device_id, organization_id=organization_id
+            )
         matched_types = {(m.get("meter_type") or "").lower() for m in matched_meters}
 
         resolved_type = (device_type or "").lower().replace(" ", "_") or None
@@ -2153,25 +2228,32 @@ async def _tool_get_dcu_status_by_id(arguments: Dict[str, Any]) -> List[types.Te
         result = {"error": "Authentication required: user_email missing from request"}
     else:
         device_id = arguments["device_id"]
-        matched_meters = await client.find_meters_by_device_id(device_id)
 
-        # Org scoping: staff can query any device; customers only devices
-        # that serve at least one meter belonging to their organization
+        # Org scoping: staff can query any device; customers only devices that
+        # serve at least one meter belonging to their organization. Permissions
+        # are resolved *before* the lookup so the lookup itself can be scoped --
+        # it used to run first and unscoped, and (against a table that did not
+        # exist) always returned [], which this check then read as "not yours"
+        # and refused every device to every non-staff caller.
         auth_service = get_auth_service()
         permissions = await auth_service.get_user_permissions(email=user_email)
         if not permissions or not permissions.organization_ids:
             result = {"error": "User not found or has no organization"}
         else:
-            org_error = None
-            if int(permissions.organization_ids[0]) != STAFF_ORG_ID:
-                if not matched_meters:
-                    org_error = f"Device {device_id} is not accessible for your organization"
-                else:
-                    org_error = await _verify_meter_org_access(
-                        matched_meters[0]["meter_no"], user_email
-                    )
-            if org_error:
-                result = {"error": org_error}
+            org_id = int(permissions.organization_ids[0])
+            is_staff = org_id == STAFF_ORG_ID
+            matched_meters = await client.find_meters_by_device_id(
+                device_id, organization_id=None if is_staff else org_id
+            )
+            if not is_staff and not matched_meters:
+                # A scoped lookup coming back empty *is* the permission
+                # answer: no meter on this device belongs to the caller's
+                # organization. The old _verify_meter_org_access hop is
+                # redundant now -- it re-checked one arbitrary meter taken
+                # from an unscoped list.
+                result = {
+                    "error": f"Device {device_id} is not accessible for your organization"
+                }
             else:
                 result = await client.unified_get_device_status_by_id(
                     device_id=device_id,
