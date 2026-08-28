@@ -1084,6 +1084,51 @@ async def _log_notification_to_chat_db(
         logger.warning("Notify: chat-db logging failed (non-fatal): {}", e)
 
 
+async def _live_downtime_state(alert_context: "UrgentAlertContext") -> Any:
+    """Classify the grid's current downtime from request-local live telemetry.
+
+    Degrades to "unknowable" (never to "up") on any read or parse failure --
+    an unknown state leaves the correlation decision exactly as it found it,
+    because this floor only ever *adds* a send.
+    """
+    from orchestrator.services.ticketing.alert_judgment_context import AlertTelemetry
+    from orchestrator.services.ticketing.downtime_alert_policy import (
+        DowntimeState,
+        assess_downtime,
+    )
+
+    try:
+        telemetry = AlertTelemetry.model_validate(await alert_context.telemetry())
+    except Exception:
+        logger.opt(exception=True).warning(
+            "Notify: live telemetry unreadable for the downtime floor"
+        )
+        return DowntimeState(down=False, known=False)
+    return assess_downtime(telemetry)
+
+
+async def _downtime_delivery_override(grid_name: str, state: Any) -> Any:
+    """Decide whether a down grid outranks correlation's silence.
+
+    The ledger read is skipped unless the grid is actually down, so a healthy
+    grid's suppressed duplicate costs no extra query.
+    """
+    from orchestrator.services.ticketing.downtime_alert_policy import (
+        decide_downtime_override,
+    )
+    from orchestrator.services.ticketing.notify_alert_delivery_repository import (
+        NotifyAlertDeliveryRepository,
+    )
+
+    last_sent_at = None
+    if state.down:
+        repository = NotifyAlertDeliveryRepository(get_client=_raw_supabase_client)
+        last_sent_at = await repository.latest_downtime_sent_at(grid_name)
+    return decide_downtime_override(
+        state, last_downtime_alert_at=last_sent_at, now=datetime.now(timezone.utc)
+    )
+
+
 async def _deliver_notification(
     body: "NotifyRequest",
     target: "GridNotificationTarget",
@@ -1110,14 +1155,40 @@ async def _deliver_notification(
         send_telegram_message_with_fallback,
     )
 
+    # Hoisted above the suppression check: the downtime floor needs this
+    # request's live telemetry to decide whether silence is still allowed.
+    # This is the one place every path -- deterministic ladder and LLM
+    # judgment alike -- passes through, so the floor is applied once, here.
+    # It does mean a suppressed duplicate now costs one (cached, timeout-
+    # bounded) telemetry read, which the pre-floor code deliberately avoided.
+    alert_context = (
+        delivery.alert_context
+        if delivery is not None and delivery.alert_context is not None
+        else _build_notify_alert_context(body, target)
+    )
+    downtime_state = await _live_downtime_state(alert_context)
+
     if delivery is not None and delivery.suppress:
+        override = await _downtime_delivery_override(target.grid_name, downtime_state)
+        if not override.send:
+            logger.info(
+                "Notify: delivery suppressed source={} grid={} ticket_ref={} downtime={}",
+                body.source,
+                target.grid_name,
+                ticket_ref,
+                override.reason,
+            )
+            return
         logger.info(
-            "Notify: delivery suppressed source={} grid={} ticket_ref={}",
+            "Notify: downtime floor overrode suppression source={} grid={} "
+            "ticket_ref={} reason={} signals={}",
             body.source,
             target.grid_name,
             ticket_ref,
+            override.reason,
+            ",".join(downtime_state.reasons),
         )
-        return
+        delivery = dataclasses.replace(delivery, suppress=False)
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     if not bot_token:
@@ -1126,11 +1197,6 @@ async def _deliver_notification(
 
     parse_mode = (body.parse_mode or "").strip() or None
     ticketed_delivery = delivery is not None and delivery.ticket is not None
-    alert_context = (
-        delivery.alert_context
-        if delivery is not None and delivery.alert_context is not None
-        else _build_notify_alert_context(body, target)
-    )
     ticket_summary = delivery.ticket_summary if delivery is not None else ""
     stored_ticket_severity = delivery.stored_ticket_severity if delivery is not None else ""
     urgent = _is_effectively_urgent(alert_context, ticket_summary, stored_ticket_severity)
@@ -1249,6 +1315,7 @@ async def _deliver_notification(
             ticket_ref=ticket_ref,
             rendered_text=text,
             alert=body.alert.model_dump() if body.alert is not None else {"text": body.text},
+            downtime=downtime_state.down,
         )
     except Exception:
         logger.opt(exception=True).warning("Notify: successful-delivery ledger write failed")
@@ -1751,7 +1818,10 @@ def _amend_delivery(
     )
 
     if not (component_added or escalated or cascade_symptom):
-        return NotificationDelivery(suppress=True)
+        # Carries the ticket even though it is suppressed: the downtime floor
+        # (_downtime_delivery_override) can un-suppress this, and the message
+        # it then posts should still link the ticket it was folded into.
+        return NotificationDelivery(suppress=True, ticket=ticket)
 
     if escalated:
         content = (amendment.rendered_summary or "").strip() if amendment is not None else ""
@@ -1802,8 +1872,13 @@ def _amend_delivery(
 
 
 def _duplicate_delivery(amendment: Any, ticket: NotificationTicket) -> NotificationDelivery:
-    """Duplicates amend ticket history but never create Telegram noise."""
-    return NotificationDelivery(suppress=True)
+    """Duplicates amend ticket history but never create Telegram noise.
+
+    "Never" holds only for equipment noise: ``_downtime_delivery_override``
+    still lifts this when live telemetry says the grid itself is down. The
+    ticket rides along so that post can link it.
+    """
+    return NotificationDelivery(suppress=True, ticket=ticket)
 
 
 def _candidate_summaries_from_store_rows(rows: List[Dict[str, Any]]) -> List[Any]:

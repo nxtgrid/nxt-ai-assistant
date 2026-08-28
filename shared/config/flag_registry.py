@@ -600,18 +600,24 @@ _FLAGS: List[Flag] = [
     ),
     _b(
         "ALERT_LLM_JUDGMENT_ENABLED",
-        False,
+        True,
         "Call the correlation LLM for every unique auto-correlated alert and use its "
-        "typed ticket judgment.",
+        "typed ticket judgment. On (default): deterministic correlation still runs, "
+        "but as evidence for one judgment rather than as the final say. Off falls "
+        "back to the deterministic ladder, where code decides suppression and an "
+        "open ticket can silently absorb a grid's later alerts.",
         group="ticketing",
         label="Use LLM judgment for every alert",
         depends_on="ALERT_CORRELATION_ENABLED",
     ),
     _b(
         "ALERT_LLM_SUPPRESSION_ENFORCED",
-        False,
+        True,
         "Allow a valid complete-context LLM judgment to suppress a Telegram alert. "
-        "Off keeps shadow mode send-all.",
+        "Off is shadow mode: the judgment is recorded but every alert still sends. "
+        "On (default) is fail-open -- an LLM failure, an invalid judgment, a missing "
+        "context source, or a material status change all force delivery, so only an "
+        "explicit healthy verdict is ever silent.",
         group="ticketing",
         label="Enforce LLM alert suppression",
         depends_on="ALERT_LLM_JUDGMENT_ENABLED",

@@ -89,8 +89,15 @@ class NotifyAlertDeliveryRepository:
         ticket_ref: str | None,
         rendered_text: str,
         alert: dict[str, Any],
+        downtime: bool = False,
     ) -> dict[str, Any] | None:
-        """Record a post only after Telegram supplied a real message identifier."""
+        """Record a post only after Telegram supplied a real message identifier.
+
+        ``downtime`` marks a delivery that told the topic the grid itself is
+        down (inverter in fault and/or phases at 0 V). It is the clock
+        ``downtime_alert_policy`` reads to hold downtime alerts to one a day
+        without ever letting an unrelated equipment alert reset that clock.
+        """
         client = self._raw_client()
         if client is None:
             _record_failure("record_success", RuntimeError("database client unavailable"))
@@ -112,6 +119,7 @@ class NotifyAlertDeliveryRepository:
                         "ticket_ref": ticket_ref,
                         "rendered_text": rendered_text,
                         "alert": alert,
+                        "downtime": bool(downtime),
                     },
                     on_conflict="external_chat_id,external_message_id",
                 )
@@ -195,6 +203,39 @@ class NotifyAlertDeliveryRepository:
             (record.external_chat_id, record.external_message_id): record for record in reversed(records)
         }
         return sorted(deduplicated.values(), key=lambda record: record.sent_at, reverse=True)[:limit]
+
+    async def latest_downtime_sent_at(self, grid_name: str) -> str | None:
+        """``sent_at`` of the newest delivery that reported this grid down.
+
+        Returns ``None`` both when the grid has never been reported down and
+        when the ledger read fails. That collapse is deliberate and fail-open:
+        an unreadable clock is not evidence the topic was already told today,
+        and ``decide_downtime_override`` treats ``None`` as "send".
+        """
+        client = self._raw_client()
+        if client is None:
+            _record_failure(
+                "latest_downtime_sent_at", RuntimeError("database client unavailable")
+            )
+            return None
+        try:
+            response = (
+                client.table("notify_alert_deliveries")
+                .select("sent_at")
+                .eq("grid_name", grid_name)
+                .eq("downtime", True)
+                .order("sent_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+        except Exception as exc:
+            _record_failure("latest_downtime_sent_at", exc)
+            return None
+        rows = getattr(response, "data", None) or []
+        if not rows:
+            return None
+        sent_at = rows[0].get("sent_at")
+        return str(sent_at) if sent_at else None
 
     async def latest_for_grid(self, grid_name: str) -> PriorAlertMessage | None:
         records = await self.recent_for_grid(grid_name, "1970-01-01T00:00:00+00:00", limit=1)

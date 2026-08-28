@@ -18,3 +18,16 @@ def test_notify_alert_delivery_migration_has_required_durable_contract() -> None
 
     assert "ticket_id               uuid REFERENCES tickets(id) ON DELETE SET NULL" in migration
     assert "ticket_id       uuid," in schema
+
+
+def test_downtime_marker_migration_matches_the_schema_snapshot() -> None:
+    """The downtime clock is only trustworthy if the column and its partial
+    index exist in both the migration and the checked-in schema."""
+    migration = (ROOT / "db/migrations/0030_notify_alert_downtime.sql").read_text()
+    schema = (ROOT / "db/schema/chat_db.sql").read_text()
+
+    assert "ADD COLUMN IF NOT EXISTS downtime boolean NOT NULL DEFAULT false" in migration
+    assert "downtime                boolean NOT NULL DEFAULT false" in schema
+    for sql in (migration, schema):
+        assert "notify_alert_deliveries_grid_downtime_sent_idx" in sql
+        assert "WHERE downtime" in sql
