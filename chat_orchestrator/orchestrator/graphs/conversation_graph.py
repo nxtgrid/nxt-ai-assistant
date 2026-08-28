@@ -958,8 +958,17 @@ class ConversationGraphBuilder:
             LOGGER.exception(f"Error escalating verification failure: {e}")
             result = {"success": False, "error": str(e)}
 
-        # Update final response with escalation message
-        escalation_message = get_user_message(ErrorCategory.ESCALATION, "verification_failed")
+        # Update final response with escalation message. Only promise support
+        # when an escalation actually exists: with the service unconfigured, the
+        # Telegram send failed, or the attempt raised, "I've notified our support
+        # team" is a lie the customer then waits on. Same defect 47009cf2 fixed
+        # in safety_check ("a promise that support had been notified. No
+        # escalation was created"), reached through this node instead.
+        escalated = bool(result.get("success", False))
+        escalation_message = get_user_message(
+            ErrorCategory.ESCALATION,
+            "verification_failed" if escalated else "failed",
+        )
 
         # Add verification metadata to the final message
         history_messages = list(state.get("history_messages", []))
@@ -970,11 +979,11 @@ class ConversationGraphBuilder:
                 last_message.metadata["verification_categories"] = state.get(
                     "verification_categories", []
                 )
-                last_message.metadata["escalated"] = True
+                last_message.metadata["escalated"] = escalated
 
         return {
             "final_response": escalation_message,
-            "escalation_triggered": result.get("success", False),
+            "escalation_triggered": escalated,
             "escalation_result": result,
             "history_messages": history_messages,
         }
