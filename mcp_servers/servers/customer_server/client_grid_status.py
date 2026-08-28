@@ -75,6 +75,23 @@ def _unavailable_live_telemetry(management: str = "unknown") -> dict[str, Any]:
     }
 
 
+def _output_unavailable_reason(voltage: Any) -> str:
+    """Why ``_fresh_inverter_output_kw`` returned ``None`` for a reading that
+    was not itself an exception -- diagnostics only, never a control flow
+    input. ``no_report_time`` and ``stale`` are both treated as stale by
+    ``_inverter_voltage_is_stale`` but mean different things: the first is
+    absent evidence (VRM returned no OV1 secondsAgo), the second is present
+    evidence that the gateway has not reported in over 30 minutes.
+    """
+    if not voltage or getattr(voltage, "error", None):
+        return "reading_unavailable"
+    if not getattr(voltage, "data_timestamp", None):
+        return "no_report_time"
+    if _inverter_voltage_is_stale(voltage):
+        return "stale"
+    return "no_power_value"
+
+
 def _current_battery_voltage_v(battery: Any) -> Optional[float]:
     """``BatteryStatus.timestamp`` is this call's own wall-clock time, not a
     gateway report time (unlike ``InverterVoltage.data_timestamp``), so there
@@ -144,7 +161,18 @@ class ClientGridStatusMixin:
             fresh = not _inverter_voltage_is_stale(voltage)
             output_kw = _fresh_inverter_output_kw(voltage)
             if output_kw is None and not isinstance(voltage, BaseException):
-                logger.info("Stale or unavailable VRM output for urgent alert grid %r", grid_name)
+                # Name the specific cause. This one line is what an operator
+                # greps when an alert reads "Site status: Unknown", and the
+                # three causes below need different responses: a dead gateway
+                # is a field problem, a missing OV1 secondsAgo means VRM
+                # served a reading we then discarded for lack of any
+                # staleness evidence, and a present-but-empty power value is
+                # neither. They were previously indistinguishable.
+                logger.info(
+                    "No usable VRM output for urgent alert grid %r (%s)",
+                    grid_name,
+                    _output_unavailable_reason(voltage),
+                )
 
             data_timestamp = getattr(voltage, "data_timestamp", None) if fresh else None
             raw_status = classify_grid_status(

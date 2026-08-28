@@ -55,6 +55,19 @@ _SUBJECTS = [
 
 _EXPECTED_KEYS = {"KBUA#5", "65SQ#0", "JD65#3", "RH2W#6", "QI11#2", "LQLA#1", "VT6Y#8"}
 
+# The real 2026-08-28 Matari storm: seven underperforming-MPPT warnings in one
+# minute, split across two tickets -- ids carrying a digit onto one, letters-only
+# ids onto the other -- because normalize_subject lowercased before masking,
+# which left _looks_like_component_id's all-caps branch permanently false. This
+# subject shape has no "on '<device>'" clause, so unlike _SUBJECTS above it is
+# not rescued by the wholesale device-clause mask.
+_MATARI_GRID = "Matari"
+_MATARI_DEVICES = ["Q4NR", "QWQJ", "TFPA", "XZAE", "6RJA", "73ZC", "9YRN"]
+_MATARI_SUBJECTS = [
+    f"! Warning: MPPT {device} in Matari seems to perform lower than other MPPTs !"
+    for device in _MATARI_DEVICES
+]
+
 
 class _ExplodingGateway:
     """Any call means the deterministic ladder (B1-B3) failed to group this
@@ -321,14 +334,14 @@ class _FakeTelegramTransport:
         return True
 
 
-def _target() -> GridNotificationTarget:
-    return GridNotificationTarget(grid_name=GRID, chat_id="-100555", topic_id="42", was_fuzzy=False)
+def _target(grid: str = GRID) -> GridNotificationTarget:
+    return GridNotificationTarget(grid_name=grid, chat_id="-100555", topic_id="42", was_fuzzy=False)
 
 
-def _body(subject: str) -> NotifyRequest:
+def _body(subject: str, grid: str = GRID) -> NotifyRequest:
     return NotifyRequest(
         source="grafana",
-        grid_name=GRID,
+        grid_name=grid,
         text=subject,
         ticket_id="auto",
         dedup_key=f"dedup-{hash(subject)}",
@@ -423,6 +436,77 @@ async def test_seven_alerts_on_seven_devices_collapse_onto_one_ticket_one_messag
     # Zero LLM calls -- fully deterministic (B1 signature fix + B2 detection
     # + B3 signature-amend rung). _ExplodingGateway raising would have
     # already failed this test with an AssertionError if this weren't true.
+
+
+@pytest.mark.asyncio
+async def test_matari_underperforming_mppt_storm_collapses_onto_one_ticket(monkeypatch):
+    """The 2026-08-28 Matari storm, end to end. Seven warnings whose only
+    difference is the device id -- four ids carry a digit, three do not --
+    must reach one ticket and one Telegram message. In production they split
+    into two tickets exactly along that digit boundary."""
+    monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+    # Same rationale as the Akinsolu storm above: this guards the
+    # deterministic ladder, so LLM judgment is pinned off explicitly.
+    monkeypatch.setenv("ALERT_LLM_JUDGMENT_ENABLED", "false")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+
+    tickets: Dict[str, Dict[str, Any]] = {}
+    store = _FakeStore(tickets)
+    ticket_service = _FakeTicketService(tickets)
+    transport = _FakeTelegramTransport()
+
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+        lambda get_client=None: store,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.service.TicketService",
+        lambda get_supabase_client=None: ticket_service,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.delivery_repository.DeliveryRepository",
+        _FakeDeliveryRepository,
+    )
+    monkeypatch.setattr(
+        "shared.llm.get_default_generation_gateway",
+        lambda default_model=None: _ExplodingGateway(),
+    )
+    monkeypatch.setattr(
+        "shared.utils.telegram_send.send_telegram_message_with_fallback", transport.send
+    )
+    monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", transport.edit)
+
+    async def _noop_chat_db_log(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("orchestrator.api.app._log_notification_to_chat_db", _noop_chat_db_log)
+
+    import orchestrator.api.app as app_module
+
+    target = _target(_MATARI_GRID)
+    refs: List[Optional[str]] = []
+    for subject in _MATARI_SUBJECTS:
+        body = _body(subject, _MATARI_GRID)
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, target)
+        assert error is None, f"unexpected error for {subject!r}: {error}"
+        refs.append(ref)
+        await app_module._deliver_notification(body, target, ref, delivery)
+
+    # One ticket, not the two the operators actually saw.
+    assert len(set(refs)) == 1, f"storm split across tickets: {sorted(set(refs))}"
+    assert len(ticket_service.create_ticket_calls) == 1
+    (ticket_id,) = tickets.keys()
+
+    # All seven devices folded in as distinct affected components.
+    row = store.rows[ticket_id]
+    assert row["occurrence_count"] == 7
+    assert {entry["key"] for entry in row["affected_keys"]} == set(_MATARI_DEVICES)
+
+    # One post, six in-place edits -- one message in the grid's topic.
+    assert len(transport.send_calls) == 1
+    assert len(transport.edit_calls) == 6
+    original_message_id = transport.send_calls[0]["message_id"]
+    assert all(call["message_id"] == original_message_id for call in transport.edit_calls)
 
 
 @pytest.mark.asyncio
