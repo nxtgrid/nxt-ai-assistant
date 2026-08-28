@@ -173,8 +173,8 @@ def normalize_subject(subject: str, component_key: str = "") -> str:
     """Canonicalize a subject line for signature comparison.
 
     Strips the leading "! Warning:"/"! Urgent:" marker and a trailing "!",
-    lowercases, then masks device identity so different components of the
-    same issue shape normalize identically:
+    masks device identity so different components of the same issue shape
+    normalize identically, then lowercases:
 
     - the VRM ``on '<device>'`` clause (``ALERT - '<grid>': '<fault>' on
       '<device>'``) is replaced wholesale with ``on '#'`` -- the synthesized
@@ -189,6 +189,15 @@ def normalize_subject(subject: str, component_key: str = "") -> str:
     Finally masks numbers/percentages/voltages/ISO timestamps to "#", and
     collapses whitespace.
 
+    Masking runs *before* ``lower()`` on purpose: ``_looks_like_component_id``
+    treats an all-caps token as an id, and that branch is the only thing
+    telling a letters-only device id ("QWQJ") apart from prose that happens
+    to follow the word MPPT ("performance"). Lowercasing first made
+    ``token.isupper()`` permanently false, so digit-bearing ids ("Q4NR") were
+    masked to "mppt #" while letters-only ids on the same alert family fell
+    through to the literal-key removal instead -- two normalizations, two
+    signatures, and one device storm split across two tickets.
+
     Deploy note: this changed the hashed material for every existing
     signature. The first alert of each family after deploy won't match its
     own ticket's previously-stored signature -- it takes the LLM path once,
@@ -198,11 +207,15 @@ def normalize_subject(subject: str, component_key: str = "") -> str:
     text = _LEADING_MARKER.sub("", text)
     text = _LEADING_BANG.sub("", text)
     text = text.rstrip("!").strip()
-    text = text.lower()
 
+    # All three patterns are case-insensitive and substitute fixed lowercase
+    # text, so running them ahead of lower() leaves their output identical --
+    # it only restores the all-caps signal _mask_mppt_mentions needs.
     text = _ON_DEVICE_CLAUSE.sub("on '#'", text)
     text = _mask_mppt_mentions(text)
     text = _DCU_PATTERN.sub("dcu #", text)
+
+    text = text.lower()
 
     if component_key:
         text = re.sub(rf"\b{re.escape(component_key.lower())}\b", "", text)

@@ -248,6 +248,41 @@ class TestNormalizeSubject:
         assert "a3" not in a
         assert "a7" not in b
 
+    def test_letters_only_device_id_is_masked_like_a_digit_bearing_one(self):
+        """A device id with no digit ("QWQJ") is recognised only by
+        _looks_like_component_id's all-caps branch, so normalize_subject has
+        to mask before it lowercases. When it didn't, "Q4NR" masked to
+        "mppt #" while "QWQJ" fell through to the literal-key removal and
+        left no placeholder -- two normalizations of one alert family, and
+        the Matari underperforming-MPPT storm split across two tickets."""
+        digit_bearing = normalize_subject(
+            "! Warning: MPPT Q4NR in Matari seems to perform lower than other MPPTs !",
+            component_key="Q4NR",
+        )
+        letters_only = normalize_subject(
+            "! Warning: MPPT QWQJ in Matari seems to perform lower than other MPPTs !",
+            component_key="QWQJ",
+        )
+        assert digit_bearing == letters_only == (
+            "mppt # in matari seems to perform lower than other mppts"
+        )
+
+    def test_letters_only_device_id_masked_without_a_provided_key(self):
+        """Same property on the keyless path (replay/duplicate callers),
+        where the literal-key fallback isn't there to paper over a miss."""
+        assert normalize_subject(
+            "! Warning: MPPT QWQJ in Matari seems to perform lower than other MPPTs !"
+        ) == normalize_subject(
+            "! Warning: MPPT TFPA in Matari seems to perform lower than other MPPTs !"
+        )
+
+    def test_lowercase_prose_after_mppt_is_still_not_masked(self):
+        """The guard masking now runs on original-case text must keep:
+        "performance" follows the word MPPT but is prose, not a device id,
+        and masking it would collapse genuinely different fault shapes."""
+        result = normalize_subject("! Warning: MPPT performance drop detected !")
+        assert result == "mppt performance drop detected"
+
 
 class TestDeriveSignature:
     def test_same_grid_same_subject_shape_different_mppt_key_same_signature(self):
@@ -368,6 +403,64 @@ class TestRealProductionStormSignatures:
             "Akinsolu",
         )
         assert no_bms != low_voltage
+
+
+class TestMatariUnderperformingMpptStorm:
+    """Regression coverage for the 2026-08-28 Matari storm: seven
+    underperforming-MPPT warnings fired within a minute and split across two
+    tickets. The split fell exactly along whether the device id contained a
+    digit, because normalize_subject lowercased before masking -- see
+    test_letters_only_device_id_is_masked_like_a_digit_bearing_one.
+
+    This subject shape has no ``on '<device>'`` clause, so it is not covered
+    by the Akinsolu/Ogbinbiri VRM subjects above: there the whole quoted
+    device clause is masked wholesale before the MPPT mask ever sees a token.
+    """
+
+    _DEVICES = ["Q4NR", "QWQJ", "TFPA", "XZAE", "6RJA", "73ZC", "9YRN"]
+
+    _SUBJECTS = [
+        f"! Warning: MPPT {device} in Matari seems to perform lower than other MPPTs !"
+        for device in _DEVICES
+    ]
+
+    def _signature_for(self, subject: str) -> str:
+        kind, key, _ = derive_component(subject)
+        return derive_signature(
+            grid_name="Matari", component_kind=kind, subject=subject, component_key=key
+        )
+
+    def test_all_seven_alerts_share_one_signature(self):
+        assert len({self._signature_for(subject) for subject in self._SUBJECTS}) == 1
+
+    def test_signature_does_not_depend_on_the_id_carrying_a_digit(self):
+        """The precise shape of the production split: ids with a digit landed
+        on one ticket, letters-only ids on another."""
+        with_digit = {
+            self._signature_for(subject)
+            for subject, device in zip(self._SUBJECTS, self._DEVICES)
+            if any(character.isdigit() for character in device)
+        }
+        letters_only = {
+            self._signature_for(subject)
+            for subject, device in zip(self._SUBJECTS, self._DEVICES)
+            if not any(character.isdigit() for character in device)
+        }
+        assert with_digit == letters_only
+
+    def test_seven_distinct_component_keys_survive(self):
+        keys = {derive_component(subject)[1] for subject in self._SUBJECTS}
+        assert keys == set(self._DEVICES)
+
+    def test_a_different_grid_still_differs(self):
+        matari = self._signature_for(self._SUBJECTS[0])
+        kudi = derive_signature(
+            grid_name="Kudi",
+            component_kind="mppt",
+            subject="! Warning: MPPT Q4NR in Kudi seems to perform lower than other MPPTs !",
+            component_key="Q4NR",
+        )
+        assert matari != kudi
 
 
 class TestEnrichAlertFacts:
