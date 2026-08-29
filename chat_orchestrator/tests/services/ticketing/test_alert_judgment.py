@@ -86,6 +86,83 @@ def test_low_confidence_existing_ticket_mutation_is_not_valid_for_suppression() 
     assert result.error_code == "low_ticket_confidence"
 
 
+def test_low_confidence_record_occurrence_is_not_valid_for_suppression() -> None:
+    """The floor covers every action that binds an alert to an existing
+    ticket, not just ``update_existing``. ``record_occurrence`` is the quieter
+    of the two -- it folds the alert into a ticket's history and out of
+    Telegram without changing any ticket prose -- and it used to be reachable
+    at any confidence at all, including 0.
+    """
+    payload = json.loads(json.dumps(VALID))
+    payload["ticket"] = {
+        "action": "record_occurrence",
+        "target_ticket_ref": "OPS-1234",
+        "change_title": False,
+        "proposed_title": None,
+        "change_description": False,
+        "description_addition": None,
+        "relationship": "same_issue",
+        "root_cause_kind": "component",
+        "reason": "Looks like the same alert",
+        "confidence": 0.2,
+    }
+    payload["grid_impact"] = {
+        "prior_known_status": "on",
+        "current_assessed_status": "on",
+        "material_status_change": False,
+        "summary": "No material site-status change",
+        "confidence": 0.9,
+    }
+    payload["notification"] = {"send_telegram": False, "reason": "Looks repetitive"}
+
+    result = parse_alert_judgment(json.dumps(payload), {"OPS-1234"}, 0.75)
+
+    assert result.valid is False
+    assert result.error_code == "low_ticket_confidence"
+
+
+def test_confident_record_occurrence_stays_valid() -> None:
+    payload = json.loads(json.dumps(VALID))
+    payload["ticket"] = {
+        "action": "record_occurrence",
+        "target_ticket_ref": "OPS-1234",
+        "change_title": False,
+        "proposed_title": None,
+        "change_description": False,
+        "description_addition": None,
+        "relationship": "same_issue",
+        "root_cause_kind": "component",
+        "reason": "The same alert re-firing",
+        "confidence": 0.88,
+    }
+
+    result = parse_alert_judgment(json.dumps(payload), {"OPS-1234"}, 0.75)
+
+    assert result.valid is True
+
+
+def test_low_confidence_create_new_is_untouched_by_the_floor() -> None:
+    """Filing a fresh ticket is the fail-open outcome -- it can never be the
+    thing a low-confidence judgment gets wrong in a way that loses an alert."""
+    payload = json.loads(json.dumps(VALID))
+    payload["ticket"] = {
+        "action": "create_new",
+        "target_ticket_ref": None,
+        "change_title": False,
+        "proposed_title": None,
+        "change_description": False,
+        "description_addition": None,
+        "relationship": "new_issue",
+        "root_cause_kind": "component",
+        "reason": "Nothing open matches",
+        "confidence": 0.1,
+    }
+
+    result = parse_alert_judgment(json.dumps(payload), {"OPS-1234"}, 0.75)
+
+    assert result.valid is True
+
+
 def test_parse_rejects_known_transition_marked_non_material() -> None:
     payload = json.loads(json.dumps(VALID))
     payload["grid_impact"]["material_status_change"] = False

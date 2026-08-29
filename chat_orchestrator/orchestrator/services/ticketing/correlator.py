@@ -35,6 +35,14 @@ Decision pipeline (cheapest/safest first -- most alerts never reach the LLM):
 Every failure mode here -- LLM timeout, transport error, malformed JSON, a
 correlation-store outage -- degrades to "new" (``decided_by="fallback"``),
 never a raised exception: every alert must result in a ticket.
+
+The judgment path (``judge`` + ``to_legacy_correlation_decision``, reached
+when ``ALERT_LLM_JUDGMENT_ENABLED`` is on, which is the default) replaces
+rungs 3-6's *decision-making* with one typed model call, and feeds the
+deterministic rungs in as evidence instead. It applies the same four
+guardrails as rung 6 -- see ``to_legacy_correlation_decision``. They are
+what keeps "one ticket per causally related failure" true rather than
+degrading to "one ticket per grid".
 """
 
 from __future__ import annotations
@@ -59,6 +67,7 @@ from .alert_judgment import (
     AlertJudgmentResult,
     DeterministicFinding,
     TicketAction,
+    TicketRelationship,
     parse_alert_judgment,
 )
 from .alert_judgment_context import AlertJudgmentContext
@@ -674,10 +683,41 @@ def _build_judgment_prompt(context: AlertJudgmentContext, alert: AlertFacts) -> 
     )
 
 
+def _with_guardrail_note(reason: str, note: str) -> str:
+    """Keep the model's own reasoning and record what overrode it.
+
+    ``_apply_guardrails`` writes ``reason = reason or <note>``, which on this
+    path would never fire -- the v2 schema requires a non-empty ``reason`` --
+    so a rung that silently changed the decision would leave nothing in
+    ``ticket_correlation_events`` explaining why the recorded action differs
+    from the one the model asked for.
+    """
+    return f"{reason.rstrip()} [guardrail: {note}]" if reason.strip() else f"guardrail: {note}"
+
+
 def to_legacy_correlation_decision(
-    result: AlertJudgmentResult, candidates: List[CandidateSummary]
+    result: AlertJudgmentResult,
+    candidates: List[CandidateSummary],
+    *,
+    alert: Optional[AlertFacts] = None,
+    min_confidence: Optional[float] = None,
 ) -> CorrelationDecision:
-    """Adapt a validated LLM judgment for legacy ticket execution only."""
+    """Adapt a validated LLM judgment for legacy ticket execution.
+
+    Runs the same four safety rungs ``_apply_guardrails`` applies on the
+    deterministic path. They were originally written there and this adapter
+    shipped without them, which quietly made ``ALERT_CASCADE_MERGE_ENABLED``
+    inert -- the flag is read in ``_apply_guardrails`` and nowhere else, and
+    ``ALERT_LLM_JUDGMENT_ENABLED`` defaults on, so the operator's kill switch
+    for cross-equipment merges stopped being consulted for live traffic. The
+    observable symptom was a grid-outage alert landing on an unrelated open
+    ticket for the same grid, which is the failure the rungs exist to stop:
+    the unit of a ticket is one causally related failure, not one grid.
+
+    ``alert``/``min_confidence`` are optional so an existing caller keeps
+    working, but a caller that omits them gets the pre-guardrail behaviour for
+    the two rungs that need alert facts -- pass both.
+    """
     candidate_refs = [candidate.ref for candidate in candidates]
     if not result.valid or result.judgment is None:
         return _fallback_decision(
@@ -695,20 +735,121 @@ def to_legacy_correlation_decision(
         target = next((candidate for candidate in candidates if candidate.ref == ticket.target_ticket_ref), None)
     if decision != "new" and target is None:
         return _fallback_decision("judgment target no longer offered", candidate_refs, result.raw)
+
+    floor = (
+        min_confidence
+        if min_confidence is not None
+        else correlation_rules.DEFAULT_CORRELATION_POLICY.confidence_floor
+    )
+    root_cause_kind = ticket.root_cause_kind.value
+    reason = ticket.reason
+    needs_root_cause_ticket = False
+
+    if target is not None:
+        alert_signature = (alert.signature if alert else "") or ""
+        alert_severity = (alert.severity if alert else "") or ""
+
+        # Rung 1: an urgent alert arriving on a not-yet-urgent ticket is a
+        # material change however the model labelled it -- never a silent
+        # re-fire.
+        if decision == "duplicate" and _is_urgent_severity_increase(
+            alert_severity, effective_candidate_severity(target)
+        ):
+            decision = "amend"
+            reason = _with_guardrail_note(
+                reason, "urgent severity increase makes this alert a material amendment"
+            )
+        elif decision == "duplicate":
+            # Rung 2: "this is the same alert again" is only credible when the
+            # ticket already carries this fault shape, or the model is
+            # confidently claiming the identical issue. Downgrade, never drop.
+            signature_overlap = bool(alert_signature) and alert_signature in (
+                target.signatures or []
+            )
+            same_issue_confident = (
+                ticket.relationship is TicketRelationship.SAME_ISSUE
+                and ticket.confidence >= 0.85
+            )
+            if not (signature_overlap or same_issue_confident):
+                decision = "amend"
+                reason = _with_guardrail_note(
+                    reason,
+                    "duplicate downgraded to amend: no signature overlap and not a "
+                    "confident same_issue relationship",
+                )
+
+        if decision == "amend":
+            # Rung 3: a different kind of equipment is a different failure
+            # unless a named power chain says otherwise -- and that allowance
+            # stays behind the operator's own kill switch.
+            target_kinds = {
+                str(entry.get("kind") or "").strip()
+                for entry in target.affected_keys or []
+                if isinstance(entry, dict) and entry.get("kind")
+            }
+            incoming_kind = ((alert.component_kind if alert else "") or "").strip()
+            is_cross_kind = bool(
+                target_kinds and incoming_kind and incoming_kind not in target_kinds
+            )
+            if is_cross_kind:
+                cascade_allowed = (
+                    root_cause_kind == "power_chain"
+                    and fr.get("ALERT_CASCADE_MERGE_ENABLED")
+                    and ticket.confidence >= floor
+                )
+                if not cascade_allowed:
+                    return CorrelationDecision(
+                        decision="new",
+                        ticket_ref=None,
+                        ticket_id=None,
+                        confidence=ticket.confidence,
+                        decided_by="llm_judgment",
+                        reason=_with_guardrail_note(
+                            reason,
+                            f"cross-kind amend ({incoming_kind!r} onto a ticket carrying "
+                            f"{sorted(target_kinds)!r}) rejected: not a permitted "
+                            "power-chain cascade",
+                        ),
+                        affected_key=None,
+                        root_cause_kind=root_cause_kind,
+                        update_message="",
+                        amended_summary="",
+                        candidate_refs=candidate_refs,
+                        llm_raw=result.raw,
+                        needs_root_cause_ticket=False,
+                    )
+
+        # Rung 4: a grid-wide root cause groups its symptoms under a ticket
+        # that represents the root cause. When no candidate is one, the
+        # symptom does not get glued onto whichever ticket happened to be
+        # open -- clearing the ref sends it back to file its own, and the
+        # deterministic path's parent-first branch does the same from here.
+        if decision == "amend" and root_cause_kind in _ROOT_CAUSE_KINDS_REQUIRING_PARENT:
+            if not any(
+                candidate.root_cause_kind == root_cause_kind for candidate in candidates
+            ):
+                needs_root_cause_ticket = True
+                reason = _with_guardrail_note(
+                    reason,
+                    f"{root_cause_kind} symptom with no open root-cause ticket: "
+                    "filing its own rather than amending an unrelated candidate",
+                )
+                target = None
+
     return CorrelationDecision(
         decision=decision,
         ticket_ref=target.ref if target else None,
         ticket_id=target.ticket_id if target else None,
         confidence=ticket.confidence,
         decided_by="llm_judgment",
-        reason=ticket.reason,
+        reason=reason,
         affected_key=None,
-        root_cause_kind=ticket.root_cause_kind.value,
+        root_cause_kind=root_cause_kind,
         update_message="",
         amended_summary=ticket.proposed_title if ticket.change_title and ticket.proposed_title else "",
         candidate_refs=candidate_refs,
         llm_raw=result.raw,
-        needs_root_cause_ticket=False,
+        needs_root_cause_ticket=needs_root_cause_ticket,
         ticket_severity=effective_candidate_severity(target) if target else "",
         description_addition=(
             ticket.description_addition
@@ -872,7 +1013,12 @@ class AlertCorrelator:
         judgment = parse_alert_judgment(raw, set(candidate_refs), self._min_confidence)
         if judgment.valid:
             return await self._finalize(
-                grid_name, alert, dedup_key, to_legacy_correlation_decision(judgment, candidates)
+                grid_name,
+                alert,
+                dedup_key,
+                to_legacy_correlation_decision(
+                    judgment, candidates, alert=alert, min_confidence=self._min_confidence
+                ),
             )
 
         parsed = _parse_llm_response(raw)

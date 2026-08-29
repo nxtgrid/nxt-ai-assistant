@@ -201,11 +201,23 @@ async def test_telegram_line_reports_battery_with_unavailable_output():
     }
 
 
-def _fake_grid_lookup_env(monkeypatch, *, site_id: str = "123", managed: bool = True):
+def _fake_grid_lookup_env(
+    monkeypatch,
+    *,
+    site_id: str = "123",
+    managed: bool = True,
+    state_flags: tuple = (True, False),
+):
     """Shared plumbing for the get_live_telemetry tests below: a fake auth
     pool that resolves one grid to one VRM site id. Returns the
     (client_grid_status module, CustomerServiceClient class) pair so each
     test only has to patch VRMPlatform.
+
+    ``state_flags`` is the ``(hps_on, fs_on)`` pair ``_recent_state_flags``
+    reads from the TimescaleDB snapshot table -- the same majority-voted,
+    staleness-gated source `/grids` uses. It is patched rather than faked at
+    the connection level because it opens its own connection, independent of
+    the auth pool below.
 
     Imported as ``servers.customer_server.*`` (relying on the ``sys.path``
     insert below), matching exactly how ``client.py`` imports
@@ -222,13 +234,17 @@ def _fake_grid_lookup_env(monkeypatch, *, site_id: str = "123", managed: bool = 
     from servers.customer_server import client_grid_status
     from servers.customer_server.client import CustomerServiceClient
 
+    async def _fake_state_flags(_grid_id):
+        return state_flags
+
+    monkeypatch.setattr(client_grid_status, "_recent_state_flags", _fake_state_flags)
+
     class FakeConnection:
         async def fetchrow(self, _query, _grid_name):
             return {
+                "id": 1,
                 "generation_external_site_id": site_id,
                 client_grid_status.MANAGED_GENERATION_COLUMN: managed,
-                "is_hps_on": True,
-                "is_fs_on": False,
                 "is_hps_on_threshold_kw": 2.0,
             }
 
@@ -330,6 +346,95 @@ async def test_live_telemetry_returns_output_and_battery_voltage_together(monkey
         "observed_at": telemetry["observed_at"],
         "fresh": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_live_telemetry_reads_state_flags_from_the_same_source_as_grids(monkeypatch):
+    """The alert path's site status has to be the verdict `/grids` would give.
+
+    It used to classify from ``grids.is_hps_on``/``grids.is_fs_on`` -- an
+    auth-DB pair that is ``NOT NULL DEFAULT false`` and carries no timestamp,
+    so it can neither be aged out nor be unknown. `/grids` classifies from the
+    majority-voted TimescaleDB snapshots instead. With the snapshots reporting
+    FS active, the two commands now agree; before, this grid reported ``hps_on``
+    here and ``fs_on`` in `/grids` at the same instant.
+    """
+    from datetime import datetime, timezone
+
+    client_grid_status, CustomerServiceClient = _fake_grid_lookup_env(
+        monkeypatch, state_flags=(True, True)
+    )
+
+    class FakeVoltage:
+        error = None
+        total_power_kw = 2.4
+        data_timestamp = datetime.now(timezone.utc)
+        is_producing = True
+        l1_voltage_v = 230.0
+        l2_voltage_v = 230.0
+        l3_voltage_v = 230.0
+
+    class FakeBattery:
+        voltage_v = 51.8
+
+    class FakeVRMPlatform:
+        async def initialize(self):
+            return None
+
+        async def get_current_inverter_voltage(self, site_id):
+            return FakeVoltage()
+
+        async def get_current_battery_status(self, site_id):
+            return FakeBattery()
+
+    monkeypatch.setattr(client_grid_status, "VRMPlatform", FakeVRMPlatform)
+
+    telemetry = await CustomerServiceClient().get_live_telemetry("Acme Grid")
+
+    assert telemetry["grid_status"] == "fs_on"
+    assert telemetry["site_status"] == "on"
+
+
+@pytest.mark.asyncio
+async def test_live_telemetry_survives_unreadable_state_flags(monkeypatch):
+    """An unreachable snapshot table means "no opinion", not "not on HPS" --
+    the classifier already treats an unknown flag that way, and the power/
+    threshold comparison still decides the outcome."""
+    from datetime import datetime, timezone
+
+    client_grid_status, CustomerServiceClient = _fake_grid_lookup_env(
+        monkeypatch, state_flags=(None, None)
+    )
+
+    class FakeVoltage:
+        error = None
+        total_power_kw = 2.4
+        data_timestamp = datetime.now(timezone.utc)
+        is_producing = True
+        l1_voltage_v = 230.0
+        l2_voltage_v = 230.0
+        l3_voltage_v = 230.0
+
+    class FakeBattery:
+        voltage_v = 51.8
+
+    class FakeVRMPlatform:
+        async def initialize(self):
+            return None
+
+        async def get_current_inverter_voltage(self, site_id):
+            return FakeVoltage()
+
+        async def get_current_battery_status(self, site_id):
+            return FakeBattery()
+
+    monkeypatch.setattr(client_grid_status, "VRMPlatform", FakeVRMPlatform)
+
+    telemetry = await CustomerServiceClient().get_live_telemetry("Acme Grid")
+
+    # 2.4 kW is at or above the fixture's 2.0 kW HPS threshold.
+    assert telemetry["grid_status"] == "hps_on"
+    assert telemetry["site_status"] == "on"
 
 
 @pytest.mark.asyncio

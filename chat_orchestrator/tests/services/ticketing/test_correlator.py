@@ -29,6 +29,10 @@ import pytest
 
 from orchestrator.services.ticketing import correlator as correlator_module
 from orchestrator.services.ticketing.alert_facts import AlertFacts, enrich_alert_facts
+from orchestrator.services.ticketing.alert_judgment import (
+    AlertJudgmentResult,
+    parse_alert_judgment,
+)
 from orchestrator.services.ticketing.alert_judgment_context import (
     AlertJudgmentContext,
     AlertTelemetry,
@@ -49,6 +53,7 @@ from orchestrator.services.ticketing.correlator import (
     _parse_llm_response,
     collect_deterministic_findings,
     effective_candidate_severity,
+    to_legacy_correlation_decision,
 )
 from orchestrator.services.ticketing.notify_alert_delivery_repository import (
     OMChatMessage,
@@ -722,6 +727,177 @@ class TestLlmFirstJudgment:
 def _mppt_alert(subject="! Warning: MPPT A3 in Kudi seems to perform lower !", **overrides) -> AlertFacts:
     alert = AlertFacts(subject=subject, details=overrides.pop("details", "mppt A3 [Kudi]"), **overrides)
     return enrich_alert_facts(alert, grid_name="Kudi")
+
+
+class TestJudgmentGuardrails:
+    """The four safety rungs on the LLM-judgment path.
+
+    They exist on the deterministic path as ``_apply_guardrails`` and were
+    missing from ``to_legacy_correlation_decision``, which is the adapter live
+    traffic runs through (``ALERT_LLM_JUDGMENT_ENABLED`` defaults on). While
+    they were missing, ``ALERT_CASCADE_MERGE_ENABLED`` was read nowhere on the
+    live path -- the operator's kill switch for cross-equipment merges could
+    not affect anything -- and any offered open ticket on a grid could absorb
+    any later alert on that grid. A ticket groups one causally related
+    failure, not one grid.
+    """
+
+    @staticmethod
+    def _judgment(**ticket_overrides) -> AlertJudgmentResult:
+        ticket = {
+            "action": "record_occurrence",
+            "target_ticket_ref": "TKT-1",
+            "change_title": False,
+            "proposed_title": None,
+            "change_description": False,
+            "description_addition": None,
+            "relationship": "same_root_cause",
+            "root_cause_kind": "other",
+            "reason": "Same grid.",
+            "confidence": 0.9,
+        }
+        ticket.update(ticket_overrides)
+        payload = {
+            "grid_impact": {
+                "prior_known_status": "on",
+                "current_assessed_status": "on",
+                "material_status_change": False,
+                "summary": "The grid remains on.",
+                "confidence": 0.9,
+            },
+            "notification": {"send_telegram": True, "reason": "Evidence."},
+            "ticket": ticket,
+            "likely_user_action": {
+                "category": "monitor",
+                "summary": "Watch the site.",
+                "confidence": 0.8,
+            },
+        }
+        raw = json.dumps(payload)
+        return parse_alert_judgment(raw, {"TKT-1"}, DEFAULT_CORRELATION_POLICY.confidence_floor)
+
+    @staticmethod
+    def _alert(**overrides) -> AlertFacts:
+        alert = AlertFacts(subject="! Warning: Batteries are not being equalized !", **overrides)
+        return enrich_alert_facts(alert, grid_name="Kudi")
+
+    def test_record_occurrence_without_signature_overlap_downgrades_to_amend(self):
+        """Rung 2. "The same alert again" is only credible when the ticket
+        already carries this fault shape -- a different shape is at most an
+        amend, and never a silent history append."""
+        decision = to_legacy_correlation_decision(
+            self._judgment(),
+            [_candidate(signatures=["a-different-shape"])],
+            alert=self._alert(),
+            min_confidence=0.75,
+        )
+
+        assert decision.decision == "amend"
+        assert "no signature overlap" in decision.reason
+
+    def test_record_occurrence_with_signature_overlap_stays_a_duplicate(self):
+        alert = self._alert()
+        decision = to_legacy_correlation_decision(
+            self._judgment(),
+            [_candidate(signatures=[alert.signature])],
+            alert=alert,
+            min_confidence=0.75,
+        )
+
+        assert decision.decision == "duplicate"
+        assert decision.ticket_ref == "TKT-1"
+
+    def test_confident_same_issue_is_accepted_without_signature_overlap(self):
+        decision = to_legacy_correlation_decision(
+            self._judgment(relationship="same_issue", confidence=0.9),
+            [_candidate(signatures=["a-different-shape"])],
+            alert=self._alert(),
+            min_confidence=0.75,
+        )
+
+        assert decision.decision == "duplicate"
+
+    def test_urgent_alert_on_a_warning_ticket_is_never_a_silent_duplicate(self):
+        """Rung 1: severity escalation is material however the model labelled it."""
+        alert = self._alert(severity="urgent")
+        decision = to_legacy_correlation_decision(
+            self._judgment(),
+            [_candidate(severity="warning", signatures=[alert.signature])],
+            alert=alert,
+            min_confidence=0.75,
+        )
+
+        assert decision.decision == "amend"
+
+    def test_cross_kind_amend_is_refused_while_the_cascade_flag_is_off(self, monkeypatch):
+        """Rung 3, and the bug report's shape: a component-level alert must not
+        join a ticket about a different kind of equipment on the same grid."""
+        monkeypatch.delenv("ALERT_CASCADE_MERGE_ENABLED", raising=False)
+        alert = _mppt_alert()
+        decision = to_legacy_correlation_decision(
+            self._judgment(action="update_existing", change_description=False),
+            [_candidate(affected_keys=[{"kind": "battery", "key": "BMS1", "label": "BMS1"}])],
+            alert=alert,
+            min_confidence=0.75,
+        )
+
+        assert decision.decision == "new"
+        assert decision.ticket_ref is None
+        assert "cross-kind amend" in decision.reason
+
+    def test_cross_kind_amend_is_allowed_for_a_confident_power_chain_with_the_flag_on(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("ALERT_CASCADE_MERGE_ENABLED", "true")
+        decision = to_legacy_correlation_decision(
+            self._judgment(action="update_existing", root_cause_kind="power_chain"),
+            [_candidate(affected_keys=[{"kind": "battery", "key": "BMS1", "label": "BMS1"}])],
+            alert=_mppt_alert(),
+            min_confidence=0.75,
+        )
+
+        assert decision.decision == "amend"
+        assert decision.ticket_ref == "TKT-1"
+
+    def test_grid_off_symptom_with_no_root_cause_candidate_files_its_own_ticket(self):
+        """Rung 4. A grid-wide root cause groups its symptoms under a ticket
+        that *is* the root cause. With no such candidate open, the symptom gets
+        its own ticket rather than being glued onto whatever else was open --
+        this is the rung that stops an unrelated warning from absorbing a
+        grid outage."""
+        decision = to_legacy_correlation_decision(
+            self._judgment(action="update_existing", root_cause_kind="grid_off"),
+            [_candidate(root_cause_kind=None)],
+            alert=self._alert(),
+            min_confidence=0.75,
+        )
+
+        assert decision.needs_root_cause_ticket is True
+        assert decision.ticket_ref is None
+        assert decision.ticket_id is None
+
+    def test_grid_off_symptom_amends_onto_an_open_root_cause_ticket(self):
+        decision = to_legacy_correlation_decision(
+            self._judgment(action="update_existing", root_cause_kind="grid_off"),
+            [_candidate(root_cause_kind="grid_off")],
+            alert=self._alert(),
+            min_confidence=0.75,
+        )
+
+        assert decision.decision == "amend"
+        assert decision.needs_root_cause_ticket is False
+        assert decision.ticket_ref == "TKT-1"
+
+    def test_create_new_is_untouched_by_every_rung(self):
+        decision = to_legacy_correlation_decision(
+            self._judgment(action="create_new", target_ticket_ref=None),
+            [_candidate()],
+            alert=self._alert(),
+            min_confidence=0.75,
+        )
+
+        assert decision.decision == "new"
+        assert decision.ticket_ref is None
 
 
 class TestVersionedPolicy:

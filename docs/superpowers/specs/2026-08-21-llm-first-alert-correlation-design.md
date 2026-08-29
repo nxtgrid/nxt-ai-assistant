@@ -446,11 +446,20 @@ code-rendered status line using the normalized vocabulary:
 - `🔴 Site status: Off`
 - `Ⅹ Site status: Unknown`
 
-For a valid judgment, the line uses `current_assessed_status`. If the LLM
-fails or its output is invalid, it falls back to telemetry's deterministic
-`site_status`; if status collection also fails, it renders `Unknown`. A
-fresh all-phase-zero/eight-hour forced message renders `Off`. Rendering never
-uses model-provided icons or arbitrary status prose.
+The line always uses telemetry's deterministic `site_status`, never the
+judgment's `current_assessed_status`; if status collection fails, it renders
+`Unknown`. A fresh all-phase-zero/eight-hour forced message renders `Off`, and
+a plant whose gateway has stopped reporting renders `Plant comms down`.
+Rendering never uses model-provided icons or arbitrary status prose.
+
+> **Corrected.** This paragraph originally specified `current_assessed_status`
+> for a valid judgment, contradicting requirement 10 above ("Site status uses
+> the same classifier and vocabulary as `/grids`") — and the implementation
+> followed this paragraph, so only the *vocabulary* was shared. The model reads
+> the alert text and ticket history and can assert a status that live telemetry
+> contradicts, with nothing in the rendered line to say which of the two
+> produced it. The judgment's assessment still drives `material_status_change`
+> and therefore delivery; it no longer speaks as if it were a reading.
 
 When a judgment requests `update_existing`, every sent message includes that
 ticket as a code-generated link. A newly created ticket is linked as today.

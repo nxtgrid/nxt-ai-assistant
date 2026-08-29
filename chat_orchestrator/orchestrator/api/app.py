@@ -2483,7 +2483,9 @@ async def _resolve_notify_ticket_llm_judgment(
         om_messages_provider=om_provider,
     ).assemble(grid_name=target.grid_name, chat_id=target.chat_id, topic_id=target.topic_id, alert=alert)
     judgment = await correlator.judge(target.grid_name, alert, context)
-    decision = to_legacy_correlation_decision(judgment, candidates)
+    decision = to_legacy_correlation_decision(
+        judgment, candidates, alert=alert, min_confidence=correlator._min_confidence
+    )
     send_decision = decide_alert_delivery(
         judgment, context, latest_prior_alert=context.prior_alerts[0] if context.prior_alerts else None,
         enforcement_enabled=bool(fr.get("ALERT_LLM_SUPPRESSION_ENFORCED")),
@@ -2516,11 +2518,17 @@ async def _resolve_notify_ticket_llm_judgment(
     extra = extra or {}
     extra.update({"judgment_valid": judgment.valid, "send_decision": "send" if send_decision.send else "suppress", "send_force_reasons": send_decision.forced_by})
     if delivery is not None:
-        status = (
-            judgment.judgment.grid_impact.current_assessed_status.value
-            if judgment.valid and judgment.judgment is not None
-            else context.telemetry.site_status.value
-        )
+        # Always the deterministic classifier, never the model's own
+        # `grid_impact.current_assessed_status`. The two disagree in exactly
+        # the case that matters -- the model reads the alert text and the
+        # ticket history and can assert "off" for a site that came back up
+        # hours ago -- and an operator comparing this line against /grid has
+        # no way to tell which of them produced it. `site_status` here is
+        # `shared.grid_status.classify_grid_status` normalized through
+        # `normalize_site_status`, i.e. literally what /grids ran. The model's
+        # assessment still drives `material_status_change` and therefore
+        # delivery; it just no longer speaks as if it were a reading.
+        status = context.telemetry.site_status.value
         if "all_phase_zero_reminder" in send_decision.forced_by:
             status = "off"
         elif context.telemetry.unavailable_reason == "stale":
