@@ -64,6 +64,12 @@ tmp/
 temp/
 *.tmp
 
+# Real grid/customer identifiers for the no-operator-data pre-commit hook --
+# never publish this file itself, its contents are exactly what the hook
+# exists to keep out of the repo. See .github/scripts/operator_names.example.txt
+# for the tracked template.
+.github/scripts/operator_names.local.txt
+
 # Telegram data files (sensitive private chat exports)
 rag_pipeline/ingestion/telegram_data_cleaning/*.json
 rag_pipeline/test_telegram_export.json
