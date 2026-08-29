@@ -38,7 +38,7 @@ class TestDeriveSeverity:
 
     def test_ignores_urgent_word_elsewhere_in_subject(self):
         assert (
-            derive_severity("! Warning: DCU 862406008 needs urgent attention in Belel !")
+            derive_severity("! Warning: DCU 862406008 needs urgent attention in GridU !")
             == "warning"
         )
 
@@ -49,7 +49,7 @@ class TestDeriveSeverity:
         )
 
     def test_bare_word_with_no_marker_is_unclassified(self):
-        assert derive_severity("This is urgent, please check Belel") == ""
+        assert derive_severity("This is urgent, please check GridU") == ""
 
 
 class TestDeriveComponent:
