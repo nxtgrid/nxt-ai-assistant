@@ -88,11 +88,11 @@ class TestRenderSummary:
                 {"kind": "mppt", "key": "5", "label": "MPPT 5", "first_seen": "t", "last_seen": "t", "count": 1},
             ]
         )
-        alert = AlertFacts(subject="! Urgent: MPPT 5 in Akinsolu !", severity="urgent")
+        alert = AlertFacts(subject="! Urgent: MPPT 5 in GridY !", severity="urgent")
 
-        result = render_summary(correlation, alert, llm_summary="", grid_name="Akinsolu")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="GridY")
 
-        assert "in Akinsolu affected" in result
+        assert "in GridY affected" in result
         assert "in  affected" not in result
 
     def test_urgent_severity_marker_preserved(self):
@@ -173,7 +173,7 @@ class TestRenderSummaryCascade:
         alert = AlertFacts(component_kind="inverter", severity="warning")
 
         result = render_summary(
-            correlation, alert, llm_summary="ignored cascade text", grid_name="Ogbinbiri"
+            correlation, alert, llm_summary="ignored cascade text", grid_name="GridX"
         )
 
         assert result.startswith("! Warning: BMS communication lost")
@@ -183,7 +183,7 @@ class TestRenderSummaryCascade:
         correlation = self._cascade_correlation()
         alert = AlertFacts(component_kind="inverter", severity="warning")
 
-        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="GridX")
 
         assert "+1 dependent alert (Inverter)" in result
 
@@ -206,7 +206,7 @@ class TestRenderSummaryCascade:
         )
         alert = AlertFacts(component_kind="inverter", severity="warning")
 
-        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="GridX")
 
         assert "+2 dependent alerts (Inverter)" in result
 
@@ -230,7 +230,7 @@ class TestRenderSummaryCascade:
         )
         alert = AlertFacts(component_kind="battery", severity="warning")
 
-        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="GridX")
 
         assert result.startswith("! Warning: Inverter cycling")
         assert "+1 dependent alert (Battery)" in result
@@ -239,7 +239,7 @@ class TestRenderSummaryCascade:
         correlation = self._cascade_correlation()
         alert = AlertFacts(component_kind="inverter", severity="warning")
 
-        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="GridX")
 
         assert result.startswith("! Warning:")
 
@@ -247,7 +247,7 @@ class TestRenderSummaryCascade:
         correlation = self._cascade_correlation()
         alert = AlertFacts(component_kind="inverter", severity="urgent")
 
-        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="GridX")
 
         assert result.startswith("! Urgent:")
 
@@ -259,7 +259,7 @@ class TestRenderSummaryCascade:
         correlation = self._cascade_correlation(severity="urgent")
         alert = AlertFacts(component_kind="inverter", severity="warning")
 
-        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="GridX")
 
         assert result.startswith("! Urgent:")
 
@@ -282,7 +282,7 @@ class TestRenderSummaryCascade:
         )
         alert = AlertFacts(component_kind="grid", severity="warning")
 
-        result = render_summary(correlation, alert, llm_summary="", grid_name="Ogbinbiri")
+        result = render_summary(correlation, alert, llm_summary="", grid_name="GridX")
 
         assert "+2 dependent alerts (Grid, Inverter)" in result
 
@@ -1018,7 +1018,7 @@ class TestApplyAmendmentFoldedComment:
                 root_cause_kind="power_chain",
             ),
             raw_text="RESTART FAILED - Inverter Off while battery Ok >52V",
-            grid_name="Ogbinbiri",
+            grid_name="GridX",
         )
 
         assert ticket_service.comment_calls == [

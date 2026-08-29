@@ -328,7 +328,7 @@
           "properties": {
             "text_search": {
               "type": "string",
-              "description": "Literal keyword match against summary/description — only finds tickets that contain these exact words. Monitoring alert tickets use templated phrasing that often differs from how a user describes the issue (e.g. a DCU outage ticket reads 'DCU 230401080 in Okpokunou could have a problem, causing Meter Issues', not 'DCU offline'; an inverter problem reads 'RESTART FAILED - Inverter Off' or 'Grid outage', not 'downtime'). Use only for distinctive literal strings like a meter number, device ID, or grid name; otherwise omit and filter the results yourself."
+              "description": "Literal keyword match against summary/description — only finds tickets that contain these exact words. Monitoring alert tickets use templated phrasing that often differs from how a user describes the issue (e.g. a DCU outage ticket reads 'DCU 230401080 in GridV could have a problem, causing Meter Issues', not 'DCU offline'; an inverter problem reads 'RESTART FAILED - Inverter Off' or 'Grid outage', not 'downtime'). Use only for distinctive literal strings like a meter number, device ID, or grid name; otherwise omit and filter the results yourself."
             },
             "grid": {
               "type": "string",

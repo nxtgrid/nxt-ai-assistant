@@ -1188,7 +1188,7 @@ The two real failure modes Spike 0 found, pinned so a refactor cannot quietly
 reintroduce guessing:
 
 ```python
-# Recorded from Spike 0 against NXT-3235 - Okpokunou Technical Review.
+# Recorded from Spike 0 against NXT-3235 - GridV Technical Review.
 # Comment AAAB0jIG6Kc quoted text that had since been edited (73% similar);
 # comment AAABnuBYGB4 quoted a value repeated in 14 cells.
 STALE_QUOTE = (

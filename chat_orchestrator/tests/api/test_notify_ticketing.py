@@ -2656,7 +2656,7 @@ def test_amend_delivery_escalation_includes_summary_with_no_doubled_emoji():
         affected_keys_count=3,
         occurrence_count=6,
         component_added=False,
-        rendered_summary="🔴 ! Urgent: 3 MPPTs in Akinsolu affected (A3, A7, B1) !",
+        rendered_summary="🔴 ! Urgent: 3 MPPTs in GridY affected (A3, A7, B1) !",
     )
 
     delivery = _amend_delivery(
@@ -2664,7 +2664,7 @@ def test_amend_delivery_escalation_includes_summary_with_no_doubled_emoji():
     )
 
     assert delivery.text_override == (
-        "escalated to urgent — ! Urgent: 3 MPPTs in Akinsolu affected (A3, A7, B1) !"
+        "escalated to urgent — ! Urgent: 3 MPPTs in GridY affected (A3, A7, B1) !"
     )
     assert delivery.text_override.count("🔴") == 0
 

@@ -12,7 +12,7 @@
 
 ## Background: what was diagnosed
 
-Verified against the code on `main` at commit `1030366f` (the build that produced the 2026-07-29 Belel/Ogheye Telegram screenshots):
+Verified against the code on `main` at commit `1030366f` (the build that produced the 2026-07-29 Belel/GridW Telegram screenshots):
 
 1. **`derive_severity()` is unanchored.** `alert_facts.py:90-96` is documented as
    reading "the n8n `! Urgent:`/`! Warning:` convention" but implements it with

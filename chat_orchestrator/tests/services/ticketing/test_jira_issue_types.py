@@ -56,8 +56,8 @@ def _context(**overrides: object):
         "project_key": "OPS",
         "summary": "MPPT Q7II low output",
         "description": "details",
-        "grid_name": "Ogheye",
-        "labels": ["grid-ogheye"],
+        "grid_name": "GridW",
+        "labels": ["grid-gridw"],
     }
     values.update(overrides)
     return JiraCreateContext(**values)
@@ -73,7 +73,7 @@ def _type_with_required_grid_option(*, grid_required: bool = True) -> JiraIssueT
                 id="customfield_44",
                 name="Grid",
                 required=grid_required,
-                allowed_values=(JiraFieldOption(id="7", value="Ogheye"),),
+                allowed_values=(JiraFieldOption(id="7", value="GridW"),),
             ),
         ),
     )
@@ -102,7 +102,7 @@ def test_normalize_issue_types_preserves_field_names_requirements_and_options():
                         "customfield_44": {
                             "name": "Grid",
                             "required": True,
-                            "allowedValues": [{"id": "7", "value": "Ogheye"}],
+                            "allowedValues": [{"id": "7", "value": "GridW"}],
                         },
                     },
                 }
@@ -113,7 +113,7 @@ def test_normalize_issue_types_preserves_field_names_requirements_and_options():
     grid = types[0].field("customfield_44")
     assert grid is not None
     assert grid.name == "Grid"
-    assert grid.allowed_values[0] == JiraFieldOption(id="7", value="Ogheye")
+    assert grid.allowed_values[0] == JiraFieldOption(id="7", value="GridW")
 
 
 def test_build_issue_payload_adds_a_required_grid_option_from_metadata():
@@ -127,7 +127,7 @@ def test_build_issue_payload_adds_a_required_grid_option_from_metadata():
         "summary": "MPPT Q7II low output",
         "description": _expected_adf("details"),
         "issuetype": {"id": "101"},
-        "labels": ["grid-ogheye"],
+        "labels": ["grid-gridw"],
         "customfield_44": {"id": "7"},
     }
 
@@ -239,7 +239,7 @@ async def test_available_types_merges_paged_jira_field_metadata_into_the_known_t
                                 "fieldId": "customfield_44",
                                 "name": "Grid",
                                 "required": True,
-                                "allowedValues": [{"id": "7", "value": "Ogheye"}],
+                                "allowedValues": [{"id": "7", "value": "GridW"}],
                             },
                         ],
                     },
@@ -276,7 +276,7 @@ async def test_available_types_merges_paged_jira_field_metadata_into_the_known_t
     ]
     assert available[0].required_fields == ("summary", "customfield_44")
     assert available[0].field("customfield_44").allowed_values == (
-        JiraFieldOption(id="7", value="Ogheye"),
+        JiraFieldOption(id="7", value="GridW"),
     )
     assert available[0].field("priority") == JiraFieldDefinition(
         id="priority", name="Priority", required=False

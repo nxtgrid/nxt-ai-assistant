@@ -1227,19 +1227,19 @@ class TestKeylessSignatureDuplicate:
         alert = enrich_alert_facts(
             AlertFacts(
                 subject=(
-                    "! Urgent: Turn off Combiner: ALERT - 'Okpokunou': "
+                    "! Urgent: Turn off Combiner: ALERT - 'GridV': "
                     "'#26 - Charger terminal overheated' on 'Combiner Box 4' !"
                 ),
                 severity="urgent",
             ),
-            grid_name="Okpokunou",
+            grid_name="GridV",
         )
         correlator, store, _ts, gateway = _make_correlator()
         store.correlations.append(
             {
                 "ticket_id": "tid-OPS-3363",
                 "ticket_ref": "OPS-3363",
-                "grid_name": "Okpokunou",
+                "grid_name": "GridV",
                 "status": "open",
                 "severity": "urgent",
                 "signatures": [alert.signature],
@@ -1248,7 +1248,7 @@ class TestKeylessSignatureDuplicate:
             }
         )
 
-        decision = await correlator.decide("Okpokunou", alert)
+        decision = await correlator.decide("GridV", alert)
 
         assert decision.decision == "duplicate"
         assert decision.ticket_ref == "OPS-3363"
@@ -1262,15 +1262,15 @@ class TestKeylessSignatureDuplicate:
     async def test_keyless_signature_match_still_escalates_on_urgency(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
         alert = enrich_alert_facts(
-            AlertFacts(subject="! Urgent: Grid outage in Okpokunou !", severity="urgent"),
-            grid_name="Okpokunou",
+            AlertFacts(subject="! Urgent: Grid outage in GridV !", severity="urgent"),
+            grid_name="GridV",
         )
         correlator, store, _ts, _gateway = _make_correlator()
         store.correlations.append(
             {
                 "ticket_id": "tid-OPS-3363",
                 "ticket_ref": "OPS-3363",
-                "grid_name": "Okpokunou",
+                "grid_name": "GridV",
                 "status": "open",
                 "severity": "warning",
                 "signatures": [alert.signature],
@@ -1279,7 +1279,7 @@ class TestKeylessSignatureDuplicate:
             }
         )
 
-        decision = await correlator.decide("Okpokunou", alert)
+        decision = await correlator.decide("GridV", alert)
 
         assert decision.decision == "amend"
         assert decision.ticket_ref == "OPS-3363"
@@ -1487,7 +1487,7 @@ class TestRecordEventIsCalled:
 
 
 class TestPowerChainCascadeDecision:
-    """C6: the real 2026-08-08 Ogbinbiri case (plan Example 5) end to end
+    """C6: the real 2026-08-08 GridX case (plan Example 5) end to end
     through AlertCorrelator.decide() -- a battery/BMS ticket already open,
     an inverter-off alert arriving minutes later. The historical model got
     this wrong (new, 0.9 confidence); this fixture is what right looks
@@ -1498,7 +1498,7 @@ class TestPowerChainCascadeDecision:
         return {
             "ticket_id": "tid-OPS-3456",
             "ticket_ref": "OPS-3456",
-            "grid_name": "Ogbinbiri",
+            "grid_name": "GridX",
             "status": "open",
             "signatures": ["bms-sig"],
             "affected_keys": [{"kind": "battery", "key": "BMS1", "label": "BMS1"}],
@@ -1515,7 +1515,7 @@ class TestPowerChainCascadeDecision:
             component_key="INV1",
             component_label="Inverter INV1",
         )
-        return enrich_alert_facts(alert, grid_name="Ogbinbiri")
+        return enrich_alert_facts(alert, grid_name="GridX")
 
     @pytest.mark.asyncio
     async def test_amends_onto_the_earlier_bms_ticket_when_the_flag_is_on(self, monkeypatch):
@@ -1538,7 +1538,7 @@ class TestPowerChainCascadeDecision:
         store.correlations.append(self._bms_ticket_row())
         ts.statuses["OPS-3456"] = TicketStatus(summary="BMS comms lost", is_done=False)
 
-        decision = await correlator.decide("Ogbinbiri", self._inverter_off_alert())
+        decision = await correlator.decide("GridX", self._inverter_off_alert())
 
         assert decision.decision == "amend"
         assert decision.ticket_ref == "OPS-3456"
@@ -1569,7 +1569,7 @@ class TestPowerChainCascadeDecision:
         store.correlations.append(self._bms_ticket_row())
         ts.statuses["OPS-3456"] = TicketStatus(summary="BMS comms lost", is_done=False)
 
-        decision = await correlator.decide("Ogbinbiri", self._inverter_off_alert())
+        decision = await correlator.decide("GridX", self._inverter_off_alert())
 
         assert decision.decision == "new"
 

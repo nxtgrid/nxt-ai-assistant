@@ -1,6 +1,6 @@
 """B7 (plan docs/superpowers/plans/2026-08-11-ticketing-noise-and-correlation-cutover.md):
-burst regression test, built from the real 2026-08-08 Akinsolu "No BMS" storm
-(finding 1) plus the component-less Ogbinbiri/Akinsolu Solar Charger miss
+burst regression test, built from the real 2026-08-08 GridY "No BMS" storm
+(finding 1) plus the component-less GridX/GridY Solar Charger miss
 (finding 2). Six MPPT devices and one bracket-only Solar Charger device, same
 fault, same grid, arriving back-to-back -- must collapse onto one ticket with
 one edited-in-place Telegram message, not seven tickets/seven posts.
@@ -29,27 +29,27 @@ from orchestrator.services.ticketing.backend import (
 from orchestrator.services.ticketing.correlation_store import AffectedKeyMerge
 from shared.auth.auth_service import GridNotificationTarget
 
-GRID = "Akinsolu"
+GRID = "GridY"
 
 # The real 2026-08-08 storm subjects (plan finding 1's table), reconstructed
 # in the full VRM alert shape ("ALERT - '<grid>': '<fault>' on '<device>'")
 # that finding 1 traces the signature bug through, plus finding 2's
 # component-less Solar Charger device on the same fault.
 _SUBJECTS = [
-    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
     "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !",
-    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
     "'Solar Charger - MPPT 65SQ ARTN4.4/-141/32 House [0]' !",
-    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
     "'Solar Charger - MPPT JD65 ARTN4.4/-176/5 Cabin [3]' !",
-    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
     "'Solar Charger - MPPT RH2W ARTN4.4/-176/5 Cabin [6]' !",
-    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
     "'Solar Charger - MPPT QI11 ARTN4.4/+27/24 Church [2]' !",
-    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
     "'Solar Charger - MPPT LQLA ARTN4.4/27/24 Church [1]' !",
     # finding 2: no "MPPT" word at all -- component-less before B2.
-    "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
     "'Solar Charger - VT6Y ARTN4.4/-141/32 House 4 [8]' !",
 ]
 
@@ -445,7 +445,7 @@ async def test_underperforming_mppt_storm_collapses_onto_one_ticket(monkeypatch)
     must reach one ticket and one Telegram message. In production they split
     into two tickets exactly along that digit boundary."""
     monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
-    # Same rationale as the Akinsolu storm above: this guards the
+    # Same rationale as the GridY storm above: this guards the
     # deterministic ladder, so LLM judgment is pinned off explicitly.
     monkeypatch.setenv("ALERT_LLM_JUDGMENT_ENABLED", "false")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")

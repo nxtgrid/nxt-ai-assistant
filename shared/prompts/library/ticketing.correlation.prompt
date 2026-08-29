@@ -163,7 +163,7 @@ MPPT issue and an inverter fault stay unrelated. Decision: **new**.
 
 **Example 5 -- battery/BMS -> inverter power chain (amend), and the wrong
 answer to avoid:**
-Grid "Ogbinbiri" has an open ticket OPS-3456, "! Warning: BMS communication
+Grid "GridX" has an open ticket OPS-3456, "! Warning: BMS communication
 lost", filed 4 minutes ago. A new alert arrives: "RESTART FAILED - Inverter
 Off while battery Ok >52V ... causing Grid outage". Grid facts'
 `live_telemetry.battery_voltage_v` gives the actual current reading, which
