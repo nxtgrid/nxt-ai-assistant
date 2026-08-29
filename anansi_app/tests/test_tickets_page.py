@@ -79,6 +79,60 @@ def test_status_filter_passes_through_a_single_status():
     assert tickets_page._status_filter_value("done") == "done"
 
 
+# ── default backend filter ──────────────────────────────────────────────────
+_JIRA_ENV_VARS = ("JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_API_TOKEN")
+
+
+def _clear_jira_env(monkeypatch):
+    monkeypatch.delenv("TICKET_BACKEND_OVERRIDE", raising=False)
+    for var in _JIRA_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_default_backend_filter_is_all_when_override_is_internal(monkeypatch):
+    _clear_jira_env(monkeypatch)
+    monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "internal")
+
+    assert tickets_page._default_backend_filter() == "all"
+
+
+def test_default_backend_filter_is_jira_when_override_is_jira(monkeypatch):
+    _clear_jira_env(monkeypatch)
+    monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "jira")
+
+    assert tickets_page._default_backend_filter() == "jira"
+
+
+def test_default_backend_filter_is_jira_in_auto_mode_when_credentials_are_configured(
+    monkeypatch,
+):
+    _clear_jira_env(monkeypatch)
+    monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "auto")
+    for var in _JIRA_ENV_VARS:
+        monkeypatch.setenv(var, "x")
+
+    assert tickets_page._default_backend_filter() == "jira"
+
+
+def test_default_backend_filter_is_all_in_auto_mode_without_credentials(monkeypatch):
+    _clear_jira_env(monkeypatch)
+    monkeypatch.setenv("TICKET_BACKEND_OVERRIDE", "auto")
+
+    assert tickets_page._default_backend_filter() == "all"
+
+
+def test_default_backend_filter_partial_credentials_are_not_enough(monkeypatch):
+    """All three Jira connection vars must be present -- matches
+    JiraTicketBackend.has_credentials()'s all-or-nothing gate that
+    resolve_backend()'s "auto"/"jira" branches rely on."""
+    _clear_jira_env(monkeypatch)
+    monkeypatch.setenv("JIRA_BASE_URL", "https://example.atlassian.net")
+    monkeypatch.setenv("JIRA_USERNAME", "bot@example.com")
+    # JIRA_API_TOKEN left unset.
+
+    assert tickets_page._default_backend_filter() == "all"
+
+
 # ── read-only guarantee: the page must call NO write paths ─────────────────────
 def test_page_only_calls_readonly_reader_methods():
     src = open(_TICKETS_PATH).read()

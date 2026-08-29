@@ -1856,7 +1856,16 @@ class SupabaseReader:
         page_size = max(page_size, 1)
         start = (page - 1) * page_size
         try:
-            query = self.client.table("ticket_list_view").select("*", count="exact")
+            # A ticket intent stuck "pending" (backend create never
+            # completed) or "failed" never reached Jira/internal, but its
+            # status column still defaults to "open" -- without this it
+            # renders as a real open ticket here forever, inflating this
+            # page's count against whatever the backend actually shows.
+            query = (
+                self.client.table("ticket_list_view")
+                .select("*", count="exact")
+                .eq("provisioning_state", "active")
+            )
             if status:
                 if isinstance(status, str):
                     query = query.eq("status", status)

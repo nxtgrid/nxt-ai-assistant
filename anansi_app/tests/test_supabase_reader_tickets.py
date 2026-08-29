@@ -98,11 +98,13 @@ def test_list_ticket_page_reads_the_canonical_view_with_database_pagination():
             "id": "ticket-new", "ticket_ref": "OPS-9", "backend": "internal",
             "created_via": "notification", "status": "open", "summary": "Newest",
             "has_escalation": False, "latest_activity_at": "2026-07-24T10:00:00",
+            "provisioning_state": "active",
         },
         {
             "id": "ticket-old", "ticket_ref": "INT-2", "backend": "internal",
             "created_via": "escalation", "status": "open", "summary": "Older",
             "has_escalation": True, "latest_activity_at": "2026-07-23T10:00:00",
+            "provisioning_state": "active",
         },
     ]
     reader = SupabaseReader.__new__(SupabaseReader)
@@ -122,16 +124,19 @@ def test_list_ticket_page_accepts_a_list_of_statuses():
             "id": "t-open", "ticket_ref": "OPS-1", "backend": "internal",
             "created_via": "notification", "status": "open", "summary": "Open one",
             "has_escalation": False, "latest_activity_at": "2026-07-24T10:00:00",
+            "provisioning_state": "active",
         },
         {
             "id": "t-progress", "ticket_ref": "OPS-2", "backend": "internal",
             "created_via": "notification", "status": "in_progress", "summary": "In progress one",
             "has_escalation": False, "latest_activity_at": "2026-07-23T10:00:00",
+            "provisioning_state": "active",
         },
         {
             "id": "t-done", "ticket_ref": "OPS-3", "backend": "internal",
             "created_via": "notification", "status": "done", "summary": "Done one",
             "has_escalation": False, "latest_activity_at": "2026-07-22T10:00:00",
+            "provisioning_state": "active",
         },
     ]
     reader = SupabaseReader.__new__(SupabaseReader)
@@ -141,6 +146,41 @@ def test_list_ticket_page_accepts_a_list_of_statuses():
 
     assert result.total == 2
     assert {item["ticket_ref"] for item in result.items} == {"OPS-1", "OPS-2"}
+
+
+def test_list_ticket_page_excludes_tickets_never_activated_on_a_backend():
+    """A ticket intent stuck "pending" (backend create never completed) or
+    "failed" never reached Jira/internal, but its ``status`` column still
+    defaults to "open" -- without this filter it renders as a real open
+    ticket here forever, inflating this page's count against Jira's."""
+    seed = _seed()
+    seed["ticket_list_view"] = [
+        {
+            "id": "t-active", "ticket_ref": "OPS-1", "backend": "internal",
+            "created_via": "notification", "status": "open", "summary": "Real ticket",
+            "has_escalation": False, "latest_activity_at": "2026-07-24T10:00:00",
+            "provisioning_state": "active",
+        },
+        {
+            "id": "t-pending", "ticket_ref": None, "backend": None,
+            "created_via": "notification", "status": "open", "summary": "Stuck intent",
+            "has_escalation": False, "latest_activity_at": "2026-07-24T09:00:00",
+            "provisioning_state": "pending",
+        },
+        {
+            "id": "t-failed", "ticket_ref": None, "backend": None,
+            "created_via": "notification", "status": "open", "summary": "Failed create",
+            "has_escalation": False, "latest_activity_at": "2026-07-24T08:00:00",
+            "provisioning_state": "failed",
+        },
+    ]
+    reader = SupabaseReader.__new__(SupabaseReader)
+    reader.client = _FakeClient(seed)
+
+    result = reader.list_ticket_page()
+
+    assert result.total == 1
+    assert [item["id"] for item in result.items] == ["t-active"]
 
 
 def test_canonical_ticket_detail_reads_recorded_delivery_with_a_safe_link():
