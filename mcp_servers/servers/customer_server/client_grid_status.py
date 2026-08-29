@@ -114,6 +114,74 @@ def _current_battery_voltage_v(battery: Any) -> Optional[float]:
     return float(voltage_v) if voltage_v is not None else None
 
 
+async def _recent_state_flags(grid_id: int) -> tuple[Optional[bool], Optional[bool]]:
+    """``(hps_on, fs_on)`` for one grid, read exactly the way `/grids` reads them.
+
+    `/grids` and `/grid` both take these from the last
+    ``STATUS_STABILITY_SNAPSHOT_COUNT`` TimescaleDB snapshots, majority-voted
+    to stop a flapping meter from flipping the reported status, and blank them
+    out when the newest snapshot is over 30 minutes old. The alert path used to
+    read ``grids.is_hps_on``/``grids.is_fs_on`` instead -- a denormalized auth-DB
+    pair that is ``NOT NULL DEFAULT false``, carries no timestamp, and therefore
+    cannot be aged out. A grid whose flags had never been synced read as a hard
+    ``False`` here (``classify_grid_status`` -> ``likely_isolated``) while
+    `/grids` saw ``None`` and fell through, so the two commands could describe
+    the same site differently at the same instant.
+
+    ``(None, None)`` on any failure: the classifier already treats an unknown
+    flag as "no opinion", which is the honest answer when the snapshot table is
+    unreachable.
+    """
+    try:
+        import asyncpg as asyncpg_ts
+
+        if not (TIMESCALE_HOST and TIMESCALE_USER and TIMESCALE_PASSWORD):
+            return (None, None)
+        ts_conn = await asyncpg_ts.connect(
+            host=TIMESCALE_HOST,
+            port=TIMESCALE_PORT,
+            user=TIMESCALE_USER,
+            password=TIMESCALE_PASSWORD,
+            database=TIMESCALE_DATABASE,
+            ssl="require",
+        )
+        try:
+            ts_row = await ts_conn.fetchrow(
+                """
+                WITH recent_snapshots AS (
+                    SELECT
+                        created_at, is_fs_active, is_hps_on,
+                        ROW_NUMBER() OVER (ORDER BY created_at DESC) as rn
+                    FROM grid_energy_snapshot_15_min
+                    WHERE grid_id = $1
+                      AND created_at >= NOW() - INTERVAL '1 hour'
+                )
+                SELECT
+                    MAX(created_at) as created_at,
+                    (COUNT(*) FILTER (WHERE is_fs_active = true) * 2 > COUNT(*)) as is_fs_active,
+                    (COUNT(*) FILTER (WHERE is_hps_on = true) * 2 > COUNT(*)) as is_hps_on
+                FROM recent_snapshots
+                WHERE rn <= $2
+                """,
+                grid_id,
+                STATUS_STABILITY_SNAPSHOT_COUNT,
+            )
+        finally:
+            await ts_conn.close()
+    except Exception:
+        logger.warning("Snapshot state flags unavailable for grid_id %s", grid_id, exc_info=True)
+        return (None, None)
+
+    if not ts_row or not ts_row["created_at"]:
+        return (None, None)
+    created_at = ts_row["created_at"]
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=timezone.utc)
+    if is_stale(created_at):
+        return (None, None)
+    return (ts_row["is_hps_on"], ts_row["is_fs_active"])
+
+
 class ClientGridStatusMixin:
     async def get_live_telemetry(self, grid_name: str) -> Dict[str, Any]:
         """Return fresh VRM inverter output (kW) and current battery voltage
@@ -126,6 +194,10 @@ class ClientGridStatusMixin:
         This intentionally performs no fuzzy grid lookup and no full-status
         enrichment: notification callers have already resolved a canonical
         grid name and need a small, best-effort live observation only.
+
+        The ``grid_status``/``site_status`` it returns are the same
+        ``classify_grid_status`` verdict `/grids` renders, from the same
+        inputs -- see ``_recent_state_flags`` for the pair that used to differ.
         """
         try:
             auth_service = get_auth_service()
@@ -133,8 +205,8 @@ class ClientGridStatusMixin:
             async with pool.acquire() as conn:
                 grid_row = await conn.fetchrow(
                     f"""
-                    SELECT generation_external_site_id, {MANAGED_GENERATION_COLUMN},
-                           is_hps_on, is_fs_on, is_hps_on_threshold_kw
+                    SELECT id, generation_external_site_id, {MANAGED_GENERATION_COLUMN},
+                           is_hps_on_threshold_kw
                     FROM grids
                     WHERE LOWER(name) = LOWER($1)
                       AND is_hidden_from_reporting IS NOT TRUE
@@ -161,11 +233,13 @@ class ClientGridStatusMixin:
             site_id = str(grid_row["generation_external_site_id"])
             vrm_platform = VRMPlatform()
             await vrm_platform.initialize()
-            voltage, battery = await asyncio.gather(
+            voltage, battery, state_flags = await asyncio.gather(
                 vrm_platform.get_current_inverter_voltage(site_id),
                 vrm_platform.get_current_battery_status(site_id),
+                _recent_state_flags(grid_row["id"]),
                 return_exceptions=True,
             )
+            hps_on, fs_on = state_flags if isinstance(state_flags, tuple) else (None, None)
 
             fresh = not _inverter_voltage_is_stale(voltage)
             output_kw = _fresh_inverter_output_kw(voltage)
@@ -189,8 +263,8 @@ class ClientGridStatusMixin:
                 vrm_data_stale=not fresh,
                 vrm_power_kw=output_kw,
                 hps_threshold_kw=grid_row.get("is_hps_on_threshold_kw"),
-                fs_on=grid_row.get("is_fs_on"),
-                hps_on=grid_row.get("is_hps_on"),
+                fs_on=fs_on,
+                hps_on=hps_on,
             )
 
             def fresh_voltage(phase: str) -> Optional[float]:

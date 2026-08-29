@@ -207,7 +207,12 @@ def parse_alert_judgment(
     if ticket.change_description and not _has_text(ticket.description_addition):
         return _invalid(raw, "invalid_ticket_description", "description change requires an addition")
 
-    if ticket.action is TicketAction.UPDATE_EXISTING and ticket.confidence < confidence_floor:
-        return _invalid(raw, "low_ticket_confidence", "existing-ticket mutation confidence is too low")
+    # Every action but create_new binds this alert to an existing ticket, and
+    # binding is the decision that can go wrong silently -- a record_occurrence
+    # is what folds an alert into a ticket's history and out of Telegram. The
+    # floor used to cover update_existing only, which left the quieter of the
+    # two mutations reachable at any confidence at all.
+    if ticket.action is not TicketAction.CREATE_NEW and ticket.confidence < confidence_floor:
+        return _invalid(raw, "low_ticket_confidence", "existing-ticket decision confidence is too low")
 
     return AlertJudgmentResult(valid=True, judgment=judgment, raw=raw)
