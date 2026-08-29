@@ -65,7 +65,21 @@ def assess_downtime(telemetry: AlertTelemetry) -> DowntimeState:
 
     ``output_kw`` is deliberately *not* a downtime signal: a solar site at
     night legitimately produces 0 kW with the grid up on battery.
+
+    A plant whose gateway has stopped reporting is the third signal, and the
+    only one that arrives on a *stale* reading. This reverses an earlier call
+    here ("stale telemetry stays silent: unknowable is not down") -- correctly,
+    because at the time every unreadable telemetry looked alike. Now that
+    ``unavailable_reason`` distinguishes them, "stale" specifically means VRM
+    served us a reading whose gateway timestamp is over 30 minutes old: not an
+    absence of evidence but evidence of absence. The plant is dark, and device
+    alerts derived from the same dark feed ("MPPT X performs lower than other
+    MPPTs" for every MPPT that stopped reporting) are artefacts of it. Saying
+    so once a day beats force-sending each artefact.
     """
+    if telemetry.unavailable_reason == "stale":
+        return DowntimeState(down=True, known=True, reasons=("plant_comms_down",))
+
     if not telemetry.fresh:
         return DowntimeState(down=False, known=False)
 

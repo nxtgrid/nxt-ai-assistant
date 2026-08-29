@@ -570,3 +570,181 @@ async def test_llm_outage_during_a_storm_still_files_and_posts_every_alert(monke
     assert len(set(refs)) == len(_SUBJECTS)
     assert len(transport.send_calls) == len(_SUBJECTS)
     assert set(send_decisions) == {"send"}
+
+
+# Synthetic sites and identifiers throughout: the alert *shapes* are what these
+# tests pin, and real grid names, ticket refs and device serials are operator
+# data that must not travel in a public repo.
+#
+# The recurring-meter-alert shape, from a site whose generation we do not
+# manage: one DCU alert, already on its ticket, re-firing hourly. Nothing new to
+# say -- but the fail-open gate said "send" to every one of them.
+_UNMANAGED_GRID = "Fairhaven"
+_RECURRING_SUBJECT = (
+    "! Warning: DCU 900000001 in Fairhaven could have a problem, causing Meter Issues !"
+)
+
+# The dark-plant shape: an underperforming-MPPT warning from a managed site
+# whose gateway has stopped reporting. Letters-only device id on purpose -- that
+# is the token shape the signature normalization has to keep intact.
+_DARK_PLANT_GRID = "Riverbend"
+_DARK_PLANT_SUBJECT = (
+    "! Warning: MPPT WXYZ in Riverbend seems to perform lower than other MPPTs !"
+)
+
+
+class _RepeatAmendment:
+    """apply_amendment's result for an alert already recorded on its ticket:
+    no new component, no escalation, nothing rendered to say."""
+
+    ticket_ref = "OPS-1001"
+    ticket_id = "tid-1"
+    decision = "duplicate"
+    escalated = False
+    component_added = False
+    affected_keys_count = 1
+    occurrence_count = 9
+    rendered_summary = ""
+
+
+class _RepeatDecision:
+    root_cause_kind = "component"
+    affected_key = {"label": "DCU 900000001"}
+    update_message = ""
+    ticket_severity = ""
+
+
+@pytest.mark.asyncio
+async def test_forced_send_of_a_silent_recurrence_is_threaded_not_a_full_repost(monkeypatch):
+    """The fail-open gate has to be able to raise its voice without reading the
+    whole alert aloud again.
+
+    ``_amend_delivery``/``_duplicate_delivery`` choose ``text_override``, the
+    reply anchor and the edit target *together* with ``suppress`` -- a delivery
+    built to stay silent carries none of them, because it was never going to
+    render. Flipping ``suppress`` alone therefore fell through to
+    ``_format_ticket_notification``, which reposts the entire original alert,
+    unthreaded, once per alert. Seven MPPT warnings on one storm ticket became
+    seven identical top-level messages, and an unmanaged site got the same DCU
+    alert re-posted in full every hour.
+
+    A forced send must be a *reply*, never an edit: Telegram edits do not
+    notify, and being seen is the entire point of forcing.
+    """
+    from orchestrator.api.app import (
+        NotificationTicket,
+        _duplicate_delivery,
+        _forced_send_delivery,
+    )
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+    transport = _FakeTelegramTransport()
+    monkeypatch.setattr(
+        "shared.utils.telegram_send.send_telegram_message_with_fallback", transport.send
+    )
+    monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", transport.edit)
+
+    async def _noop_chat_db_log(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("orchestrator.api.app._log_notification_to_chat_db", _noop_chat_db_log)
+
+    import orchestrator.api.app as app_module
+
+    ticket = NotificationTicket(ref="OPS-1001", backend="internal", ticket_id="tid-1")
+    silent = _duplicate_delivery(
+        _RepeatAmendment(),
+        ticket,
+        reply_to_message_id=4242,
+        decision=_RepeatDecision(),
+    )
+    assert silent.suppress is True, "a recurrence is still silent by default"
+
+    forced = _forced_send_delivery(silent, site_status="unknown")
+    body = _body(_RECURRING_SUBJECT, grid=_UNMANAGED_GRID)
+    await app_module._deliver_notification(
+        body, _target(_UNMANAGED_GRID), "OPS-1001", forced
+    )
+
+    assert len(transport.send_calls) == 1
+    assert transport.edit_calls == [], "a forced send must notify, so never an edit"
+
+    posted = transport.send_calls[0]
+    assert posted["reply_to_message_id"] == 4242, "threaded under the ticket's own message"
+    assert "OPS-1001" in posted["text"]
+    assert "Site status: Unknown" in posted["text"]
+    assert "could have a problem" not in posted["text"], (
+        "forcing a silent recurrence must not repost the whole alert"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dark_plant_says_so_instead_of_relisting_a_device(monkeypatch):
+    """When the gateway has stopped reporting, the message an operator needs is
+    that the plant is dark -- not "MPPT QWQJ is still firing".
+
+    The device readings behind that line came from the same feed that went
+    quiet. Naming the outage once, with a status line that says so, is what
+    makes the underperforming-MPPT storm interpretable instead of alarming.
+    """
+    from datetime import datetime, timezone
+
+    from orchestrator.api.app import NotificationTicket, _duplicate_delivery
+    from orchestrator.services.ticketing.alert_judgment_context import AlertTelemetry
+    from orchestrator.services.ticketing.downtime_alert_policy import (
+        assess_downtime,
+        decide_downtime_override,
+    )
+
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+    transport = _FakeTelegramTransport()
+    monkeypatch.setattr(
+        "shared.utils.telegram_send.send_telegram_message_with_fallback", transport.send
+    )
+    monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", transport.edit)
+
+    async def _noop_chat_db_log(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    import orchestrator.api.app as app_module
+
+    monkeypatch.setattr(app_module, "_log_notification_to_chat_db", _noop_chat_db_log)
+
+    # Real policy, faked I/O: a plant whose last gateway report is stale.
+    dark = AlertTelemetry(
+        generation_management="managed",
+        grid_status="unknown",
+        site_status="unknown",
+        unavailable_reason="stale",
+        fresh=False,
+    )
+    state = assess_downtime(dark)
+    assert state.reasons == ("plant_comms_down",)
+
+    async def _state(_alert_context: Any) -> Any:
+        return state
+
+    async def _override(_grid_name: str, _state_arg: Any) -> Any:
+        return decide_downtime_override(
+            state, last_downtime_alert_at=None, now=datetime.now(timezone.utc)
+        )
+
+    monkeypatch.setattr(app_module, "_live_downtime_state", _state)
+    monkeypatch.setattr(app_module, "_downtime_delivery_override", _override)
+
+    ticket = NotificationTicket(ref="OPS-1000", backend="internal", ticket_id="tid-1")
+    silent = _duplicate_delivery(
+        _RepeatAmendment(), ticket, reply_to_message_id=66225, decision=_RepeatDecision()
+    )
+    body = _body(_DARK_PLANT_SUBJECT, grid=_DARK_PLANT_GRID)
+    await app_module._deliver_notification(
+        body, _target(_DARK_PLANT_GRID), "OPS-1000", silent
+    )
+
+    assert len(transport.send_calls) == 1
+    posted = transport.send_calls[0]["text"]
+    assert "plant comms down" in posted
+    assert "Site status: Plant comms down" in posted
+    assert "seems to perform lower" not in posted, "the storm text is the artefact, not the news"
+    assert "still firing" not in posted, "a device line is the wrong thing to say here"
+    assert transport.send_calls[0]["reply_to_message_id"] == 66225

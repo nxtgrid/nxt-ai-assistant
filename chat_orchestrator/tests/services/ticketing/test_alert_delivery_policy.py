@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from orchestrator.services.ticketing.alert_delivery_policy import (
+    FAIL_OPEN_REMINDER_INTERVAL,
     all_phases_zero_for_override,
     decide_alert_delivery,
 )
@@ -144,3 +145,228 @@ def test_partial_or_missing_phase_does_not_trigger_override(phase) -> None:
     )
 
     assert all_phases_zero_for_override(telemetry) is False
+
+
+def _unmanaged_telemetry() -> AlertTelemetry:
+    """What client_grid_status returns for a grid whose generation we do not
+    manage: _unavailable_live_telemetry("unmanaged"), which reports UNKNOWN
+    because there is no plant of ours to read -- not because a read failed."""
+    return AlertTelemetry(
+        generation_management="unmanaged",
+        grid_status="unknown",
+        site_status="unknown",
+        fresh=False,
+    )
+
+
+def test_unmanaged_generation_does_not_force_on_unknown_status() -> None:
+    """An unmanaged grid's UNKNOWN status is its configuration, not a doubt.
+
+    Nothing about it will ever become knowable, so treating it as a reason to
+    override the judgment forces every alert on that grid forever. Two unmanaged
+    sites re-fired the same meter alert onto one ticket every hour on exactly
+    this rung.
+    """
+    decision = decide_alert_delivery(
+        _result(prior=SiteStatus.UNKNOWN, current=SiteStatus.UNKNOWN),
+        _context(telemetry=_unmanaged_telemetry()),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.forced_by == []
+    assert decision.send is False
+    assert decision.reason == "llm_explicit_suppression"
+
+
+def test_unmanaged_generation_still_forces_on_every_other_doubt() -> None:
+    """Only the status rung is excused. An unmanaged grid whose LLM call failed,
+    or whose required context is missing, still fails open like any other."""
+    unmanaged = _unmanaged_telemetry()
+
+    llm_failed = decide_alert_delivery(
+        AlertJudgmentResult(valid=False, error_code="timed_out"),
+        _context(telemetry=unmanaged),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+    context_failed = decide_alert_delivery(
+        _result(prior=SiteStatus.UNKNOWN, current=SiteStatus.UNKNOWN),
+        _context(telemetry=unmanaged, failed="om_messages"),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert llm_failed.send is True and "llm_failed" in llm_failed.forced_by
+    assert context_failed.send is True
+    assert "context_failed:om_messages" in context_failed.forced_by
+
+
+def test_managed_grid_with_unknown_status_still_forces() -> None:
+    """The rung that matters stays intact: on a grid we do manage, an UNKNOWN
+    status means we genuinely cannot tell what is happening, and silence is not
+    ours to choose."""
+    managed_but_dark = AlertTelemetry(
+        generation_management="managed",
+        grid_status="unknown",
+        site_status="unknown",
+        fresh=False,
+    )
+
+    decision = decide_alert_delivery(
+        _result(prior=SiteStatus.UNKNOWN, current=SiteStatus.UNKNOWN),
+        _context(telemetry=managed_but_dark),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is True
+    assert "status_unknown" in decision.forced_by
+
+
+def _on_ticket(ref: str, *, send: bool = False) -> AlertJudgmentResult:
+    """A judgment that puts this alert onto an existing ticket."""
+    result = _result(prior=SiteStatus.UNKNOWN, current=SiteStatus.UNKNOWN, send=send)
+    assert result.judgment is not None
+    return result.model_copy(
+        update={
+            "judgment": result.judgment.model_copy(
+                update={
+                    "ticket": result.judgment.ticket.model_copy(
+                        update={
+                            "action": TicketAction.RECORD_OCCURRENCE,
+                            "target_ticket_ref": ref,
+                        }
+                    )
+                }
+            )
+        }
+    )
+
+
+def _spoke_about(ref: str, *, minutes_ago: int) -> PriorAlertMessage:
+    sent = NOW - timedelta(minutes=minutes_ago)
+    return PriorAlertMessage(
+        external_chat_id="-100",
+        external_message_id=1,
+        sent_at=sent.isoformat(),
+        ticket_ref=ref,
+    )
+
+
+def _with_history(*prior: PriorAlertMessage, failed: str | None = None) -> AlertJudgmentContext:
+    context = _context(failed=failed)
+    return context.model_copy(update={"prior_alerts": list(prior)})
+
+
+def test_stale_telemetry_no_longer_forces_every_alert() -> None:
+    """A plant that stopped reporting is handled by the downtime floor, once a
+    day. Forcing here as well put one message per device on top of it."""
+    stale = AlertTelemetry(
+        generation_management="managed",
+        grid_status="unknown",
+        site_status="unknown",
+        unavailable_reason="stale",
+        fresh=False,
+    )
+
+    decision = decide_alert_delivery(
+        _result(prior=SiteStatus.UNKNOWN, current=SiteStatus.UNKNOWN),
+        _context(telemetry=stale),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert "status_unknown" not in decision.forced_by
+
+
+def test_doubt_only_force_is_capped_once_we_have_already_said_it() -> None:
+    """Fail-open owes the topic *a* message, not one per alert.
+
+    Seven MPPT warnings landing on one ticket inside a minute are seven reasons
+    to doubt, not seven things to say.
+    """
+    decision = decide_alert_delivery(
+        _on_ticket("OPS-1000"),
+        _with_history(_spoke_about("OPS-1000", minutes_ago=3)),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is False
+    assert decision.reason == "fail_open_capped"
+    assert "status_unknown" in decision.forced_by, "the audit still records what forced it"
+
+
+def test_the_first_doubt_still_gets_through() -> None:
+    """The guarantee half: nothing said about this ticket yet, so say it."""
+    decision = decide_alert_delivery(
+        _on_ticket("OPS-1000"), _with_history(), enforcement_enabled=True, now=NOW
+    )
+
+    assert decision.send is True
+    assert decision.reason == "fail_open"
+
+
+def test_cap_expires_with_the_window() -> None:
+    decision = decide_alert_delivery(
+        _on_ticket("OPS-1000"),
+        _with_history(_spoke_about("OPS-1000", minutes_ago=int(FAIL_OPEN_REMINDER_INTERVAL.total_seconds() // 60) + 1)),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is True
+
+
+def test_cap_is_per_ticket_not_per_grid() -> None:
+    """A different ticket is a different problem, however recently we spoke."""
+    decision = decide_alert_delivery(
+        _on_ticket("OPS-1000"),
+        _with_history(_spoke_about("OPS-9999", minutes_ago=1)),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is True
+
+
+@pytest.mark.parametrize("send_telegram", [True])
+def test_evidence_driven_sends_are_never_capped(send_telegram: bool) -> None:
+    """The cap only ever quiets doubt. An explicit LLM request to send is not
+    doubt, and neither is a material status change -- those go out however
+    recently we last spoke."""
+    decision = decide_alert_delivery(
+        _on_ticket("OPS-1000", send=send_telegram),
+        _with_history(_spoke_about("OPS-1000", minutes_ago=1)),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is True
+    assert "llm_requested_delivery" in decision.forced_by
+
+
+def test_cap_needs_reliable_history_to_apply() -> None:
+    """If we could not read what we already sent, we cannot know we are
+    repeating ourselves -- so we repeat ourselves. Fail open, as everywhere."""
+    decision = decide_alert_delivery(
+        _on_ticket("OPS-1000"),
+        _with_history(_spoke_about("OPS-1000", minutes_ago=1), failed="prior_alerts"),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is True
+
+
+def test_a_brand_new_ticket_is_never_capped() -> None:
+    """No target ticket means nothing was said about it yet, by definition."""
+    decision = decide_alert_delivery(
+        _result(prior=SiteStatus.UNKNOWN, current=SiteStatus.UNKNOWN),
+        _with_history(_spoke_about("OPS-1000", minutes_ago=1)),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is True

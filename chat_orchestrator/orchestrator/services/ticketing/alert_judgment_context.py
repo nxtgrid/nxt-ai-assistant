@@ -60,6 +60,14 @@ class OpenTicketContext(_ContextModel):
 
 
 class AlertTelemetry(_ContextModel):
+    # Why site_status is UNKNOWN, when it is. "" means the reading was usable.
+    # "unmanaged" is a fact about the site; "stale" means the plant's gateway
+    # has stopped reporting (it is dark, and device-level alerts derived from
+    # the same feed are suspect); the rest are gaps in our own knowledge.
+    # site_status collapses all of these to UNKNOWN, so anything that needs to
+    # tell them apart -- the delivery policy, and the judgment LLM, which is
+    # handed this whole model -- has to read this field.
+    unavailable_reason: str = ""
     generation_management: Literal["managed", "unmanaged", "unknown"] = "unknown"
     grid_status: GridStatus = GridStatus.UNKNOWN
     site_status: SiteStatus = SiteStatus.UNKNOWN

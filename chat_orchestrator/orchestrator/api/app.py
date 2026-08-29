@@ -1188,7 +1188,15 @@ async def _deliver_notification(
             override.reason,
             ",".join(downtime_state.reasons),
         )
-        delivery = dataclasses.replace(delivery, suppress=False)
+        comms_down = "plant_comms_down" in downtime_state.reasons
+        delivery = _forced_send_delivery(
+            delivery,
+            site_status=COMMS_DOWN_STATUS if comms_down else "",
+            # "still firing on MPPT QWQJ" is the wrong thing to say when the
+            # reason we are speaking is that the plant stopped reporting -- the
+            # device readings behind that line came from the same dark feed.
+            text_override=_PLANT_COMMS_DOWN_MESSAGE if comms_down else None,
+        )
 
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
     if not bot_token:
@@ -1712,11 +1720,23 @@ class NotificationDelivery:
     site_status: str = ""
 
 
+# Not a SiteStatus member: that vocabulary is shared with /grids and the fleet
+# view, and this is a statement about our link to the plant rather than about
+# the plant's output. It only ever reaches the notify renderer.
+COMMS_DOWN_STATUS = "comms_down"
+
+_PLANT_COMMS_DOWN_MESSAGE = (
+    "plant comms down: no VRM report for over 30 minutes. Device alerts from "
+    "this grid are unreliable until it reports again."
+)
+
+
 def _render_alert_site_status(status: str) -> str:
     return {
         "on": "🟢 Site status: On",
         "isolated": "🔌 Site status: Isolated",
         "off": "🔴 Site status: Off",
+        COMMS_DOWN_STATUS: "📡 Site status: Plant comms down",
     }.get(status, "Ⅹ Site status: Unknown")
 
 
@@ -1818,10 +1838,20 @@ def _amend_delivery(
     )
 
     if not (component_added or escalated or cascade_symptom):
-        # Carries the ticket even though it is suppressed: the downtime floor
-        # (_downtime_delivery_override) can un-suppress this, and the message
-        # it then posts should still link the ticket it was folded into.
-        return NotificationDelivery(suppress=True, ticket=ticket)
+        # Silent, but fully built. Both the downtime floor
+        # (_downtime_delivery_override) and the LLM fail-open gate can
+        # un-suppress this, and a delivery carrying no text and no anchor
+        # renders as the entire original alert, unthreaded -- see
+        # _forced_send_delivery. Decide the wording and the thread here, where
+        # the amendment is actually in hand, and leave `suppress` as the only
+        # thing those callers have to change. No edit target: an override is
+        # only ever raising its voice, and a Telegram edit does not notify.
+        return NotificationDelivery(
+            suppress=True,
+            text_override=_recurrence_message(decision, amendment),
+            reply_to_message_id=reply_to_message_id,
+            ticket=ticket,
+        )
 
     if escalated:
         content = (amendment.rendered_summary or "").strip() if amendment is not None else ""
@@ -1871,14 +1901,79 @@ def _amend_delivery(
     )
 
 
-def _duplicate_delivery(amendment: Any, ticket: NotificationTicket) -> NotificationDelivery:
+def _recurrence_message(decision: Any, amendment: Any) -> str:
+    """One line for an alert that added nothing new to its ticket.
+
+    Only ever rendered when something overrides the silence. What an operator
+    needs then is that the ticket is still firing and on what -- not the alert
+    body read aloud a second time.
+    """
+    count = getattr(amendment, "occurrence_count", 0) or 0
+    affected = getattr(decision, "affected_key", None) or {}
+    label = str(affected.get("label") or "").strip() if isinstance(affected, dict) else ""
+    where = f" on {label}" if label else ""
+    return f"still firing{where} ({count} occurrences)" if count > 1 else f"still firing{where}"
+
+
+def _duplicate_delivery(
+    amendment: Any,
+    ticket: NotificationTicket,
+    reply_to_message_id: Optional[int] = None,
+    decision: Any = None,
+) -> NotificationDelivery:
     """Duplicates amend ticket history but never create Telegram noise.
 
-    "Never" holds only for equipment noise: ``_downtime_delivery_override``
-    still lifts this when live telemetry says the grid itself is down. The
-    ticket rides along so that post can link it.
+    "Never" holds only for equipment noise: ``_downtime_delivery_override`` and
+    the LLM fail-open gate both still lift this. Because they can, the update
+    line and the reply anchor are decided here rather than left blank -- a
+    duplicate that gets un-suppressed with neither reposts the whole alert as
+    if it were new (see ``_forced_send_delivery``). The ticket rides along so
+    any such post can link it.
     """
-    return NotificationDelivery(suppress=True, ticket=ticket)
+    return NotificationDelivery(
+        suppress=True,
+        text_override=_recurrence_message(decision, amendment),
+        reply_to_message_id=reply_to_message_id,
+        ticket=ticket,
+    )
+
+
+def _forced_send_delivery(
+    delivery: NotificationDelivery,
+    *,
+    site_status: str = "",
+    text_override: Optional[str] = None,
+) -> NotificationDelivery:
+    """The one sanctioned way to overrule a delivery's own silence.
+
+    ``suppress`` is not independently meaningful. ``_amend_delivery`` and
+    ``_duplicate_delivery`` choose the update text, the reply anchor and the
+    edit target *together* with it, so flipping the bool on its own leaves a
+    delivery whose ``text_override`` is empty -- which ``_deliver_notification``
+    then renders through ``_format_ticket_notification`` as the full original
+    alert, top-level, once per alert. That is what put one full copy per device
+    on a single storm ticket, and re-posted an unmanaged site's meter alert in
+    full every hour.
+
+    A forced send is always a reply and never an edit: Telegram edits do not
+    notify, and being seen is the entire point of overriding silence.
+
+    A delivery that is already sending is returned untouched -- its own render
+    fields are internally consistent and none of this applies. A suppressed
+    delivery with no ticket (the ``apply_amendment`` returned ``None`` path)
+    has nothing to thread or link, so it still falls back to the full text;
+    that path posts nothing today and is left to its own judgment.
+    """
+    resolved_status = site_status or delivery.site_status
+    if not delivery.suppress:
+        return dataclasses.replace(delivery, site_status=resolved_status)
+    return dataclasses.replace(
+        delivery,
+        suppress=False,
+        edit_message_id=None,
+        text_override=text_override or delivery.text_override,
+        site_status=resolved_status,
+    )
 
 
 def _candidate_summaries_from_store_rows(rows: List[Dict[str, Any]]) -> List[Any]:
@@ -1972,7 +2067,10 @@ async def _finalize_correlation_decision(
             ticket_id=amendment.ticket_id,
         )
         reply_to_message_id: Optional[int] = None
-        if amendment.decision == "amend" and not amendment.escalated:
+        # Duplicates need this as much as amends do now: a duplicate that the
+        # downtime floor or the fail-open gate un-suppresses has to thread under
+        # the ticket's own message rather than arrive as a fresh alert.
+        if amendment.decision in ("amend", "duplicate") and not amendment.escalated:
             from orchestrator.services.ticketing.delivery_repository import DeliveryRepository
 
             try:
@@ -2002,7 +2100,9 @@ async def _finalize_correlation_decision(
             )
         else:
             ticket_summary = ""
-            delivery = _duplicate_delivery(amendment, ticket)
+            delivery = _duplicate_delivery(
+                amendment, ticket, reply_to_message_id, decision
+            )
         delivery = dataclasses.replace(
             delivery,
             alert_context=alert_context,
@@ -2423,8 +2523,15 @@ async def _resolve_notify_ticket_llm_judgment(
         )
         if "all_phase_zero_reminder" in send_decision.forced_by:
             status = "off"
-        delivery = dataclasses.replace(
-            delivery, suppress=not send_decision.send, site_status=status
+        elif context.telemetry.unavailable_reason == "stale":
+            # UNKNOWN here means the gateway went quiet, which is worth naming.
+            # (Mutually exclusive with the branch above: that one needs fresh
+            # telemetry, and this one is the definition of not having it.)
+            status = COMMS_DOWN_STATUS
+        delivery = (
+            _forced_send_delivery(delivery, site_status=status)
+            if send_decision.send
+            else dataclasses.replace(delivery, suppress=True, site_status=status)
         )
     return ref, response, extra, delivery
 

@@ -318,6 +318,7 @@ async def test_live_telemetry_returns_output_and_battery_voltage_together(monkey
 
     telemetry = await CustomerServiceClient().get_live_telemetry("Acme Grid")
     assert telemetry == {
+        "unavailable_reason": '',
         "generation_management": "managed",
         "grid_status": "hps_on",
         "site_status": "on",
@@ -365,6 +366,7 @@ async def test_live_telemetry_battery_voltage_survives_a_stale_inverter_reading(
 
     telemetry = await CustomerServiceClient().get_live_telemetry("Acme Grid")
     assert telemetry == {
+        "unavailable_reason": 'stale',
         "generation_management": "managed",
         "grid_status": "unknown",
         "site_status": "unknown",
@@ -407,6 +409,7 @@ async def test_live_telemetry_output_survives_a_failed_battery_fetch(monkeypatch
 
     telemetry = await CustomerServiceClient().get_live_telemetry("Acme Grid")
     assert telemetry == {
+        "unavailable_reason": '',
         "generation_management": "managed",
         "grid_status": "hps_on",
         "site_status": "on",
@@ -449,6 +452,10 @@ async def test_live_telemetry_returns_both_none_when_grid_has_no_vrm_site(monkey
 
     telemetry = await CustomerServiceClient().get_live_telemetry("Off-grid Site")
     assert telemetry == {
+        # Despite this test's name, the fixture leaves managed-generation unset
+        # rather than clearing the site id, so this is the management_unknown
+        # rung. Surfacing the reason is what made the difference visible.
+        "unavailable_reason": "management_unknown",
         "generation_management": "unknown",
         "grid_status": "unknown",
         "site_status": "unknown",
@@ -475,6 +482,7 @@ async def test_unmanaged_generation_skips_vrm_and_is_not_an_error(monkeypatch):
     telemetry = await CustomerServiceClient().get_live_telemetry("Acme Grid")
 
     assert telemetry == {
+        "unavailable_reason": 'unmanaged',
         "generation_management": "unmanaged",
         "grid_status": "unknown",
         "site_status": "unknown",
