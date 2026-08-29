@@ -25,7 +25,7 @@ On 2026-08-10 `0005b_ticket_schema_validate_and_contract.sql` (merged in #93) wa
 **Task 7 of `docs/superpowers/plans/2026-07-28-anansi-ticket-schema-consolidation.md` ("Key alert correlation by canonical ticket ID") was never implemented**, so `correlation_store.py` still reads and writes every one of those columns. Since the migration ran, every `/notify` produces:
 
 ```
-correlation store: open_candidates_for_grid(Akinsolu) failed: column ticket_correlations.grid_name does not exist
+correlation store: open_candidates_for_grid(GridY) failed: column ticket_correlations.grid_name does not exist
 correlation store: record_event failed: Could not find the 'ticket_ref' column of 'ticket_correlation_events'
 correlation store: upsert_correlation(OPS-3467) failed: Could not find the 'grid_name' column
 correlation store: record_amendment(OPS-3427) failed: Could not find the 'summary_current' column
@@ -43,17 +43,17 @@ Because every store method swallows its error and returns an empty value, the fa
 | `merge_affected_key` / `get_correlation` | Silently no-op or return `None` → `apply_amendment` takes its "correlation row missing" branch, which returns `escalated=True` unconditionally for urgent alerts. |
 | `grid_name` gone from a row that *is* found | `render_summary` renders `"3 MPPTs in  affected"` — the empty grid name in the operator's 2026-08-11 08:15 screenshot. |
 
-Verified against `doctl apps logs 525c885e-c7e4-4721-b654-b724c1de5553 anansi-bot --type run`, window 06:15:27–06:16:08 UTC on 2026-08-11 (= 08:15–08:16 UTC+2): 7 Akinsolu alerts, 7 Gemini correlation calls, 7 failed `record_amendment` writes, 7 top-level Telegram posts for OPS-3427/OPS-3428.
+Verified against `doctl apps logs 525c885e-c7e4-4721-b654-b724c1de5553 anansi-bot --type run`, window 06:15:27–06:16:08 UTC on 2026-08-11 (= 08:15–08:16 UTC+2): 7 GridY alerts, 7 Gemini correlation calls, 7 failed `record_amendment` writes, 7 top-level Telegram posts for OPS-3427/OPS-3428.
 
 **Nothing caught this** because `db/schema/chat_db.sql:211` still describes the pre-0005b tables (Task 11 of that plan is also unrun) and no test compares store payloads against the schema. Phase A closes that hole first, so the cutover has something to verify against.
 
 ## Background: what the correlation audit trail proves about grouping
 
-Read from production `ticket_correlation_events` on 2026-08-11 (grids Akinsolu and Ogbinbiri, 72 + ~40 events). Two findings here are load-bearing for Phase B — without them the obvious fix does nothing.
+Read from production `ticket_correlation_events` on 2026-08-11 (grids GridY and GridX, 72 + ~40 events). Two findings here are load-bearing for Phase B — without them the obvious fix does nothing.
 
 **1. The alert signature does not group what its docstring says it groups.**
 
-`alert_facts.py`'s module docstring promises the signature "deliberately EXCLUDES the component key — `MPPT A3` and `MPPT A7` firing on the same grid must produce the *same* signature". In production they do not. The Akinsolu "No BMS" storm of 2026-08-08 14:40 produced **six alerts with six different signatures**:
+`alert_facts.py`'s module docstring promises the signature "deliberately EXCLUDES the component key — `MPPT A3` and `MPPT A7` firing on the same grid must produce the *same* signature". In production they do not. The GridY "No BMS" storm of 2026-08-08 14:40 produced **six alerts with six different signatures**:
 
 | signature | component | device name in subject |
 |---|---|---|
@@ -72,18 +72,18 @@ Cause: `normalize_subject` strips the *derived* `component_key` (`KBUA#5`), but 
 
 **2. Component detection misses Victron "Solar Charger" devices, and the keyless rung then over-groups them.**
 
-`_MPPT_PATTERN` requires the literal word `MPPT`. On Ogbinbiri, `'#67 - No BMS' on 'Solar Charger [278]'` and `… 'Solar Charger [279]'` both parsed as **no component at all** — and because they then share one signature (`007f06d35b`), `_find_signature_only_duplicate` classified charger **279 as a duplicate of 278's ticket**. Two distinct failed devices, one recorded, the other silently dropped: no `affected_keys` entry, nothing in the description's equipment list. The same miss hit Akinsolu's `Solar Charger - VT6Y … House 4 [8]` (signature `edf04832ad`, `comp=/`).
+`_MPPT_PATTERN` requires the literal word `MPPT`. On GridX, `'#67 - No BMS' on 'Solar Charger [278]'` and `… 'Solar Charger [279]'` both parsed as **no component at all** — and because they then share one signature (`007f06d35b`), `_find_signature_only_duplicate` classified charger **279 as a duplicate of 278's ticket**. Two distinct failed devices, one recorded, the other silently dropped: no `affected_keys` entry, nothing in the description's equipment list. The same miss hit GridY's `Solar Charger - VT6Y … House 4 [8]` (signature `edf04832ad`, `comp=/`).
 
 This is the mirror image of finding 1, and it is why fixing normalization *without* fixing detection would make things worse: coarser signatures plus keyless alerts means more silent duplicate-collapsing.
 
 **3. The cascade misgrouping is squarely the prompt, twice, with the model's reasoning on record.**
 
-- Ogbinbiri, 2026-08-08 10:31:43 — `RESTART FAILED - Inverter Off while battery Ok >52V … causing Grid outage` → `new`, confidence **0.9**, reason: *"The incoming alert describes a total grid outage due to an inverter failure, which is distinct from the existing BMS communication issue (OPS-3456) and the batt…"*. The model **saw** OPS-3456 (filed 4 minutes earlier) and explicitly rejected it.
-- Akinsolu, 2026-07-29 19:00:57 — same alert shape → `new`, confidence **0.95**, reason: *"The existing ticket relates to battery equalization, which is a maintenance issue, whereas this new alert indicates a critical grid outage due to an inverter fault"*.
+- GridX, 2026-08-08 10:31:43 — `RESTART FAILED - Inverter Off while battery Ok >52V … causing Grid outage` → `new`, confidence **0.9**, reason: *"The incoming alert describes a total grid outage due to an inverter failure, which is distinct from the existing BMS communication issue (OPS-3456) and the batt…"*. The model **saw** OPS-3456 (filed 4 minutes earlier) and explicitly rejected it.
+- GridY, 2026-07-29 19:00:57 — same alert shape → `new`, confidence **0.95**, reason: *"The existing ticket relates to battery equalization, which is a maintenance issue, whereas this new alert indicates a critical grid outage due to an inverter fault"*.
 
 High confidence, correct-by-the-prompt reasoning. The prompt models only `grid_off` / `grid_isolated`, states that an MPPT issue and an inverter fault on the same grid are usually unrelated, and Example 4 makes exactly this shape a `new` ticket. Phase C changes the instructions, not the model.
 
-**4. Sibling tickets are self-perpetuating.** Once OPS-3427 *and* OPS-3428 both exist, every later Akinsolu alert lists both as candidates and the LLM picks between them non-deterministically (candidate order flips between events). Phase B stops new splits; the existing sibling pairs (OPS-3427/3428, OPS-3456/3457) need a human merge-and-close. Out of scope for the code.
+**4. Sibling tickets are self-perpetuating.** Once OPS-3427 *and* OPS-3428 both exist, every later GridY alert lists both as candidates and the LLM picks between them non-deterministically (candidate order flips between events). Phase B stops new splits; the existing sibling pairs (OPS-3427/3428, OPS-3456/3457) need a human merge-and-close. Out of scope for the code.
 
 ## Background: what exists today
 
@@ -208,7 +208,7 @@ One review/verify/commit cycle covering operator problems 1, 2, and 3 plus the a
 
 - [ ] **B1: Fix the signature so one fault on N devices is one shape**
 
-  Write the failing tests first, from the real subjects in finding 1: all six Akinsolu `No BMS` MPPT subjects must produce **one** signature, and both Ogbinbiri `Solar Charger [278]` / `[279]` subjects must too — while a *different* fault text on the same device still differs.
+  Write the failing tests first, from the real subjects in finding 1: all six GridY `No BMS` MPPT subjects must produce **one** signature, and both GridX `Solar Charger [278]` / `[279]` subjects must too — while a *different* fault text on the same device still differs.
 
   In `normalize_subject`, stop relying on the synthesized `component_key` appearing verbatim. Mask device identity structurally instead: replace a trailing quoted device segment (`on '<anything>'` → `on '#'`, the VRM `ALERT - '<grid>': '<fault>' on '<device>'` shape) and substitute `_MPPT_PATTERN` / `_DCU_PATTERN` matches with `mppt #` / `dcu #`. Keep the existing key-removal as a fallback for subjects where the key *does* appear literally. The fault text survives, so grouping stays inside one fault type; device identity is `component_key`'s job, which is the point.
 
@@ -244,7 +244,7 @@ One review/verify/commit cycle covering operator problems 1, 2, and 3 plus the a
 
 - [ ] **B7: Burst regression test**
 
-  New `chat_orchestrator/tests/api/test_notify_alert_storm.py`, built from the real Akinsolu subjects: six `'#67 - No BMS'` MPPT alerts on distinct devices plus the component-less `Solar Charger - VT6Y … [8]`, arriving back-to-back on one grid. Assert exactly one ticket, seven occurrences, all seven components in `affected_keys` (VT6Y included, thanks to B2), exactly one escalation delivery, one Telegram message edited in place rather than seven posts, the equipment list at the top of the description, and zero LLM calls.
+  New `chat_orchestrator/tests/api/test_notify_alert_storm.py`, built from the real GridY subjects: six `'#67 - No BMS'` MPPT alerts on distinct devices plus the component-less `Solar Charger - VT6Y … [8]`, arriving back-to-back on one grid. Assert exactly one ticket, seven occurrences, all seven components in `affected_keys` (VT6Y included, thanks to B2), exactly one escalation delivery, one Telegram message edited in place rather than seven posts, the equipment list at the top of the description, and zero LLM calls.
 
 - [ ] **B8: Phase B gate**
 
@@ -285,7 +285,7 @@ One review/verify/commit cycle. Battery voltage ships here rather than as its ow
 
 - [ ] **C5: Render and deliver a merged cascade honestly**
 
-  `render_summary` picks a dominant kind today, which would produce `"2 Inverters in Ogbinbiri affected"` for a mixed-kind ticket. When `affected_keys` spans more than one kind, render root-cause-led instead: the ticket's `summary_base` (severity marker preserved, upgraded to `! Urgent:` if any folded symptom is urgent) followed by `— +N dependent alert(s) (<kind labels>)`. Prefix a folded symptom's ticket comment with `Folded in as a power_chain symptom:` so the second repair stays legible on one ticket — this is the mitigation for the one real cost of merging over linking. A cascade merge must not be suppressed: post the LLM's `update_message` (falling back to the rendered summary) against the root ticket's anchor, so the operator gets one threaded update instead of two unrelated urgent pings.
+  `render_summary` picks a dominant kind today, which would produce `"2 Inverters in GridX affected"` for a mixed-kind ticket. When `affected_keys` spans more than one kind, render root-cause-led instead: the ticket's `summary_base` (severity marker preserved, upgraded to `! Urgent:` if any folded symptom is urgent) followed by `— +N dependent alert(s) (<kind labels>)`. Prefix a folded symptom's ticket comment with `Folded in as a power_chain symptom:` so the second repair stays legible on one ticket — this is the mitigation for the one real cost of merging over linking. A cascade merge must not be suppressed: post the LLM's `update_message` (falling back to the rendered summary) against the root ticket's anchor, so the operator gets one threaded update instead of two unrelated urgent pings.
 
 - [ ] **C6: Tests**
 

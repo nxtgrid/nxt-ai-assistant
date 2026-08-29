@@ -31,14 +31,14 @@ def _builder():
 
 def _state():
     return {
-        "user_input": "what is the current status of okpokunou grid",
-        "final_response": "The Okpokunou grid is currently operating in HPS mode.",
+        "user_input": "what is the current status of gridv",
+        "final_response": "GridV is currently operating in HPS mode.",
         "verification_feedback": "Claims are not supported by the tool output.",
         "verification_categories": ["accuracy"],
-        "session_id": "sess-okpokunou-1",
+        "session_id": "sess-gridv-1",
         "user_context": None,
         "metadata": {},
-        "history_messages": [ConversationMessage(role="model", content="The Okpokunou grid is...")],
+        "history_messages": [ConversationMessage(role="model", content="GridV is...")],
     }
 
 

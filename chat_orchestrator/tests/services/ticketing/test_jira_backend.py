@@ -181,7 +181,7 @@ def _queue_createmeta_with_required_grid(fake_session: FakeJiraSession) -> None:
                     "customfield_grid": {
                         "name": "Grid",
                         "required": True,
-                        "allowedValues": [{"id": "ogheye-option", "value": "Ogheye"}],
+                        "allowedValues": [{"id": "gridw-option", "value": "GridW"}],
                     }
                 },
             }
@@ -542,7 +542,7 @@ class TestCreateTicket:
             TicketCreateRequest(
                 summary="Grid down",
                 description="0 kW",
-                grid_name="Ogheye",
+                grid_name="GridW",
                 source="notify",
             )
         )
@@ -614,9 +614,9 @@ class TestCreateTicket:
         _queue_createmeta_with_required_grid(fake_session)
         fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-8"}))
 
-        await _make_backend().create_ticket(TicketCreateRequest(summary="Help", grid_name="Ogheye"))
+        await _make_backend().create_ticket(TicketCreateRequest(summary="Help", grid_name="GridW"))
 
-        assert _posted_fields(fake_session)["customfield_grid"] == {"id": "ogheye-option"}
+        assert _posted_fields(fake_session)["customfield_grid"] == {"id": "gridw-option"}
 
     @pytest.mark.asyncio
     async def test_urgent_jira_ticket_uses_discovered_highest_priority(self, fake_session):

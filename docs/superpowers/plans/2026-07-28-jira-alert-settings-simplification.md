@@ -53,7 +53,7 @@ def test_normalize_issue_types_preserves_field_names_requirements_and_options():
             "summary": {"name": "Summary", "required": True},
             "customfield_44": {
                 "name": "Grid", "required": True,
-                "allowedValues": [{"id": "7", "value": "Ogheye"}],
+                "allowedValues": [{"id": "7", "value": "GridW"}],
             },
         },
     }]})
@@ -61,7 +61,7 @@ def test_normalize_issue_types_preserves_field_names_requirements_and_options():
     grid = types[0].field("customfield_44")
     assert grid is not None
     assert grid.name == "Grid"
-    assert grid.allowed_values[0] == JiraFieldOption(id="7", value="Ogheye")
+    assert grid.allowed_values[0] == JiraFieldOption(id="7", value="GridW")
 ```
 
 - [ ] **Step 2: Run the metadata test to verify it fails**
@@ -76,7 +76,7 @@ Expected: FAIL because `JiraFieldOption`/`JiraIssueType.field()` do not yet exis
 def test_build_issue_payload_adds_a_required_grid_option_from_metadata():
     context = JiraCreateContext(
         project_key="OPS", summary="MPPT Q7II low output", description="details",
-        grid_name="Ogheye", labels=["grid-ogheye"],
+        grid_name="GridW", labels=["grid-gridw"],
     )
     issue_type = _type_with_required_grid_option()
 
@@ -85,7 +85,7 @@ def test_build_issue_payload_adds_a_required_grid_option_from_metadata():
         "summary": "MPPT Q7II low output",
         "description": _expected_adf("details"),
         "issuetype": {"id": "101"},
-        "labels": ["grid-ogheye"],
+        "labels": ["grid-gridw"],
         "customfield_44": {"id": "7"},
     }
 
@@ -144,7 +144,7 @@ async def test_notify_selects_a_creatable_type_from_the_generic_project(fake_ses
     fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-7"}))
 
     result = await _make_backend().create_ticket(
-        TicketCreateRequest(summary="Grid down", description="0 kW", grid_name="Ogheye", source="notify")
+        TicketCreateRequest(summary="Grid down", description="0 kW", grid_name="GridW", source="notify")
     )
 
     assert result.ticket_type == "Electricity Service Disruption"
@@ -175,8 +175,8 @@ async def test_escalation_uses_the_same_metadata_payload_builder(fake_session):
     _queue_createmeta_with_required_grid(fake_session)
     fake_session.queue("POST", "/rest/api/3/issue", _FakeResponse(201, {"key": "OPS-8"}))
 
-    await _make_backend().create_ticket(TicketCreateRequest(summary="Help", grid_name="Ogheye"))
-    assert _posted_fields(fake_session)["customfield_grid"] == {"id": "ogheye-option"}
+    await _make_backend().create_ticket(TicketCreateRequest(summary="Help", grid_name="GridW"))
+    assert _posted_fields(fake_session)["customfield_grid"] == {"id": "gridw-option"}
 ```
 
 - [ ] **Step 4: Run the fallback/shared-path tests to verify they fail**
