@@ -2521,19 +2521,19 @@ def test_amend_delivery_is_silent_when_no_component_was_added():
 
     decision = CorrelationDecision(
         decision="amend",
-        ticket_ref="OPS-3352",
+        ticket_ref="OPS-1002",
         confidence=0.9,
         decided_by="llm",
         reason="same root cause",
-        affected_key={"kind": "mppt", "key": "J47M", "label": "MPPT J47M"},
+        affected_key={"kind": "mppt", "key": "AB12", "label": "MPPT AB12"},
         root_cause_kind=None,
         update_message="",
         amended_summary="",
-        candidate_refs=["OPS-3352"],
+        candidate_refs=["OPS-1002"],
         llm_raw="{}",
     )
     amendment = AmendmentResult(
-        ticket_ref="OPS-3352",
+        ticket_ref="OPS-1002",
         ticket_id="ticket-3352",
         decision="amend",
         escalated=False,
@@ -2543,11 +2543,18 @@ def test_amend_delivery_is_silent_when_no_component_was_added():
     )
 
     delivery = _amend_delivery(
-        decision, amendment, NotificationTicket(ref="OPS-3352", backend="jira")
+        decision, amendment, NotificationTicket(ref="OPS-1002", backend="jira"), 777
     )
 
     assert delivery.suppress is True
-    assert delivery.text_override is None
+    # Silent, but not empty. text_override used to be None here, which is what
+    # made an override (the downtime floor, or the LLM fail-open gate) repost
+    # the whole alert instead of a one-line update -- see _forced_send_delivery.
+    # The delivery now says what it *would* say and where it would thread, and
+    # `suppress` alone decides whether any of it is used.
+    assert delivery.text_override == "still firing on MPPT AB12 (42 occurrences)"
+    assert delivery.reply_to_message_id == 777
+    assert delivery.edit_message_id is None, "an override notifies; an edit does not"
 
 
 def test_amend_delivery_never_announces_a_nameless_component():

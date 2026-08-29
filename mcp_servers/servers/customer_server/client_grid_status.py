@@ -60,8 +60,17 @@ def _inverter_voltage_is_stale(voltage: Any) -> bool:
     return now - data_timestamp > timedelta(minutes=30)
 
 
-def _unavailable_live_telemetry(management: str = "unknown") -> dict[str, Any]:
+def _unavailable_live_telemetry(
+    management: str = "unknown", unavailable_reason: str = "telemetry_unavailable"
+) -> dict[str, Any]:
+    """A telemetry blank. ``unavailable_reason`` says *why* it is blank, which
+    is the difference between "nothing of ours to read here" and "the plant has
+    gone dark" -- indistinguishable in ``site_status`` alone, and both of them
+    UNKNOWN. Consumers (and the alert-judgment LLM) need the distinction to
+    decide whether UNKNOWN is a fact about the site or a gap in our knowledge.
+    """
     return {
+        "unavailable_reason": unavailable_reason,
         "generation_management": management,
         "grid_status": GridStatus.UNKNOWN.value,
         "site_status": SiteStatus.UNKNOWN.value,
@@ -136,18 +145,18 @@ class ClientGridStatusMixin:
                 )
             if not grid_row:
                 logger.info("No VRM site configured for urgent alert grid %r", grid_name)
-                return _unavailable_live_telemetry()
+                return _unavailable_live_telemetry(unavailable_reason="grid_not_found")
 
             if grid_row.get(MANAGED_GENERATION_COLUMN) is False:
-                return _unavailable_live_telemetry("unmanaged")
+                return _unavailable_live_telemetry("unmanaged", "unmanaged")
 
             if grid_row.get(MANAGED_GENERATION_COLUMN) is not True:
                 logger.warning("Managed-generation state unavailable for urgent alert grid %r", grid_name)
-                return _unavailable_live_telemetry()
+                return _unavailable_live_telemetry(unavailable_reason="management_unknown")
 
             if not grid_row["generation_external_site_id"]:
                 logger.info("No VRM site configured for urgent alert grid %r", grid_name)
-                return _unavailable_live_telemetry()
+                return _unavailable_live_telemetry(unavailable_reason="no_vrm_site")
 
             site_id = str(grid_row["generation_external_site_id"])
             vrm_platform = VRMPlatform()
@@ -189,6 +198,11 @@ class ClientGridStatusMixin:
                 return float(value) if value is not None else None
 
             return {
+                # "" when the reading is usable. Otherwise the specific cause,
+                # so a consumer can tell a gateway that has stopped reporting
+                # ("stale" -- the plant is dark, which is information) from a
+                # reading we simply could not obtain.
+                "unavailable_reason": "" if output_kw is not None else _output_unavailable_reason(voltage),
                 "generation_management": "managed",
                 "grid_status": raw_status.value,
                 "site_status": normalize_site_status(raw_status).value,
@@ -202,7 +216,7 @@ class ClientGridStatusMixin:
             }
         except Exception:
             logger.warning("Live VRM telemetry fetch failed for %s", grid_name, exc_info=True)
-            return _unavailable_live_telemetry()
+            return _unavailable_live_telemetry(unavailable_reason="fetch_failed")
 
     async def get_live_inverter_output(self, grid_name: str) -> Optional[float]:
         """Return fresh VRM inverter output in kW, or ``None`` when unavailable.

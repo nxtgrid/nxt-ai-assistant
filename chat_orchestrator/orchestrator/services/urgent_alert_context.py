@@ -15,6 +15,8 @@ LOGGER = get_logger(__name__)
 LiveTelemetry = Dict[str, Any]
 LiveTelemetryReader = Callable[[str], Awaitable[LiveTelemetry]]
 _UNAVAILABLE: LiveTelemetry = {
+    # A genuine gap, not a fact about the site -- this still fails open.
+    "unavailable_reason": "fetch_failed",
     "generation_management": "unknown",
     "grid_status": "unknown",
     "site_status": "unknown",

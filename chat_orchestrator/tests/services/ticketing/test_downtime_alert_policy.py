@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from orchestrator.services.ticketing.alert_judgment_context import AlertTelemetry
 from orchestrator.services.ticketing.downtime_alert_policy import (
     DOWNTIME_ALERT_INTERVAL,
@@ -158,3 +160,63 @@ class TestDecideDowntimeOverride:
         )
         assert decision.send is False
         assert decision.reason == "already_alerted_today"
+
+
+def test_a_plant_that_stopped_reporting_is_down_not_unknowable() -> None:
+    """VRM served a reading whose gateway timestamp is over 30 minutes old.
+
+    That is not absence of evidence -- it is evidence: the plant is dark. It
+    used to land in the same UNKNOWN bucket as "we could not reach VRM at all",
+    so the floor stayed silent and every individual device alert was force-sent
+    instead. One comms-down message a day is the honest replacement.
+    """
+    state = assess_downtime(
+        AlertTelemetry(
+            generation_management="managed",
+            grid_status="unknown",
+            site_status="unknown",
+            unavailable_reason="stale",
+            fresh=False,
+        )
+    )
+
+    assert state.known is True
+    assert state.down is True
+    assert state.reasons == ("plant_comms_down",)
+
+
+@pytest.mark.parametrize(
+    "reason", ["fetch_failed", "management_unknown", "no_vrm_site", "grid_not_found"]
+)
+def test_other_unavailable_reasons_remain_unknowable(reason: str) -> None:
+    """Only "stale" carries evidence. Everything else is a gap in our own
+    knowledge -- we cannot assert the plant is down, so the floor stays out of
+    it and the fail-open gate keeps its say."""
+    state = assess_downtime(
+        AlertTelemetry(
+            generation_management="managed",
+            grid_status="unknown",
+            site_status="unknown",
+            unavailable_reason=reason,
+            fresh=False,
+        )
+    )
+
+    assert state.known is False
+    assert state.down is False
+
+
+def test_unmanaged_is_never_down() -> None:
+    """We do not manage this plant, so we are in no position to call it dark."""
+    state = assess_downtime(
+        AlertTelemetry(
+            generation_management="unmanaged",
+            grid_status="unknown",
+            site_status="unknown",
+            unavailable_reason="unmanaged",
+            fresh=False,
+        )
+    )
+
+    assert state.known is False
+    assert state.down is False
