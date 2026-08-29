@@ -38,7 +38,7 @@ class TestDeriveSeverity:
 
     def test_ignores_urgent_word_elsewhere_in_subject(self):
         assert (
-            derive_severity("! Warning: DCU 862406008 needs urgent attention in Belel !")
+            derive_severity("! Warning: DCU 862406008 needs urgent attention in GridU !")
             == "warning"
         )
 
@@ -49,7 +49,7 @@ class TestDeriveSeverity:
         )
 
     def test_bare_word_with_no_marker_is_unclassified(self):
-        assert derive_severity("This is urgent, please check Belel") == ""
+        assert derive_severity("This is urgent, please check GridU") == ""
 
 
 class TestDeriveComponent:
@@ -99,7 +99,7 @@ class TestDeriveComponent:
 
     def test_solar_charger_mppt_with_model_between_id_and_bracket(self):
         subject = (
-            "! Urgent: Turn off Combiner: ALERT - 'Okpokunou': "
+            "! Urgent: Turn off Combiner: ALERT - 'GridV': "
             "'#26 - Charger terminal overheated' on "
             "'Solar Charger - MPPT PNXG ARTN4.50/100/10 [27]' !"
         )
@@ -121,7 +121,7 @@ class TestDeriveComponent:
         assert label == "MPPT B1#5"
 
     def test_mppt_id_without_any_bracket(self):
-        subject = "! Warning: MPPT IYYY in Ogheye seems to perform lower than other MPPTs !"
+        subject = "! Warning: MPPT IYYY in GridW seems to perform lower than other MPPTs !"
         kind, key, label = derive_component(subject, "")
         assert kind == "mppt"
         assert key == "IYYY"
@@ -210,11 +210,11 @@ class TestNormalizeSubject:
         appears literally in the subject, so the old literal-removal did
         nothing and the device token + location word leaked into the hash."""
         a = normalize_subject(
-            "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+            "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
             "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !"
         )
         b = normalize_subject(
-            "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+            "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
             "'Solar Charger - MPPT 65SQ ARTN4.4/-141/32 House [0]' !"
         )
         assert a == b
@@ -225,11 +225,11 @@ class TestNormalizeSubject:
 
     def test_device_clause_masking_preserves_a_differing_fault(self):
         no_bms = normalize_subject(
-            "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+            "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
             "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !"
         )
         low_voltage = normalize_subject(
-            "! Urgent: ALERT - 'Akinsolu': '#68 - Low voltage' on "
+            "! Urgent: ALERT - 'GridY': '#68 - Low voltage' on "
             "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !"
         )
         assert no_bms != low_voltage
@@ -254,26 +254,26 @@ class TestNormalizeSubject:
         to mask before it lowercases. When it didn't, "Q4NR" masked to
         "mppt #" while "QWQJ" fell through to the literal-key removal and
         left no placeholder -- two normalizations of one alert family, and
-        the Matari underperforming-MPPT storm split across two tickets."""
+        the underperforming-MPPT storm split across two tickets."""
         digit_bearing = normalize_subject(
-            "! Warning: MPPT Q4NR in Matari seems to perform lower than other MPPTs !",
+            "! Warning: MPPT Q4NR in GridZ seems to perform lower than other MPPTs !",
             component_key="Q4NR",
         )
         letters_only = normalize_subject(
-            "! Warning: MPPT QWQJ in Matari seems to perform lower than other MPPTs !",
+            "! Warning: MPPT QWQJ in GridZ seems to perform lower than other MPPTs !",
             component_key="QWQJ",
         )
         assert digit_bearing == letters_only == (
-            "mppt # in matari seems to perform lower than other mppts"
+            "mppt # in gridz seems to perform lower than other mppts"
         )
 
     def test_letters_only_device_id_masked_without_a_provided_key(self):
         """Same property on the keyless path (replay/duplicate callers),
         where the literal-key fallback isn't there to paper over a miss."""
         assert normalize_subject(
-            "! Warning: MPPT QWQJ in Matari seems to perform lower than other MPPTs !"
+            "! Warning: MPPT QWQJ in GridZ seems to perform lower than other MPPTs !"
         ) == normalize_subject(
-            "! Warning: MPPT TFPA in Matari seems to perform lower than other MPPTs !"
+            "! Warning: MPPT TFPA in GridZ seems to perform lower than other MPPTs !"
         )
 
     def test_lowercase_prose_after_mppt_is_still_not_masked(self):
@@ -342,29 +342,29 @@ class TestDeriveSignature:
 
 class TestRealProductionStormSignatures:
     """Regression coverage for the plan's findings 1 and 2 (the 2026-08-08
-    Akinsolu 'No BMS' storm and the Ogbinbiri 'Solar Charger' pair). Drives
+    GridY 'No BMS' storm and the GridX 'Solar Charger' pair). Drives
     derive_component + derive_signature together, the same way
     enrich_alert_facts does, so this exercises the real pipeline rather than
     normalize_subject/derive_component in isolation."""
 
-    _AKINSOLU_NO_BMS_SUBJECTS = [
-        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+    _GRIDY_NO_BMS_SUBJECTS = [
+        "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
         "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !",
-        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
         "'Solar Charger - MPPT 65SQ ARTN4.4/-141/32 House [0]' !",
-        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
         "'Solar Charger - MPPT JD65 ARTN4.4/-176/5 Cabin [3]' !",
-        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
         "'Solar Charger - MPPT RH2W ARTN4.4/-176/5 Cabin [6]' !",
-        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
         "'Solar Charger - MPPT QI11 ARTN4.4/+27/24 Church [2]' !",
-        "! Urgent: ALERT - 'Akinsolu': '#67 - No BMS' on "
+        "! Urgent: ALERT - 'GridY': '#67 - No BMS' on "
         "'Solar Charger - MPPT LQLA ARTN4.4/27/24 Church [1]' !",
     ]
 
-    _OGBINBIRI_NO_BMS_SUBJECTS = [
-        "! Urgent: ALERT - 'Ogbinbiri': '#67 - No BMS' on 'Solar Charger [278]' !",
-        "! Urgent: ALERT - 'Ogbinbiri': '#67 - No BMS' on 'Solar Charger [279]' !",
+    _GRIDX_NO_BMS_SUBJECTS = [
+        "! Urgent: ALERT - 'GridX': '#67 - No BMS' on 'Solar Charger [278]' !",
+        "! Urgent: ALERT - 'GridX': '#67 - No BMS' on 'Solar Charger [279]' !",
     ]
 
     def _signature_for(self, subject: str, grid_name: str) -> str:
@@ -373,61 +373,61 @@ class TestRealProductionStormSignatures:
             grid_name=grid_name, component_kind=kind, subject=subject, component_key=key
         )
 
-    def test_six_akinsolu_no_bms_mppt_alerts_share_one_signature(self):
+    def test_six_gridy_no_bms_mppt_alerts_share_one_signature(self):
         signatures = {
-            self._signature_for(subject, "Akinsolu")
-            for subject in self._AKINSOLU_NO_BMS_SUBJECTS
+            self._signature_for(subject, "GridY")
+            for subject in self._GRIDY_NO_BMS_SUBJECTS
         }
         assert len(signatures) == 1
 
-    def test_akinsolu_no_bms_alerts_keep_six_distinct_component_keys(self):
-        keys = {derive_component(subject)[1] for subject in self._AKINSOLU_NO_BMS_SUBJECTS}
-        assert len(keys) == len(self._AKINSOLU_NO_BMS_SUBJECTS)
+    def test_gridy_no_bms_alerts_keep_six_distinct_component_keys(self):
+        keys = {derive_component(subject)[1] for subject in self._GRIDY_NO_BMS_SUBJECTS}
+        assert len(keys) == len(self._GRIDY_NO_BMS_SUBJECTS)
 
-    def test_two_ogbinbiri_solar_charger_alerts_share_one_signature(self):
+    def test_two_gridx_solar_charger_alerts_share_one_signature(self):
         signatures = {
-            self._signature_for(subject, "Ogbinbiri")
-            for subject in self._OGBINBIRI_NO_BMS_SUBJECTS
+            self._signature_for(subject, "GridX")
+            for subject in self._GRIDX_NO_BMS_SUBJECTS
         }
         assert len(signatures) == 1
 
-    def test_ogbinbiri_solar_chargers_keep_distinct_component_keys(self):
-        keys = {derive_component(subject)[1] for subject in self._OGBINBIRI_NO_BMS_SUBJECTS}
+    def test_gridx_solar_chargers_keep_distinct_component_keys(self):
+        keys = {derive_component(subject)[1] for subject in self._GRIDX_NO_BMS_SUBJECTS}
         assert keys == {"278", "279"}
 
     def test_a_different_fault_on_the_same_device_still_differs(self):
-        no_bms = self._signature_for(self._AKINSOLU_NO_BMS_SUBJECTS[0], "Akinsolu")
+        no_bms = self._signature_for(self._GRIDY_NO_BMS_SUBJECTS[0], "GridY")
         low_voltage = self._signature_for(
-            "! Urgent: ALERT - 'Akinsolu': '#68 - Low voltage' on "
+            "! Urgent: ALERT - 'GridY': '#68 - Low voltage' on "
             "'Solar Charger - MPPT KBUA ARTN4.4/-176/5 Cabin [5]' !",
-            "Akinsolu",
+            "GridY",
         )
         assert no_bms != low_voltage
 
 
-class TestMatariUnderperformingMpptStorm:
-    """Regression coverage for the 2026-08-28 Matari storm: seven
+class TestUnderperformingMpptStorm:
+    """Regression coverage for the 2026-08-28 underperforming-MPPT storm: seven
     underperforming-MPPT warnings fired within a minute and split across two
     tickets. The split fell exactly along whether the device id contained a
     digit, because normalize_subject lowercased before masking -- see
     test_letters_only_device_id_is_masked_like_a_digit_bearing_one.
 
     This subject shape has no ``on '<device>'`` clause, so it is not covered
-    by the Akinsolu/Ogbinbiri VRM subjects above: there the whole quoted
+    by the GridY/GridX VRM subjects above: there the whole quoted
     device clause is masked wholesale before the MPPT mask ever sees a token.
     """
 
     _DEVICES = ["Q4NR", "QWQJ", "TFPA", "XZAE", "6RJA", "73ZC", "9YRN"]
 
     _SUBJECTS = [
-        f"! Warning: MPPT {device} in Matari seems to perform lower than other MPPTs !"
+        f"! Warning: MPPT {device} in GridZ seems to perform lower than other MPPTs !"
         for device in _DEVICES
     ]
 
     def _signature_for(self, subject: str) -> str:
         kind, key, _ = derive_component(subject)
         return derive_signature(
-            grid_name="Matari", component_kind=kind, subject=subject, component_key=key
+            grid_name="GridZ", component_kind=kind, subject=subject, component_key=key
         )
 
     def test_all_seven_alerts_share_one_signature(self):
@@ -453,14 +453,14 @@ class TestMatariUnderperformingMpptStorm:
         assert keys == set(self._DEVICES)
 
     def test_a_different_grid_still_differs(self):
-        matari = self._signature_for(self._SUBJECTS[0])
+        storm = self._signature_for(self._SUBJECTS[0])
         kudi = derive_signature(
             grid_name="Kudi",
             component_kind="mppt",
             subject="! Warning: MPPT Q4NR in Kudi seems to perform lower than other MPPTs !",
             component_key="Q4NR",
         )
-        assert matari != kudi
+        assert storm != kudi
 
 
 class TestEnrichAlertFacts:

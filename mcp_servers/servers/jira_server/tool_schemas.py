@@ -48,7 +48,7 @@ READ_ONLY_TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'search_issues_with_com
                                                                 'differs from how a user describes '
                                                                 'the issue (e.g. a DCU outage '
                                                                 "ticket reads 'DCU 230401080 in "
-                                                                'Okpokunou could have a problem, '
+                                                                'GridV could have a problem, '
                                                                 "causing Meter Issues', not 'DCU "
                                                                 "offline'; an inverter problem "
                                                                 "reads 'RESTART FAILED - Inverter "

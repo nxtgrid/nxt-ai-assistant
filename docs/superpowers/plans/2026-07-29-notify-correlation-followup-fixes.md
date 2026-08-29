@@ -12,7 +12,7 @@
 
 ## Background: what was diagnosed
 
-Verified against the code on `main` at commit `1030366f` (the build that produced the 2026-07-29 Belel/Ogheye Telegram screenshots):
+Verified against the code on `main` at commit `1030366f` (the build that produced the 2026-07-29 GridU/GridW Telegram screenshots):
 
 1. **`derive_severity()` is unanchored.** `alert_facts.py:90-96` is documented as
    reading "the n8n `! Urgent:`/`! Warning:` convention" but implements it with
@@ -39,7 +39,7 @@ Verified against the code on `main` at commit `1030366f` (the build that produce
    (a single holder's worst case is already LLM 12s + ticket-backend HTTP
    calls bounded up to 30s each) and trivially reachable under a burst, where
    N alerts on one grid queue linearly behind the same lock. A burst of DCU
-   alerts on Belel is exactly this scenario.
+   alerts on GridU is exactly this scenario.
 3. **Amendments always post a new reply message.** `_amend_delivery`
    (`app.py:1454-1480`) posts a fresh `reply_to_message_id`-anchored message
    for every `component_added` amendment; only `escalated` is treated as
@@ -161,7 +161,7 @@ before it reaches any log.
   ```python
   def test_ignores_urgent_word_elsewhere_in_subject(self):
       assert (
-          derive_severity("! Warning: DCU 862406008 needs urgent attention in Belel !")
+          derive_severity("! Warning: DCU 862406008 needs urgent attention in GridU !")
           == "warning"
       )
 
@@ -172,7 +172,7 @@ before it reaches any log.
       )
 
   def test_bare_word_with_no_marker_is_unclassified(self):
-      assert derive_severity("This is urgent, please check Belel") == ""
+      assert derive_severity("This is urgent, please check GridU") == ""
   ```
 
   Keep the four existing `TestDeriveSeverity` tests unchanged — the fix must

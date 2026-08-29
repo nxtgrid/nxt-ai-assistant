@@ -12,7 +12,7 @@
 
 ## Background: what was diagnosed
 
-Verified against the code on `main` (the build that produced the 2026-07-28 Okpokunou/Ogheye Telegram screenshots):
+Verified against the code on `main` (the build that produced the 2026-07-28 GridV/GridW Telegram screenshots):
 
 1. **Component extraction fails on real alert text.** `_MPPT_PATTERN` in
    `alert_facts.py:44` is `mppt\s+([A-Za-z0-9]+)\s*\[(.*?)\]` — it requires the
@@ -41,7 +41,7 @@ Verified against the code on `main` (the build that produced the 2026-07-28 Okpo
    `affected_key=None` (`correlator.py:415`).
 5. **The documented "rung 2" exact-signature match was never wired in.**
    `CorrelationStore.get_by_signature` (`correlation_store.py:190`) has no
-   production caller. So two byte-identical keyless alerts (the Okpokunou
+   production caller. So two byte-identical keyless alerts (the GridV
    combiner alerts that became OPS-3363 and OPS-3365) have zero deterministic
    grouping and depend entirely on an LLM judgment that falls back to "new" on
    any hiccup.
@@ -104,7 +104,7 @@ is read-only and decides whether Task 2 and Task 7 are needed at all.
 select created_at, ticket_ref, decision, decided_by, confidence,
        left(reason, 200) as reason, candidate_refs
 from ticket_correlation_events
-where grid_name = 'Okpokunou'
+where grid_name = 'GridV'
   and created_at >= '2026-07-28T10:00:00Z'
 order by created_at;
 ```
@@ -123,7 +123,7 @@ Read the row written at ~16:45 local (the second combiner alert):
 - `decided_by = 'fallback'` with a reason containing `confidence` → the model
   correlated but below the 0.75 floor; Task 5 still fixes it deterministically.
 
-- [ ] **Step 2: Find out whether the Ogheye re-announcements were LLM or replay**
+- [ ] **Step 2: Find out whether the GridW re-announcements were LLM or replay**
 
 ```sql
 select created_at, ticket_ref, decision, decided_by,
@@ -131,7 +131,7 @@ select created_at, ticket_ref, decision, decided_by,
        alert->>'component_key' as key,
        alert->>'signature' as signature
 from ticket_correlation_events
-where grid_name = 'Ogheye'
+where grid_name = 'GridW'
   and created_at >= '2026-07-28T18:30:00Z'
 order by created_at;
 ```
@@ -881,7 +881,7 @@ Add to `TestDeriveComponent` in `test_alert_facts.py`:
 ```python
     def test_solar_charger_mppt_with_model_between_id_and_bracket(self):
         subject = (
-            "! Urgent: Turn off Combiner: ALERT - 'Okpokunou': "
+            "! Urgent: Turn off Combiner: ALERT - 'GridV': "
             "'#26 - Charger terminal overheated' on "
             "'Solar Charger - MPPT PNXG ARTN4.50/100/10 [27]' !"
         )
@@ -896,7 +896,7 @@ Add to `TestDeriveComponent` in `test_alert_facts.py`:
         assert first[1] != second[1]
 
     def test_mppt_id_without_any_bracket(self):
-        subject = "! Warning: MPPT IYYY in Ogheye seems to perform lower than other MPPTs !"
+        subject = "! Warning: MPPT IYYY in GridW seems to perform lower than other MPPTs !"
         kind, key, label = derive_component(subject, "")
         assert kind == "mppt"
         assert key == "IYYY"
@@ -1073,7 +1073,7 @@ git commit -m "fix: compare correlation component keys case-insensitively"
 
 ### Task 5: Add the missing exact-signature rung for keyless alerts
 
-Two byte-identical alerts with no identifiable component (the Okpokunou
+Two byte-identical alerts with no identifiable component (the GridV
 combiner alerts) currently have no deterministic path at all — grouping them is
 left entirely to the LLM. The correlator's own docstring calls this "rung 2";
 `CorrelationStore.get_by_signature` was written for it and never wired in. This
@@ -1099,18 +1099,18 @@ class TestKeylessSignatureDuplicate:
         alert = enrich_alert_facts(
             AlertFacts(
                 subject=(
-                    "! Urgent: Turn off Combiner: ALERT - 'Okpokunou': "
+                    "! Urgent: Turn off Combiner: ALERT - 'GridV': "
                     "'#26 - Charger terminal overheated' on 'Combiner Box 4' !"
                 ),
                 severity="urgent",
             ),
-            grid_name="Okpokunou",
+            grid_name="GridV",
         )
         correlator, store, _ts, gateway = _make_correlator()
         store.correlations.append(
             {
                 "ticket_ref": "OPS-3363",
-                "grid_name": "Okpokunou",
+                "grid_name": "GridV",
                 "status": "open",
                 "severity": "urgent",
                 "signatures": [alert.signature],
@@ -1119,7 +1119,7 @@ class TestKeylessSignatureDuplicate:
             }
         )
 
-        decision = await correlator.decide("Okpokunou", alert)
+        decision = await correlator.decide("GridV", alert)
 
         assert decision.decision == "duplicate"
         assert decision.ticket_ref == "OPS-3363"
@@ -1130,14 +1130,14 @@ class TestKeylessSignatureDuplicate:
     async def test_keyless_signature_match_still_escalates_on_urgency(self, monkeypatch):
         monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
         alert = enrich_alert_facts(
-            AlertFacts(subject="! Urgent: Grid outage in Okpokunou !", severity="urgent"),
-            grid_name="Okpokunou",
+            AlertFacts(subject="! Urgent: Grid outage in GridV !", severity="urgent"),
+            grid_name="GridV",
         )
         correlator, store, _ts, _gateway = _make_correlator()
         store.correlations.append(
             {
                 "ticket_ref": "OPS-3363",
-                "grid_name": "Okpokunou",
+                "grid_name": "GridV",
                 "status": "open",
                 "severity": "warning",
                 "signatures": [alert.signature],
@@ -1146,7 +1146,7 @@ class TestKeylessSignatureDuplicate:
             }
         )
 
-        decision = await correlator.decide("Okpokunou", alert)
+        decision = await correlator.decide("GridV", alert)
 
         assert decision.decision == "amend"
         assert decision.ticket_ref == "OPS-3363"
@@ -1598,7 +1598,7 @@ version of "did the noise stop".
 ```sql
 select date_trunc('hour', created_at) as hour, decided_by, decision, count(*)
 from ticket_correlation_events
-where grid_name in ('Ogheye', 'Okpokunou')
+where grid_name in ('GridW', 'GridV')
   and created_at >= now() - interval '24 hours'
 group by 1, 2, 3
 order by 1;

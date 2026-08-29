@@ -63,8 +63,8 @@ class TestParseExpertCommand:
 
     def test_parse_preserves_case_in_args(self):
         """Arguments preserve original case."""
-        result = parse_expert_command("/analyze Grid BELEL")
-        assert result["raw_args"] == "Grid BELEL"
+        result = parse_expert_command("/analyze Grid GRIDU")
+        assert result["raw_args"] == "Grid GRIDU"
 
     def test_parse_handles_extra_whitespace(self):
         """Parser handles extra whitespace."""

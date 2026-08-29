@@ -35,7 +35,7 @@ splits the LPP monolith — without cutting LPP over.
 
 A read-only probe of the Drive comments API across 25 accessible
 spreadsheets (46 comments), plus a locator validation against
-*NXT-3235 - Okpokunou Technical Review*. Findings are load-bearing and
+*NXT-3235 - GridV Technical Review*. Findings are load-bearing and
 several contradict what the design would otherwise have assumed.
 
 **1. `quotedFileContent` IS populated for cell-anchored Sheets comments.**

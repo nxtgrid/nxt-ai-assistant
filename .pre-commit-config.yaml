@@ -24,3 +24,28 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+
+      # Scans staged *additions* (including edits to already-tracked files --
+      # the gap .gitignore's tests/ rule doesn't cover) against a local,
+      # gitignored list of real identifiers. See check_operator_data.py for
+      # why, and its list-missing message for setup.
+      - id: operator-data
+        name: No real grid/customer identifiers in staged changes
+        entry: python3 .github/scripts/check_operator_data.py
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Same list, applied to the commit message. Needs commit-msg installed
+      # too: `pre-commit install --hook-type commit-msg` (default_install_hook_types
+      # below covers a fresh `pre-commit install`). pass_filenames is left at
+      # its true default here -- for a commit-msg-stage hook that "filename"
+      # is the one argument this hook needs: the path to the temp file
+      # holding the message about to be committed.
+      - id: operator-data-commit-msg
+        name: No real grid/customer identifiers in the commit message
+        entry: python3 .github/scripts/check_operator_data.py --commit-msg
+        language: system
+        stages: [commit-msg]
+
+default_install_hook_types: [pre-commit, commit-msg]

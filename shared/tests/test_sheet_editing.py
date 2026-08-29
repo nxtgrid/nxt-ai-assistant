@@ -57,7 +57,7 @@ def test_returns_empty_for_empty_needle():
     assert find_cells_in_grids(GRIDS, "   ") == []
 
 
-# Recorded from Spike 0 against NXT-3235 - Okpokunou Technical Review.
+# Recorded from Spike 0 against NXT-3235 - GridV Technical Review.
 # Comment AAAB0jIG6Kc quoted text that had since been edited (73% similar);
 # comment AAABnuBYGB4 matched 14 cells.
 STALE_QUOTE = (
