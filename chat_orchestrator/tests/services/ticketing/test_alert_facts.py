@@ -254,26 +254,26 @@ class TestNormalizeSubject:
         to mask before it lowercases. When it didn't, "Q4NR" masked to
         "mppt #" while "QWQJ" fell through to the literal-key removal and
         left no placeholder -- two normalizations of one alert family, and
-        the Matari underperforming-MPPT storm split across two tickets."""
+        the underperforming-MPPT storm split across two tickets."""
         digit_bearing = normalize_subject(
-            "! Warning: MPPT Q4NR in Matari seems to perform lower than other MPPTs !",
+            "! Warning: MPPT Q4NR in GridZ seems to perform lower than other MPPTs !",
             component_key="Q4NR",
         )
         letters_only = normalize_subject(
-            "! Warning: MPPT QWQJ in Matari seems to perform lower than other MPPTs !",
+            "! Warning: MPPT QWQJ in GridZ seems to perform lower than other MPPTs !",
             component_key="QWQJ",
         )
         assert digit_bearing == letters_only == (
-            "mppt # in matari seems to perform lower than other mppts"
+            "mppt # in gridz seems to perform lower than other mppts"
         )
 
     def test_letters_only_device_id_masked_without_a_provided_key(self):
         """Same property on the keyless path (replay/duplicate callers),
         where the literal-key fallback isn't there to paper over a miss."""
         assert normalize_subject(
-            "! Warning: MPPT QWQJ in Matari seems to perform lower than other MPPTs !"
+            "! Warning: MPPT QWQJ in GridZ seems to perform lower than other MPPTs !"
         ) == normalize_subject(
-            "! Warning: MPPT TFPA in Matari seems to perform lower than other MPPTs !"
+            "! Warning: MPPT TFPA in GridZ seems to perform lower than other MPPTs !"
         )
 
     def test_lowercase_prose_after_mppt_is_still_not_masked(self):
@@ -405,8 +405,8 @@ class TestRealProductionStormSignatures:
         assert no_bms != low_voltage
 
 
-class TestMatariUnderperformingMpptStorm:
-    """Regression coverage for the 2026-08-28 Matari storm: seven
+class TestUnderperformingMpptStorm:
+    """Regression coverage for the 2026-08-28 underperforming-MPPT storm: seven
     underperforming-MPPT warnings fired within a minute and split across two
     tickets. The split fell exactly along whether the device id contained a
     digit, because normalize_subject lowercased before masking -- see
@@ -420,14 +420,14 @@ class TestMatariUnderperformingMpptStorm:
     _DEVICES = ["Q4NR", "QWQJ", "TFPA", "XZAE", "6RJA", "73ZC", "9YRN"]
 
     _SUBJECTS = [
-        f"! Warning: MPPT {device} in Matari seems to perform lower than other MPPTs !"
+        f"! Warning: MPPT {device} in GridZ seems to perform lower than other MPPTs !"
         for device in _DEVICES
     ]
 
     def _signature_for(self, subject: str) -> str:
         kind, key, _ = derive_component(subject)
         return derive_signature(
-            grid_name="Matari", component_kind=kind, subject=subject, component_key=key
+            grid_name="GridZ", component_kind=kind, subject=subject, component_key=key
         )
 
     def test_all_seven_alerts_share_one_signature(self):
@@ -453,14 +453,14 @@ class TestMatariUnderperformingMpptStorm:
         assert keys == set(self._DEVICES)
 
     def test_a_different_grid_still_differs(self):
-        matari = self._signature_for(self._SUBJECTS[0])
+        storm = self._signature_for(self._SUBJECTS[0])
         kudi = derive_signature(
             grid_name="Kudi",
             component_kind="mppt",
             subject="! Warning: MPPT Q4NR in Kudi seems to perform lower than other MPPTs !",
             component_key="Q4NR",
         )
-        assert matari != kudi
+        assert storm != kudi
 
 
 class TestEnrichAlertFacts:

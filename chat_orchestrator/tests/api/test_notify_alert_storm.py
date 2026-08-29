@@ -55,17 +55,17 @@ _SUBJECTS = [
 
 _EXPECTED_KEYS = {"KBUA#5", "65SQ#0", "JD65#3", "RH2W#6", "QI11#2", "LQLA#1", "VT6Y#8"}
 
-# The real 2026-08-28 Matari storm: seven underperforming-MPPT warnings in one
+# The real 2026-08-28 storm: seven underperforming-MPPT warnings in one
 # minute, split across two tickets -- ids carrying a digit onto one, letters-only
 # ids onto the other -- because normalize_subject lowercased before masking,
 # which left _looks_like_component_id's all-caps branch permanently false. This
 # subject shape has no "on '<device>'" clause, so unlike _SUBJECTS above it is
 # not rescued by the wholesale device-clause mask.
-_MATARI_GRID = "Matari"
-_MATARI_DEVICES = ["Q4NR", "QWQJ", "TFPA", "XZAE", "6RJA", "73ZC", "9YRN"]
-_MATARI_SUBJECTS = [
-    f"! Warning: MPPT {device} in Matari seems to perform lower than other MPPTs !"
-    for device in _MATARI_DEVICES
+_STORM_GRID = "GridZ"
+_STORM_DEVICES = ["Q4NR", "QWQJ", "TFPA", "XZAE", "6RJA", "73ZC", "9YRN"]
+_STORM_SUBJECTS = [
+    f"! Warning: MPPT {device} in GridZ seems to perform lower than other MPPTs !"
+    for device in _STORM_DEVICES
 ]
 
 
@@ -439,8 +439,8 @@ async def test_seven_alerts_on_seven_devices_collapse_onto_one_ticket_one_messag
 
 
 @pytest.mark.asyncio
-async def test_matari_underperforming_mppt_storm_collapses_onto_one_ticket(monkeypatch):
-    """The 2026-08-28 Matari storm, end to end. Seven warnings whose only
+async def test_underperforming_mppt_storm_collapses_onto_one_ticket(monkeypatch):
+    """The 2026-08-28 underperforming-MPPT storm, end to end. Seven warnings whose only
     difference is the device id -- four ids carry a digit, three do not --
     must reach one ticket and one Telegram message. In production they split
     into two tickets exactly along that digit boundary."""
@@ -483,10 +483,10 @@ async def test_matari_underperforming_mppt_storm_collapses_onto_one_ticket(monke
 
     import orchestrator.api.app as app_module
 
-    target = _target(_MATARI_GRID)
+    target = _target(_STORM_GRID)
     refs: List[Optional[str]] = []
-    for subject in _MATARI_SUBJECTS:
-        body = _body(subject, _MATARI_GRID)
+    for subject in _STORM_SUBJECTS:
+        body = _body(subject, _STORM_GRID)
         ref, error, extra, delivery = await _resolve_notify_ticket_full(body, target)
         assert error is None, f"unexpected error for {subject!r}: {error}"
         refs.append(ref)
@@ -500,7 +500,7 @@ async def test_matari_underperforming_mppt_storm_collapses_onto_one_ticket(monke
     # All seven devices folded in as distinct affected components.
     row = store.rows[ticket_id]
     assert row["occurrence_count"] == 7
-    assert {entry["key"] for entry in row["affected_keys"]} == set(_MATARI_DEVICES)
+    assert {entry["key"] for entry in row["affected_keys"]} == set(_STORM_DEVICES)
 
     # One post, six in-place edits -- one message in the grid's topic.
     assert len(transport.send_calls) == 1
