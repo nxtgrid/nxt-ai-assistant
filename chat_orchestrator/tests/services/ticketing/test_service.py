@@ -97,6 +97,11 @@ class _FakeTicketRepository:
         self.comments_by_ref: dict[str, list[dict]] = {}
         self.open_refs_by_backend: dict[str, list[str]] = {}
         self.list_open_by_backend_calls: list[tuple] = []
+        self.recently_done_refs_by_backend: dict[str, list[str]] = {}
+        self.list_recently_done_by_backend_calls: list[tuple] = []
+        self.sync_backend_status_calls: list[tuple[str, str]] = []
+        self.reopen_by_ref_calls: list[tuple[str, str]] = []
+        self.reopen_returns: bool = True
 
     async def create_intent(self, req, *, created_via):
         self.calls.append(("intent", created_via, req.summary))
@@ -154,6 +159,19 @@ class _FakeTicketRepository:
     async def list_open_by_backend(self, backend: str, *, limit: int = 200) -> List[str]:
         self.list_open_by_backend_calls.append((backend, limit))
         return self.open_refs_by_backend.get(backend, [])
+
+    async def list_recently_done_by_backend(
+        self, backend: str, *, since: str, limit: int = 200
+    ) -> List[str]:
+        self.list_recently_done_by_backend_calls.append((backend, since, limit))
+        return self.recently_done_refs_by_backend.get(backend, [])
+
+    async def sync_backend_status_by_ref(self, ref: str, backend_status: str) -> None:
+        self.sync_backend_status_calls.append((ref, backend_status))
+
+    async def reopen_by_ref(self, ref: str, *, to_status: str) -> bool:
+        self.reopen_by_ref_calls.append((ref, to_status))
+        return self.reopen_returns
 
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         self.find_by_escalation_calls.append(mapping_id)
@@ -802,7 +820,7 @@ class TestSyncJiraTicketStatuses:
 
         assert set(jira.get_status_calls) == {"OPS-1", "OPS-2"}
         assert repository.transition_to_done_by_ref_calls == ["OPS-1"]
-        assert result == {"checked": 2, "closed": 1}
+        assert result == {"checked": 2, "closed": 1, "reopened": 0}
 
     @pytest.mark.asyncio
     async def test_no_open_tickets_is_a_no_op(self):
@@ -812,7 +830,7 @@ class TestSyncJiraTicketStatuses:
 
         result = await service.sync_jira_ticket_statuses()
 
-        assert result == {"checked": 0, "closed": 0}
+        assert result == {"checked": 0, "closed": 0, "reopened": 0}
         assert repository.transition_to_done_by_ref_calls == []
 
     @pytest.mark.asyncio
@@ -835,7 +853,117 @@ class TestSyncJiraTicketStatuses:
         result = await service.sync_jira_ticket_statuses()
 
         assert repository.transition_to_done_by_ref_calls == ["OPS-2"]
-        assert result == {"checked": 2, "closed": 1}
+        assert result == {"checked": 2, "closed": 1, "reopened": 0}
+
+    @pytest.mark.asyncio
+    async def test_sets_in_progress_for_an_indeterminate_category_status(self):
+        """Jira's own vocabulary for its in-progress-shaped statuses ("In
+        Review", "Blocked", etc.) is the "indeterminate" category, not a
+        specific name -- this is what the sweep was silently discarding
+        before, leaving Jira-side "In Progress" tickets reading "open" here
+        indefinitely."""
+        jira = _FakeBackend("jira")
+        jira.status_by_ref = {
+            "OPS-1": TicketStatus(
+                summary="Grid down", is_done=False, raw_status="In Progress",
+                status_category="indeterminate",
+            ),
+        }
+        repository = _FakeTicketRepository()
+        repository.open_refs_by_backend["jira"] = ["OPS-1"]
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+
+        result = await service.sync_jira_ticket_statuses()
+
+        assert repository.set_in_progress_by_ref_calls == ["OPS-1"]
+        assert repository.transition_to_done_by_ref_calls == []
+        assert result == {"checked": 1, "closed": 0, "reopened": 0}
+
+    @pytest.mark.asyncio
+    async def test_does_not_mark_in_progress_a_status_still_in_the_new_category(self):
+        """A Jira ticket that's still just "Open"/"To Do" (category "new")
+        must not flip the canonical row to in_progress."""
+        jira = _FakeBackend("jira")
+        jira.status_by_ref = {
+            "OPS-1": TicketStatus(
+                summary="Grid down", is_done=False, raw_status="Open",
+                status_category="new",
+            ),
+        }
+        repository = _FakeTicketRepository()
+        repository.open_refs_by_backend["jira"] = ["OPS-1"]
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+
+        await service.sync_jira_ticket_statuses()
+
+        assert repository.set_in_progress_by_ref_calls == []
+
+    @pytest.mark.asyncio
+    async def test_records_live_backend_status_for_every_checked_ticket(self):
+        jira = _FakeBackend("jira")
+        jira.status_by_ref = {
+            "OPS-1": TicketStatus(
+                summary="Grid down", is_done=False, raw_status="In Review",
+                status_category="indeterminate",
+            ),
+        }
+        repository = _FakeTicketRepository()
+        repository.open_refs_by_backend["jira"] = ["OPS-1"]
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+
+        await service.sync_jira_ticket_statuses()
+
+        assert repository.sync_backend_status_calls == [("OPS-1", "In Review")]
+
+    @pytest.mark.asyncio
+    async def test_reopens_a_recently_done_ticket_jira_now_reports_as_reopened(self):
+        jira = _FakeBackend("jira")
+        jira.status_by_ref = {
+            "OPS-9": TicketStatus(
+                summary="Grid down", is_done=False, raw_status="Reopened",
+                status_category="new",
+            ),
+        }
+        repository = _FakeTicketRepository()
+        repository.recently_done_refs_by_backend["jira"] = ["OPS-9"]
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+
+        result = await service.sync_jira_ticket_statuses()
+
+        assert repository.reopen_by_ref_calls == [("OPS-9", "open")]
+        assert result == {"checked": 0, "closed": 0, "reopened": 1}
+
+    @pytest.mark.asyncio
+    async def test_reopens_a_recently_done_ticket_to_in_progress_when_jira_says_so(self):
+        jira = _FakeBackend("jira")
+        jira.status_by_ref = {
+            "OPS-9": TicketStatus(
+                summary="Grid down", is_done=False, raw_status="In Progress",
+                status_category="indeterminate",
+            ),
+        }
+        repository = _FakeTicketRepository()
+        repository.recently_done_refs_by_backend["jira"] = ["OPS-9"]
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+
+        await service.sync_jira_ticket_statuses()
+
+        assert repository.reopen_by_ref_calls == [("OPS-9", "in_progress")]
+
+    @pytest.mark.asyncio
+    async def test_does_not_reopen_a_recently_done_ticket_still_done_in_jira(self):
+        jira = _FakeBackend("jira")
+        jira.status_by_ref = {
+            "OPS-9": TicketStatus(summary="Grid down", is_done=True, status_category="done"),
+        }
+        repository = _FakeTicketRepository()
+        repository.recently_done_refs_by_backend["jira"] = ["OPS-9"]
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+
+        result = await service.sync_jira_ticket_statuses()
+
+        assert repository.reopen_by_ref_calls == []
+        assert result == {"checked": 0, "closed": 0, "reopened": 0}
 
 
 class TestUpdateTicket:

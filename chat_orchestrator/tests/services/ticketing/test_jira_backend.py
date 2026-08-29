@@ -891,6 +891,7 @@ class TestGetStatus:
         assert status.summary == "Customer issue"
         assert status.is_done is False
         assert status.raw_status == "In Progress"
+        assert status.status_category == "indeterminate"
 
     @pytest.mark.asyncio
     async def test_is_done_true_for_done_category(self, fake_session):
@@ -913,6 +914,7 @@ class TestGetStatus:
 
         assert status is not None
         assert status.is_done is True
+        assert status.status_category == "done"
 
     @pytest.mark.asyncio
     async def test_none_on_not_found(self, fake_session):

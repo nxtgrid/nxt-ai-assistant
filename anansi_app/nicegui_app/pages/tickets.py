@@ -21,6 +21,7 @@ from typing import Any, Optional
 from nicegui import run, ui
 
 from nicegui_app.services_access import get_reader
+from shared.config import flag_registry as fr
 
 _STATUS_LABELS = {"open": "open", "in_progress": "in-progress", "done": "done"}
 _STATUS_COLORS = {"open": "green", "in_progress": "orange", "done": "grey"}
@@ -39,6 +40,34 @@ def _status_filter_value(selected: str) -> "list[str] | str | None":
     if selected == _DEFAULT_STATUS_FILTER:
         return _OPEN_STATUSES
     return selected
+
+
+# Same three vars JiraTicketBackend.has_credentials() gates on -- kept in
+# sync with that all-or-nothing check rather than re-deriving it here,
+# since anansi_app can't import chat_orchestrator's JiraTicketBackend.
+_JIRA_CREDENTIAL_ENV_VARS = ("JIRA_BASE_URL", "JIRA_USERNAME", "JIRA_API_TOKEN")
+
+
+def _default_backend_filter() -> str:
+    """Best-effort default for the backend filter dropdown.
+
+    Mirrors TicketService.resolve_backend()'s TICKET_BACKEND_OVERRIDE
+    handling so the page opens already scoped to whichever backend is
+    actually in use -- without a live Jira health probe (this is just a
+    page-load default; the dropdown can always be changed). "auto" falls
+    back to checking whether Jira looks configured rather than a real
+    ``is_available()`` call, since that's an async network probe this
+    synchronous page-load default has no business making.
+    """
+    override = (fr.get("TICKET_BACKEND_OVERRIDE") or "auto").strip().lower()
+    if override == "internal":
+        return "all"
+    if override == "jira":
+        return "jira"
+    # "auto" (and any unrecognized value).
+    if all(os.getenv(var) for var in _JIRA_CREDENTIAL_ENV_VARS):
+        return "jira"
+    return "all"
 
 _COMMENT_SOURCE_LABELS = {
     "customer": "👤 Customer",
@@ -171,9 +200,10 @@ async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
         await _render_single_detail(db, ref)
         return
 
+    default_backend = _default_backend_filter()
     state: dict[str, Any] = {
         "status": _DEFAULT_STATUS_FILTER,
-        "backend": "all",
+        "backend": default_backend,
         "created_via": "all",
         "has_escalation": "all",
         "search": "",
@@ -192,7 +222,7 @@ async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
         ).bind_value(state, "status").on_value_change(lambda: _reload())
         ui.select(
             {"all": "All backends", "jira": "🎫 Jira", "internal": "🗂 Internal"},
-            value="all",
+            value=default_backend,
         ).bind_value(state, "backend").on_value_change(lambda: _reload())
         ui.select(
             {
