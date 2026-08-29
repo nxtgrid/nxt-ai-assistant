@@ -42,6 +42,10 @@ class _Query:
         self.filters.append((column, f"neq:{value}"))
         return self
 
+    def gte(self, column, value):
+        self.filters.append((column, f"gte:{value}"))
+        return self
+
     def order(self, _column, **_kwargs):
         return self
 
@@ -55,11 +59,13 @@ class _Query:
             self.client.rows.append(row)
             return _Response([row])
         if self.mode == "update":
-            # Simulates a guarded UPDATE (e.g. `.neq("status", "done")`)
-            # matching zero rows -- used to test idempotent transitions
-            # without teaching this fake to track real row state.
-            has_neq = any(isinstance(v, str) and v.startswith("neq:") for _, v in self.filters)
-            if has_neq and self.client.update_conflict:
+            # Simulates a guarded UPDATE (e.g. `.neq("status", "done")` or
+            # `.eq("status", "done")`) matching zero rows -- used to test
+            # idempotent transitions without teaching this fake to track
+            # real row state. Any filter beyond the identifying `.eq("id",
+            # ...)` counts as a guard.
+            has_guard = any(column != "id" for column, _ in self.filters)
+            if has_guard and self.client.update_conflict:
                 return _Response([])
             row = {
                 "id": "ticket-1",
@@ -197,6 +203,27 @@ async def test_get_status_by_ref_reads_the_canonical_ticket_projection():
     assert status.summary == "Grid down"
     assert status.is_done is True
     assert status.ticket_type == "Task"
+    assert status.status_category == "done"
+
+
+@pytest.mark.asyncio
+async def test_get_status_by_ref_maps_open_and_in_progress_to_jira_style_categories():
+    """The sweep branches on ``status_category`` the same way for either
+    backend, so a local ticket's status must map onto Jira's fixed category
+    vocabulary ("new"/"indeterminate"/"done") even though it never talks to
+    Jira."""
+    for local_status, expected_category in (("open", "new"), ("in_progress", "indeterminate")):
+        client = _Client()
+        client.select_rows = [{
+            "id": "ticket-1", "ticket_ref": "TKT-1", "backend": "internal",
+            "summary": "Grid down", "status": local_status,
+            "created_via": "notification", "provisioning_state": "active",
+        }]
+
+        status = await TicketRepository(client=client).get_status_by_ref("TKT-1")
+
+        assert status is not None
+        assert status.status_category == expected_category
 
 
 @pytest.mark.asyncio
@@ -402,6 +429,91 @@ async def test_list_open_by_backend_reads_active_non_done_tickets_for_that_backe
             ("status", "neq:done"),
         ],
     )
+
+
+@pytest.mark.asyncio
+async def test_list_recently_done_by_backend_reads_active_done_tickets_resolved_after_cutoff():
+    client = _Client()
+    client.select_rows_by_table = {
+        "tickets": [
+            {
+                "id": "ticket-1", "ticket_ref": "OPS-1", "backend": "jira",
+                "status": "done", "summary": "Grid down",
+                "created_via": "notification", "provisioning_state": "active",
+            },
+        ],
+    }
+
+    refs = await TicketRepository(client=client).list_recently_done_by_backend(
+        "jira", since="2026-08-01T00:00:00+00:00", limit=50
+    )
+
+    assert refs == ["OPS-1"]
+    assert client.calls[-1] == (
+        "tickets", "select", None,
+        [
+            ("backend", "jira"),
+            ("provisioning_state", "active"),
+            ("status", "done"),
+            ("resolved_at", "gte:2026-08-01T00:00:00+00:00"),
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_backend_status_by_ref_updates_backend_status_and_synced_at():
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "OPS-1", "backend": "jira",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+    }]
+
+    await TicketRepository(client=client).sync_backend_status_by_ref("OPS-1", "In Review")
+
+    table, mode, payload, filters = client.calls[-1]
+    assert table == "tickets"
+    assert mode == "update"
+    assert ("id", "ticket-1") in filters
+    assert payload["backend_status"] == "In Review"
+    assert payload["backend_synced_at"]
+
+
+@pytest.mark.asyncio
+async def test_reopen_by_ref_flips_a_done_ticket_back_and_clears_resolved_at():
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "OPS-1", "backend": "jira",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+        "status": "done",
+    }]
+
+    reopened = await TicketRepository(client=client).reopen_by_ref("OPS-1", to_status="in_progress")
+
+    assert reopened is True
+    table, mode, payload, filters = client.calls[-1]
+    assert table == "tickets"
+    assert mode == "update"
+    assert payload == {"status": "in_progress", "resolved_at": None}
+    assert ("id", "ticket-1") in filters
+    assert ("status", "done") in filters
+
+
+@pytest.mark.asyncio
+async def test_reopen_by_ref_returns_false_when_not_currently_done():
+    """A race where something else already reopened it (or it was never
+    done) must not report a fresh reopen -- same idempotency shape as the
+    other guarded transitions."""
+    client = _Client()
+    client.select_rows = [{
+        "id": "ticket-1", "ticket_ref": "OPS-1", "backend": "jira",
+        "summary": "Grid down", "created_via": "notification", "provisioning_state": "active",
+        "status": "open",
+    }]
+    client.update_conflict = True
+
+    reopened = await TicketRepository(client=client).reopen_by_ref("OPS-1", to_status="open")
+
+    assert reopened is False
 
 
 @pytest.mark.asyncio

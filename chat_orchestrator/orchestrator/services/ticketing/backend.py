@@ -91,6 +91,12 @@ class TicketStatus(BaseModel):
     is_done: bool
     raw_status: str = ""
     ticket_type: Optional[str] = None
+    # Jira's fixed status-category key ("new"/"indeterminate"/"done") --
+    # not a Jira workflow's per-project status *name*, which varies. Used by
+    # the sweep (``TicketService.sync_jira_ticket_statuses``) to distinguish
+    # "still open" from "moved to in progress" the same way
+    # ``_status_transition_kind`` does for the webhook. Empty when unknown.
+    status_category: str = ""
 
 
 class TicketSummary(BaseModel):

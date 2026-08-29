@@ -11,6 +11,7 @@ in without also having to design its public surface.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from orchestrator.config.settings import get_settings
@@ -33,6 +34,13 @@ from .jira_backend import JiraTicketBackend
 from .repository import TicketRepository
 
 LOGGER = get_logger(__name__)
+
+# How far back the sweep re-checks already-"done" Jira tickets for a
+# reopen. Bounds sync_jira_ticket_statuses's second query -- re-checking
+# every ticket ever closed would grow unboundedly for a case (a human
+# reopening a closed Jira issue) that's rare and, past this window, no
+# longer actionable as a "sweep missed it" gap anyway.
+_REOPEN_LOOKBACK_DAYS = 7
 
 
 class TicketService:
@@ -475,18 +483,31 @@ class TicketService:
         return ok
 
     async def sync_jira_ticket_statuses(self, limit: int = 200) -> Dict[str, int]:
-        """Pull live Jira status for open Jira-backed canonical tickets and close done ones.
+        """Pull live Jira status for canonical Jira tickets and reconcile it.
 
         Complements the near-instant Jira webhook and the escalation sweep's
         own reconciliation loop (which only reconciles tickets tied to an
         escalation mapping): this walks every open Jira ticket in the
         canonical ``tickets`` table, so it also catches tickets filed via
-        ``/notify`` with no linked escalation, or a closure the webhook
-        missed. Meant to be called from the same daily sweep job.
+        ``/notify`` with no linked escalation, or a status change the
+        webhook missed. Meant to be called from the same daily sweep job.
+
+        Reconciles all three directions the webhook can miss:
+        - open/in_progress -> done (unchanged from before)
+        - open -> in_progress (Jira's "indeterminate" status category --
+          previously fetched and discarded; see ``status.status_category``)
+        - done -> reopened (a human reopening a closed Jira issue), checked
+          only for tickets resolved within ``_REOPEN_LOOKBACK_DAYS``
+
+        Also records ``backend_status``/``backend_synced_at`` for every
+        ticket checked, so the canonical projection carries Jira's literal
+        status text (e.g. "In Review") even when it doesn't cross one of
+        the three canonical-status boundaries above.
         """
         refs = await self._tickets.list_open_by_backend("jira", limit=limit)
         checked = 0
         closed = 0
+        reopened = 0
         for ref in refs:
             checked += 1
             try:
@@ -496,14 +517,54 @@ class TicketService:
                     "ticket status sync: get_status failed for {}", ref
                 )
                 continue
-            if status is None or not status.is_done:
+            if status is None:
                 continue
             try:
-                await self._tickets.transition_to_done_by_ref(ref)
-                closed += 1
+                await self._tickets.sync_backend_status_by_ref(ref, status.raw_status)
             except Exception:
-                LOGGER.opt(exception=True).warning("ticket status sync: failed to close {}", ref)
-        return {"checked": checked, "closed": closed}
+                LOGGER.opt(exception=True).warning(
+                    "ticket status sync: failed to record backend status for {}", ref
+                )
+            if status.is_done:
+                try:
+                    await self._tickets.transition_to_done_by_ref(ref)
+                    closed += 1
+                except Exception:
+                    LOGGER.opt(exception=True).warning(
+                        "ticket status sync: failed to close {}", ref
+                    )
+            elif status.status_category == "indeterminate":
+                try:
+                    await self._tickets.set_in_progress_by_ref(ref)
+                except Exception:
+                    LOGGER.opt(exception=True).warning(
+                        "ticket status sync: failed to mark {} in progress", ref
+                    )
+
+        since = (
+            datetime.now(timezone.utc) - timedelta(days=_REOPEN_LOOKBACK_DAYS)
+        ).isoformat()
+        done_refs = await self._tickets.list_recently_done_by_backend(
+            "jira", since=since, limit=limit
+        )
+        for ref in done_refs:
+            try:
+                status = await self._jira.get_status(ref)
+            except Exception:
+                LOGGER.opt(exception=True).warning(
+                    "ticket status sync: get_status failed for recently-done {}", ref
+                )
+                continue
+            if status is None or status.is_done:
+                continue
+            to_status = "in_progress" if status.status_category == "indeterminate" else "open"
+            try:
+                if await self._tickets.reopen_by_ref(ref, to_status=to_status):
+                    reopened += 1
+            except Exception:
+                LOGGER.opt(exception=True).warning("ticket status sync: failed to reopen {}", ref)
+
+        return {"checked": checked, "closed": closed, "reopened": reopened}
 
     async def find_open_by_grid(
         self, grid_name: str, limit: int = 20, backend_override: Optional[str] = None

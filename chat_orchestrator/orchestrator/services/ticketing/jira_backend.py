@@ -417,6 +417,7 @@ class JiraTicketBackend:
             summary=fields.get("summary", ""),
             is_done=bool(fields.get("is_done", False)),
             raw_status=fields.get("raw_status", ""),
+            status_category=fields.get("status_category", ""),
         )
 
     async def transition_to_done(self, ref: str) -> bool:
@@ -881,10 +882,12 @@ class JiraTicketBackend:
     async def _fetch_jira_issue_fields(self, issue_key: str) -> Optional[Dict[str, Any]]:
         """Fetch summary and status category for a Jira issue.
 
-        Returns {"summary": str, "is_done": bool, "raw_status": str} or None on
-        error/not-found. ``raw_status`` is additive (the Jira status name, e.g.
-        "In Progress") for TicketStatus -- the original inline version of this
-        helper only returned summary/is_done since that's all its one caller
+        Returns {"summary": str, "is_done": bool, "raw_status": str,
+        "status_category": str} or None on error/not-found. ``raw_status``
+        and ``status_category`` are additive (the Jira status name, e.g. "In
+        Progress", and its fixed category key, e.g. "indeterminate") for
+        TicketStatus -- the original inline version of this helper only
+        returned summary/is_done since that's all its one caller
         (EscalationService) needed.
         """
         if not self._jira_base_url:
@@ -908,6 +911,7 @@ class JiraTicketBackend:
                 "summary": fields.get("summary", ""),
                 "is_done": status_category == "done",
                 "raw_status": status_field.get("name", ""),
+                "status_category": status_category,
             }
         except Exception:
             LOGGER.opt(exception=True).debug("Error fetching Jira issue fields for {}", issue_key)

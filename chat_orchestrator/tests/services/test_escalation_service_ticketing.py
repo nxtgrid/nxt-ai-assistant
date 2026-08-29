@@ -375,6 +375,7 @@ class _FakeTickets:
         self._sync_jira_ticket_statuses_result = sync_jira_ticket_statuses_result or {
             "checked": 0,
             "closed": 0,
+            "reopened": 0,
         }
 
     async def get_status(self, ref: str):
@@ -1516,7 +1517,9 @@ async def test_sweep_also_syncs_canonical_jira_ticket_statuses():
     supa = _FakeSupabase(_FakeRaw())
     svc = _make_service(supa)
 
-    tickets = _FakeTickets(sync_jira_ticket_statuses_result={"checked": 5, "closed": 2})
+    tickets = _FakeTickets(
+        sync_jira_ticket_statuses_result={"checked": 5, "closed": 2, "reopened": 1}
+    )
     svc._tickets = tickets
 
     result = await svc.run_escalation_ticket_sweep()
@@ -1524,6 +1527,7 @@ async def test_sweep_also_syncs_canonical_jira_ticket_statuses():
     assert tickets.sync_jira_ticket_statuses_calls == 1
     assert result["ticket_status_checked"] == 5
     assert result["ticket_status_closed"] == 2
+    assert result["ticket_status_reopened"] == 1
 
 
 # ---------------------------------------------------------------------------

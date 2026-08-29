@@ -199,11 +199,18 @@ class TicketRepository:
         ticket = await self.get_by_ref(ref)
         if ticket is None:
             return None
+        # Map onto Jira's fixed category vocabulary so callers (the sweep)
+        # can branch on ``status_category`` the same way regardless of
+        # which backend a ticket lives on.
+        category = {"open": "new", "in_progress": "indeterminate", "done": "done"}.get(
+            ticket.status, ""
+        )
         return TicketStatus(
             summary=ticket.summary,
             is_done=ticket.status == "done",
             raw_status=ticket.status,
             ticket_type=ticket.ticket_type,
+            status_category=category,
         )
 
     async def add_comment_by_ref(
@@ -313,6 +320,60 @@ class TicketRepository:
             raise TicketRepositoryError(f"failed to update canonical ticket: {exc}") from exc
         return bool(getattr(response, "data", None))
 
+    async def reopen_by_ref(self, ref: str, *, to_status: Literal["open", "in_progress"]) -> bool:
+        """Reopen a canonical ticket that the backend now reports as not done.
+
+        Unlike ``set_in_progress_by_ref`` (which refuses to touch an
+        already-"done" row, guarding against an out-of-order webhook
+        delivery), this is only ever called by the sweep right after a live
+        Jira GET -- there's no reordering risk, the ticket really is open
+        again now. Guarded on ``status == 'done'`` so a race with something
+        else reopening it first reports False rather than double-counting.
+        Clears ``resolved_at`` since the ticket is no longer resolved.
+        """
+        ticket = await self.get_by_ref(ref)
+        if ticket is None:
+            raise TicketRepositoryError(f"cannot reopen: unknown ticket ref {ref}")
+        payload = {"status": to_status, "resolved_at": None}
+        try:
+            response = (
+                self._raw_client()
+                .table("tickets")
+                .update(payload)
+                .eq("id", ticket.id)
+                .eq("status", "done")
+                .execute()
+            )
+        except Exception as exc:
+            raise TicketRepositoryError(f"failed to reopen canonical ticket {ref}: {exc}") from exc
+        return bool(getattr(response, "data", None))
+
+    async def sync_backend_status_by_ref(self, ref: str, backend_status: str) -> None:
+        """Record the live backend status text + sync timestamp for a ticket,
+        independent of any canonical status transition.
+
+        Used by the Jira sweep so ``tickets.backend_status``/
+        ``backend_synced_at`` reflect the last live check even when the raw
+        status doesn't cross a canonical open/in_progress/done boundary
+        (e.g. Jira's "In Review" or "Blocked", both status-category
+        "indeterminate"). Not guarded/idempotency-tracked -- this is a plain
+        projection touch, not a transition callers need to know "did I just
+        flip this" for.
+        """
+        ticket = await self.get_by_ref(ref)
+        if ticket is None:
+            raise TicketRepositoryError(f"cannot sync backend status: unknown ticket ref {ref}")
+        payload = {
+            "backend_status": backend_status,
+            "backend_synced_at": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            self._raw_client().table("tickets").update(payload).eq("id", ticket.id).execute()
+        except Exception as exc:
+            raise TicketRepositoryError(
+                f"failed to sync backend status for {ref}: {exc}"
+            ) from exc
+
     async def update_by_ref(
         self, ref: str, *, summary: str | None = None, description: str | None = None
     ) -> None:
@@ -382,6 +443,40 @@ class TicketRepository:
             raise
         except Exception as exc:
             raise TicketRepositoryError(f"failed to list open {backend} tickets: {exc}") from exc
+
+        rows = getattr(response, "data", None) or []
+        return [row["ticket_ref"] for row in rows if row.get("ticket_ref")]
+
+    async def list_recently_done_by_backend(
+        self, backend: str, *, since: str, limit: int = 200
+    ) -> list[str]:
+        """Return ticket_refs for active, done tickets on the given backend
+        resolved at or after ``since`` (an ISO-8601 timestamp).
+
+        Used by the sweep to catch a Jira reopen: once a ticket has been
+        done for a while, re-checking it forever would grow the sweep
+        unboundedly for a case that almost never happens, so this only
+        re-checks tickets closed recently. ``since`` is the caller's
+        lookback cutoff -- see ``TicketService.sync_jira_ticket_statuses``.
+        """
+        try:
+            response = (
+                self._raw_client()
+                .table("tickets")
+                .select("ticket_ref")
+                .eq("backend", backend)
+                .eq("provisioning_state", "active")
+                .eq("status", "done")
+                .gte("resolved_at", since)
+                .limit(limit)
+                .execute()
+            )
+        except TicketRepositoryError:
+            raise
+        except Exception as exc:
+            raise TicketRepositoryError(
+                f"failed to list recently-done {backend} tickets: {exc}"
+            ) from exc
 
         rows = getattr(response, "data", None) or []
         return [row["ticket_ref"] for row in rows if row.get("ticket_ref")]

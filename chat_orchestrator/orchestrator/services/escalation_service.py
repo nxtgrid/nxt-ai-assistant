@@ -2532,6 +2532,7 @@ class EscalationService:
             "notified_groups": notified_groups,
             "ticket_status_checked": ticket_sync["checked"],
             "ticket_status_closed": ticket_sync["closed"],
+            "ticket_status_reopened": ticket_sync["reopened"],
         }
         LOGGER.info("Escalation sweep complete: {}", summary)
         return summary
