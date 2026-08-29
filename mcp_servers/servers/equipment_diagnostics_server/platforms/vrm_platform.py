@@ -5,6 +5,7 @@ Implements the BasePlatform interface for Victron Energy's VRM API.
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
@@ -207,6 +208,32 @@ VRM_ATTRIBUTE_CODES = {
 DEFAULT_INVERTER_INSTANCE = 276
 DEFAULT_BATTERY_INSTANCE = 512
 
+# A widget field's ``formattedValue`` is a display string carrying its unit
+# ("0 W", "0.00 V", "1,234.5 kWh"), which float() rejects outright.
+_UNIT_SUFFIX = re.compile(r"[^0-9]+$")
+_GROUPED_DIGITS = re.compile(r"[-+]?\d{1,3}(?:,\d{3})+(?:\.\d+)?")
+
+
+def _coerce_widget_number(value: Any) -> Optional[float]:
+    """Coerce one widget field's value to a float, or None if it is not numeric."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+
+    text = _UNIT_SUFFIX.sub("", value.strip())
+    if _GROUPED_DIGITS.fullmatch(text):
+        # "1,234.5 kWh" -> "1234.5". A comma that is not digit grouping is left
+        # in place: it may be a decimal separator, and guessing wrong would
+        # report a silently incorrect number instead of no reading at all.
+        text = text.replace(",", "")
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
 
 class VRMPlatform(BasePlatform):
     """VRM platform implementation."""
@@ -357,24 +384,37 @@ class VRMPlatform(BasePlatform):
                 field_data = field_data[0]
 
             if isinstance(field_data, dict):
-                value = field_data.get("rawValue") or field_data.get("formattedValue")
+                raw_value = field_data.get("rawValue")
+                # Fall back only when rawValue is genuinely absent. A rawValue
+                # of 0.0 is falsy but is a real reading, and formattedValue's
+                # unit suffix ("0 W") made float() raise -- so every zero used
+                # to be reported as no data at all.
+                value = raw_value if raw_value is not None else field_data.get("formattedValue")
                 field_code = field_data.get("code", "")
             elif isinstance(field_data, (int, float)):
                 value = field_data
 
             if field_id and fid == field_id:
-                try:
-                    return float(value) if value is not None else None
-                except (ValueError, TypeError):
-                    return None
+                return _coerce_widget_number(value)
 
             if code and field_code == code:
-                try:
-                    return float(value) if value is not None else None
-                except (ValueError, TypeError):
-                    return None
+                return _coerce_widget_number(value)
 
         return None
+
+    def _extract_phase_value(
+        self, records: Dict[str, Any], field_id: str, code: str
+    ) -> Optional[float]:
+        """Look one phase up by field id, falling back to its attribute code.
+
+        The fallback is taken only when the field-id lookup found nothing. A
+        plain ``or`` would discard a phase genuinely reading 0, dropping it
+        from the reading and from the total summed over the phases.
+        """
+        value = self._extract_widget_value(records, field_id)
+        if value is None:
+            value = self._extract_widget_value(records, code=code)
+        return value
 
     def _extract_output_consumption_from_diagnostics(
         self, records: List[Dict[str, Any]]
@@ -484,15 +524,9 @@ class VRMPlatform(BasePlatform):
             status_data = await self._get_widget_data(site_id, "Status", DEFAULT_INVERTER_INSTANCE)
             records = status_data.get("records", {})
 
-            l1 = self._extract_widget_value(records, "29") or self._extract_widget_value(
-                records, code="OP1"
-            )
-            l2 = self._extract_widget_value(records, "30") or self._extract_widget_value(
-                records, code="OP2"
-            )
-            l3 = self._extract_widget_value(records, "31") or self._extract_widget_value(
-                records, code="OP3"
-            )
+            l1 = self._extract_phase_value(records, "29", "OP1")
+            l2 = self._extract_phase_value(records, "30", "OP2")
+            l3 = self._extract_phase_value(records, "31", "OP3")
 
             total = sum(p for p in [l1, l2, l3] if p is not None)
 
@@ -570,15 +604,9 @@ class VRMPlatform(BasePlatform):
                 power_source = "output_consumption"
             else:
                 # Fall back to inverter output power (OP1/OP2/OP3) from Status widget
-                p1 = self._extract_widget_value(records, "29") or self._extract_widget_value(
-                    records, code="OP1"
-                )
-                p2 = self._extract_widget_value(records, "30") or self._extract_widget_value(
-                    records, code="OP2"
-                )
-                p3 = self._extract_widget_value(records, "31") or self._extract_widget_value(
-                    records, code="OP3"
-                )
+                p1 = self._extract_phase_value(records, "29", "OP1")
+                p2 = self._extract_phase_value(records, "30", "OP2")
+                p3 = self._extract_phase_value(records, "31", "OP3")
 
             # Calculate total power in kW (sum of all phases that have data)
             powers = [p for p in [p1, p2, p3] if p is not None]
