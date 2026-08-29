@@ -39,7 +39,6 @@ from orchestrator.models.schemas import (
 )
 from orchestrator.services import telegram_transport
 from orchestrator.services.callback_handlers import _handle_callback_query
-from orchestrator.services.jira_webhooks import _handle_jira_webhook
 from orchestrator.services.supabase_client import get_supabase_client
 from orchestrator.services.thread_assignment import (
     assign_passive_thread,
@@ -1634,11 +1633,6 @@ def main(args: Dict[str, Any]) -> Dict[str, Any]:
         WebhookResponse with success, message, session_id
     """
     try:
-        # Check if this is a Jira webhook (has webhookEvent field)
-        if "webhookEvent" in args and args.get("webhookEvent", "").startswith("jira:"):
-            LOGGER.info(f"Received Jira webhook: {args.get('webhookEvent')}")
-            return _handle_jira_webhook(args)
-
         # Check if this is a message_reaction update (Telegram reactions)
         if "message_reaction" in args:
             LOGGER.info("Received message_reaction update")
@@ -1733,11 +1727,6 @@ async def async_main(args: Dict[str, Any]) -> Dict[str, Any]:
         # Internal re-entries (e.g., _flush_media_group) also keep their metadata.
         if not is_internal_media_group_reentry and args.get("_auth_method") != "api":
             args.pop("metadata", None)
-
-        # Check if this is a Jira webhook (has webhookEvent field)
-        if "webhookEvent" in args and args.get("webhookEvent", "").startswith("jira:"):
-            LOGGER.info(f"Received Jira webhook: {args.get('webhookEvent')}")
-            return _handle_jira_webhook(args)
 
         # Check if this is a message_reaction update (Telegram reactions)
         if "message_reaction" in args:
