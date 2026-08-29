@@ -1,0 +1,25 @@
+# Template for .github/scripts/operator_names.local.txt -- copy this file to
+# that name and replace the examples below with real identifiers. That file is
+# gitignored on purpose: the list of real grid/customer names *is* the
+# sensitive data check_operator_data.py exists to keep out of the repo, so it
+# can never be the tracked file you're reading right now.
+#
+# Format: one literal string per line, matched case-insensitively as a whole
+# word (regex \b boundaries) against staged diff additions, staged file paths,
+# and commit messages. Blank lines and lines starting with # are ignored.
+# No wildcards, no regex syntax -- entries are matched literally.
+#
+# What belongs here: real grid/site names, customer/operator names, org tags
+# (with or without the leading #, both are matched by the bare word), and any
+# other real identifier you already know leaked once and don't want to see
+# again -- including a real ticket/escalation number, if you know one by
+# value. Ticket refs and chat/session ids are *not* pattern-matched (e.g. no
+# blanket `OPS-\d+` rule) because most of those in this repo are synthetic
+# fixture data and a shape-based rule would flag them constantly -- add a
+# specific real one here by value if it ever surfaces.
+#
+# Examples (fake, safe to leave in the tracked template):
+ExampleGridOne
+ExampleGridTwo
+ExampleCustomerName
+ExampleOrgTag
