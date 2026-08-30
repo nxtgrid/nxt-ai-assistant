@@ -361,7 +361,12 @@ def test_cap_needs_reliable_history_to_apply() -> None:
 
 
 def test_a_brand_new_ticket_is_never_capped() -> None:
-    """No target ticket means nothing was said about it yet, by definition."""
+    """No ticket from either source means nothing was said about it yet.
+
+    The caller can still supply one it resolved itself -- see
+    ``correlated_ticket_ref`` below -- but with neither, there is nothing to
+    have already spoken about and the cap must decline.
+    """
     decision = decide_alert_delivery(
         _result(prior=SiteStatus.UNKNOWN, current=SiteStatus.UNKNOWN),
         _with_history(_spoke_about("OPS-1000", minutes_ago=1)),
@@ -370,3 +375,57 @@ def test_a_brand_new_ticket_is_never_capped() -> None:
     )
 
     assert decision.send is True
+
+
+# --------------------------------------------------------------------------- #
+# The caller's own correlation result
+#
+# The model names a target ticket only when it decides UPDATE/DUPLICATE. A
+# judgment that failed outright, or one asserting CREATE_NEW, leaves the cap
+# with no ref to check -- which is how a device storm came to speak once per
+# device: every alert in it looked like the first thing said about a ticket
+# that did not exist yet. The caller resolves the ticket deterministically
+# (exact signature match) before asking, and passes it in.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_deterministically_correlated_alert_is_capped_like_any_other() -> None:
+    """The judgment has no target; the caller resolved one anyway."""
+    decision = decide_alert_delivery(
+        _result(prior=SiteStatus.UNKNOWN, current=SiteStatus.UNKNOWN),
+        _with_history(_spoke_about("OPS-1000", minutes_ago=3)),
+        enforcement_enabled=True,
+        now=NOW,
+        correlated_ticket_ref="OPS-1000",
+    )
+
+    assert decision.send is False
+    assert decision.reason == "fail_open_capped"
+
+
+def test_a_correlated_ticket_not_yet_spoken_about_still_sends() -> None:
+    """The guarantee half, unchanged: the cap shortens, it never silences."""
+    decision = decide_alert_delivery(
+        _result(prior=SiteStatus.UNKNOWN, current=SiteStatus.UNKNOWN),
+        _with_history(_spoke_about("OPS-2000", minutes_ago=3)),
+        enforcement_enabled=True,
+        now=NOW,
+        correlated_ticket_ref="OPS-1000",
+    )
+
+    assert decision.send is True
+    assert decision.reason == "fail_open"
+
+
+def test_the_judgments_own_target_still_wins_when_it_has_one() -> None:
+    """The caller's ref fills a gap; it does not override a stated target."""
+    decision = decide_alert_delivery(
+        _on_ticket("OPS-1000"),
+        _with_history(_spoke_about("OPS-1000", minutes_ago=3)),
+        enforcement_enabled=True,
+        now=NOW,
+        correlated_ticket_ref="OPS-9999",
+    )
+
+    assert decision.send is False
+    assert decision.reason == "fail_open_capped"

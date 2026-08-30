@@ -133,10 +133,14 @@ class CorrelationDecision:
     ticket_ref: Optional[str]
     confidence: Optional[float]
     decided_by: str  # "replay"|"flag_off"|"no_candidates"|"signature"|"llm"|"fallback"
-    # "fallback_signature" is also produced -- outside this module, by
-    # app.py's lock-free grid-lock-timeout fallback, which mirrors this
-    # class's "signature" rung without holding the per-grid lock. See
-    # ``_attempt_lock_free_signature_correlation`` in app.py.
+    # Two more are produced outside this module, both in app.py, and both
+    # mirroring this class's "signature" rung in a context it cannot reach:
+    # "fallback_signature" from the lock-free grid-lock-timeout fallback
+    # (``_attempt_lock_free_signature_correlation``), and
+    # "signature_backstop" from the LLM-judgment path, where an exact
+    # signature match overrules a judgment of "new"
+    # (``_resolve_notify_ticket_llm_judgment``). Both are worth telling apart
+    # from a lock-held "signature" in the audit trail.
     reason: str
     affected_key: Optional[Dict[str, str]]
     root_cause_kind: Optional[str]
@@ -927,6 +931,63 @@ class AlertCorrelator:
             get_grid_operational_context or correlation_rules.get_grid_operational_context
         )
 
+    async def replay_decision(self, dedup_key: Optional[str]) -> Optional[CorrelationDecision]:
+        """Rung 0: the prior decision for a ``dedup_key`` already decided.
+
+        Returns ``None`` when there is nothing to replay (no key, no prior
+        row, or a store read that failed) so every caller falls through to
+        deciding normally -- an unreadable ledger must not be the reason an
+        alert goes undecided.
+
+        Extracted from ``decide()`` so the LLM-judgment path can share it.
+        That path used to skip rung 0 entirely: a webhook retry re-ran the
+        model and, whenever the second judgment landed on "new", filed a
+        second ticket for an alert already decided and already posted.
+        """
+        if not dedup_key:
+            return None
+        try:
+            prior = await self._store.get_by_dedup_key(dedup_key)
+        except Exception:
+            LOGGER.opt(exception=True).warning(
+                "Dedup-key replay lookup failed for {!r}; deciding afresh", dedup_key
+            )
+            return None
+        if not prior:
+            return None
+
+        ticket_id = prior.get("ticket_id")
+        ticket_ref: Optional[str] = None
+        ticket_severity = ""
+        if ticket_id:
+            ticket_ref = await self._ticket_service.get_ref_by_id(ticket_id)
+            try:
+                correlation = await self._store.get_correlation(ticket_id)
+            except Exception:
+                LOGGER.opt(exception=True).warning(
+                    "Failed to load durable severity for replayed ticket {!r}",
+                    ticket_id,
+                )
+            else:
+                if correlation is not None:
+                    ticket_severity = correlation.get("severity") or ticket_severity
+        return CorrelationDecision(
+            decision=prior.get("decision", "new"),
+            ticket_ref=ticket_ref,
+            ticket_id=ticket_id,
+            confidence=prior.get("confidence"),
+            decided_by="replay",
+            reason=prior.get("reason") or "replayed prior decision (dedup_key match)",
+            affected_key=None,
+            root_cause_kind=None,
+            update_message="",
+            amended_summary="",
+            candidate_refs=[],
+            llm_raw=None,
+            needs_root_cause_ticket=False,
+            ticket_severity=ticket_severity,
+        )
+
     async def decide(
         self,
         grid_name: str,
@@ -935,40 +996,9 @@ class AlertCorrelator:
         backend_override: Optional[str] = None,
         get_live_facts: Optional[Callable[[], Awaitable[Dict[str, Any]]]] = None,
     ) -> CorrelationDecision:
-        if dedup_key:
-            prior = await self._store.get_by_dedup_key(dedup_key)
-            if prior:
-                ticket_id = prior.get("ticket_id")
-                ticket_ref: Optional[str] = None
-                ticket_severity = ""
-                if ticket_id:
-                    ticket_ref = await self._ticket_service.get_ref_by_id(ticket_id)
-                    try:
-                        correlation = await self._store.get_correlation(ticket_id)
-                    except Exception:
-                        LOGGER.opt(exception=True).warning(
-                            "Failed to load durable severity for replayed ticket {!r}",
-                            ticket_id,
-                        )
-                    else:
-                        if correlation is not None:
-                            ticket_severity = correlation.get("severity") or ticket_severity
-                return CorrelationDecision(
-                    decision=prior.get("decision", "new"),
-                    ticket_ref=ticket_ref,
-                    ticket_id=ticket_id,
-                    confidence=prior.get("confidence"),
-                    decided_by="replay",
-                    reason=prior.get("reason") or "replayed prior decision (dedup_key match)",
-                    affected_key=None,
-                    root_cause_kind=None,
-                    update_message="",
-                    amended_summary="",
-                    candidate_refs=[],
-                    llm_raw=None,
-                    needs_root_cause_ticket=False,
-                    ticket_severity=ticket_severity,
-                )
+        replayed = await self.replay_decision(dedup_key)
+        if replayed is not None:
+            return replayed
 
         if not fr.get("ALERT_CORRELATION_ENABLED"):
             return await self._finalize(

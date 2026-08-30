@@ -16,6 +16,7 @@ LLM fails loudly rather than silently passing via a fake LLM decision.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -510,15 +511,24 @@ async def test_underperforming_mppt_storm_collapses_onto_one_ticket(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_llm_outage_during_a_storm_still_files_and_posts_every_alert(monkeypatch):
-    """Fail-open under the LLM-first default: an internal error must never be
-    the reason an alert goes unseen.
+async def test_llm_outage_during_a_storm_collapses_onto_one_ticket_and_still_speaks(monkeypatch):
+    """Fail-open under the LLM-first default, without the ticket fan-out.
 
-    With judgment on (the default) and the gateway dead, each of the seven
-    alerts falls back to its own ticket and its own Telegram post. That is
-    noisier than the deterministic ladder's single rolled-up message and
-    deliberately so -- during an LLM outage the correct failure is too many
-    alerts, never a silent one.
+    An LLM outage must never be why an alert goes unseen. But "seen" is a
+    promise about Telegram, not a promise to file one ticket per device, and
+    the deterministic ladder is not the model -- it is an exact comparison of
+    this alert's signature against the signatures the open candidates already
+    carry, and it stays available while the gateway is dead.
+
+    So with the gateway exploding on every call, the storm still reaches the
+    topic *and* still lands on one ticket: the first alert opens it and posts
+    in full, each later device edits that message in place.
+
+    This test asserted the opposite until the signature backstop landed --
+    seven tickets and seven full posts, on the reasoning that too many alerts
+    beat a silent one. The two were never in tension; the judgment path simply
+    fed the ladder to the model as evidence and then ignored it, so every
+    failed judgment filed afresh.
     """
     monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
@@ -567,9 +577,25 @@ async def test_llm_outage_during_a_storm_still_files_and_posts_every_alert(monke
         await app_module._deliver_notification(body, _target(), ref, delivery)
 
     assert None not in refs
-    assert len(set(refs)) == len(_SUBJECTS)
-    assert len(transport.send_calls) == len(_SUBJECTS)
+    # One fault on one grid is one ticket, gateway up or down.
+    assert len(set(refs)) == 1
+    assert len(ticket_service.create_ticket_calls) == 1
+    # ...and every device is still recorded on it, so nothing is lost by not
+    # filing six more tickets.
+    ticket_id = ticket_service.create_ticket_calls and "tid-1"
+    assert {entry["key"] for entry in store.rows[ticket_id]["affected_keys"]} == _EXPECTED_KEYS
+
+    # Fail-open still holds: the topic hears about it, and keeps hearing as
+    # each new device joins -- one post, then in-place edits, never silence.
+    assert len(transport.send_calls) == 1
+    assert len(transport.edit_calls) == len(_SUBJECTS) - 1
     assert set(send_decisions) == {"send"}
+
+    # The override is greppable in the audit trail rather than silent.
+    backstopped = [
+        call for call in store.record_event_calls if call.get("decided_by") == "signature_backstop"
+    ]
+    assert len(backstopped) == len(_SUBJECTS) - 1
 
 
 # Synthetic sites and identifiers throughout: the alert *shapes* are what these
@@ -748,3 +774,211 @@ async def test_a_dark_plant_says_so_instead_of_relisting_a_device(monkeypatch):
     assert "seems to perform lower" not in posted, "the storm text is the artefact, not the news"
     assert "still firing" not in posted, "a device line is the wrong thing to say here"
     assert transport.send_calls[0]["reply_to_message_id"] == 66225
+
+
+# --------------------------------------------------------------------------- #
+# The signature backstop under a *healthy* model
+#
+# The outage test above covers a judgment that never arrived. These cover the
+# other half: a judgment that arrives, parses, clears the confidence floor, and
+# still says "file a new ticket" for a device whose fault is already on one.
+# CREATE_NEW sets ``target=None``, which is the condition every guardrail in
+# ``to_legacy_correlation_decision`` is nested under, so nothing else in the
+# pipeline looks at it.
+# --------------------------------------------------------------------------- #
+
+
+def _create_new_judgment() -> str:
+    """A well-formed judgment that always wants a fresh ticket.
+
+    ``send_telegram`` is False and ``material_status_change`` is False on
+    purpose: both are evidence forces that would refuse the fail-open cap on
+    their own, and these tests are about what the cap does when nothing else
+    is shouting.
+    """
+    return json.dumps(
+        {
+            "grid_impact": {
+                "prior_known_status": "on",
+                "current_assessed_status": "on",
+                "material_status_change": False,
+                "summary": "One charge controller is not reporting its battery link",
+                "confidence": 0.9,
+            },
+            "notification": {
+                "send_telegram": False,
+                "reason": "Equipment-level fault already represented in the topic",
+            },
+            "ticket": {
+                "action": "create_new",
+                "target_ticket_ref": None,
+                "change_title": False,
+                "proposed_title": None,
+                "change_description": False,
+                "description_addition": None,
+                "relationship": "unrelated",
+                "root_cause_kind": "component",
+                "reason": "Treating this controller as its own issue",
+                "confidence": 0.9,
+            },
+            "likely_user_action": {
+                "category": "remote_investigation",
+                "summary": "Check the battery communication link",
+                "confidence": 0.8,
+            },
+        }
+    )
+
+
+class _CreateNewGateway:
+    """Returns a valid CREATE_NEW judgment for every alert in the storm."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def generate(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+
+        class _Result:
+            text = _create_new_judgment()
+
+        return _Result()
+
+
+def _wire_storm(monkeypatch, store, ticket_service, transport, gateway) -> Any:
+    """The monkeypatch block every storm test shares."""
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+        lambda get_client=None: store,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.service.TicketService",
+        lambda get_supabase_client=None: ticket_service,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.delivery_repository.DeliveryRepository",
+        _FakeDeliveryRepository,
+    )
+    monkeypatch.setattr(
+        "shared.llm.get_default_generation_gateway", lambda default_model=None: gateway
+    )
+    monkeypatch.setattr(
+        "shared.utils.telegram_send.send_telegram_message_with_fallback", transport.send
+    )
+    monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", transport.edit)
+
+    async def _noop_chat_db_log(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("orchestrator.api.app._log_notification_to_chat_db", _noop_chat_db_log)
+
+    import orchestrator.api.app as app_module
+
+    return app_module
+
+
+async def _run_storm(app_module, subjects) -> tuple[List[Optional[str]], List[str]]:
+    refs: List[Optional[str]] = []
+    send_decisions: List[str] = []
+    for subject in subjects:
+        body = _body(subject)
+        ref, error, extra, delivery = await _resolve_notify_ticket_full(body, _target())
+        assert error is None, f"unexpected error for {subject!r}: {error}"
+        refs.append(ref)
+        send_decisions.append((extra or {}).get("send_decision", ""))
+        await app_module._deliver_notification(body, _target(), ref, delivery)
+    return refs, send_decisions
+
+
+@pytest.mark.asyncio
+async def test_a_confident_create_new_judgment_loses_to_an_exact_signature_match(monkeypatch):
+    """The model is asked, answers cleanly, and is still overruled.
+
+    An exact signature match is not an opinion competing with the model's --
+    it is the recorded fact that this grid already has an open ticket for this
+    fault shape. Six charge controllers failing the same way is one problem,
+    however confidently the model calls each one its own.
+    """
+    monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+
+    tickets: Dict[str, Dict[str, Any]] = {}
+    store = _FakeStore(tickets)
+    ticket_service = _FakeTicketService(tickets)
+    transport = _FakeTelegramTransport()
+    gateway = _CreateNewGateway()
+    app_module = _wire_storm(monkeypatch, store, ticket_service, transport, gateway)
+
+    refs, _ = await _run_storm(app_module, _SUBJECTS)
+
+    assert gateway.calls > 0, "the model must still be consulted, not bypassed"
+    assert len(set(refs)) == 1
+    assert len(ticket_service.create_ticket_calls) == 1
+    assert {entry["key"] for entry in store.rows["tid-1"]["affected_keys"]} == _EXPECTED_KEYS
+    # One post for the ticket, in-place edits as each later device joins it.
+    assert len(transport.send_calls) == 1
+    assert len(transport.edit_calls) == len(_SUBJECTS) - 1
+
+
+@pytest.mark.asyncio
+async def test_the_backstop_kill_switch_returns_the_judgment_to_the_last_word(monkeypatch):
+    """``ALERT_DETERMINISTIC_BACKSTOP_ENABLED=false`` is a real rollback.
+
+    Pinned so the flag cannot quietly become decorative: with it off, the same
+    confident CREATE_NEW judgments file the same seven tickets they filed
+    before the backstop existed.
+    """
+    monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+    monkeypatch.setenv("ALERT_DETERMINISTIC_BACKSTOP_ENABLED", "false")
+
+    tickets: Dict[str, Dict[str, Any]] = {}
+    store = _FakeStore(tickets)
+    ticket_service = _FakeTicketService(tickets)
+    transport = _FakeTelegramTransport()
+    app_module = _wire_storm(
+        monkeypatch, store, ticket_service, transport, _CreateNewGateway()
+    )
+
+    refs, _ = await _run_storm(app_module, _SUBJECTS)
+
+    assert len(set(refs)) == len(_SUBJECTS)
+    assert len(ticket_service.create_ticket_calls) == len(_SUBJECTS)
+
+
+@pytest.mark.asyncio
+async def test_a_retried_webhook_replays_its_decision_instead_of_rejudging(monkeypatch):
+    """Rung 0 on the judgment path.
+
+    n8n retries. The same ``dedup_key`` arriving twice must resolve to the
+    ticket it already resolved to, without a second model call, a second
+    ticket, or a second message -- the judgment path skipped this check
+    entirely, so a retry landing on a second "new" judgment filed a duplicate.
+    """
+    monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+
+    tickets: Dict[str, Dict[str, Any]] = {}
+    store = _FakeStore(tickets)
+    ticket_service = _FakeTicketService(tickets)
+    transport = _FakeTelegramTransport()
+    gateway = _CreateNewGateway()
+    app_module = _wire_storm(monkeypatch, store, ticket_service, transport, gateway)
+
+    subject = _SUBJECTS[0]
+    body = _body(subject)
+
+    first_ref, error, _, first_delivery = await _resolve_notify_ticket_full(body, _target())
+    assert error is None
+    await app_module._deliver_notification(body, _target(), first_ref, first_delivery)
+    calls_after_first = gateway.calls
+
+    # Same body, same dedup_key -- the retry.
+    retry_ref, error, extra, retry_delivery = await _resolve_notify_ticket_full(body, _target())
+    assert error is None
+    await app_module._deliver_notification(body, _target(), retry_ref, retry_delivery)
+
+    assert retry_ref == first_ref
+    assert (extra or {}).get("decided_by") == "replay"
+    assert gateway.calls == calls_after_first, "a replay must not re-ask the model"
+    assert len(ticket_service.create_ticket_calls) == 1
+    assert len(transport.send_calls) == 1
+    assert transport.edit_calls == []

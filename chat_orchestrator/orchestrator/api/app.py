@@ -2455,13 +2455,58 @@ async def _resolve_notify_ticket_llm_judgment(
     from orchestrator.services.ticketing.alert_delivery_policy import decide_alert_delivery
     from orchestrator.services.ticketing.alert_judgment_context import AlertJudgmentContextAssembler
     from orchestrator.services.ticketing.correlator import (
+        _is_urgent_severity_increase,
         collect_deterministic_findings,
+        find_deterministic_decision,
         to_legacy_correlation_decision,
     )
     from orchestrator.services.ticketing.notify_alert_delivery_repository import (
         NotifyAlertDeliveryRepository,
     )
     from shared.config import flag_registry as fr
+
+    # Rung 0, ahead of every cost this function is about to incur: a
+    # dedup_key that was already decided replays that decision. ``decide()``
+    # has always done this and this path never did, so a retried webhook
+    # re-judged an alert already on a ticket -- and whenever the second
+    # judgment came back "new", filed a second ticket for it and posted it
+    # again. Checking here also spares the candidate assembly, the context
+    # assembly and the model call that a replay makes redundant.
+    replayed = await correlator.replay_decision(body.dedup_key)
+    if replayed is not None and replayed.ticket_ref:
+        if not _is_urgent_severity_increase(alert.severity, replayed.ticket_severity):
+            logger.info(
+                "Notify: replayed dedup_key for {!r} -- suppressing duplicate delivery",
+                replayed.ticket_ref,
+            )
+            return (
+                replayed.ticket_ref,
+                None,
+                {
+                    "decision": replayed.decision,
+                    "correlated_with": replayed.ticket_ref,
+                    "confidence": replayed.confidence,
+                    "decided_by": replayed.decided_by,
+                },
+                NotificationDelivery(
+                    suppress=True,
+                    alert_context=alert_context,
+                    stored_ticket_severity=replayed.ticket_severity,
+                ),
+            )
+        # Urgent severity increase on a replay: escalate the ticket this
+        # dedup_key already names rather than filing a second one, exactly as
+        # the deterministic path does. Coercing to "amend" routes it into the
+        # ordinary amend execution -- decision.decision on a replay is still
+        # whatever the original, pre-replay decision was.
+        logger.info(
+            "Notify: replayed dedup_key for {!r} escalating on urgent severity increase",
+            replayed.ticket_ref,
+        )
+        return await _finalize_correlation_decision(
+            body, target, alert, alert_context, store, ticket_service,
+            dataclasses.replace(replayed, decision="amend", needs_root_cause_ticket=False),
+        )
 
     try:
         candidates = await correlator._assemble_candidates(target.grid_name, backend_override=backend_override)
@@ -2486,9 +2531,49 @@ async def _resolve_notify_ticket_llm_judgment(
     decision = to_legacy_correlation_decision(
         judgment, candidates, alert=alert, min_confidence=correlator._min_confidence
     )
+
+    # The deterministic ladder is not a second opinion from the model. It is an
+    # exact comparison of this alert's signature against the signatures the
+    # open candidates already carry, and it is the thing that collapses one
+    # fault across N devices onto one ticket. This path fed it to the model as
+    # evidence and then ignored it: a judgment that failed (timeout, transport
+    # error, malformed JSON, below the confidence floor) or asserted
+    # CREATE_NEW went straight to filing, and CREATE_NEW sets ``target=None``,
+    # which is the condition every guardrail in ``to_legacy_correlation_decision``
+    # is nested under -- so nothing checked it at all. N devices, N tickets, N
+    # full posts, each then accruing its own recurrence and closure messages.
+    #
+    # An exact signature match wins over the model in that situation. It does
+    # not weaken the fail-open promise, because a deterministic amend still
+    # speaks: the burst's first alert opens the ticket and posts in full, and
+    # each later device edits that message in place instead of announcing a
+    # ticket of its own. What it removes is duplicate tickets, not delivery.
+    if decision.decision == "new" and fr.get("ALERT_DETERMINISTIC_BACKSTOP_ENABLED"):
+        backstop = find_deterministic_decision(
+            candidates,
+            alert,
+            decided_by="signature_backstop",
+            reason_suffix=" (exact signature match overruling a judgment of 'new')",
+        )
+        if backstop is not None:
+            logger.info(
+                "Notify: signature backstop overruled a 'new' judgment for grid {!r} -- "
+                "amending {!r} instead of filing a second ticket "
+                "(judgment_valid={} error={})",
+                target.grid_name,
+                backstop.ticket_ref,
+                judgment.valid,
+                judgment.error_code or "-",
+            )
+            decision = backstop
+
     send_decision = decide_alert_delivery(
         judgment, context, latest_prior_alert=context.prior_alerts[0] if context.prior_alerts else None,
         enforcement_enabled=bool(fr.get("ALERT_LLM_SUPPRESSION_ENFORCED")),
+        # The model names a target only when it decides UPDATE/DUPLICATE, so
+        # without this the fail-open cap could never fire for a burst that
+        # correlated deterministically -- it would force-send every device.
+        correlated_ticket_ref=decision.ticket_ref or "",
     )
     try:
         await store.record_event(
