@@ -108,6 +108,7 @@ def _fail_open_is_capped(
     context: AlertJudgmentContext,
     force_reasons: list[str],
     now: datetime,
+    correlated_ticket_ref: str = "",
 ) -> bool:
     """Whether this forced send would only be repeating a doubt we just voiced.
 
@@ -119,6 +120,16 @@ def _fail_open_is_capped(
     Capping is refused wherever it could cause silence rather than brevity: any
     evidence-driven force, an unreadable delivery history, or an alert with no
     existing ticket to have already spoken about.
+
+    ``correlated_ticket_ref`` is that last clause's escape hatch, and the whole
+    reason a device storm used to speak once per device. The model names a
+    target ticket only when it decides UPDATE/DUPLICATE; a judgment that failed
+    outright, or one asserting CREATE_NEW, leaves ``target_ticket_ref`` empty,
+    the cap declines, and every alert in the burst posts in full. The caller
+    now resolves the alert's ticket deterministically (signature match) before
+    asking, so the burst's second and later alerts arrive here carrying the
+    same ref the first one already spoke about -- which is the fact the cap
+    needed all along and could not see.
     """
     if any(reason in _EVIDENCE_FORCES for reason in force_reasons):
         return False
@@ -126,6 +137,7 @@ def _fail_open_is_capped(
     if history is None or history.status in {ContextStatus.FAILED, ContextStatus.TIMED_OUT}:
         return False
     ticket_ref = (judgment.ticket.target_ticket_ref or "") if judgment is not None else ""
+    ticket_ref = ticket_ref or (correlated_ticket_ref or "")
     if not ticket_ref:
         return False
     return _already_said_recently(context, ticket_ref, now)
@@ -148,8 +160,15 @@ def decide_alert_delivery(
     latest_prior_alert: PriorAlertMessage | None = None,
     enforcement_enabled: bool,
     now: datetime | None = None,
+    correlated_ticket_ref: str = "",
 ) -> DeliveryDecision:
-    """Suppress only the explicitly healthy LLM verdict; every doubt sends."""
+    """Suppress only the explicitly healthy LLM verdict; every doubt sends.
+
+    ``correlated_ticket_ref`` is the ticket this alert actually landed on once
+    the caller has resolved it, which is not always the one the model named --
+    see ``_fail_open_is_capped``. Optional so an existing caller keeps working;
+    omitting it only forgoes the cap.
+    """
     if not enforcement_enabled:
         return DeliveryDecision(send=True, reason="shadow_mode", forced_by=["shadow_mode"])
 
@@ -197,7 +216,9 @@ def decide_alert_delivery(
                 force_reasons.append("all_phase_zero_reminder")
 
     if force_reasons:
-        if _fail_open_is_capped(judgment, context, force_reasons, moment):
+        if _fail_open_is_capped(
+            judgment, context, force_reasons, moment, correlated_ticket_ref
+        ):
             # forced_by is kept: the audit should still show what would have
             # sent this, so a capped storm is greppable rather than invisible.
             return DeliveryDecision(send=False, reason="fail_open_capped", forced_by=force_reasons)

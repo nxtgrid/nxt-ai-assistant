@@ -623,6 +623,19 @@ _FLAGS: List[Flag] = [
         depends_on="ALERT_LLM_JUDGMENT_ENABLED",
     ),
     _b(
+        "ALERT_DETERMINISTIC_BACKSTOP_ENABLED",
+        True,
+        "Let an exact alert-signature match overrule an LLM judgment of 'file a new "
+        "ticket'. On (default): when the model fails, times out, or asserts a new "
+        "issue while an open ticket already carries this alert's exact signature, the "
+        "signature wins and the alert amends that ticket. Off: the judgment is final, "
+        "and one fault across N devices files N tickets whenever the model does not "
+        "group them itself.",
+        group="ticketing",
+        label="Let an exact signature match overrule an LLM 'new ticket'",
+        depends_on="ALERT_LLM_JUDGMENT_ENABLED",
+    ),
+    _b(
         "ALERT_CASCADE_MERGE_ENABLED",
         False,
         "Merge a cascading equipment failure (e.g. battery/BMS communication loss "
