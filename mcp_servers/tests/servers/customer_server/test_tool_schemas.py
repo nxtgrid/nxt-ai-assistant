@@ -51,7 +51,7 @@ EXPECTED_MUTATING_VISIBILITY = {
 class TestSchemaIntegrity:
     def test_expected_tool_count(self):
         """Pins the count so a truncated or partially-merged file fails loudly."""
-        assert len(TOOL_SCHEMAS) == 22
+        assert len(TOOL_SCHEMAS) == 23
 
     def test_names_are_unique(self):
         names = [s["name"] for s in TOOL_SCHEMAS]

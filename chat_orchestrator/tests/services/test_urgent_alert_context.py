@@ -345,6 +345,11 @@ async def test_live_telemetry_returns_output_and_battery_voltage_together(monkey
         "l3_voltage_v": 230.0,
         "observed_at": telemetry["observed_at"],
         "fresh": True,
+        # FakeVRMPlatform doesn't implement get_historical_power/get_active_alarms/
+        # get_historical_alarms -- the production/error fetch fails soft to empty.
+        "power_history_30min": [],
+        "active_alarms": [],
+        "recent_alarms_30min": [],
     }
 
 
@@ -482,6 +487,11 @@ async def test_live_telemetry_battery_voltage_survives_a_stale_inverter_reading(
         "l3_voltage_v": None,
         "observed_at": telemetry["observed_at"],
         "fresh": False,
+        # FakeVRMPlatform doesn't implement get_historical_power/get_active_alarms/
+        # get_historical_alarms -- the production/error fetch fails soft to empty.
+        "power_history_30min": [],
+        "active_alarms": [],
+        "recent_alarms_30min": [],
     }
 
 
@@ -525,6 +535,11 @@ async def test_live_telemetry_output_survives_a_failed_battery_fetch(monkeypatch
         "l3_voltage_v": 230.0,
         "observed_at": telemetry["observed_at"],
         "fresh": True,
+        # FakeVRMPlatform doesn't implement get_historical_power/get_active_alarms/
+        # get_historical_alarms -- the production/error fetch fails soft to empty.
+        "power_history_30min": [],
+        "active_alarms": [],
+        "recent_alarms_30min": [],
     }
 
 

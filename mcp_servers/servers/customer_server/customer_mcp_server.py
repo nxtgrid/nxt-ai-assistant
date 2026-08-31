@@ -480,6 +480,29 @@ async def _tool_customer_get_all_grids_status(arguments: Dict[str, Any]) -> List
     return list(compose_json_response(result))
 
 
+@registry.tool(
+    "get_recent_production_errors_and_power",
+    _SCHEMAS_BY_NAME["get_recent_production_errors_and_power"],
+)
+async def _tool_get_recent_production_errors_and_power(
+    arguments: Dict[str, Any],
+) -> List[types.TextContent]:
+    grid_name = arguments.get("grid_name")
+    if not grid_name:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: grid_name is required",
+            )
+        ]
+    minutes = int(arguments.get("minutes") or 30)
+    result = await customer_client.get_recent_production_errors_and_power(
+        grid_name=grid_name,
+        minutes=minutes,
+    )
+    return list(compose_json_response(result))
+
+
 @registry.tool("customer_get_last_gtr_summary", _SCHEMAS_BY_NAME["customer_get_last_gtr_summary"])
 async def _tool_customer_get_last_gtr_summary(arguments: Dict[str, Any]) -> List[types.TextContent]:
     grid_name = arguments.get("grid_name")

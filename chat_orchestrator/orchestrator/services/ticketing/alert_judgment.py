@@ -123,9 +123,23 @@ class AlertJudgmentResult(_StrictModel):
     raw: str | None = None
 
 
-def _invalid(raw: str | None, code: str, detail: str) -> AlertJudgmentResult:
+def _invalid(
+    raw: str | None, code: str, detail: str, judgment: AlertJudgment | None = None
+) -> AlertJudgmentResult:
+    """Build a failed result. ``judgment`` carries the already-parsed
+    ``AlertJudgment`` through a guardrail rejection, when the caller has one --
+    every guardrail below `AlertJudgment.model_validate` succeeding checks
+    internal consistency of the `ticket`/`notification` sections only, never
+    the content of `grid_impact`/`likely_user_action`. Discarding a
+    well-formed judgment wholesale on a ticket-only guardrail failure used to
+    also throw away a perfectly good root-cause/action summary that has
+    nothing to do with the failure -- callers that only need those two
+    fields (e.g. rendering an operator-facing line) should still get them
+    even when `valid` is False and the ticket decision itself is untrusted.
+    """
     return AlertJudgmentResult(
         valid=False,
+        judgment=judgment,
         error_code=code,
         error_detail=detail,
         raw=raw,
@@ -169,9 +183,15 @@ def parse_alert_judgment(
     except ValidationError as exc:
         return _invalid(raw, "invalid_schema", str(exc))
 
+    # Every guardrail from here down checks internal consistency of the
+    # `ticket`/`notification` sections only -- none of them re-examine
+    # `grid_impact`/`likely_user_action` content, so a rejection here still
+    # passes the already-parsed `judgment` through (see `_invalid`).
     impact = judgment.grid_impact
     if impact.material_status_change and not judgment.notification.send_telegram:
-        return _invalid(raw, "inconsistent_notification", "material change requires delivery")
+        return _invalid(
+            raw, "inconsistent_notification", "material change requires delivery", judgment
+        )
 
     known_statuses = {SiteStatus.ON, SiteStatus.ISOLATED, SiteStatus.OFF}
     if {
@@ -184,28 +204,41 @@ def parse_alert_judgment(
                 raw,
                 "inconsistent_site_status",
                 "known site-status transition disagrees with materiality",
+                judgment,
             )
 
     ticket = judgment.ticket
     target_ref = ticket.target_ticket_ref
     if ticket.action is TicketAction.CREATE_NEW:
         if target_ref is not None:
-            return _invalid(raw, "unexpected_ticket_ref", "create_new cannot target an existing ticket")
+            return _invalid(
+                raw, "unexpected_ticket_ref", "create_new cannot target an existing ticket", judgment
+            )
         if ticket.change_title or ticket.change_description:
-            return _invalid(raw, "invalid_ticket_action", "create_new cannot amend an existing ticket")
+            return _invalid(
+                raw, "invalid_ticket_action", "create_new cannot amend an existing ticket", judgment
+            )
     else:
         if not target_ref or target_ref not in candidate_refs:
-            return _invalid(raw, "unknown_ticket_ref", "ticket target is not an offered candidate")
+            return _invalid(
+                raw, "unknown_ticket_ref", "ticket target is not an offered candidate", judgment
+            )
 
     if ticket.action is TicketAction.RECORD_OCCURRENCE and (
         ticket.change_title or ticket.change_description
     ):
-        return _invalid(raw, "invalid_ticket_action", "record_occurrence cannot amend a ticket")
+        return _invalid(
+            raw, "invalid_ticket_action", "record_occurrence cannot amend a ticket", judgment
+        )
 
     if ticket.change_title and not _has_text(ticket.proposed_title):
-        return _invalid(raw, "invalid_ticket_title", "title change requires a proposed title")
+        return _invalid(
+            raw, "invalid_ticket_title", "title change requires a proposed title", judgment
+        )
     if ticket.change_description and not _has_text(ticket.description_addition):
-        return _invalid(raw, "invalid_ticket_description", "description change requires an addition")
+        return _invalid(
+            raw, "invalid_ticket_description", "description change requires an addition", judgment
+        )
 
     # Every action but create_new binds this alert to an existing ticket, and
     # binding is the decision that can go wrong silently -- a record_occurrence
@@ -213,6 +246,11 @@ def parse_alert_judgment(
     # floor used to cover update_existing only, which left the quieter of the
     # two mutations reachable at any confidence at all.
     if ticket.action is not TicketAction.CREATE_NEW and ticket.confidence < confidence_floor:
-        return _invalid(raw, "low_ticket_confidence", "existing-ticket decision confidence is too low")
+        return _invalid(
+            raw,
+            "low_ticket_confidence",
+            "existing-ticket decision confidence is too low",
+            judgment,
+        )
 
     return AlertJudgmentResult(valid=True, judgment=judgment, raw=raw)
