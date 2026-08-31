@@ -184,10 +184,11 @@ async def _recent_state_flags(grid_id: int) -> tuple[Optional[bool], Optional[bo
 
 class ClientGridStatusMixin:
     async def get_live_telemetry(self, grid_name: str) -> Dict[str, Any]:
-        """Return fresh VRM inverter output (kW) and current battery voltage
-        (V) for one grid, resolving the site once and fetching both widgets
-        in parallel. Each field is ``None`` independently of the other when
-        its own reading is unavailable -- see ``_fresh_inverter_output_kw``/
+        """Return fresh VRM inverter output (kW), current battery voltage (V),
+        and recent power/error history for one grid.
+
+        Each field is ``None`` independently of the other when its own reading
+        is unavailable -- see ``_fresh_inverter_output_kw``/
         ``_current_battery_voltage_v`` for why only the inverter field has a
         staleness rule.
 
@@ -198,6 +199,9 @@ class ClientGridStatusMixin:
         The ``grid_status``/``site_status`` it returns are the same
         ``classify_grid_status`` verdict `/grids` renders, from the same
         inputs -- see ``_recent_state_flags`` for the pair that used to differ.
+
+        Includes recent power trend (past 30min per phase) and active/recent
+        alarms for LLM alert correlation context.
         """
         try:
             auth_service = get_auth_service()
@@ -233,10 +237,13 @@ class ClientGridStatusMixin:
             site_id = str(grid_row["generation_external_site_id"])
             vrm_platform = VRMPlatform()
             await vrm_platform.initialize()
-            voltage, battery, state_flags = await asyncio.gather(
+
+            # Fetch live telemetry and recent power/error data in parallel
+            voltage, battery, state_flags, prod_data = await asyncio.gather(
                 vrm_platform.get_current_inverter_voltage(site_id),
                 vrm_platform.get_current_battery_status(site_id),
                 _recent_state_flags(grid_row["id"]),
+                self.get_recent_production_errors_and_power(grid_name),
                 return_exceptions=True,
             )
             hps_on, fs_on = state_flags if isinstance(state_flags, tuple) else (None, None)
@@ -271,6 +278,16 @@ class ClientGridStatusMixin:
                 value = getattr(voltage, phase, None) if fresh else None
                 return float(value) if value is not None else None
 
+            # Extract production data (power history and errors)
+            prod_data_dict = (
+                prod_data if isinstance(prod_data, dict) else {
+                    "power_history": [],
+                    "active_alarms": [],
+                    "recent_alarms": [],
+                    "unavailable_reason": "fetch_failed" if isinstance(prod_data, Exception) else "",
+                }
+            )
+
             return {
                 # "" when the reading is usable. Otherwise the specific cause,
                 # so a consumer can tell a gateway that has stopped reporting
@@ -287,6 +304,9 @@ class ClientGridStatusMixin:
                 "l3_voltage_v": fresh_voltage("l3_voltage_v"),
                 "observed_at": data_timestamp.isoformat() if data_timestamp else None,
                 "fresh": fresh,
+                "power_history_30min": prod_data_dict.get("power_history", []),
+                "active_alarms": prod_data_dict.get("active_alarms", []),
+                "recent_alarms_30min": prod_data_dict.get("recent_alarms", []),
             }
         except Exception:
             logger.warning("Live VRM telemetry fetch failed for %s", grid_name, exc_info=True)
@@ -1657,6 +1677,125 @@ class ClientGridStatusMixin:
         except Exception as e:
             logger.error(f"Error getting all grids status: {e}")
             return {"error": f"Failed to get all grids status: {str(e)}"}
+
+    async def get_recent_production_errors_and_power(
+        self, grid_name: str, minutes: int = 30
+    ) -> Dict[str, Any]:
+        """Get recent power data (per phase) and active/recent alarms for alert context.
+
+        Fetches the past N minutes of inverter power data per phase and recent VE.Bus
+        errors/alarms, useful for LLM judgment context when correlating alerts.
+
+        Args:
+            grid_name: Grid name
+            minutes: How many minutes back to fetch (default 30)
+
+        Returns:
+            Dict with:
+            - power_history: List of [{timestamp, output_kw, l1_power_w, l2_power_w, l3_power_w}]
+            - active_alarms: List of current alarms
+            - recent_alarms: List of alarms from the time window
+        """
+        try:
+            auth_service = get_auth_service()
+            pool = await auth_service._get_db_pool()
+            async with pool.acquire() as conn:
+                grid_row = await conn.fetchrow(
+                    "SELECT id, generation_external_site_id FROM grids WHERE LOWER(name) = LOWER($1) AND deleted_at IS NULL LIMIT 1",
+                    grid_name,
+                )
+            if not grid_row or not grid_row.get("generation_external_site_id"):
+                return {
+                    "power_history": [],
+                    "active_alarms": [],
+                    "recent_alarms": [],
+                    "unavailable_reason": "grid_not_found",
+                }
+
+            site_id = str(grid_row["generation_external_site_id"])
+            vrm_platform = VRMPlatform()
+            await vrm_platform.initialize()
+
+            now = datetime.now(timezone.utc)
+            start_time = now - timedelta(minutes=minutes)
+
+            # Fetch power history and alarms in parallel
+            power_task = vrm_platform.get_historical_power(
+                site_id=site_id,
+                start_time=start_time,
+                end_time=now,
+                metrics=["grid_consumption"],  # o1/o2/o3 per phase + total
+                aggregation=None,  # Use default/mean aggregation
+            )
+            active_alarms_task = vrm_platform.get_active_alarms(site_id)
+            recent_alarms_task = vrm_platform.get_historical_alarms(
+                site_id=site_id,
+                start_time=start_time,
+                end_time=now,
+            )
+
+            results = await asyncio.gather(
+                power_task, active_alarms_task, recent_alarms_task, return_exceptions=True
+            )
+
+            power_history = results[0] if not isinstance(results[0], Exception) else []
+            active_alarms = results[1] if not isinstance(results[1], Exception) else []
+            recent_alarms = results[2] if not isinstance(results[2], Exception) else []
+
+            # Normalize power history to include phase breakdowns
+            normalized_power = []
+            for point in power_history:
+                if hasattr(point, "to_dict"):
+                    data = point.to_dict()
+                else:
+                    data = point if isinstance(point, dict) else {}
+
+                normalized_power.append(
+                    {
+                        "timestamp": data.get("timestamp"),
+                        "output_kw": data.get("total_power_kw") or data.get("output_kw"),
+                        "l1_power_w": data.get("l1_power_w"),
+                        "l2_power_w": data.get("l2_power_w"),
+                        "l3_power_w": data.get("l3_power_w"),
+                    }
+                )
+
+            # Normalize alarms
+            normalized_active = []
+            for alarm in active_alarms:
+                if hasattr(alarm, "to_dict"):
+                    alarm_dict = alarm.to_dict()
+                elif isinstance(alarm, dict):
+                    alarm_dict = alarm
+                else:
+                    alarm_dict = {
+                        "code": getattr(alarm, "code", ""),
+                        "description": getattr(alarm, "description", ""),
+                        "severity": getattr(alarm, "severity", ""),
+                        "timestamp": getattr(alarm, "timestamp", None),
+                    }
+                normalized_active.append(alarm_dict)
+
+            normalized_recent = (
+                [a if isinstance(a, dict) else a.to_dict() for a in recent_alarms]
+                if isinstance(recent_alarms, list)
+                else []
+            )
+
+            return {
+                "power_history": normalized_power[-12:],  # Last 12 points (30min @ 2.5min intervals)
+                "active_alarms": normalized_active,
+                "recent_alarms": normalized_recent,
+                "unavailable_reason": "",
+            }
+        except Exception as e:
+            logger.warning(f"Failed to get production errors/power for {grid_name}: {e}", exc_info=True)
+            return {
+                "power_history": [],
+                "active_alarms": [],
+                "recent_alarms": [],
+                "unavailable_reason": "fetch_failed",
+            }
 
     async def close(self):
         """Close HTTP session."""

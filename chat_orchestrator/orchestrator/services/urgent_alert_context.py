@@ -107,6 +107,27 @@ class UrgentAlertContext:
         battery_voltage_v = telemetry.get("battery_voltage_v")
         if battery_voltage_v is not None:
             facts["battery_voltage_v"] = battery_voltage_v
+
+        # Add per-phase voltages for context
+        for phase in ["l1_voltage_v", "l2_voltage_v", "l3_voltage_v"]:
+            value = telemetry.get(phase)
+            if value is not None:
+                facts[phase] = value
+
+        # Add recent power history (past 30 min) for trend context
+        power_history = telemetry.get("power_history_30min", [])
+        if power_history:
+            facts["power_trend_past_30min"] = power_history
+
+        # Add active and recent alarms for error context
+        active_alarms = telemetry.get("active_alarms", [])
+        if active_alarms:
+            facts["active_ve_bus_errors"] = active_alarms
+
+        recent_alarms = telemetry.get("recent_alarms_30min", [])
+        if recent_alarms:
+            facts["recent_ve_bus_errors_30min"] = recent_alarms
+
         return facts
 
     async def telegram_output_line(self) -> str:

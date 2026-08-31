@@ -114,6 +114,22 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'meter_information',
                  'output), use customer_get_grid_status instead.',
   'inputSchema': {'type': 'object', 'properties': {}},
   'visible_to_customer': True},
+ {'name': 'get_recent_production_errors_and_power',
+  'description': '[READ-ONLY] Get recent per-phase power history and VE.Bus errors/alarms for a '
+                 'grid, covering the window immediately before a fault. Returns power_history '
+                 '(timestamped per-phase kW/W readings), active_alarms (currently active VE.Bus '
+                 'errors/warnings), and recent_alarms (errors that fired within the window). Use '
+                 'this to build alert-correlation context — e.g. was one phase already dropping '
+                 'before an inverter tripped, or was a VE.Bus alarm active leading up to a grid '
+                 'outage — rather than only the instantaneous reading at alert time.',
+  'inputSchema': {'type': 'object',
+                  'properties': {'grid_name': {'type': 'string',
+                                               'description': 'Name of the grid (required)'},
+                                 'minutes': {'type': 'integer',
+                                            'description': 'How many minutes of history to look '
+                                                           'back (default 30)'}},
+                  'required': ['grid_name']},
+  'visible_to_customer': False},
  {'name': 'customer_get_last_gtr_summary',
   'description': '[READ-ONLY] Get the last Grid Technical Report (GTR) summary for a specific '
                  'grid. Returns KPI values, commentary, and pending issues from the most recent '

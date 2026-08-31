@@ -1777,6 +1777,8 @@ def _alert_reading_lines(delivery: "Optional[NotificationDelivery]") -> List[str
     site is not, so it is assembled once here.
 
     Each line is omitted when its value is absent rather than rendered blank.
+    Lines are shown independently: root cause and suggested action are
+    displayed even if only one is available.
     """
     from shared.utils.telegram_markdown import escape_markdown
 
@@ -1785,8 +1787,10 @@ def _alert_reading_lines(delivery: "Optional[NotificationDelivery]") -> List[str
     lines: List[str] = []
     if delivery.site_status:
         lines.append(_render_alert_site_status(delivery.site_status))
+    # Show root cause if available, regardless of suggested action
     if delivery.root_cause:
         lines.append(f"🧭 Likely cause: {escape_markdown(delivery.root_cause)}")
+    # Show suggested action if available, regardless of root cause
     if delivery.suggested_action:
         lines.append(f"🛠 Suggested action: {escape_markdown(delivery.suggested_action)}")
     return lines

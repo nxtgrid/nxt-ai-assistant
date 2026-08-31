@@ -1,7 +1,7 @@
 {
   "$schema": "tool_definitions_schema.json",
   "version": "1.0.0",
-  "exported_at": "2026-08-26T16:47:20.608817Z",
+  "exported_at": "2026-08-31T13:34:05.877539Z",
   "tools": {
     "equipment_diagnostics": [
       {
@@ -860,6 +860,27 @@
           "properties": {}
         },
         "visible_to_customer": true
+      },
+      {
+        "name": "get_recent_production_errors_and_power",
+        "description": "[READ-ONLY] Get recent per-phase power history and VE.Bus errors/alarms for a grid, covering the window immediately before a fault. Returns power_history (timestamped per-phase kW/W readings), active_alarms (currently active VE.Bus errors/warnings), and recent_alarms (errors that fired within the window). Use this to build alert-correlation context — e.g. was one phase already dropping before an inverter tripped, or was a VE.Bus alarm active leading up to a grid outage — rather than only the instantaneous reading at alert time.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "grid_name": {
+              "type": "string",
+              "description": "Name of the grid (required)"
+            },
+            "minutes": {
+              "type": "integer",
+              "description": "How many minutes of history to look back (default 30)"
+            }
+          },
+          "required": [
+            "grid_name"
+          ]
+        },
+        "visible_to_customer": false
       },
       {
         "name": "customer_get_last_gtr_summary",

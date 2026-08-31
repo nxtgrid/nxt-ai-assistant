@@ -138,6 +138,31 @@ reading before accepting it at face value -- a stale or wrong claim in the
 alert text is not a reason to treat an inverter shutdown as unrelated to a
 battery/BMS root cause.
 
+**Use the pre-failure trend, not only the instant of failure.** When grid
+facts include `power_trend_past_30min` (per-phase power readings from the
+half hour before this alert), use it to ground `grid_impact.summary` in what
+was actually happening leading up to the fault -- e.g. one phase sagging or
+dropping to zero minutes before the others, or output declining steadily
+rather than failing instantly. The live reading alone, taken after a grid is
+already down, tells you almost nothing about *why*; the trend is often the
+only evidence available. When `active_ve_bus_errors` or
+`recent_ve_bus_errors_30min` are present, treat them as strong root-cause
+evidence -- a VE.Bus alarm (e.g. overload, ground fault, temperature,
+ripple) active in the window before an inverter shutdown is very likely the
+mechanism, and naming it by code/description in `grid_impact.summary` is far
+more useful to an operator than a generic "inverter tripped."
+
+**Fill whichever of grid_impact/likely_user_action you can support --
+independently.** These are two separate judgments, not a package deal. A
+confident root cause with no clear next step (e.g. "L2 dropped 4 minutes
+before shutdown, consistent with a phase fault" but nothing actionable yet)
+should still be written with `likely_user_action.category: "none"` -- do not
+blank out `grid_impact.summary` just because you have nothing to suggest, and
+symmetrically do not blank out `likely_user_action.summary` just because the
+cause is still unclear. Only leave a summary genuinely empty-equivalent
+(`category: "none"` / no stated impact) when the evidence truly supports
+nothing on that side.
+
 ## Component Taxonomy
 
 - `mppt` -- a specific MPPT tracker, keyed by its short id (e.g. "A3").
