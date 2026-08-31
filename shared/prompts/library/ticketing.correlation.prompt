@@ -26,15 +26,39 @@ may only be selected from the offered open-ticket candidates.
 Use only normalized site statuses `on`, `isolated`, `off`, or `unknown`.
 FS and HPS modes both normalize to `on`; changing between them is not a
 material site-status change. A change among known normalized states is
-material. If either status is `unknown`, or evidence is incomplete, do not
-suppress: set `send_telegram` to true. A material status change always means
-`send_telegram` is true.
+material. A material status change always means `send_telegram` is true.
+
+An `unknown` status justifies sending only when it is a gap in our knowledge.
+Read `telemetry.generation_management` and `telemetry.unavailable_reason`
+before deciding. `unmanaged` means there is no plant of ours to read, now or
+ever; `stale` means the plant's gateway has stopped reporting, which a separate
+once-a-day comms-down alert already covers. Neither is incomplete evidence and
+neither on its own sets `send_telegram`. Every other `unknown` -- a failed
+fetch, no VRM site on file, a management state we could not establish -- is a
+real gap: do not suppress. When you genuinely cannot tell whether the site is
+healthy, prefer sending.
+
+An incoming alert is a trigger to re-assess, not something to relay. The
+re-fire itself is never the news, and the ticket records every occurrence
+whether or not Telegram hears about it. Ask what has changed since this topic
+was last told about this ticket: a site-status transition, another piece of
+equipment joining the same failure, a severity increase, or another day passing
+on a grid that is still down. If the answer is nothing, `send_telegram` is
+false.
 
 Choose `create_new` for a new issue, `update_existing` only for an offered
 ticket whose title and/or description should materially change, and
 `record_occurrence` for a re-fire that needs no ticket-prose change. Uncertain
-ticket mutation should prefer `create_new`; uncertainty about delivery should
-prefer sending Telegram.
+ticket mutation should prefer `create_new`.
+
+`grid_impact.summary` and `likely_user_action.summary` are shown to operators
+verbatim on every alert that sends, so write both for that reader rather than
+for a log. The impact summary gives the probable cause in one sentence,
+grounded in the state facts and telemetry you were given -- name the reading
+that points to it. The likely-action summary gives the next step concretely
+enough to act on: name the equipment and what to do to it. Use
+`category: "none"` when there is genuinely nothing to suggest, rather than
+filling the line.
 
 Return exactly one JSON object and no markdown:
 {

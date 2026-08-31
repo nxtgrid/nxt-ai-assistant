@@ -7,21 +7,23 @@ from datetime import datetime, timedelta, timezone
 
 from shared.grid_status import SiteStatus
 
-from .alert_judgment import AlertJudgment, AlertJudgmentResult
+from .alert_judgment import AlertJudgment, AlertJudgmentResult, TicketAction
 from .alert_judgment_context import AlertJudgmentContext, AlertTelemetry, ContextStatus
 from .notify_alert_delivery_repository import PriorAlertMessage
 
 OUTAGE_REMINDER_INTERVAL = timedelta(hours=8)
 FAIL_OPEN_REMINDER_INTERVAL = timedelta(hours=8)
 
-# Forces that carry evidence rather than doubt. These are never capped: the LLM
-# asking for delivery, the grid changing state, and the all-phase-zero reminder
-# are all positive findings, and the last already has its own clock. An
-# unparseable prior timestamp is listed here too -- if we cannot read the
-# history we cannot dedupe against it, so it must not quiet anything.
+# Forces that carry evidence rather than doubt. These are never capped: the grid
+# changing state and the all-phase-zero reminder are positive findings, and the
+# last already has its own clock. An unparseable prior timestamp is listed here
+# too -- if we cannot read the history we cannot dedupe against it, so it must
+# not quiet anything.
+#
+# ``llm_requested_delivery`` used to sit here unconditionally; it is now
+# conditional -- see ``_evidence_forces``.
 _EVIDENCE_FORCES = frozenset(
     {
-        "llm_requested_delivery",
         "material_status_change",
         "all_phase_zero_reminder",
         "prior_alert_timestamp_invalid",
@@ -103,6 +105,32 @@ def _already_said_recently(
     return False
 
 
+def _evidence_forces(judgment: "AlertJudgment | None") -> frozenset[str]:
+    """Which forces outrank the cap for *this* judgment.
+
+    ``llm_requested_delivery`` is the conditional one, and that is the whole
+    point. The correlation prompt tells the model to ask for delivery whenever
+    the site status is unknown -- and for a plant whose generation we do not
+    manage, unknown is not a transient doubt but a permanent fact about the
+    site, the very case ``_status_unknown_is_explained`` already stops the
+    policy itself forcing on. Treating the model's request as evidence
+    regardless handed that same unknown a standing exemption from the cap, so
+    an unmanaged site's re-firing alert reached its topic on every scheduled
+    run for as long as its ticket stayed open: the 2026-08-28 flood, restored
+    through the one door the cap left open.
+
+    ``record_occurrence`` is the model saying, in its own vocabulary, that
+    nothing about the ticket changed. A send request resting on that is a doubt
+    like any other, and is capped like one -- quieter, never silent, since the
+    cap only ever applies when this exact ticket already reached the topic
+    inside ``FAIL_OPEN_REMINDER_INTERVAL``. Any other action means the ticket
+    itself is about to change, which the topic genuinely has not heard.
+    """
+    if judgment is not None and judgment.ticket.action is not TicketAction.RECORD_OCCURRENCE:
+        return _EVIDENCE_FORCES | {"llm_requested_delivery"}
+    return _EVIDENCE_FORCES
+
+
 def _fail_open_is_capped(
     judgment: "AlertJudgment | None",
     context: AlertJudgmentContext,
@@ -131,7 +159,7 @@ def _fail_open_is_capped(
     same ref the first one already spoke about -- which is the fact the cap
     needed all along and could not see.
     """
-    if any(reason in _EVIDENCE_FORCES for reason in force_reasons):
+    if any(reason in _evidence_forces(judgment) for reason in force_reasons):
         return False
     history = context.availability.get("prior_alerts")
     if history is None or history.status in {ContextStatus.FAILED, ContextStatus.TIMED_OUT}:

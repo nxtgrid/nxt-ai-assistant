@@ -900,6 +900,68 @@ class TestJudgmentGuardrails:
         assert decision.ticket_ref is None
 
 
+class TestJudgmentCarriesTheAffectedComponent:
+    """``affected_key`` was hardcoded to ``None`` on every return path of
+    ``to_legacy_correlation_decision``.
+
+    It is the only input ``apply_amendment`` merges into a ticket's
+    ``affected_keys`` list, and this adapter is what live traffic runs
+    through, so on the live path a ticket's affected-equipment list was
+    seeded once and never grew again. Three things downstream read that
+    list, and all three were reading a frozen value: the aggregate summary
+    ("N MPPTs in <grid> affected"), ``component_added`` (which is the only
+    thing that makes an amend speak at all), and the affected-component
+    count the notification is supposed to report instead of an occurrence
+    total.
+
+    The deterministic path never had this gap -- ``find_deterministic_decision``
+    fills ``affected_key`` from the alert's own facts, which is the same
+    source used here.
+    """
+
+    @staticmethod
+    def _judgment(**ticket_overrides) -> AlertJudgmentResult:
+        return TestJudgmentGuardrails._judgment(**ticket_overrides)
+
+    def test_an_amend_carries_the_alerts_own_component(self):
+        alert = _mppt_alert()
+        decision = to_legacy_correlation_decision(
+            self._judgment(action="update_existing"),
+            [_candidate(affected_keys=[{"kind": "mppt", "key": "A5", "label": "MPPT A5"}])],
+            alert=alert,
+            min_confidence=0.75,
+        )
+
+        assert decision.decision == "amend"
+        assert decision.affected_key == {
+            "kind": alert.component_kind,
+            "key": alert.component_key,
+            "label": alert.component_label,
+        }
+
+    def test_a_grid_level_alert_still_carries_no_component(self):
+        """Nothing to name, and a ("", "") entry would merge a nameless row --
+        the guard ``apply_amendment`` already carries for exactly this."""
+        alert = AlertFacts(subject="! Warning: Grid is off !")
+        decision = to_legacy_correlation_decision(
+            self._judgment(action="update_existing"),
+            [_candidate()],
+            alert=alert,
+            min_confidence=0.75,
+        )
+
+        assert decision.affected_key is None
+
+    def test_the_adapter_still_works_without_alert_facts(self):
+        """``alert`` is optional for an existing caller -- omitting it forgoes
+        the component, it does not raise."""
+        decision = to_legacy_correlation_decision(
+            self._judgment(action="update_existing"), [_candidate()]
+        )
+
+        assert decision.affected_key is None
+
+
 class TestVersionedPolicy:
     @pytest.mark.asyncio
     async def test_injected_policy_limits_the_candidates_sent_to_the_model(self, monkeypatch):
