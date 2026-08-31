@@ -2302,7 +2302,7 @@ class TestDeliverNotificationDelivery:
         monkeypatch.setenv("APP_URL", "https://anansi.test")
         body = _notify_body()
         delivery = NotificationDelivery(
-            text_override="still firing — 10 occurrences",
+            text_override="still firing: ! Warning: MPPT A7 in Kudi seems to perform lower !",
             reply_to_message_id=555,
             ticket=NotificationTicket(ref="TKT-000042", backend="internal"),
         )
@@ -2312,9 +2312,71 @@ class TestDeliverNotificationDelivery:
         assert len(fake_telegram_send.calls) == 1
         assert fake_telegram_send.calls[0]["text"] == (
             "↻ [TKT-000042](https://anansi.test/tickets/TKT-000042) — "
-            "still firing — 10 occurrences"
+            "still firing: ! Warning: MPPT A7 in Kudi seems to perform lower !"
         )
         assert fake_telegram_send.calls[0]["reply_to_message_id"] == 555
+
+    async def test_every_ticketed_message_carries_the_same_reading_of_the_site(
+        self, fake_telegram_send, monkeypatch
+    ):
+        """Status, likely cause and suggested action, in that order, on a
+        recurrence line as much as on a fresh alert card.
+
+        These four renderers -- new ticket, amend, forced recurrence,
+        escalation -- used to disagree about how much an operator was told,
+        so what you learned from a message depended on which branch produced
+        it. The judgment answers "what is probably behind this" and "what
+        would someone do about it" on every alert; both were being discarded.
+        """
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        monkeypatch.setenv("APP_URL", "https://anansi.test")
+        body = _notify_body()
+        delivery = NotificationDelivery(
+            text_override="still firing: ! Warning: MPPT A7 in Kudi seems to perform lower !",
+            reply_to_message_id=555,
+            ticket=NotificationTicket(ref="TKT-000042", backend="internal"),
+            site_status="off",
+            root_cause="Inverter has been in fault since 04:10; every MPPT below it reads zero.",
+            suggested_action="Restart the inverter remotely before dispatching anyone.",
+        )
+
+        await _deliver_notification(body, _target(), "TKT-000042", delivery)
+
+        assert fake_telegram_send.calls[0]["text"] == (
+            "↻ [TKT-000042](https://anansi.test/tickets/TKT-000042) — "
+            "still firing: ! Warning: MPPT A7 in Kudi seems to perform lower !\n"
+            "🔴 Site status: Off\n"
+            "🧭 Likely cause: Inverter has been in fault since 04:10; "
+            "every MPPT below it reads zero.\n"
+            "🛠 Suggested action: Restart the inverter remotely before dispatching anyone."
+        )
+
+    async def test_an_absent_reading_is_omitted_rather_than_rendered_blank(
+        self, fake_telegram_send, monkeypatch
+    ):
+        """The judgment can decline to suggest anything (``category: none``),
+        and a non-"auto" path has no judgment at all. Neither should leave a
+        labelled empty line behind."""
+        from orchestrator.api.app import NotificationDelivery, _deliver_notification
+
+        monkeypatch.setenv("APP_URL", "https://anansi.test")
+        body = _notify_body()
+        delivery = NotificationDelivery(
+            text_override="still firing: ! Warning: MPPT A7 in Kudi seems to perform lower !",
+            ticket=NotificationTicket(ref="TKT-000042", backend="internal"),
+            site_status="on",
+            root_cause="One MPPT underperforming; the rest of the array is nominal.",
+        )
+
+        await _deliver_notification(body, _target(), "TKT-000042", delivery)
+
+        text = fake_telegram_send.calls[0]["text"]
+        assert text.endswith(
+            "🟢 Site status: On\n"
+            "🧭 Likely cause: One MPPT underperforming; the rest of the array is nominal."
+        )
+        assert "Suggested action" not in text
 
     async def test_escalation_delivery_is_top_level_not_a_reply(self, fake_telegram_send):
         from orchestrator.api.app import NotificationDelivery, _deliver_notification
@@ -2540,10 +2602,15 @@ def test_amend_delivery_is_silent_when_no_component_was_added():
         affected_keys_count=16,
         occurrence_count=42,
         component_added=False,
+        rendered_summary="16 MPPTs in Kudi affected (A3, A5, A6, A7, AB12, B2)",
     )
 
     delivery = _amend_delivery(
-        decision, amendment, NotificationTicket(ref="OPS-1002", backend="jira"), 777
+        decision,
+        amendment,
+        NotificationTicket(ref="OPS-1002", backend="jira"),
+        777,
+        subject="! Warning: MPPT AB12 in Kudi seems to perform lower !",
     )
 
     assert delivery.suppress is True
@@ -2552,7 +2619,16 @@ def test_amend_delivery_is_silent_when_no_component_was_added():
     # the whole alert instead of a one-line update -- see _forced_send_delivery.
     # The delivery now says what it *would* say and where it would thread, and
     # `suppress` alone decides whether any of it is used.
-    assert delivery.text_override == "still firing on MPPT AB12 (42 occurrences)"
+    #
+    # *What* it says is the ticket's own re-rendered summary, which already
+    # names the affected equipment and how much of it there is. The occurrence
+    # total this line used to lead with ("42 occurrences") is the one number
+    # that grows whether or not anything changed; it lives on the ticket, where
+    # render_description writes it.
+    assert delivery.text_override == (
+        "still firing: 16 MPPTs in Kudi affected (A3, A5, A6, A7, AB12, B2)"
+    )
+    assert "42" not in delivery.text_override, "occurrence totals are not the update"
     assert delivery.reply_to_message_id == 777
     assert delivery.edit_message_id is None, "an override notifies; an edit does not"
 
@@ -2949,6 +3025,58 @@ def test_duplicate_delivery_is_silent():
     )
 
     assert delivery.suppress is True
+
+
+def test_a_duplicates_recurrence_line_says_what_the_ticket_is_about():
+    """A duplicate never re-renders the ticket, so there is no summary to quote
+    -- the incoming subject is what the ticket is about, and the affected-
+    component count is the number worth carrying alongside it.
+
+    Neither is the occurrence total. "still firing (77 occurrences)" was the
+    whole message an operator got for a re-firing meter alert: a ticket ref, a
+    verb, and the one figure that rises no matter what happens on the site.
+    """
+    from orchestrator.api.app import _duplicate_delivery
+
+    amendment = AmendmentResult(
+        ticket_ref="OPS-42",
+        ticket_id="ticket-42",
+        decision="duplicate",
+        escalated=False,
+        affected_keys_count=3,
+        occurrence_count=77,
+    )
+
+    delivery = _duplicate_delivery(
+        amendment,
+        NotificationTicket(ref="OPS-42", backend="jira"),
+        subject="! Warning: DCU 900000001 in Kudi could have a problem, causing Meter Issues !",
+    )
+
+    assert delivery.text_override == (
+        "still firing: ! Warning: DCU 900000001 in Kudi could have a problem, "
+        "causing Meter Issues ! (3 affected components)"
+    )
+    assert "77" not in delivery.text_override
+
+
+def test_a_recurrence_line_survives_having_nothing_to_say():
+    """Neither a summary nor a subject: the line degrades to the bare phrase
+    rather than rendering a dangling colon."""
+    from orchestrator.api.app import _duplicate_delivery
+
+    amendment = AmendmentResult(
+        ticket_ref="OPS-42",
+        ticket_id="ticket-42",
+        decision="duplicate",
+        escalated=False,
+        affected_keys_count=0,
+        occurrence_count=4,
+    )
+
+    delivery = _duplicate_delivery(amendment, NotificationTicket(ref="OPS-42", backend="jira"))
+
+    assert delivery.text_override == "still firing"
 
 
 # ---------------------------------------------------------------------------

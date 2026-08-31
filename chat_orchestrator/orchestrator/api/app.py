@@ -1210,7 +1210,22 @@ async def _deliver_notification(
     urgent = _is_effectively_urgent(alert_context, ticket_summary, stored_ticket_severity)
     if delivery is not None and delivery.top_level:
         urgent = True
-    live_output_line = await alert_context.telegram_output_line() if urgent else None
+    # Every ticketed alert carries the plant reading, not only an urgent one:
+    # "what does the site look like right now" is the first thing an operator
+    # asks of a warning too, and this request's telemetry lookup is already
+    # resolved and cached by the downtime floor above, so saying it costs no
+    # extra I/O.
+    #
+    # An urgent alert still says "unavailable" out loud -- there, the fact that
+    # we reached for a reading and could not get one is itself worth knowing.
+    # Below that bar an unreadable plant contributes nothing the status line
+    # does not already say, so the line is omitted rather than rendered empty,
+    # the same rule every other line in `_alert_reading_lines` follows.
+    live_output_line = None
+    if urgent:
+        live_output_line = await alert_context.telegram_output_line()
+    elif ticketed_delivery and await alert_context.output_kw() is not None:
+        live_output_line = await alert_context.telegram_output_line()
     if ticketed_delivery:
         # Ticket references are deliberately rendered as Telegram Markdown
         # links, so a caller-provided plain/HTML mode cannot make the link
@@ -1229,8 +1244,9 @@ async def _deliver_notification(
         )
     elif live_output_line:
         raw_text = f"{raw_text.rstrip()}\n{live_output_line}"
-    if delivery is not None and delivery.site_status:
-        raw_text = f"{raw_text.rstrip()}\n{_render_alert_site_status(delivery.site_status)}"
+    reading = _alert_reading_lines(delivery)
+    if reading:
+        raw_text = "\n".join([raw_text.rstrip(), *reading])
     text = raw_text
     if parse_mode and parse_mode.lower().startswith("markdown"):
         text = convert_github_to_telegram_markdown(raw_text)
@@ -1718,6 +1734,15 @@ class NotificationDelivery:
     ticket_summary: str = ""
     stored_ticket_severity: str = ""
     site_status: str = ""
+    # The judgment's own reading of the alert, rendered as the same two trailing
+    # lines on every kind of ticketed message. The model produces both on every
+    # alert and nothing used to read either: `grid_impact.summary` was consumed
+    # only for its status enums, and `likely_user_action` was parsed, validated,
+    # and then dropped -- so the work of deciding what is probably wrong and
+    # what to do about it was done once per alert and thrown away, while the
+    # topic got a ticket ref and a verb.
+    root_cause: str = ""
+    suggested_action: str = ""
 
 
 # Not a SiteStatus member: that vocabulary is shared with /grids and the fleet
@@ -1738,6 +1763,33 @@ def _render_alert_site_status(status: str) -> str:
         "off": "🔴 Site status: Off",
         COMMS_DOWN_STATUS: "📡 Site status: Plant comms down",
     }.get(status, "Ⅹ Site status: Unknown")
+
+
+def _alert_reading_lines(delivery: "Optional[NotificationDelivery]") -> List[str]:
+    """The site status, likely cause and suggested action, in that order.
+
+    Appended to every ticketed message this endpoint sends, whichever branch
+    built it. A new ticket, an amendment, a silent recurrence that got forced
+    out and an escalation are four different renderers, and what an operator
+    could learn from a message used to depend entirely on which of them
+    happened to run -- a full card at one end, "OPS-1234 — still firing" at
+    the other. The alert body is the branch's business; this reading of the
+    site is not, so it is assembled once here.
+
+    Each line is omitted when its value is absent rather than rendered blank.
+    """
+    from shared.utils.telegram_markdown import escape_markdown
+
+    if delivery is None:
+        return []
+    lines: List[str] = []
+    if delivery.site_status:
+        lines.append(_render_alert_site_status(delivery.site_status))
+    if delivery.root_cause:
+        lines.append(f"🧭 Likely cause: {escape_markdown(delivery.root_cause)}")
+    if delivery.suggested_action:
+        lines.append(f"🛠 Suggested action: {escape_markdown(delivery.suggested_action)}")
+    return lines
 
 
 def _build_notify_alert_context(
@@ -1802,6 +1854,7 @@ def _amend_delivery(
     ticket: NotificationTicket,
     reply_to_message_id: Optional[int] = None,
     ticket_summary: str = "",
+    subject: str = "",
 ) -> NotificationDelivery:
     """Post only what an operator needs to act on.
 
@@ -1848,7 +1901,7 @@ def _amend_delivery(
         # only ever raising its voice, and a Telegram edit does not notify.
         return NotificationDelivery(
             suppress=True,
-            text_override=_recurrence_message(decision, amendment),
+            text_override=_recurrence_message(amendment, subject),
             reply_to_message_id=reply_to_message_id,
             ticket=ticket,
         )
@@ -1901,25 +1954,43 @@ def _amend_delivery(
     )
 
 
-def _recurrence_message(decision: Any, amendment: Any) -> str:
+def _recurrence_message(amendment: Any, subject: str = "") -> str:
     """One line for an alert that added nothing new to its ticket.
 
     Only ever rendered when something overrides the silence. What an operator
-    needs then is that the ticket is still firing and on what -- not the alert
-    body read aloud a second time.
+    needs then is what the ticket is *about* and how much equipment is on it --
+    not the alert body read aloud a second time, and not how many times it has
+    fired.
+
+    The occurrence total this line used to lead with is the one figure that
+    rises whether or not anything changed, so a message built around it reads
+    as escalation while carrying no news; it already lives on the ticket, where
+    ``render_description`` writes "Occurrences: N". Two designs said so before
+    this line existed: "amendments report distinct affected components, never
+    occurrence totals" (2026-07-28 alert-correlation-noise-reduction) and "for
+    a forced occurrence, use the impact summary when nonblank, otherwise the
+    incoming subject" (2026-08-21 llm-first-alert-correlation, step 5).
+
+    An amend re-renders the ticket's summary, and ``render_summary`` already
+    names the affected equipment and counts it ("3 MPPTs in <grid> affected"),
+    so the count is spelled out only on the subject fallback -- a duplicate,
+    which never re-renders anything.
     """
-    count = getattr(amendment, "occurrence_count", 0) or 0
-    affected = getattr(decision, "affected_key", None) or {}
-    label = str(affected.get("label") or "").strip() if isinstance(affected, dict) else ""
-    where = f" on {label}" if label else ""
-    return f"still firing{where} ({count} occurrences)" if count > 1 else f"still firing{where}"
+    summary = str(getattr(amendment, "rendered_summary", "") or "").strip()
+    what = summary or (subject or "").strip()
+    if not what:
+        return "still firing"
+    count = int(getattr(amendment, "affected_keys_count", 0) or 0)
+    if summary or count < 2:
+        return f"still firing: {what}"
+    return f"still firing: {what} ({count} affected components)"
 
 
 def _duplicate_delivery(
     amendment: Any,
     ticket: NotificationTicket,
     reply_to_message_id: Optional[int] = None,
-    decision: Any = None,
+    subject: str = "",
 ) -> NotificationDelivery:
     """Duplicates amend ticket history but never create Telegram noise.
 
@@ -1932,7 +2003,7 @@ def _duplicate_delivery(
     """
     return NotificationDelivery(
         suppress=True,
-        text_override=_recurrence_message(decision, amendment),
+        text_override=_recurrence_message(amendment, subject),
         reply_to_message_id=reply_to_message_id,
         ticket=ticket,
     )
@@ -2096,12 +2167,13 @@ async def _finalize_correlation_decision(
                 else ""
             )
             delivery = _amend_delivery(
-                decision, amendment, ticket, reply_to_message_id, ticket_summary
+                decision, amendment, ticket, reply_to_message_id, ticket_summary,
+                subject=alert.subject,
             )
         else:
             ticket_summary = ""
             delivery = _duplicate_delivery(
-                amendment, ticket, reply_to_message_id, decision
+                amendment, ticket, reply_to_message_id, subject=alert.subject
             )
         delivery = dataclasses.replace(
             delivery,
@@ -2453,6 +2525,7 @@ async def _resolve_notify_ticket_llm_judgment(
 ) -> "tuple[Optional[str], Optional[JSONResponse], Optional[Dict[str, Any]], Optional[NotificationDelivery]]":
     """LLM-first auto path: gather bounded evidence, judge once, then fail open."""
     from orchestrator.services.ticketing.alert_delivery_policy import decide_alert_delivery
+    from orchestrator.services.ticketing.alert_judgment import LikelyUserActionCategory
     from orchestrator.services.ticketing.alert_judgment_context import AlertJudgmentContextAssembler
     from orchestrator.services.ticketing.correlator import (
         _is_urgent_severity_increase,
@@ -2621,6 +2694,22 @@ async def _resolve_notify_ticket_llm_judgment(
             # (Mutually exclusive with the branch above: that one needs fresh
             # telemetry, and this one is the definition of not having it.)
             status = COMMS_DOWN_STATUS
+        # The judgment already answered "what is probably behind this" and
+        # "what would someone most likely do about it" -- on every alert,
+        # whether or not it ends up sending. Carrying both onto the delivery is
+        # what turns a bare ticket ref into something actionable; until now they
+        # were computed, validated, and discarded.
+        impact = judgment.judgment.grid_impact if judgment.judgment is not None else None
+        action = judgment.judgment.likely_user_action if judgment.judgment is not None else None
+        delivery = dataclasses.replace(
+            delivery,
+            root_cause=(impact.summary or "").strip() if impact is not None else "",
+            suggested_action=(
+                (action.summary or "").strip()
+                if action is not None and action.category is not LikelyUserActionCategory.NONE
+                else ""
+            ),
+        )
         delivery = (
             _forced_send_delivery(delivery, site_status=status)
             if send_decision.send

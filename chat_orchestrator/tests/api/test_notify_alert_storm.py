@@ -633,13 +633,6 @@ class _RepeatAmendment:
     rendered_summary = ""
 
 
-class _RepeatDecision:
-    root_cause_kind = "component"
-    affected_key = {"label": "DCU 900000001"}
-    update_message = ""
-    ticket_severity = ""
-
-
 @pytest.mark.asyncio
 async def test_forced_send_of_a_silent_recurrence_is_threaded_not_a_full_repost(monkeypatch):
     """The fail-open gate has to be able to raise its voice without reading the
@@ -682,7 +675,7 @@ async def test_forced_send_of_a_silent_recurrence_is_threaded_not_a_full_repost(
         _RepeatAmendment(),
         ticket,
         reply_to_message_id=4242,
-        decision=_RepeatDecision(),
+        subject=_RECURRING_SUBJECT,
     )
     assert silent.suppress is True, "a recurrence is still silent by default"
 
@@ -699,7 +692,12 @@ async def test_forced_send_of_a_silent_recurrence_is_threaded_not_a_full_repost(
     assert posted["reply_to_message_id"] == 4242, "threaded under the ticket's own message"
     assert "OPS-1001" in posted["text"]
     assert "Site status: Unknown" in posted["text"]
-    assert "could have a problem" not in posted["text"], (
+    # One threaded update line, not a rebuilt alert card. The subject itself is
+    # welcome in it -- a bare "still firing" under a ticket ref tells an
+    # operator nothing -- but the grid/ticket block _format_ticket_notification
+    # builds for a fresh alert is what must not come back.
+    assert posted["text"].startswith("\u21bb "), "an update line, not a new alert"
+    assert "\U0001f4cd Grid:" not in posted["text"], (
         "forcing a silent recurrence must not repost the whole alert"
     )
 
@@ -760,7 +758,7 @@ async def test_a_dark_plant_says_so_instead_of_relisting_a_device(monkeypatch):
 
     ticket = NotificationTicket(ref="OPS-1000", backend="internal", ticket_id="tid-1")
     silent = _duplicate_delivery(
-        _RepeatAmendment(), ticket, reply_to_message_id=66225, decision=_RepeatDecision()
+        _RepeatAmendment(), ticket, reply_to_message_id=66225, subject=_DARK_PLANT_SUBJECT
     )
     body = _body(_DARK_PLANT_SUBJECT, grid=_DARK_PLANT_GRID)
     await app_module._deliver_notification(

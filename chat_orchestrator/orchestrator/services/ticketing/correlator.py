@@ -699,6 +699,23 @@ def _with_guardrail_note(reason: str, note: str) -> str:
     return f"{reason.rstrip()} [guardrail: {note}]" if reason.strip() else f"guardrail: {note}"
 
 
+def _alert_affected_key(alert: Optional[AlertFacts]) -> Optional[Dict[str, str]]:
+    """The alert's own component, in the shape ``apply_amendment`` merges.
+
+    ``None`` when there is no identifiable component (a grid-level alert, or
+    no alert facts passed at all): a dict of empty strings is truthy, and
+    merging one writes a nameless row into the ticket's affected-equipment
+    list -- the guard ``apply_amendment`` already carries for exactly this.
+    """
+    if alert is None or not (alert.component_kind and alert.component_key):
+        return None
+    return {
+        "kind": alert.component_kind,
+        "key": alert.component_key,
+        "label": alert.component_label,
+    }
+
+
 def to_legacy_correlation_decision(
     result: AlertJudgmentResult,
     candidates: List[CandidateSummary],
@@ -745,6 +762,17 @@ def to_legacy_correlation_decision(
         if min_confidence is not None
         else correlation_rules.DEFAULT_CORRELATION_POLICY.confidence_floor
     )
+    # The judgment schema has no affected-key field -- the model names a ticket,
+    # not a component -- so the component comes from the alert's own facts, the
+    # same source ``find_deterministic_decision`` uses. This was hardcoded to
+    # None on every return path below, and it is the only input
+    # ``apply_amendment`` merges into a ticket's ``affected_keys``: on the live
+    # judgment path a ticket's affected-equipment list was therefore seeded once
+    # and never grew. Everything downstream that reads that list was reading a
+    # frozen value -- the aggregate summary ("N MPPTs in <grid> affected"),
+    # ``component_added`` (the only thing that makes an amend speak), and the
+    # affected-component count the notification reports.
+    affected_key = _alert_affected_key(alert)
     root_cause_kind = ticket.root_cause_kind.value
     reason = ticket.reason
     needs_root_cause_ticket = False
@@ -814,7 +842,7 @@ def to_legacy_correlation_decision(
                             f"{sorted(target_kinds)!r}) rejected: not a permitted "
                             "power-chain cascade",
                         ),
-                        affected_key=None,
+                        affected_key=affected_key,
                         root_cause_kind=root_cause_kind,
                         update_message="",
                         amended_summary="",
@@ -847,7 +875,7 @@ def to_legacy_correlation_decision(
         confidence=ticket.confidence,
         decided_by="llm_judgment",
         reason=reason,
-        affected_key=None,
+        affected_key=affected_key,
         root_cause_kind=root_cause_kind,
         update_message="",
         amended_summary=ticket.proposed_title if ticket.change_title and ticket.proposed_title else "",

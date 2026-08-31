@@ -224,19 +224,23 @@ def test_managed_grid_with_unknown_status_still_forces() -> None:
     assert "status_unknown" in decision.forced_by
 
 
-def _on_ticket(ref: str, *, send: bool = False) -> AlertJudgmentResult:
+def _on_ticket(
+    ref: str,
+    *,
+    send: bool = False,
+    action: TicketAction = TicketAction.RECORD_OCCURRENCE,
+    prior: SiteStatus = SiteStatus.UNKNOWN,
+    current: SiteStatus = SiteStatus.UNKNOWN,
+) -> AlertJudgmentResult:
     """A judgment that puts this alert onto an existing ticket."""
-    result = _result(prior=SiteStatus.UNKNOWN, current=SiteStatus.UNKNOWN, send=send)
+    result = _result(prior=prior, current=current, send=send)
     assert result.judgment is not None
     return result.model_copy(
         update={
             "judgment": result.judgment.model_copy(
                 update={
                     "ticket": result.judgment.ticket.model_copy(
-                        update={
-                            "action": TicketAction.RECORD_OCCURRENCE,
-                            "target_ticket_ref": ref,
-                        }
+                        update={"action": action, "target_ticket_ref": ref}
                     )
                 }
             )
@@ -331,13 +335,25 @@ def test_cap_is_per_ticket_not_per_grid() -> None:
     assert decision.send is True
 
 
-@pytest.mark.parametrize("send_telegram", [True])
-def test_evidence_driven_sends_are_never_capped(send_telegram: bool) -> None:
-    """The cap only ever quiets doubt. An explicit LLM request to send is not
-    doubt, and neither is a material status change -- those go out however
-    recently we last spoke."""
+def test_a_material_status_change_is_never_capped() -> None:
+    """The cap only ever quiets doubt. A grid that changed state is a finding,
+    and it goes out however recently we last spoke."""
     decision = decide_alert_delivery(
-        _on_ticket("OPS-1000", send=send_telegram),
+        _on_ticket("OPS-1000", send=True, prior=SiteStatus.ON, current=SiteStatus.OFF),
+        _with_history(_spoke_about("OPS-1000", minutes_ago=1)),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is True
+    assert "material_status_change" in decision.forced_by
+
+
+def test_an_llm_send_request_is_evidence_only_when_the_ticket_changed() -> None:
+    """An UPDATE_EXISTING carries something the topic has not heard: the ticket
+    itself is about to change. That request outranks the cap, as it always has."""
+    decision = decide_alert_delivery(
+        _on_ticket("OPS-1000", send=True, action=TicketAction.UPDATE_EXISTING),
         _with_history(_spoke_about("OPS-1000", minutes_ago=1)),
         enforcement_enabled=True,
         now=NOW,
@@ -345,6 +361,47 @@ def test_evidence_driven_sends_are_never_capped(send_telegram: bool) -> None:
 
     assert decision.send is True
     assert "llm_requested_delivery" in decision.forced_by
+
+
+def test_an_llm_send_request_on_a_pure_re_fire_is_capped_like_any_other_doubt() -> None:
+    """RECORD_OCCURRENCE is the model saying, in its own vocabulary, that
+    nothing about this ticket changed. A send request on top of that is not a
+    finding -- it is the same doubt the cap exists to quiet, arriving through
+    the model instead of through the policy.
+
+    This is the door the 2026-08-29 cap left open. An unmanaged plant reports
+    UNKNOWN forever, ``_status_unknown_is_explained`` correctly stops the
+    policy forcing on it, and the correlation prompt then asks for delivery on
+    exactly the same UNKNOWN -- so the alert re-fired into the topic on every
+    scheduled run, indefinitely, with the cap standing aside for it.
+    """
+    decision = decide_alert_delivery(
+        _on_ticket("OPS-1000", send=True),
+        _with_history(_spoke_about("OPS-1000", minutes_ago=1)),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is False
+    assert decision.reason == "fail_open_capped"
+    assert "llm_requested_delivery" in decision.forced_by, "the audit still records it"
+
+
+def test_a_capped_re_fire_still_speaks_again_once_the_window_passes() -> None:
+    """The guarantee half of the cap: quieter, never silent."""
+    decision = decide_alert_delivery(
+        _on_ticket("OPS-1000", send=True),
+        _with_history(
+            _spoke_about(
+                "OPS-1000",
+                minutes_ago=int(FAIL_OPEN_REMINDER_INTERVAL.total_seconds() // 60) + 1,
+            )
+        ),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is True
 
 
 def test_cap_needs_reliable_history_to_apply() -> None:
