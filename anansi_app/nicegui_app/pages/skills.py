@@ -258,12 +258,13 @@ async def _open_editor(row, schedule, service, refresh, user_email) -> None:
     The Workflow card mounts the same chat-driven builder the standalone
     /skill-builder page used to (render_builder, extracted for exactly this
     reuse), for New and Edit alike. Editing seeds it with the workflow's
-    stored steps via initial_steps: each renders as an inert "not yet
-    re-run" card until the author actually re-sends it, so a re-run is a
-    real execution against live tools, not a replay of old transcript --
-    see render_builder's docstring for the pending-tail mechanism, and
-    _derive_steps_payload for how anything left un-re-run is preserved
-    verbatim at Save.
+    stored steps via initial_steps: each renders as an editable "saved" card
+    the author can reword, reorder or delete without running anything, and
+    which is written back verbatim at Save. Re-sending one instead is a real
+    execution against live tools, not a replay of old transcript, which is
+    why it can only go in order from the top -- see render_builder's
+    docstring for both paths and the pending-tail mechanism, and
+    _derive_steps_payload for how anything left un-re-run is preserved.
 
     Sized and structured like the rest of the app's editor modals
     (broadcast.py, knowledge_modules.py, prompts.py: a capped-width card
@@ -453,9 +454,13 @@ async def _open_editor(row, schedule, service, refresh, user_email) -> None:
             ui.label("Workflow").classes("text-subtitle2")
             if row:
                 ui.label(
-                    "Each step below is re-runnable, one at a time from the top -- "
-                    "grey cards haven't been re-run in this session yet and are "
-                    "saved unchanged if you don't get to them."
+                    "Edit any saved step below in place -- change its wording, "
+                    "reorder it, delete it -- then Save. That runs nothing."
+                ).classes("text-xs text-gray-500")
+                ui.label(
+                    "Re-running a step is separate: it executes against live tools, "
+                    "so it has to go in order from the top and only the next step up "
+                    "can be run."
                 ).classes("text-xs text-gray-500")
             builder_user_id = f"{user_email}:{uuid.uuid4()}"
             state_holder = await render_builder(
