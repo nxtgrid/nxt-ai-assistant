@@ -18,7 +18,7 @@ Special characters that cause parsing errors: _ * ` [
 """
 
 import re
-from typing import List, Optional
+from typing import Callable, List, Optional, Set, Tuple
 
 
 def _convert_table_to_text(table_lines: List[str]) -> str:
@@ -156,6 +156,8 @@ def convert_github_to_telegram_markdown(text: str) -> str:
 
     Also sanitizes text to avoid Telegram markdown parsing errors:
     - Escapes underscores in the middle of words (e.g., grid_name -> grid\\_name)
+    - Escapes any *, _, ` or [ left unpaired, which Telegram would otherwise
+      reject as an unterminated entity (see balance_markdown_entities)
 
     Args:
         text: GitHub-flavored markdown text
@@ -183,26 +185,36 @@ def convert_github_to_telegram_markdown(text: str) -> str:
     # Match lines that start with * followed by space (bullet point)
     text = re.sub(r"^(\s*)\* ", r"\1- ", text, flags=re.MULTILINE)
 
-    # Escape underscores that are in the middle of words (not italic formatting)
-    # BUT preserve slash commands and URLs - they should not be escaped
-    # because when markdown parsing fails, the backslash becomes visible
-
-    # Protected items storage
+    # Escape underscores that are in the middle of words (not italic formatting).
+    # Links, URLs and slash commands are lifted out first so the generic
+    # word-boundary rules below cannot mangle them.
+    #
+    # A complete [text](url) link is restored verbatim: Telegram reads the URL
+    # between the parens literally, so a backslash there would corrupt the href.
+    # Bare URLs and slash commands are restored *escaped*, because to Telegram
+    # the underscore in /equipment_history is a live italic marker -- an odd
+    # count fails the whole message, an even one italicises everything between
+    # two commands. The backslash is consumed when Telegram parses the message,
+    # so the command still reads (and stays tappable) exactly as written.
     protected_items: List[str] = []
+    escape_on_restore: List[bool] = []
 
-    def protect_item(m: re.Match) -> str:
-        item = m.group(0)
-        protected_items.append(item)
-        return f"⟦PROT{len(protected_items) - 1}⟧"
+    def protect(escape: bool) -> Callable[[re.Match], str]:
+        def protect_item(m: re.Match) -> str:
+            protected_items.append(m.group(0))
+            escape_on_restore.append(escape)
+            return f"⟦PROT{len(protected_items) - 1}⟧"
+
+        return protect_item
 
     # Protect markdown links [text](url) - protect the entire link to preserve URL
-    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", protect_item, text)
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", protect(escape=False), text)
 
     # Protect bare URLs (https:// or http://)
-    text = re.sub(r"https?://[^\s\)]+", protect_item, text)
+    text = re.sub(r"https?://[^\s\)]+", protect(escape=True), text)
 
     # Protect slash commands like /equipment_history
-    text = re.sub(r"/[a-zA-Z][a-zA-Z0-9_]*", protect_item, text)
+    text = re.sub(r"/[a-zA-Z][a-zA-Z0-9_]*", protect(escape=True), text)
 
     # Now escape underscores in remaining text
     # Match underscore surrounded by word characters (e.g., grid_name, user_id)
@@ -214,12 +226,138 @@ def convert_github_to_telegram_markdown(text: str) -> str:
 
     # Restore protected items
     for i, item in enumerate(protected_items):
-        text = text.replace(f"⟦PROT{i}⟧", item)
+        text = text.replace(f"⟦PROT{i}⟧", escape_markdown(item) if escape_on_restore[i] else item)
 
     # Fail-safe cleanup: remove any remaining markers that weren't restored
     text = re.sub(r"⟦PROT\d+⟧", "", text)
 
-    return text
+    # Last, because everything above can leave a delimiter stranded: neutralise
+    # anything Telegram would read as an entity that never closes. One stray
+    # "[" is enough to fail the whole message.
+    return balance_markdown_entities(text)
+
+
+# A well-formed inline link -- deliberately the same shape the converter above
+# protects, so a link that survived conversion is not escaped here instead. Its
+# interior goes to Telegram's own link parser, so the delimiters inside it are
+# none of our business.
+_COMPLETE_LINK_RE = re.compile(r"\[[^\[\]]*\]\([^()]*\)")
+
+# Delimiters that open a Markdown v1 entity Telegram expects to see closed.
+_PAIRED_DELIMITERS = ("*", "_")
+
+
+def _tokenize_for_balancing(text: str) -> List[Tuple[str, str]]:
+    """Split text into (kind, chunk) tokens for entity balancing.
+
+    "atomic" tokens are already valid (escapes, closed code spans, complete
+    links, ordinary characters) and pass through untouched. Every other kind
+    names a delimiter whose pairing still has to be decided.
+    """
+    tokens: List[Tuple[str, str]] = []
+    i = 0
+    n = len(text)
+
+    while i < n:
+        char = text[i]
+
+        # An existing backslash escape already neutralises whatever follows.
+        if char == "\\" and i + 1 < n:
+            tokens.append(("atomic", text[i : i + 2]))
+            i += 2
+            continue
+
+        if char == "`":
+            fence = "```" if text.startswith("```", i) else "`"
+            close = text.find(fence, i + len(fence))
+            if close != -1:
+                # Closed code span: its contents are literal to Telegram.
+                tokens.append(("atomic", text[i : close + len(fence)]))
+                i = close + len(fence)
+                continue
+            tokens.append(("`", "`"))
+            i += 1
+            continue
+
+        if char == "[":
+            match = _COMPLETE_LINK_RE.match(text, i)
+            if match:
+                tokens.append(("atomic", match.group(0)))
+                i = match.end()
+                continue
+            tokens.append(("[", "["))
+            i += 1
+            continue
+
+        if char in _PAIRED_DELIMITERS:
+            tokens.append((char, char))
+            i += 1
+            continue
+
+        tokens.append(("atomic", char))
+        i += 1
+
+    return tokens
+
+
+def balance_markdown_entities(text: str) -> str:
+    """Escape every delimiter Telegram would read as an unterminated entity.
+
+    Telegram's Markdown v1 parser is all-or-nothing: a single delimiter that
+    opens an entity without closing it fails the *whole* message with
+    "can't parse entities", and the sender then has to fall back to plain
+    text. Text assembled from external systems hits this constantly -- a Jira
+    summary truncated mid-sentence keeps its opening "[" but loses the closing
+    "]", and that lone bracket is enough to strip the formatting off
+    everything around it.
+
+    Rather than drop formatting wholesale, escape only the delimiters that
+    cannot pair, so intended bold/italic/code still renders and the stray
+    character renders as itself. Delimiters are paired greedily left to right
+    (the order Telegram itself pairs them in); the leftover odd one is
+    escaped. Empty pairs are escaped too -- Telegram rejects a zero-length
+    entity.
+
+    Escapes already present are preserved, so this is safe to apply more than
+    once -- message chunking re-balances each chunk after the split.
+
+    Args:
+        text: Telegram Markdown v1 text
+
+    Returns:
+        The same text with unpairable delimiters backslash-escaped.
+    """
+    if not text:
+        return text
+
+    tokens = _tokenize_for_balancing(text)
+
+    # "[" only ever opens an entity; a bare "]" is harmless on its own. Any
+    # bracket that did not form a complete link above cannot pair, so it goes.
+    unpairable = {index for index, (kind, _) in enumerate(tokens) if kind in ("[", "`")}
+
+    for delimiter in _PAIRED_DELIMITERS:
+        positions = [index for index, (kind, _) in enumerate(tokens) if kind == delimiter]
+        opener: Optional[int] = None
+        paired: Set[int] = set()
+        for position in positions:
+            if opener is None:
+                opener = position
+            elif position > opener + 1:
+                # Non-empty content between the two: a real entity.
+                paired.add(opener)
+                paired.add(position)
+                opener = None
+            else:
+                # Adjacent delimiters would make an empty entity. Abandon the
+                # earlier one (it stays unpaired) and try this one as opener.
+                opener = position
+        unpairable.update(position for position in positions if position not in paired)
+
+    return "".join(
+        f"\\{chunk}" if index in unpairable else chunk
+        for index, (_, chunk) in enumerate(tokens)
+    )
 
 
 def strip_markdown(text: str) -> str:
@@ -236,6 +374,18 @@ def strip_markdown(text: str) -> str:
     if not text:
         return text
 
+    # Lift backslash escapes out before stripping anything. "\\_" is a literal
+    # underscore, not an italic delimiter -- unescaping it last (as this used
+    # to) lets the italic rule below pair it with a later escape and swallow
+    # the characters in between.
+    escaped: List[str] = []
+
+    def protect_escape(m: re.Match) -> str:
+        escaped.append(m.group(1))
+        return f"⟦ESC{len(escaped) - 1}⟧"
+
+    text = re.sub(r"\\([_*`\[\]])", protect_escape, text)
+
     # Remove bold markers
     text = re.sub(r"\*\*([^*]+)\*\*", r"\1", text)
     text = re.sub(r"\*([^*]+)\*", r"\1", text)
@@ -249,11 +399,9 @@ def strip_markdown(text: str) -> str:
     # Remove link formatting, keep link text
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
 
-    # Remove escaped characters
-    text = text.replace("\\_", "_")
-    text = text.replace("\\*", "*")
-    text = text.replace("\\`", "`")
-    text = text.replace("\\[", "[")
+    # Restore what the escapes were protecting, now as plain characters
+    for i, char in enumerate(escaped):
+        text = text.replace(f"⟦ESC{i}⟧", char)
 
     return text
 
@@ -288,5 +436,8 @@ def sanitize_for_telegram(
     if max_length and len(result) > max_length:
         # Leave room for truncation indicator
         result = result[: max_length - 20] + "\n\n... (truncated)"
+        # The cut can land inside an entity, so re-balance what survived.
+        if is_markdown:
+            result = balance_markdown_entities(result)
 
     return result

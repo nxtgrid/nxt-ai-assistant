@@ -10,6 +10,8 @@ from typing import Any, Dict, Optional, cast
 
 import aiohttp
 
+from shared.utils.telegram_markdown import balance_markdown_entities, strip_markdown
+
 logger = logging.getLogger(__name__)
 
 _MAX_TELEGRAM_DOC_BYTES = 45 * 1024 * 1024  # 45 MB (Telegram limit is 50 MB)
@@ -25,6 +27,15 @@ def _get_session() -> aiohttp.ClientSession:
     if _session is None or _session.closed:
         _session = aiohttp.ClientSession()
     return _session
+
+
+def _is_markdown_v1(parse_mode: Optional[str]) -> bool:
+    """True for Telegram's legacy Markdown mode, the only dialect we rebalance.
+
+    HTML and MarkdownV2 have different escaping rules, so the v1 balancer and
+    stripper must not be pointed at them.
+    """
+    return (parse_mode or "").strip().lower() == "markdown"
 
 
 def _split_telegram_message(text: str) -> list[str]:
@@ -127,9 +138,12 @@ async def send_telegram_message_raw(
 ) -> Dict[str, Any]:
     """Send a message with a plain-text retry, returning Telegram's raw response.
 
-    Sends ``text`` with ``parse_mode`` (default ``"Markdown"``). If Telegram
-    rejects it with a "can't parse entities" 400, the same text is resent without
-    a ``parse_mode`` so the content still reaches the chat.
+    Sends ``text`` with ``parse_mode`` (default ``"Markdown"``). Under Markdown
+    v1 the text is first rebalanced so no delimiter is left opening an entity
+    that never closes. If Telegram still rejects it with a "can't parse
+    entities" 400, the text is resent with the markers stripped and no
+    ``parse_mode``, so the content reaches the chat as clean prose rather than
+    as visible markup.
 
     ``reply_to_message_id`` threads the send as a reply (used by alert
     correlation to reply to a ticket's original alert post for an amend
@@ -163,6 +177,13 @@ async def send_telegram_message_raw(
                     "description": await response.text(),
                 }
 
+    # Rebalance here rather than at the caller: this is the single point every
+    # Markdown send funnels through, including each chunk of a split message.
+    # A split lands wherever the character budget runs out, so a chunk can
+    # inherit an opening delimiter whose partner ended up in the other chunk.
+    if _is_markdown_v1(parse_mode):
+        text = balance_markdown_entities(text)
+
     payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
     if reply_markup:
         payload["reply_markup"] = json.dumps(reply_markup)
@@ -189,6 +210,10 @@ async def send_telegram_message_raw(
         if not result.get("ok") and is_markdown_parse_error(result) and "parse_mode" in payload:
             logger.info("Retrying Telegram send as plain text after Markdown parse error")
             payload.pop("parse_mode", None)
+            # Drop the markers along with the parse mode. Resending the marked-up
+            # text verbatim is what puts raw "*OPS-1234*" in front of the reader.
+            if _is_markdown_v1(parse_mode):
+                payload["text"] = strip_markdown(text)
             result = await _post(payload)
         if not result.get("ok"):
             logger.warning("Failed to send Telegram message: %s", result.get("description"))
@@ -280,6 +305,9 @@ async def edit_telegram_message(
     """
     try:
         url = f"https://api.telegram.org/bot{bot_token}/editMessageText"
+        if _is_markdown_v1(parse_mode):
+            text = balance_markdown_entities(text)
+
         payload: Dict[str, Any] = {
             "chat_id": chat_id,
             "message_id": message_id,
@@ -288,20 +316,31 @@ async def edit_telegram_message(
         if parse_mode:
             payload["parse_mode"] = parse_mode
 
-        session = _get_session()
-        async with session.post(
-            url,
-            json=payload,
-            timeout=aiohttp.ClientTimeout(total=10),
-        ) as response:
-            try:
-                result = cast(Dict[str, Any], await response.json())
-            except Exception:
-                result = {
-                    "ok": False,
-                    "error_code": response.status,
-                    "description": await response.text(),
-                }
+        async def _post() -> Dict[str, Any]:
+            session = _get_session()
+            async with session.post(
+                url,
+                json=payload,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as response:
+                try:
+                    return cast(Dict[str, Any], await response.json())
+                except Exception:
+                    return {
+                        "ok": False,
+                        "error_code": response.status,
+                        "description": await response.text(),
+                    }
+
+        result = await _post()
+        if not result.get("ok") and is_markdown_parse_error(result) and "parse_mode" in payload:
+            # Same plain-text retry the send path has, so an amendment that
+            # trips the parser still lands instead of leaving the stale text up.
+            logger.info("Retrying Telegram edit as plain text after Markdown parse error")
+            payload.pop("parse_mode", None)
+            if _is_markdown_v1(parse_mode):
+                payload["text"] = strip_markdown(text)
+            result = await _post()
 
         if result.get("ok"):
             return True
@@ -402,6 +441,9 @@ async def send_telegram_photo(
     if caption:
         if len(caption) > _MAX_TELEGRAM_CAPTION_CHARS:
             caption = caption[: _MAX_TELEGRAM_CAPTION_CHARS - 4] + "..."
+        if _is_markdown_v1(parse_mode):
+            # The 1024-char cut above lands mid-entity often enough to matter.
+            caption = balance_markdown_entities(caption)
         data.add_field("caption", caption)
         if parse_mode:
             data.add_field("parse_mode", parse_mode)
@@ -476,6 +518,8 @@ async def send_telegram_document(
         form = aiohttp.FormData()
         form.add_field("chat_id", chat_id)
         if caption:
+            if _is_markdown_v1(parse_mode):
+                caption = balance_markdown_entities(caption)
             form.add_field("caption", caption)
         if parse_mode:
             form.add_field("parse_mode", parse_mode)

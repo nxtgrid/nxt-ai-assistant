@@ -15,7 +15,10 @@ import aiohttp
 
 from orchestrator.models.schemas import ToolCallResult
 from shared.utils.logging import get_logger
-from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
+from shared.utils.telegram_markdown import (
+    convert_github_to_telegram_markdown,
+    strip_markdown,
+)
 from shared.utils.telegram_send import send_telegram_photo
 
 LOGGER = get_logger(__name__)
@@ -112,7 +115,9 @@ async def _edit_message_text(
                     if "can't parse entities" in error_text.lower():
                         LOGGER.warning("Markdown parsing failed in edit, retrying as plain text")
                         payload.pop("parse_mode", None)
-                        payload["text"] = text  # Use original text
+                        # Strip the markers rather than reposting the original:
+                        # with no parse_mode its "**bold**" would show as-is.
+                        payload["text"] = strip_markdown(telegram_text)
                         async with session.post(
                             url,
                             json=payload,
