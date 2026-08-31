@@ -500,6 +500,194 @@ def test_derive_steps_payload_carries_a_mock_toggle_edit_on_a_pending_step():
     assert steps[0]["handler"] == "write_review_section"  # untouched fields still ride through
 
 
+def test_instruction_edit_lands_on_the_same_dict_derive_reads():
+    """The in-place edit path: _apply_instruction_edit must mutate the dict
+    object held in initial_steps, not a copy -- that identity is what carries
+    an edit into the Save payload with no separate dirty-step tracking, the
+    same way the mock toggle above already relies on it."""
+    from nicegui_app.pages.skill_builder import (
+        _apply_instruction_edit,
+        _derive_steps_payload,
+    )
+
+    stored_step = {
+        "index": 0, "name": "a", "instruction": "do a", "allow_write": False,
+        "is_response_step": True, "had_tool_error": False, "result_preview": "",
+    }
+    state = {"steps": [], "flags": {}, "initial_steps": [stored_step]}
+
+    returned = _apply_instruction_edit(stored_step, "do a, but better")
+
+    assert returned is stored_step
+    assert _derive_steps_payload(state)[0]["instruction"] == "do a, but better"
+
+
+def test_instruction_edit_resyncs_the_output_var_with_the_write_clause():
+    """skill_validation.py Pass 1 errors when a step's stored output_var
+    disagrees with its instruction's '-> {{var}}' clause, so an edit that
+    adds, changes or drops the clause has to move output_var with it."""
+    from nicegui_app.pages.skill_builder import _apply_instruction_edit
+
+    step = {"index": 0, "name": "step_1", "instruction": "find tickets", "output_var": None}
+
+    _apply_instruction_edit(step, "find tickets -> {{open_tickets}}")
+    assert step["output_var"] == "open_tickets"
+    assert step["name"] == "open_tickets"  # name follows while there is one
+
+    _apply_instruction_edit(step, "find tickets -> {{tickets}}")
+    assert step["output_var"] == "tickets"
+
+    # Clause removed: output_var must go too, or the step declares a write
+    # its instruction no longer makes. name is display-only in validation,
+    # so it keeps what it had rather than churning to a positional stub.
+    _apply_instruction_edit(step, "find tickets")
+    assert step["output_var"] is None
+    assert step["name"] == "tickets"
+
+
+def test_instruction_edit_leaves_a_function_steps_output_var_alone():
+    """A function step's write comes from its handler's return value, not
+    from clause parsing -- editing its label text must not blank it."""
+    from nicegui_app.pages.skill_builder import _apply_instruction_edit
+
+    step = {
+        "index": 0, "kind": "function", "handler": "fetch_grafana_kpis",
+        "instruction": "Fetch KPIs", "output_var": "kpis",
+    }
+
+    _apply_instruction_edit(step, "Fetch this week's KPIs")
+
+    assert step["output_var"] == "kpis"
+    assert step["instruction"] == "Fetch this week's KPIs"
+
+
+def test_delete_pending_step_removes_only_from_the_tail():
+    from nicegui_app.pages.skill_builder import _delete_pending_step
+
+    steps = [{"instruction": "a"}, {"instruction": "b"}, {"instruction": "c"}]
+
+    # live_count=1: step "a" has already been re-run, so tail offset 0 is "b".
+    _delete_pending_step(steps, 1, 0)
+
+    assert [s["instruction"] for s in steps] == ["a", "c"]
+
+
+def test_delete_pending_step_ignores_an_out_of_range_offset():
+    """A stale click on a card a rebuild already moved must not raise."""
+    from nicegui_app.pages.skill_builder import _delete_pending_step
+
+    steps = [{"instruction": "a"}]
+
+    _delete_pending_step(steps, 1, 5)
+    _delete_pending_step(steps, 0, -1)
+
+    assert [s["instruction"] for s in steps] == ["a"]
+
+
+def test_move_pending_step_reorders_within_the_tail():
+    from nicegui_app.pages.skill_builder import _move_pending_step
+
+    steps = [{"instruction": "a"}, {"instruction": "b"}, {"instruction": "c"}]
+
+    _move_pending_step(steps, 0, 2, -1)  # move "c" one earlier
+
+    assert [s["instruction"] for s in steps] == ["a", "c", "b"]
+
+
+def test_move_pending_step_cannot_cross_into_the_live_steps():
+    """The live steps' order is the chat session's own history -- a pending
+    step must not be reorderable above one that has already run."""
+    from nicegui_app.pages.skill_builder import _move_pending_step
+
+    steps = [{"instruction": "a"}, {"instruction": "b"}, {"instruction": "c"}]
+
+    _move_pending_step(steps, 1, 0, -1)  # "b" is the first pending; up is a no-op
+    assert [s["instruction"] for s in steps] == ["a", "b", "c"]
+
+    _move_pending_step(steps, 1, 1, 1)  # "c" is last; down is a no-op
+    assert [s["instruction"] for s in steps] == ["a", "b", "c"]
+
+
+def test_reordered_pending_steps_are_renumbered_in_the_save_payload():
+    from nicegui_app.pages.skill_builder import _derive_steps_payload, _move_pending_step
+
+    stored = [
+        {"index": 0, "name": "a", "instruction": "do a", "is_response_step": False},
+        {"index": 1, "name": "b", "instruction": "do b", "is_response_step": False},
+        {"index": 2, "name": "c", "instruction": "do c", "is_response_step": True},
+    ]
+    state = {"steps": [], "flags": {}, "initial_steps": stored}
+
+    _move_pending_step(stored, 0, 0, 1)  # "a" moves after "b"
+
+    steps = _derive_steps_payload(state)
+
+    assert [s["instruction"] for s in steps] == ["do b", "do a", "do c"]
+    assert [s["index"] for s in steps] == [0, 1, 2]
+
+
+def test_deleting_the_last_pending_step_moves_the_response_flag():
+    """is_response_step is positional (the combined-last step always
+    returns), so deleting the tail's end has to promote its predecessor --
+    otherwise an edited workflow saves with nothing that returns anything."""
+    from nicegui_app.pages.skill_builder import _delete_pending_step, _derive_steps_payload
+
+    stored = [
+        {"index": 0, "name": "a", "instruction": "do a", "is_response_step": False},
+        {"index": 1, "name": "b", "instruction": "do b", "is_response_step": True},
+    ]
+    state = {"steps": [], "flags": {}, "initial_steps": stored}
+
+    _delete_pending_step(stored, 0, 1)
+
+    steps = _derive_steps_payload(state)
+    assert len(steps) == 1
+    assert steps[0]["is_response_step"] is True
+
+
+def test_compose_box_is_not_prefilled_with_a_pending_steps_text():
+    """The reported confusion: the send box sat below the last saved card,
+    labelled "Next step", auto-filled with the FIRST saved step's
+    instruction -- so its position said "step 16" while its contents were
+    step 1. The prefill is gone; a pending step is now run from its own
+    card's button instead."""
+    import inspect
+
+    from nicegui_app.pages import skill_builder
+
+    src = inspect.getsource(skill_builder.render_builder)
+
+    assert 'ui.textarea("Next step")' not in src
+    assert "message_input.value = pending_tail[0]" not in src
+    assert "▶ Run this step" in src
+
+
+def test_pending_cards_render_between_the_live_ones_and_after_the_compose_box():
+    """Container order is the whole spatial fix -- the box belongs at the
+    cursor between what has run and what has not, not below everything."""
+    import inspect
+
+    from nicegui_app.pages import skill_builder
+
+    src = inspect.getsource(skill_builder.render_builder)
+
+    assert src.index("live_column = ui.column()") < src.index("compose_caption = ui.label")
+    assert src.index("compose_caption = ui.label") < src.index("pending_column = ui.column()")
+
+
+def test_pending_cards_show_their_validation_findings():
+    """Findings for a pending step were computed but only ever passed to
+    _render_step, so a broken saved step showed a clean card and then
+    blocked activation with no on-card cause."""
+    import inspect
+
+    from nicegui_app.pages import skill_builder
+
+    src = inspect.getsource(skill_builder.render_builder)
+
+    assert "errors=errors_by_step.get(live_count + offset, [])" in src
+
+
 def test_editor_has_a_context_card_only_for_an_existing_workflow():
     import inspect
 
