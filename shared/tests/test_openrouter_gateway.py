@@ -356,3 +356,77 @@ def test_generate_sync_can_add_provider_routing():
         "allow_fallbacks": False,
         "require_parameters": True,
     }
+
+
+async def _reasoning_payload(options: GenerationOptions) -> dict:
+    client = FakeAsyncClient([FakeAsyncResponse(completion_payload(content="ok"))])
+    gateway = OpenRouterGateway(
+        api_key="or-key", default_model="google/gemini-2.5-flash", async_client=client
+    )
+    await gateway.generate([LLMMessage(role="user", text="Hi")], options)
+    return client.calls[0]["json"]
+
+
+@pytest.mark.asyncio
+async def test_positive_thinking_budget_becomes_reasoning_max_tokens():
+    payload = await _reasoning_payload(GenerationOptions(thinking_budget=2048))
+
+    assert payload["reasoning"] == {"max_tokens": 2048}
+
+
+@pytest.mark.asyncio
+async def test_zero_thinking_budget_disables_reasoning():
+    payload = await _reasoning_payload(GenerationOptions(thinking_budget=0))
+
+    assert payload["reasoning"] == {"enabled": False}
+
+
+@pytest.mark.asyncio
+async def test_negative_thinking_budget_omits_reasoning():
+    payload = await _reasoning_payload(GenerationOptions(thinking_budget=-1))
+
+    assert "reasoning" not in payload
+
+
+@pytest.mark.asyncio
+async def test_thinking_off_disables_reasoning():
+    payload = await _reasoning_payload(GenerationOptions(thinking="off"))
+
+    assert payload["reasoning"] == {"enabled": False}
+
+
+@pytest.mark.asyncio
+async def test_thinking_level_becomes_reasoning_effort():
+    payload = await _reasoning_payload(GenerationOptions(thinking="high"))
+
+    assert payload["reasoning"] == {"effort": "high"}
+
+
+@pytest.mark.asyncio
+async def test_explicit_budget_takes_precedence_over_thinking_level():
+    payload = await _reasoning_payload(
+        GenerationOptions(thinking="high", thinking_budget=1000)
+    )
+
+    assert payload["reasoning"] == {"max_tokens": 1000}
+
+
+@pytest.mark.asyncio
+async def test_default_thinking_omits_reasoning():
+    payload = await _reasoning_payload(GenerationOptions())
+
+    assert "reasoning" not in payload
+
+
+def test_generate_sync_forwards_reasoning_budget():
+    client = FakeSyncClient([FakeAsyncResponse(completion_payload(content="ok"))])
+    gateway = OpenRouterGateway(
+        api_key="or-key", default_model="google/gemini-2.5-flash", client=client
+    )
+
+    gateway.generate_sync(
+        [LLMMessage(role="user", text="Hi")],
+        GenerationOptions(thinking_budget=512),
+    )
+
+    assert client.calls[0]["json"]["reasoning"] == {"max_tokens": 512}

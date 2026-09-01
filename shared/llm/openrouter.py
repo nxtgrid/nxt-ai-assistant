@@ -161,6 +161,9 @@ class OpenRouterGateway:
             payload["max_tokens"] = options.max_output_tokens
         if options.response_format == "json":
             payload["response_format"] = {"type": "json_object"}
+        reasoning = _reasoning_config(options)
+        if reasoning:
+            payload["reasoning"] = reasoning
         if tools:
             payload["tools"] = [self._convert_tool(tool) for tool in tools]
         provider = self._provider_preferences()
@@ -324,6 +327,29 @@ class OpenRouterGateway:
             )
         except Exception:
             LOGGER.opt(exception=True).debug("Skipping Langfuse generation update")
+
+
+def _reasoning_config(options: GenerationOptions) -> dict[str, Any]:
+    """Translate provider-neutral thinking controls to OpenRouter's unified
+    ``reasoning`` parameter, mirroring ``GeminiGateway._build_config``'s
+    precedence: an explicit ``thinking_budget`` wins over the ``thinking``
+    mode; a zero budget or ``thinking="off"`` disables reasoning; a negative
+    budget (the "-1 = dynamic" sentinel) or ``thinking="default"`` leaves it
+    to the model. Without this, both controls were silently dropped on the
+    OpenRouter path while the Gemini gateway honoured them.
+    """
+    budget = options.thinking_budget
+    if budget is not None:
+        if budget < 0:
+            return {}
+        if budget == 0:
+            return {"enabled": False}
+        return {"max_tokens": budget}
+    if options.thinking == "off":
+        return {"enabled": False}
+    if options.thinking in ("medium", "high"):
+        return {"effort": options.thinking}
+    return {}
 
 
 def _csv_env(name: str) -> list[str]:
