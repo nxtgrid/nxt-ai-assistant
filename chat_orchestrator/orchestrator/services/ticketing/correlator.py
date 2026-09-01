@@ -1130,11 +1130,13 @@ class AlertCorrelator:
             return AlertJudgmentResult(
                 valid=False, error_code="llm_failed", error_detail=type(exc).__name__
             )
-        return parse_alert_judgment(
+        result = parse_alert_judgment(
             getattr(response, "text", None),
             {ticket.ref for ticket in context.open_tickets},
             self._min_confidence,
         )
+        usage = getattr(response, "usage", None)
+        return result.model_copy(update={"usage": usage}) if usage is not None else result
 
     async def _finalize(
         self,
