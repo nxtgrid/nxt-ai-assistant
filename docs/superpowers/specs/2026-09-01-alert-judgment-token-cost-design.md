@@ -133,6 +133,13 @@ model. Moving the check *ahead* of the model removes, for that case: one
 prior alerts + 50 O&M messages + telemetry. The post-LLM backstop stays in
 place for the no-match path as defence-in-depth.
 
+**Gated by `ALERT_DETERMINISTIC_BACKSTOP_ENABLED`.** The pre-LLM check runs
+only when that flag is on (its default). With it off the flag's stated
+contract is "the judgment is the last word" — so an exact re-fire is judged,
+not pre-empted, exactly as the post-LLM backstop is also skipped. One flag,
+one meaning: *a deterministic signature match takes precedence over the
+model* — whether that match is applied before the call or after it.
+
 **Interaction with `replay_decision`.** Unchanged and still first — a
 `dedup_key` replay is even cheaper (no candidate assembly). The signature
 check runs only when replay misses.

@@ -2590,6 +2590,31 @@ async def _resolve_notify_ticket_llm_judgment(
     except Exception:
         logger.opt(exception=True).warning("Notify: judgment candidate assembly failed")
         candidates = []
+
+    deterministic = (
+        find_deterministic_decision(candidates, alert)
+        if fr.get("ALERT_DETERMINISTIC_BACKSTOP_ENABLED")
+        else None
+    )
+    if deterministic is not None:
+        # An exact signature match against an open ticket is decided the same
+        # way the post-LLM backstop already decides it -- confidence 1.0, no
+        # model call. Doing it *before* the call also skips the context
+        # assembly (20 prior alerts + 50 O&M messages + telemetry) the judgment
+        # would otherwise gather. Gated by the same flag as the post-LLM
+        # backstop: with it off, "the judgment is the last word" (see
+        # flag_registry) -- an exact re-fire is judged, not pre-empted.
+        logger.info(
+            "Notify: exact-signature short-circuit for grid {!r} -- {} onto {!r}, no LLM call",
+            target.grid_name,
+            deterministic.decision,
+            deterministic.ticket_ref,
+        )
+        await correlator._finalize(target.grid_name, alert, body.dedup_key, deterministic)
+        return await _finalize_correlation_decision(
+            body, target, alert, alert_context, store, ticket_service, deterministic
+        )
+
     since = (datetime.now(timezone.utc) - timedelta(hours=168)).isoformat()
     history = NotifyAlertDeliveryRepository(get_client=_raw_supabase_client)
 

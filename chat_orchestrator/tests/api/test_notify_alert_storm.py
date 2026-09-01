@@ -626,13 +626,20 @@ async def test_llm_outage_during_a_storm_collapses_onto_one_ticket_and_still_spe
     # each new device joins -- one post, then in-place edits, never silence.
     assert len(transport.send_calls) == 1
     assert len(transport.edit_calls) == len(_SUBJECTS) - 1
-    assert set(send_decisions) == {"send"}
+    # First alert (no candidates) is judged and fail-opens to "send". The rest
+    # match by signature *before* the model and amend without a send-decision
+    # of their own -- their delivery still speaks (the in-place edits above).
+    # Nothing is suppressed either way.
+    assert "suppress" not in send_decisions
+    assert "send" in send_decisions
 
-    # The override is greppable in the audit trail rather than silent.
-    backstopped = [
-        call for call in store.record_event_calls if call.get("decided_by") == "signature_backstop"
+    # The signature match is greppable in the audit trail rather than silent.
+    # decided_by is "signature" (the pre-LLM short-circuit) for every re-fire
+    # after the first, rather than "signature_backstop" (the post-LLM override).
+    signature_decided = [
+        call for call in store.record_event_calls if call.get("decided_by") == "signature"
     ]
-    assert len(backstopped) == len(_SUBJECTS) - 1
+    assert len(signature_decided) == len(_SUBJECTS) - 1
 
 
 class _LoggerSpy:
@@ -707,6 +714,69 @@ async def test_judgment_path_logs_token_counts(monkeypatch):
     line = next((m for m in spy.infos if "alert_judgment_tokens" in m), None)
     assert line is not None
     assert "in=5000" in line and "cached=4096" in line and "grid=Solitary" in line
+
+
+@pytest.mark.asyncio
+async def test_exact_refire_on_the_judgment_path_skips_the_llm(monkeypatch):
+    """With LLM judgment ON: the first alert (no candidates) is judged and files
+    a ticket; an identical re-fire matches by signature and is decided WITHOUT a
+    second model call and without assembling judgment context."""
+    monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+    monkeypatch.setenv("ALERT_LLM_JUDGMENT_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+
+    tickets: Dict[str, Dict[str, Any]] = {}
+    store = _FakeStore(tickets)
+    ticket_service = _FakeTicketService(tickets)
+    transport = _FakeTelegramTransport()
+    gateway = _CannedJudgmentGateway()
+
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+        lambda get_client=None: store,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.service.TicketService",
+        lambda get_supabase_client=None: ticket_service,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.delivery_repository.DeliveryRepository",
+        _FakeDeliveryRepository,
+    )
+    monkeypatch.setattr(
+        "shared.llm.get_default_generation_gateway", lambda default_model=None: gateway
+    )
+    monkeypatch.setattr(
+        "shared.utils.telegram_send.send_telegram_message_with_fallback", transport.send
+    )
+    monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", transport.edit)
+
+    async def _noop_chat_db_log(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("orchestrator.api.app._log_notification_to_chat_db", _noop_chat_db_log)
+
+    import orchestrator.api.app as app_module
+
+    target = _target(_STORM_GRID)
+    subject = _STORM_SUBJECTS[0]
+
+    body1 = _body(subject, _STORM_GRID)
+    ref1, err1, _extra1, delivery1 = await _resolve_notify_ticket_full(body1, target)
+    assert err1 is None
+    await app_module._deliver_notification(body1, target, ref1, delivery1)
+
+    body2 = _body(subject, _STORM_GRID).model_copy(update={"dedup_key": "distinct-key"})
+    ref2, err2, extra2, delivery2 = await _resolve_notify_ticket_full(body2, target)
+    assert err2 is None
+    await app_module._deliver_notification(body2, target, ref2, delivery2)
+
+    assert ref2 == ref1
+    assert extra2["decision"] in ("duplicate", "amend")
+    assert extra2["decided_by"] == "signature"
+    assert len(gateway.calls) == 1, "the exact re-fire must not call the LLM again"
+    (ticket_id,) = tickets.keys()
+    assert store.rows[ticket_id]["occurrence_count"] == 2
 
 
 # Synthetic sites and identifiers throughout: the alert *shapes* are what these
