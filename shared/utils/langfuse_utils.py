@@ -22,9 +22,32 @@ def langfuse_observe(**kwargs):
     return lambda fn: fn
 
 
+def _has_active_span() -> bool:
+    """True when an OpenTelemetry span is active in the current context.
+
+    The ``update_current_*`` / ``score_current_*`` SDK calls below are no-ops
+    without an active span -- but calling them anyway makes Langfuse log
+    ``Context error: No active span in current context`` on every call and
+    forces the global Langfuse client (background exporter threads, ingestion
+    queues) into existence in processes that never open a span: every model
+    call from a path not wrapped in ``@langfuse_observe`` (alert judgment,
+    summarisers, verification sub-calls, the MCP servers, the anansi_app poller
+    daemons). Gate on this so the SDK stays completely dormant there.
+
+    Mirrors the SDK's own private check without tripping its warning. Any
+    failure (OTel not installed, no context) is treated as "no span".
+    """
+    try:
+        from opentelemetry import trace as _otel_trace
+
+        return _otel_trace.get_current_span().get_span_context().is_valid
+    except Exception:
+        return False
+
+
 def update_generation(**kwargs):
     """Safely update the current Langfuse generation metadata."""
-    if not LANGFUSE_ENABLED:
+    if not LANGFUSE_ENABLED or not _has_active_span():
         return
     try:
         from langfuse import get_client
@@ -36,7 +59,7 @@ def update_generation(**kwargs):
 
 def update_span(**kwargs):
     """Safely update the current Langfuse span."""
-    if not LANGFUSE_ENABLED:
+    if not LANGFUSE_ENABLED or not _has_active_span():
         return
     try:
         from langfuse import get_client
@@ -48,7 +71,7 @@ def update_span(**kwargs):
 
 def update_trace(**kwargs):
     """Safely update the current Langfuse trace."""
-    if not LANGFUSE_ENABLED:
+    if not LANGFUSE_ENABLED or not _has_active_span():
         return
     try:
         from langfuse import get_client
@@ -75,7 +98,7 @@ def prompt_metadata(rendered) -> dict:
 
 def score_trace(**kwargs):
     """Safely score the current Langfuse trace."""
-    if not LANGFUSE_ENABLED:
+    if not LANGFUSE_ENABLED or not _has_active_span():
         return
     try:
         from langfuse import get_client
