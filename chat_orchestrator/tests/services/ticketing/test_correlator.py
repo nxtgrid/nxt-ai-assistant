@@ -558,10 +558,17 @@ class _FakeTicketService:
 
 
 class _FakeGateway:
-    def __init__(self, text: Optional[str] = None, raise_exc: Optional[Exception] = None, delay: float = 0.0):
+    def __init__(
+        self,
+        text: Optional[str] = None,
+        raise_exc: Optional[Exception] = None,
+        delay: float = 0.0,
+        usage: Optional[Any] = None,
+    ):
         self.text = text
         self.raise_exc = raise_exc
         self.delay = delay
+        self.usage = usage
         self.calls: List[Any] = []
 
     async def generate(self, messages, options, **kwargs):
@@ -573,6 +580,7 @@ class _FakeGateway:
 
         class _Result:
             text = self.text
+            usage = self.usage
 
         return _Result()
 
@@ -683,6 +691,30 @@ class TestLlmFirstJudgment:
 
         assert result.valid is True
         assert len(gateway.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_judge_attaches_gateway_usage_to_the_result(self):
+        from shared.llm import Usage
+
+        usage = Usage(input_tokens=4200, output_tokens=180, thinking_tokens=900, cached_tokens=3300)
+        correlator, _, _, _ = _make_correlator(
+            gateway=_FakeGateway(text=_full_judgment_json(), usage=usage)
+        )
+
+        result = await correlator.judge("GridA", _mppt_alert(), _judgment_context())
+
+        assert result.usage == usage
+
+    @pytest.mark.asyncio
+    async def test_judge_usage_is_none_when_the_call_fails(self):
+        correlator, _, _, _ = _make_correlator(
+            gateway=_FakeGateway(raise_exc=RuntimeError("boom"))
+        )
+
+        result = await correlator.judge("GridA", _mppt_alert(), _judgment_context())
+
+        assert result.valid is False
+        assert result.usage is None
 
     def test_judgment_prompt_keeps_all_context_in_labeled_json_sections(self):
         context = _judgment_context(

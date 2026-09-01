@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from shared.grid_status import SiteStatus
+from shared.llm import Usage
 
 
 class TicketAction(str, Enum):
@@ -121,6 +122,7 @@ class AlertJudgmentResult(_StrictModel):
     error_code: str = ""
     error_detail: str = ""
     raw: str | None = None
+    usage: Usage | None = None
 
 
 def _invalid(
