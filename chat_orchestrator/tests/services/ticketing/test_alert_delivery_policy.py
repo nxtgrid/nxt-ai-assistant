@@ -26,6 +26,7 @@ from orchestrator.services.ticketing.alert_judgment_context import (
     AlertTelemetry,
     ContextSourceResult,
     ContextStatus,
+    OpenTicketContext,
 )
 from orchestrator.services.ticketing.notify_alert_delivery_repository import PriorAlertMessage
 from shared.grid_status import SiteStatus
@@ -231,6 +232,7 @@ def _on_ticket(
     action: TicketAction = TicketAction.RECORD_OCCURRENCE,
     prior: SiteStatus = SiteStatus.UNKNOWN,
     current: SiteStatus = SiteStatus.UNKNOWN,
+    root_cause_kind: RootCauseKind = RootCauseKind.COMPONENT,
 ) -> AlertJudgmentResult:
     """A judgment that puts this alert onto an existing ticket."""
     result = _result(prior=prior, current=current, send=send)
@@ -240,7 +242,11 @@ def _on_ticket(
             "judgment": result.judgment.model_copy(
                 update={
                     "ticket": result.judgment.ticket.model_copy(
-                        update={"action": action, "target_ticket_ref": ref}
+                        update={
+                            "action": action,
+                            "target_ticket_ref": ref,
+                            "root_cause_kind": root_cause_kind,
+                        }
                     )
                 }
             )
@@ -335,12 +341,109 @@ def test_cap_is_per_ticket_not_per_grid() -> None:
     assert decision.send is True
 
 
-def test_a_material_status_change_is_never_capped() -> None:
-    """The cap only ever quiets doubt. A grid that changed state is a finding,
-    and it goes out however recently we last spoke."""
+def test_material_status_change_on_an_independent_component_re_fire_is_capped() -> None:
+    """A grid that changed state is not, on its own, news for a ticket that
+    neither represents grid state nor is a downstream symptom of it.
+
+    A standalone DCU-fault ticket (root_cause_kind unset, later assessed
+    'component') re-fired into its topic every time its grid flipped on or off,
+    though the DCU "could have a problem" whether the grid is up or down and
+    "monitor now that it is back on" was not an instruction the ticket's owner
+    needed.
+    """
     decision = decide_alert_delivery(
-        _on_ticket("OPS-1000", send=True, prior=SiteStatus.ON, current=SiteStatus.OFF),
+        _on_ticket(
+            "OPS-1000",
+            send=True,
+            prior=SiteStatus.OFF,
+            current=SiteStatus.ON,
+            root_cause_kind=RootCauseKind.COMPONENT,
+        ),
         _with_history(_spoke_about("OPS-1000", minutes_ago=1)),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is False
+    assert decision.reason == "fail_open_capped"
+    assert "material_status_change" not in decision.forced_by
+    assert "llm_requested_delivery" in decision.forced_by, "the audit still records what was capped"
+
+
+def test_material_status_change_is_still_never_capped_for_a_grid_state_ticket() -> None:
+    """The invariant that survives the narrowing: a transition on a ticket that
+    *is* the grid state (or a power-chain symptom of it) still goes out however
+    recently we last spoke."""
+    decision = decide_alert_delivery(
+        _on_ticket(
+            "OPS-1000",
+            send=True,
+            prior=SiteStatus.ON,
+            current=SiteStatus.OFF,
+            root_cause_kind=RootCauseKind.GRID_OFF,
+        ),
+        _with_history(_spoke_about("OPS-1000", minutes_ago=1)),
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is True
+    assert "material_status_change" in decision.forced_by
+
+
+def test_material_status_change_still_forces_while_the_plant_gateway_is_down() -> None:
+    """Plant comms down is a grid-wide event: every device alert on that grid is
+    an artefact of the same dark feed, so a transition into or out of it is
+    worth surfacing on each open ticket regardless of its root_cause_kind."""
+    stale = AlertTelemetry(
+        generation_management="managed",
+        grid_status="unknown",
+        site_status="unknown",
+        unavailable_reason="stale",
+        fresh=False,
+    )
+    context = _context(telemetry=stale).model_copy(
+        update={"prior_alerts": [_spoke_about("OPS-1000", minutes_ago=1)]}
+    )
+
+    decision = decide_alert_delivery(
+        _on_ticket(
+            "OPS-1000",
+            send=True,
+            prior=SiteStatus.ON,
+            current=SiteStatus.OFF,
+            root_cause_kind=RootCauseKind.COMPONENT,
+        ),
+        context,
+        enforcement_enabled=True,
+        now=NOW,
+    )
+
+    assert decision.send is True
+    assert "material_status_change" in decision.forced_by
+
+
+def test_material_status_change_forced_by_the_persisted_candidate_kind() -> None:
+    """The model's per-alert root_cause_kind flip-flops between component / other
+    / grid_off on the same ticket. When the ticket's own recorded kind is a
+    grid-state one, the transition still forces even on an alert the model
+    happened to call 'component'."""
+    context = _context().model_copy(
+        update={
+            "prior_alerts": [_spoke_about("OPS-1000", minutes_ago=1)],
+            "open_tickets": [OpenTicketContext(ref="OPS-1000", root_cause_kind="grid_isolated")],
+        }
+    )
+
+    decision = decide_alert_delivery(
+        _on_ticket(
+            "OPS-1000",
+            send=True,
+            prior=SiteStatus.ISOLATED,
+            current=SiteStatus.ON,
+            root_cause_kind=RootCauseKind.COMPONENT,
+        ),
+        context,
         enforcement_enabled=True,
         now=NOW,
     )

@@ -37,6 +37,12 @@ _REQUIRED_SOURCES = (
     "om_messages",
 )
 
+# The root-cause kinds whose ticket *is* the grid state, or a downstream symptom
+# of it. A material grid-status change is news for one of these; for an
+# independent component fault it is not (see
+# ``_grid_transition_is_material_to_ticket``).
+_GRID_STATE_ROOT_CAUSES = frozenset({"grid_off", "grid_isolated", "power_chain"})
+
 
 @dataclass(frozen=True)
 class DeliveryDecision:
@@ -82,6 +88,45 @@ def _status_unknown_is_explained(telemetry: AlertTelemetry) -> bool:
         telemetry.generation_management == "unmanaged"
         or telemetry.unavailable_reason in {"unmanaged", "stale"}
     )
+
+
+def _grid_transition_is_material_to_ticket(
+    judgment: "AlertJudgment | None",
+    context: AlertJudgmentContext,
+    correlated_ticket_ref: str,
+) -> bool:
+    """Whether a material grid-status change is itself news for the ticket this
+    alert landed on.
+
+    It always is for a ticket that represents grid state or a downstream symptom
+    of it (``grid_off``/``grid_isolated``/``power_chain``), and for any ticket
+    while the plant's gateway is down -- a dark feed makes every device alert on
+    the grid an artefact of the same outage. It is not, on its own, news for an
+    independent ``component``/``other``/unclassified ticket that merely shares a
+    grid with the outage: the equipment fault the ticket tracks is unchanged by
+    the grid coming back, and a re-fire built around "monitor now that it is
+    back on" reads as escalation while carrying nothing to act on. Such a
+    re-fire is capped like any other doubt.
+
+    Both the model's assessment of *this* alert
+    (``judgment.ticket.root_cause_kind``) and the ticket's own recorded kind
+    count. The model's per-alert kind flip-flops between
+    ``component``/``other``/``grid_off`` across a ticket's re-fires, so the
+    recorded kind on an offered candidate can still raise the answer to True
+    where the model called this one alert ``component``; it never lowers it.
+    Without a judgment at all the force stands, exactly as before.
+    """
+    if context.telemetry.unavailable_reason == "stale":
+        return True
+    if judgment is None:
+        return True
+    if judgment.ticket.root_cause_kind.value in _GRID_STATE_ROOT_CAUSES:
+        return True
+    ref = correlated_ticket_ref or (judgment.ticket.target_ticket_ref or "")
+    for ticket in context.open_tickets:
+        if ref and ticket.ref == ref and (ticket.root_cause_kind or "") in _GRID_STATE_ROOT_CAUSES:
+            return True
+    return False
 
 
 def _parse_sent_at(value: str) -> datetime | None:
@@ -228,7 +273,9 @@ def decide_alert_delivery(
             or impact.current_assessed_status not in known
         ):
             force_reasons.append("status_unknown")
-        if impact.material_status_change:
+        if impact.material_status_change and _grid_transition_is_material_to_ticket(
+            judgment, context, correlated_ticket_ref
+        ):
             force_reasons.append("material_status_change")
         if judgment.notification.send_telegram:
             force_reasons.append("llm_requested_delivery")
