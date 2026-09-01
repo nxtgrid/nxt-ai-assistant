@@ -2605,6 +2605,16 @@ async def _resolve_notify_ticket_llm_judgment(
         om_messages_provider=om_provider,
     ).assemble(grid_name=target.grid_name, chat_id=target.chat_id, topic_id=target.topic_id, alert=alert)
     judgment = await correlator.judge(target.grid_name, alert, context)
+    _usage = judgment.usage
+    logger.info(
+        "alert_judgment_tokens grid={} in={} out={} thinking={} cached={} valid={}",
+        target.grid_name,
+        _usage.input_tokens if _usage else 0,
+        _usage.output_tokens if _usage else 0,
+        _usage.thinking_tokens if _usage else 0,
+        _usage.cached_tokens if _usage else 0,
+        judgment.valid,
+    )
     decision = to_legacy_correlation_decision(
         judgment, candidates, alert=alert, min_confidence=correlator._min_confidence
     )

@@ -82,6 +82,43 @@ class _ExplodingGateway:
         )
 
 
+class _CannedJudgmentGateway:
+    """Returns one fixed 'create_new / send' judgment plus a token-usage
+    object, and counts .generate calls."""
+
+    def __init__(self) -> None:
+        self.calls: List[Any] = []
+
+    async def generate(self, messages: Any, options: Any, **kwargs: Any) -> Any:
+        from shared.llm import Usage
+
+        self.calls.append((messages, options))
+        payload = {
+            "notification": {"send_telegram": True, "reason": "New underperformance."},
+            "grid_impact": {
+                "prior_known_status": "on", "current_assessed_status": "on",
+                "material_status_change": False, "summary": "One MPPT underperforming.",
+                "confidence": 0.9,
+            },
+            "ticket": {
+                "action": "create_new", "target_ticket_ref": None, "change_title": False,
+                "proposed_title": None, "change_description": False, "description_addition": None,
+                "relationship": "new_issue", "root_cause_kind": "component",
+                "reason": "No matching open ticket.", "confidence": 0.9,
+            },
+            "likely_user_action": {
+                "category": "remote_investigation", "summary": "Check the tracker.",
+                "confidence": 0.8,
+            },
+        }
+
+        class _Result:
+            text = json.dumps(payload)
+            usage = Usage(input_tokens=5000, output_tokens=120, thinking_tokens=800, cached_tokens=4096)
+
+        return _Result()
+
+
 class _FakeTicketService:
     """Combines the correlator-facing lookups (find_open_by_grid,
     get_ref_by_id, get_backend_name, get_status) with ticket creation
@@ -596,6 +633,80 @@ async def test_llm_outage_during_a_storm_collapses_onto_one_ticket_and_still_spe
         call for call in store.record_event_calls if call.get("decided_by") == "signature_backstop"
     ]
     assert len(backstopped) == len(_SUBJECTS) - 1
+
+
+class _LoggerSpy:
+    """Records loguru-style .info(msg, *args) calls (positional {} formatting)
+    and delegates every other attribute to the real logger. Deterministic --
+    unlike an added loguru sink, which this codebase's lru_cached setup_logging
+    removes whenever get_logger is called with an uncached module name."""
+
+    def __init__(self, real: Any) -> None:
+        self._real = real
+        self.infos: List[str] = []
+
+    def info(self, msg: str, *args: Any, **kwargs: Any) -> Any:
+        try:
+            self.infos.append(msg.format(*args) if args else msg)
+        except Exception:
+            self.infos.append(msg)
+        return self._real.info(msg, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+@pytest.mark.asyncio
+async def test_judgment_path_logs_token_counts(monkeypatch):
+    """One greppable token-usage line per model call, for cache verification."""
+    monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+    monkeypatch.setenv("ALERT_LLM_JUDGMENT_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "TESTTOKEN")
+
+    tickets: Dict[str, Dict[str, Any]] = {}
+    store = _FakeStore(tickets)
+    ticket_service = _FakeTicketService(tickets)
+    transport = _FakeTelegramTransport()
+    gateway = _CannedJudgmentGateway()
+
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.correlation_store.CorrelationStore",
+        lambda get_client=None: store,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.service.TicketService",
+        lambda get_supabase_client=None: ticket_service,
+    )
+    monkeypatch.setattr(
+        "orchestrator.services.ticketing.delivery_repository.DeliveryRepository",
+        _FakeDeliveryRepository,
+    )
+    monkeypatch.setattr(
+        "shared.llm.get_default_generation_gateway", lambda default_model=None: gateway
+    )
+    monkeypatch.setattr(
+        "shared.utils.telegram_send.send_telegram_message_with_fallback", transport.send
+    )
+    monkeypatch.setattr("shared.utils.telegram_send.edit_telegram_message", transport.edit)
+
+    async def _noop_chat_db_log(*args: Any, **kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr("orchestrator.api.app._log_notification_to_chat_db", _noop_chat_db_log)
+
+    import orchestrator.api.app as app_module
+
+    spy = _LoggerSpy(app_module.logger)
+    monkeypatch.setattr(app_module, "logger", spy)
+
+    body = _body("! Warning: MPPT AA11 in Solitary looks low !", grid="Solitary")
+    ref, error, _extra, _delivery = await _resolve_notify_ticket_full(body, _target("Solitary"))
+
+    assert error is None
+    assert len(gateway.calls) == 1
+    line = next((m for m in spy.infos if "alert_judgment_tokens" in m), None)
+    assert line is not None
+    assert "in=5000" in line and "cached=4096" in line and "grid=Solitary" in line
 
 
 # Synthetic sites and identifiers throughout: the alert *shapes* are what these
