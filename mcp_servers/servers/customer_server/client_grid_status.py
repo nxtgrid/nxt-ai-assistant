@@ -33,7 +33,13 @@ from servers.equipment_diagnostics_server.platforms.vrm_platform import Inverter
 
 from shared.auth import get_auth_service
 from shared.auth.auth_service import MANAGED_GENERATION_COLUMN
-from shared.grid_status import GridStatus, SiteStatus, classify_grid_status, normalize_site_status
+from shared.grid_status import (
+    GridStatus,
+    SiteStatus,
+    classify_grid_status,
+    normalize_site_status,
+    service_label,
+)
 from shared.utils.geo import parse_location_geom
 
 
@@ -180,6 +186,55 @@ async def _recent_state_flags(grid_id: int) -> tuple[Optional[bool], Optional[bo
     if is_stale(created_at):
         return (None, None)
     return (ts_row["is_hps_on"], ts_row["is_fs_active"])
+
+
+def build_grid_operating_view(
+    *,
+    vrm_is_on: Optional[bool],
+    vrm_power_kw: Optional[float],
+    hps_threshold_kw: Optional[float],
+    ts_hps_on: Optional[bool],
+    ts_fs_on: Optional[bool],
+    latest_state: Optional[Dict[str, Any]],
+) -> tuple[Dict[str, Any], Optional[Dict[str, Any]]]:
+    """Turn one grid's raw telemetry into the status a chat model may see.
+
+    Returns ``(service_fields, sanitized_latest_state)``.
+
+    ``service_fields`` is the processed operating status ``/grid`` and
+    ``meter_information`` report -- the same ``classify_grid_status`` verdict
+    ``/grids`` renders, as
+    ``{"service": <FS|HPS|Isolated|Off|Unknown>, "status_code": <enum value>}``.
+    A missing or stale VRM ON/OFF reading yields ``Unknown`` here, exactly as it
+    does in ``/grids``; the single-grid path deliberately does *not* fall back
+    to a Timescale-only "HPS"/"FS" guess.
+
+    ``sanitized_latest_state`` is ``latest_state`` with the raw ``is_hps_on`` /
+    ``is_fs_active`` snapshot booleans removed. Those lag physical state and a
+    model that reads one instead of ``service`` will tell a customer a live grid
+    is "not active" -- the incident this function exists to prevent. Only the
+    resolved verdict crosses into model-visible output.
+    """
+    raw_status = classify_grid_status(
+        vrm_is_on=vrm_is_on,
+        vrm_data_stale=vrm_is_on is None,
+        vrm_power_kw=vrm_power_kw,
+        hps_threshold_kw=hps_threshold_kw,
+        fs_on=ts_fs_on,
+        hps_on=ts_hps_on,
+    )
+    service_fields = {
+        "service": service_label(raw_status),
+        "status_code": raw_status.value,
+    }
+    if latest_state is None:
+        return service_fields, None
+    sanitized = {
+        key: value
+        for key, value in latest_state.items()
+        if key not in ("is_hps_on", "is_fs_active")
+    }
+    return service_fields, sanitized
 
 
 class ClientGridStatusMixin:
@@ -901,49 +956,28 @@ class ClientGridStatusMixin:
                 if corrected_grid_name:
                     result["name_corrected_from"] = corrected_grid_name
 
-                # Determine service status using VRM voltage/power with TimescaleDB fallback
-                # - VRM voltage determines ON/OFF (if available)
-                # - VRM power vs threshold determines HPS (if ON), with TimescaleDB fallback
-                # - FS status always from TimescaleDB (VRM doesn't track FS)
-                # - "Likely Isolated" = ON but power below HPS threshold
-                # NOTE: Keep this logic consistent with /grids command in list_all_grids_status()
-                hps_threshold_kw = grid.get("is_hps_on_threshold_kw")
-
-                if vrm_is_on is None:
-                    # No VRM data - fall back to TimescaleDB-only logic
-                    if ts_is_stale or (ts_fs_on is None and ts_hps_on is None):
-                        service_status = "Unknown"
-                    elif ts_fs_on:
-                        service_status = "FS"
-                    elif ts_hps_on:
-                        service_status = "HPS"
-                    else:
-                        service_status = "Down"
-                elif vrm_is_on is False:
-                    # VRM says grid is OFF (no inverter voltage)
-                    service_status = "Down"
-                else:
-                    # VRM says grid is ON - determine HPS using VRM power vs threshold
-                    # with TimescaleDB fallback if VRM power unavailable
-                    if vrm_power_kw is not None and hps_threshold_kw is not None:
-                        vrm_hps_on = vrm_power_kw >= float(hps_threshold_kw)
-                    else:
-                        # Fallback to TimescaleDB if VRM power unavailable
-                        vrm_hps_on = ts_hps_on
-
-                    # Power below threshold = Isolated, even if meters report FS
-                    if vrm_hps_on is False:
-                        service_status = "Likely Isolated"
-                    elif ts_fs_on is True:
-                        service_status = "FS"
-                    elif vrm_hps_on is True:
-                        service_status = "HPS"
-                    else:
-                        service_status = "Likely Isolated"
+                # Processed operating status -- the same ``classify_grid_status``
+                # verdict ``/grids`` renders, resolved through
+                # ``build_grid_operating_view`` so the two commands cannot drift.
+                # A missing or stale VRM reading is ``Unknown`` here exactly as it
+                # is in ``/grids``; the single-grid path does not fall back to a
+                # Timescale-only "HPS"/"FS" guess. The call also strips the raw
+                # ``is_hps_on`` / ``is_fs_active`` snapshot booleans out of
+                # ``latest_state`` -- only ``service`` crosses into what a chat
+                # model sees. Stale snapshot flags are blanked first, the same
+                # way ``/grids`` does it (``hps_on = None if ts_is_stale else``).
+                service_fields, latest_state = build_grid_operating_view(
+                    vrm_is_on=vrm_is_on,
+                    vrm_power_kw=vrm_power_kw,
+                    hps_threshold_kw=grid.get("is_hps_on_threshold_kw"),
+                    ts_hps_on=None if ts_is_stale else ts_hps_on,
+                    ts_fs_on=None if ts_is_stale else ts_fs_on,
+                    latest_state=latest_state,
+                )
 
                 # Service status section: current state + yesterday's on hours + downtime
                 result["service_status"] = {
-                    "service": service_status,
+                    **service_fields,
                     "inverter_power_kw": vrm_power_kw,  # VRM total output power
                     "inverter_l1_power_kw": (
                         round(vrm_l1_power_w / 1000, 3) if vrm_l1_power_w is not None else None
@@ -1044,7 +1078,10 @@ class ClientGridStatusMixin:
                     }
 
                 logger.info(
-                    f"Grid status for {grid['name']}: HPS={ts_hps_on}, FS={ts_fs_on}, "
+                    f"Grid status for {grid['name']}: service={service_fields['service']} "
+                    f"({service_fields['status_code']}) "
+                    f"[vrm_on={vrm_is_on}, vrm_power_kw={vrm_power_kw}, "
+                    f"raw_snapshot_flags HPS={ts_hps_on}/FS={ts_fs_on}], "
                     f"business_snapshot={'present' if business_snapshot else 'None'}, "
                     f"fs_schedule={fs_schedule.get('summary', 'N/A') if fs_schedule else 'None'}, "
                     f"yesterday_on={yesterday_on.get('on_hours', 'N/A')}h"

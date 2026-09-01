@@ -1,6 +1,12 @@
 import pytest
 
-from shared.grid_status import GridStatus, SiteStatus, classify_grid_status, normalize_site_status
+from shared.grid_status import (
+    GridStatus,
+    SiteStatus,
+    classify_grid_status,
+    normalize_site_status,
+    service_label,
+)
 
 
 @pytest.mark.parametrize(
@@ -15,6 +21,28 @@ from shared.grid_status import GridStatus, SiteStatus, classify_grid_status, nor
 )
 def test_normalizes_grids_status_for_alerts(raw: GridStatus, normalized: SiteStatus) -> None:
     assert normalize_site_status(raw) is normalized
+
+
+@pytest.mark.parametrize(
+    ("raw", "label"),
+    [
+        (GridStatus.FS_ON, "FS"),
+        (GridStatus.HPS_ON, "HPS"),
+        (GridStatus.LIKELY_ISOLATED, "Isolated"),
+        (GridStatus.OFF, "Off"),
+        (GridStatus.UNKNOWN, "Unknown"),
+    ],
+)
+def test_service_label_uses_the_grids_command_vocabulary(raw: GridStatus, label: str) -> None:
+    """The one status word a chat model should ever see for a grid is the same
+    processed verdict `/grids` shows an operator -- FS / HPS / Isolated / Off /
+    Unknown -- never a raw ``is_hps_on`` / ``is_fs_active`` snapshot boolean."""
+    assert service_label(raw) == label
+
+
+def test_service_label_covers_every_grid_status() -> None:
+    for status in GridStatus:
+        assert service_label(status), f"no label for {status}"
 
 
 @pytest.mark.parametrize(

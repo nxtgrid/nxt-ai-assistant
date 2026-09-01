@@ -61,3 +61,22 @@ def normalize_site_status(status: GridStatus) -> SiteStatus:
         GridStatus.OFF: SiteStatus.OFF,
         GridStatus.UNKNOWN: SiteStatus.UNKNOWN,
     }[status]
+
+
+def service_label(status: GridStatus) -> str:
+    """Human label for a processed grid status, in the vocabulary the `/grids`
+    command shows an operator: FS / HPS / Isolated / Off / Unknown.
+
+    This is the only grid-status string that should reach a chat model. The raw
+    ``is_hps_on`` / ``is_fs_active`` snapshot booleans must never be handed over
+    beside it: they lag physical state, read as "off" on any data gap, and a
+    model that picks one out of a status payload over the processed verdict will
+    tell a customer a live grid is "not active".
+    """
+    return {
+        GridStatus.FS_ON: "FS",
+        GridStatus.HPS_ON: "HPS",
+        GridStatus.LIKELY_ISOLATED: "Isolated",
+        GridStatus.OFF: "Off",
+        GridStatus.UNKNOWN: "Unknown",
+    }[status]

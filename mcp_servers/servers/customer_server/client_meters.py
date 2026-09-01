@@ -221,14 +221,14 @@ class ClientMetersMixin:
             if "connection_type" in enriched_meter:
                 response["connection_type"] = enriched_meter["connection_type"]
 
-            # Include full grid status if available
+            # Include full grid status if available. When get_grid_status could
+            # not resolve one, fall back to the grid name only -- never a
+            # status guess from a raw flag, which is what a chat model latches
+            # onto to tell a customer a live grid is "not active".
             if full_grid_status and "error" not in full_grid_status:
                 response["grid"] = full_grid_status
             elif "grid_name" in enriched_meter:
-                # Fallback to simple grid info
                 response["grid_name"] = enriched_meter["grid_name"]
-                if "grid_status" in enriched_meter:
-                    response["grid_status"] = enriched_meter["grid_status"]
 
             if "dcu_status" in enriched_meter:
                 response["dcu_status"] = enriched_meter["dcu_status"]
