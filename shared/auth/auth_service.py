@@ -13,6 +13,7 @@ Uses direct PostgreSQL connection with a dedicated readonly database user.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass
@@ -143,8 +144,12 @@ class AuthService:
             AUTH_DB_PORT: Database port (default: 6543 for pooler)
             AUTH_DB_NAME: Database name (default: postgres)
         """
-        # Direct PostgreSQL connection (only supported method)
+        # Direct PostgreSQL connection (only supported method). The pool is
+        # loop-bound (asyncpg); _db_pool_loop records which loop built it so
+        # _get_db_pool can rebuild after a poller daemon's asyncio.run() loop
+        # closes rather than reusing a dead pool forever.
         self._db_pool = None
+        self._db_pool_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Validate configuration
         required_vars = ["AUTH_DB_HOST", "AUTH_DB_USER", "AUTH_DB_PASSWORD"]
@@ -158,7 +163,29 @@ class AuthService:
         LOGGER.info("Auth service using direct PostgreSQL connection (readonly user)")
 
     async def _get_db_pool(self):
-        """Get or create direct PostgreSQL connection pool (readonly role)."""
+        """Get or create direct PostgreSQL connection pool (readonly role).
+
+        asyncpg pools are bound to the event loop that created them. This
+        service is a process-wide singleton, but the anansi_app poller daemons
+        run each unit of work under a fresh ``asyncio.run(...)`` whose loop is
+        closed on return. Reusing a pool bound to a closed loop raises
+        ``RuntimeError: Event loop is closed`` on every acquire and leaks the
+        pool's connections. So if the cached pool belongs to a different loop,
+        discard it (best-effort ``terminate()``; may itself raise on a
+        fully-closed loop, in which case GC reclaims the sockets) and rebuild.
+        """
+        running_loop = asyncio.get_running_loop()
+
+        if self._db_pool is not None and self._db_pool_loop is not running_loop:
+            stale, self._db_pool = self._db_pool, None
+            self._db_pool_loop = None
+            try:
+                stale.terminate()
+            except Exception:
+                LOGGER.opt(exception=True).debug(
+                    "Discarding an auth DB pool bound to a stale event loop"
+                )
+
         if self._db_pool is None:
             try:
                 import asyncpg
@@ -179,6 +206,7 @@ class AuthService:
                     command_timeout=10,
                     statement_cache_size=0,  # Disable prepared statements for PgBouncer
                 )
+                self._db_pool_loop = running_loop
                 LOGGER.info("PostgreSQL connection pool created for auth database")
             except ImportError:
                 LOGGER.error("asyncpg not installed. Install with: pip install asyncpg")
