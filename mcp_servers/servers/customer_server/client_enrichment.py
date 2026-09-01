@@ -28,7 +28,9 @@ class ClientEnrichmentMixin:
             - customer_name, customer_id
             - connection_type, connection_id
             - grid_name, grid_id
-            - grid_status (from is_hps_on or similar field)
+
+        Grid operating status is intentionally not included -- callers read it
+        from get_grid_status so there is exactly one status signal per payload.
         """
         try:
             # Use direct database connection instead of Supabase API to bypass RLS
@@ -168,14 +170,20 @@ class ClientEnrichmentMixin:
                     except Exception as e:
                         logger.warning(f"Could not enrich connection/customer info: {e}")
 
-                # Get grid info - schema uses rls_grid_id
+                # Get grid info - schema uses rls_grid_id.
+                # Only the grid name is taken here. Grid operating status is NOT
+                # derived from grids.is_hps_on: that denormalised column is
+                # NOT NULL DEFAULT false, carries no timestamp, and cannot be
+                # aged out, so it reads as a hard "down" on any un-synced grid.
+                # meter_information reports status from get_grid_status (the same
+                # processed classify_grid_status verdict /grids renders); this
+                # path must not put a second, contradictory signal beside it.
                 grid_id = meter.get("rls_grid_id")
                 if grid_id:
                     try:
-                        # Schema has is_hps_on boolean field for grid status
                         grid_row = await conn.fetchrow(
                             """
-                            SELECT id, name, is_hps_on
+                            SELECT id, name
                             FROM grids
                             WHERE id = $1
                             LIMIT 1
@@ -185,12 +193,6 @@ class ClientEnrichmentMixin:
 
                         if grid_row:
                             enriched["grid_name"] = grid_row.get("name")
-
-                            # Use is_hps_on to determine grid status
-                            if "is_hps_on" in grid_row and grid_row["is_hps_on"] is not None:
-                                enriched["grid_status"] = (
-                                    "grid is energized" if grid_row["is_hps_on"] else "grid is down"
-                                )
                     except Exception as e:
                         logger.warning(f"Could not enrich grid info: {e}")
 
