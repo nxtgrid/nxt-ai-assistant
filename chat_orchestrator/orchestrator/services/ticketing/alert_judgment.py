@@ -73,7 +73,10 @@ class GridImpact(_StrictModel):
 
 class NotificationJudgment(_StrictModel):
     send_telegram: bool
-    reason: str = Field(min_length=1, max_length=500)
+    # Nullable: the prompt tells the model to omit this when send_telegram is
+    # false (nobody reads it). A sent alert must still carry one -- enforced by
+    # the ``missing_notification_reason`` guardrail in ``parse_alert_judgment``.
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class TicketJudgment(_StrictModel):
@@ -98,7 +101,9 @@ class TicketJudgment(_StrictModel):
 
 class LikelyUserAction(_StrictModel):
     category: LikelyUserActionCategory
-    summary: str = Field(min_length=1, max_length=500)
+    # Nullable for the same reason as ``NotificationJudgment.reason`` -- the
+    # prompt asks for null (with ``category: "none"``) when not sending.
+    summary: str | None = Field(default=None, max_length=500)
     confidence: float = Field(ge=0, le=1)
 
     @field_validator("confidence")
@@ -189,6 +194,14 @@ def parse_alert_judgment(
     # `ticket`/`notification` sections only -- none of them re-examine
     # `grid_impact`/`likely_user_action` content, so a rejection here still
     # passes the already-parsed `judgment` through (see `_invalid`).
+    if judgment.notification.send_telegram and not _has_text(judgment.notification.reason):
+        return _invalid(
+            raw,
+            "missing_notification_reason",
+            "a sent alert must carry a notification reason",
+            judgment,
+        )
+
     impact = judgment.grid_impact
     if impact.material_status_change and not judgment.notification.send_telegram:
         return _invalid(

@@ -198,3 +198,47 @@ def test_parse_keeps_unknown_status_judgment_for_fail_open_delivery_policy() -> 
     assert result.valid is True
     assert result.judgment is not None
     assert result.judgment.grid_impact.prior_known_status == "unknown"
+
+
+def test_parse_accepts_null_reason_and_action_summary_when_not_sending() -> None:
+    payload = json.loads(json.dumps(VALID))
+    payload["grid_impact"] = {
+        "prior_known_status": "on",
+        "current_assessed_status": "on",
+        "material_status_change": False,
+        "summary": "recurrence, no status change",
+        "confidence": 0.9,
+    }
+    payload["notification"] = {"send_telegram": False, "reason": None}
+    payload["likely_user_action"] = {"category": "none", "summary": None, "confidence": 0.7}
+    payload["ticket"] = {
+        "action": "record_occurrence",
+        "target_ticket_ref": "OPS-1234",
+        "change_title": False,
+        "proposed_title": None,
+        "change_description": False,
+        "description_addition": None,
+        "relationship": "same_issue",
+        "root_cause_kind": "other",
+        "reason": "re-fire",
+        "confidence": 0.9,
+    }
+
+    result = parse_alert_judgment(json.dumps(payload), {"OPS-1234"}, 0.75)
+
+    assert result.valid is True
+    assert result.judgment is not None
+    assert result.judgment.notification.reason is None
+    assert result.judgment.likely_user_action.summary is None
+    round_tripped = result.judgment.model_dump(mode="json")
+    assert round_tripped["notification"]["reason"] is None
+
+
+def test_parse_rejects_missing_reason_when_sending() -> None:
+    payload = json.loads(json.dumps(VALID))
+    payload["notification"] = {"send_telegram": True, "reason": None}
+
+    result = parse_alert_judgment(json.dumps(payload), {"OPS-1234"}, 0.75)
+
+    assert result.valid is False
+    assert result.error_code == "missing_notification_reason"
