@@ -10,6 +10,11 @@ that stands in for it.
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
+import pytest
+from nicegui_app import page_context as pc
 from nicegui_app.page_context import (
     MAX_SELECTION_CHARS,
     MAX_SUMMARY_CHARS,
@@ -81,3 +86,41 @@ def test_chip_label_truncates_long_labels():
     page = PageContext(kind="x", label="y" * 80)
     assert len(page.chip_label()) == 40
     assert page.chip_label().endswith("…")
+
+
+@pytest.fixture
+def fake_client_storage(monkeypatch):
+    """Give the faked `nicegui` module an `app.storage.client` dict.
+
+    conftest.py stubs `nicegui` as SimpleNamespace(run=..., ui=...) with no
+    `app`, which is exactly why page_context imports `app` inside its
+    functions rather than at module top.
+    """
+    store: dict = {}
+    nicegui = sys.modules["nicegui"]
+    monkeypatch.setattr(
+        nicegui, "app", SimpleNamespace(storage=SimpleNamespace(client=store)), raising=False
+    )
+    return store
+
+
+def test_set_then_get_round_trips(fake_client_storage):
+    page = PageContext(kind="ticket", label="Ticket OPS-1")
+    pc.set_page_context(page)
+    assert pc.get_page_context() == page
+
+
+def test_get_returns_none_when_nothing_was_set(fake_client_storage):
+    assert pc.get_page_context() is None
+
+
+def test_get_ignores_a_non_pagecontext_value(fake_client_storage):
+    fake_client_storage["anansi_chat_page_context"] = {"kind": "ticket"}
+    assert pc.get_page_context() is None
+
+
+def test_set_outside_a_client_context_is_a_noop_not_a_crash():
+    # No fake_client_storage fixture: `nicegui` has no `app`, so the
+    # function-local import raises -- and must be swallowed.
+    pc.set_page_context(PageContext(kind="ticket", label="T"))
+    assert pc.get_page_context() is None
