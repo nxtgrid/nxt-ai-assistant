@@ -527,6 +527,14 @@ async def preview_module_body(module: Any, provider: Any, user_email: str) -> st
     module that means their own Drive access -- preview is a dry run of the
     real gate, not a second gate that could disagree with it. Anything else
     would show an operator content they cannot otherwise reach.
+
+    A provider may expose a ``preview(ctx)`` coroutine for the case where a
+    plain ``resolve`` cannot say anything useful outside a real conversation
+    -- the episodic module keys on a single grid/org from the request scope,
+    which a preview has no way to supply, so without this it would always
+    report "resolved to nothing" no matter how many distillations exist.
+    When present it fully owns the preview rendering; ``resolve`` is not
+    also called.
     """
     from shared.prompts.providers import ResolutionContext
     from shared.prompts.types import RequestScope
@@ -536,8 +544,12 @@ async def preview_module_body(module: Any, provider: Any, user_email: str) -> st
     # missing is user_email -- without it a document module resolved under
     # no identity at all.
     ctx = ResolutionContext(scope=RequestScope(), user_email=user_email, is_staff=True)
+    previewer = getattr(provider, "preview", None)
     try:
-        body = await provider.resolve(module, ctx)
+        if callable(previewer):
+            body = await previewer(ctx)
+        else:
+            body = await provider.resolve(module, ctx)
     except Exception as e:
         return f"Provider failed: {e}"
     return body or "Resolved to nothing for your permissions."

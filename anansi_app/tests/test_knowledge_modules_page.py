@@ -455,6 +455,31 @@ def test_preview_reports_a_provider_failure_rather_than_raising():
     assert "RPC missing" in text
 
 
+def test_preview_prefers_a_provider_preview_hook_over_resolve():
+    """A provider exposing preview(ctx) owns the preview; resolve() -- which
+    for the episodic module is always None outside a real conversation -- is
+    not consulted."""
+    import asyncio
+
+    module = KnowledgeModule(
+        id="e", slug="episodic", title="Episodic", summary="s", body=None, source="episodic"
+    )
+
+    class _Provider:
+        source = "episodic"
+
+        async def resolve(self, m, ctx):
+            return None
+
+        async def preview(self, ctx):
+            return f"12 distillation(s) stored, seen as {ctx.user_email}"
+
+    text = asyncio.run(
+        preview_module_body(module, _Provider(), user_email="ops@example.com")
+    )
+    assert text == "12 distillation(s) stored, seen as ops@example.com"
+
+
 # ── Slug autofill: same shape as the Skills editor and /learn's
 # normalize_slug, applied live as an operator types a Title instead of at
 # save time. Never raises -- it runs on every keystroke, where "nothing

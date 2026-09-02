@@ -5,8 +5,11 @@ from typing import Any, Dict, List
 import pytest
 
 from shared.episodic_memory import (
+    MAX_CHARS_PER_MESSAGE,
+    MAX_TOTAL_HISTORY_CHARS,
     anchors_to_refresh,
     build_distillation_prompt,
+    clamp_history,
     distill_anchor,
     distill_anchor_type,
     select_targets,
@@ -100,9 +103,11 @@ class _Gateway:
         self._text = text
         self._raises = raises
         self.calls = 0
+        self.last_prompt = None
 
-    async def generate(self, _messages, _options):
+    async def generate(self, messages, _options):
         self.calls += 1
+        self.last_prompt = messages[0].text if messages else None
         if self._raises:
             raise self._raises
         return type("Resp", (), {"text": self._text})()
@@ -154,6 +159,70 @@ async def test_an_empty_model_response_does_not_overwrite_a_good_summary():
     client = _client()
     assert await distill_anchor(client, "grid", "Alpha", _Gateway(text="  "), "m") is None
     assert client.upserts == []
+
+
+# ── clamp_history: the payload cap that keeps the nightly batch from
+# sending ~850k-token grid prompts (see the constant's comment) ────────────
+
+
+def test_clamp_history_truncates_an_oversized_message():
+    [out] = clamp_history(["x" * (MAX_CHARS_PER_MESSAGE + 5_000)])
+    assert len(out) <= MAX_CHARS_PER_MESSAGE + len(" […]")
+    assert out.endswith(" […]")
+
+
+def test_clamp_history_keeps_newest_first_until_the_budget_is_spent():
+    one_k = "y" * 1_000
+    many = [one_k] * (MAX_TOTAL_HISTORY_CHARS // 1_000 + 50)
+    out = clamp_history(many)
+    assert sum(len(m) for m in out) <= MAX_TOTAL_HISTORY_CHARS
+    assert len(out) < len(many)  # some were dropped
+
+
+def test_clamp_history_leaves_a_small_history_untouched():
+    small = ["short message", "another short one"]
+    assert clamp_history(small) == small
+
+
+@pytest.mark.asyncio
+async def test_distill_anchor_bounds_a_huge_history_before_calling_the_model():
+    huge = [("m%d " % i) + "z" * 20_000 for i in range(300)]
+    client = _client(messages=huge)
+    gateway = _Gateway()
+
+    await distill_anchor(client, "grid", "Alpha", gateway, "m")
+
+    assert len(gateway.last_prompt) < MAX_TOTAL_HISTORY_CHARS + 5_000
+    # message_count records what was actually sent, not the 300 matched.
+    assert client.upserts[0]["message_count"] < 300
+
+
+@pytest.mark.asyncio
+async def test_zero_writes_with_targets_warns(monkeypatch):
+    from loguru import logger
+
+    monkeypatch.setattr(
+        "shared.episodic_memory.eligible_anchor_names", _async_returning(["Alpha", "Beta"])
+    )
+
+    async def _all_quiet(_client, _anchor_type, _name, _gateway, _model):
+        return None  # every anchor: no messages / nothing back
+
+    monkeypatch.setattr("shared.episodic_memory.distill_anchor", _all_quiet)
+    monkeypatch.setattr(
+        "shared.llm.get_default_generation_gateway", lambda: _Gateway(), raising=False
+    )
+    monkeypatch.setattr("shared.llm.model_tiers.resolve_model", lambda _t: "m", raising=False)
+
+    seen: list = []
+    sink_id = logger.add(seen.append, level="WARNING", format="{message}")
+    try:
+        result = await distill_anchor_type("grid", apply=True, client=_client())
+    finally:
+        logger.remove(sink_id)
+
+    assert result["written"] == 0
+    assert any("0 of 2 target anchor(s)" in str(m) for m in seen)
 
 
 # ── distill_anchor_type ──────────────────────────────────────────────────────

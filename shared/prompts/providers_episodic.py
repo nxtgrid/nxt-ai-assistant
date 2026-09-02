@@ -75,6 +75,83 @@ class EpisodicProvider:
         summary = (rows[0].get("summary") or "").strip()
         return summary or None
 
+    async def preview(self, ctx: ResolutionContext) -> Optional[str]:
+        """What the admin Context page shows for this module.
+
+        `resolve` is keyed on a single grid or organization taken from the
+        conversation's scope. A preview has no conversation, so `resolve`
+        always returns None here and the operator learns nothing about
+        whether distillation is working. This instead enumerates the
+        distillations the viewer is allowed to see, states that a live
+        conversation gets exactly one of them, and shows the most recent in
+        full as a concrete sample. Read-only, same as `resolve`.
+        """
+        if self._client is None:
+            return "_Context storage is not configured, so no distillations can be listed._"
+
+        try:
+            result = (
+                self._client.table("episodic_distillations")
+                .select("anchor_type, anchor_id, anchor_name, summary, message_count, generated_at")
+                .order("generated_at", desc=True)
+                .execute()
+            )
+        except Exception as e:
+            LOGGER.warning(f"Episodic distillation preview lookup failed: {e}")
+            return f"_Could not read stored distillations: {e}_"
+
+        rows = list(result.data or [])
+        if not ctx.is_staff:
+            allowed = set(ctx.organization_ids or ())
+            rows = [
+                r for r in rows
+                if r.get("anchor_type") == "organization" and str(r.get("anchor_id")) in allowed
+            ]
+        return _render_preview(rows, is_staff=ctx.is_staff)
+
+
+def _render_preview(rows: list, *, is_staff: bool) -> str:
+    """Format `preview`'s row list as markdown. Pure, for testability."""
+    if not rows:
+        if is_staff:
+            return (
+                "_No distillations stored yet. The nightly batch "
+                "(anansi_app/scripts/episodic_scheduler.py) writes one per site or "
+                "organization that has recent chat history mentioning it by name._"
+            )
+        return "_No distillations are stored for your organization(s) yet._"
+
+    # Defensive re-sort: don't rely on the query's ORDER BY surviving the
+    # client/transport, and a missing generated_at must not raise.
+    rows = sorted(rows, key=lambda r: r.get("generated_at") or "", reverse=True)
+    grids = sum(1 for r in rows if r.get("anchor_type") == "grid")
+    orgs = sum(1 for r in rows if r.get("anchor_type") == "organization")
+
+    newest = rows[0]
+    name = newest.get("anchor_name") or newest.get("anchor_id") or "(unnamed)"
+    when = (newest.get("generated_at") or "")[:10]
+    count = newest.get("message_count")
+    header = (
+        f"_{len(rows)} distillation(s) stored — {grids} site(s), {orgs} organization(s). "
+        "A live conversation injects exactly one, chosen by the site or organization "
+        "in scope; a preview has neither, so this shows the most recently generated "
+        "one as a sample._"
+    )
+    meta = f"**{name}** — {newest.get('anchor_type')} · generated {when}"
+    if count is not None:
+        meta += f" · {count} messages"
+    parts = [header, "\n---\n", meta, "", (newest.get("summary") or "").strip()]
+
+    others = rows[1:]
+    if others:
+        listed = ", ".join(
+            f"{r.get('anchor_name') or r.get('anchor_id')} ({(r.get('generated_at') or '')[:10]})"
+            for r in others[:20]
+        )
+        more = "" if len(others) <= 20 else f", +{len(others) - 20} more"
+        parts += ["\n---", f"_Also stored: {listed}{more}_"]
+    return "\n".join(parts)
+
 
 async def _default_grid_access(grid: str, ctx: ResolutionContext) -> bool:
     """Staff see every grid; everyone else needs it in their permitted set.

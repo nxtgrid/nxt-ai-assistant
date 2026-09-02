@@ -35,6 +35,32 @@ LOOKBACK_DAYS = 30
 MAX_MESSAGES = 300
 TARGET_WORDS = 200
 
+# MAX_MESSAGES bounds how many messages are pulled, not their size. A grid
+# name can match 300 bulky alert / correlation / tool-result messages, and
+# after the late-August alert-storm traffic that reached ~850k tokens of
+# prompt per grid -- enough to make the nightly 03:00 batch fail under the
+# container's memory pressure and the hour's Gemini rate limit, even though
+# the identical code hand-run at a quiet hour writes every row. Bound the
+# payload: truncate each message, then keep newest-first until the budget is
+# spent. A 200-word summary cannot reflect 850k tokens anyway, so a tighter
+# window also sharpens the result.
+MAX_CHARS_PER_MESSAGE = 2_000
+MAX_TOTAL_HISTORY_CHARS = 120_000  # ~30k tokens
+
+
+def clamp_history(messages: List[str]) -> List[str]:
+    """Bound the distillation payload. ``messages`` is newest-first."""
+    clamped: List[str] = []
+    budget = MAX_TOTAL_HISTORY_CHARS
+    for message in messages:
+        if len(message) > MAX_CHARS_PER_MESSAGE:
+            message = message[:MAX_CHARS_PER_MESSAGE] + " […]"
+        if len(message) > budget:
+            break
+        clamped.append(message)
+        budget -= len(message)
+    return clamped
+
 
 def anchors_to_refresh(candidates: List[str], existing: List[Dict[str, Any]]) -> List[str]:
     """Which anchors the batch should regenerate.
@@ -132,6 +158,7 @@ async def distill_anchor(
     messages = [r["content"] for r in rows if r.get("content")]
     if not messages:
         return None
+    messages = clamp_history(messages)
 
     response = await gateway.generate(
         [LLMMessage(role="user", text=build_distillation_prompt(name, messages))],
@@ -212,16 +239,31 @@ async def distill_anchor_type(
         if on_progress:
             on_progress(name, written)
 
+    if not result["written"]:
+        # Enumeration succeeded (targets is non-empty here) but nothing was
+        # written -- every anchor either had no messages or the model gave
+        # nothing back. That is how grid distillation silently went stale for
+        # a week; a WARNING clears the INFO-level default so the next stale
+        # stretch is visible without waiting for someone to notice missing
+        # rows.
+        LOGGER.warning(
+            f"Episodic {anchor_type}: 0 of {len(result['targets'])} target anchor(s) "
+            f"produced a distillation; stored rows are now stale."
+        )
+
     return result
 
 
 __all__ = [
     "LOOKBACK_DAYS",
     "MAX_MESSAGES",
+    "MAX_CHARS_PER_MESSAGE",
+    "MAX_TOTAL_HISTORY_CHARS",
     "TARGET_WORDS",
     "anchors_to_refresh",
     "build_client",
     "build_distillation_prompt",
+    "clamp_history",
     "distill_anchor",
     "distill_anchor_type",
     "eligible_anchor_names",
