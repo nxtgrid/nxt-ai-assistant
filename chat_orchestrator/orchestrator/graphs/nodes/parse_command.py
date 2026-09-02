@@ -31,9 +31,17 @@ async def parse_command(state: ConversationState) -> Dict[str, Any]:
     user_input = state.get("user_input", "")
     original_input = user_input
 
-    # Only process commands from Telegram
-    if not user_context or user_context.source != "telegram":
-        LOGGER.debug("Not a Telegram source, skipping command parsing")
+    # Sources whose input is typed by a human and may therefore be a command.
+    # "web" is the anansi_app chat widget, which is meant to behave like a
+    # Telegram personal chat -- without it, a staff user's "/grids" reaches the
+    # model as literal prose and NL triggers stop matching entirely. "api" and
+    # "roam" stay out: those are machine callers (n8n, the scheduler, direct
+    # integrations) whose generated text would match NL triggers by accident.
+    if not user_context or user_context.source not in ("telegram", "web"):
+        LOGGER.debug(
+            f"Source {getattr(user_context, 'source', 'unknown')} does not carry "
+            "commands, skipping command parsing"
+        )
         return {
             "original_input": original_input,
             "parsed_command": None,
