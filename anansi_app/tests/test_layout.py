@@ -30,3 +30,24 @@ def test_rag_knowledgebase_is_the_context_child():
     assert items[context_index + 1].target == "/rag-knowledgebase"
     assert items[context_index + 1].label == "📚 RAG Knowledgebase"
     assert items[context_index + 1].depth == 1
+
+
+def test_frame_mounts_the_chat_widget():
+    """Static check: `frame` is the single mount point, so the widget appears
+    on every admin page. Rendering it needs a NiceGUI runtime, which this
+    suite does not have (conftest fakes `nicegui`), so assert on the source.
+    """
+    import ast
+    import inspect
+
+    from nicegui_app import layout
+
+    source = inspect.getsource(layout.frame)
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source.lstrip()))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "mount"
+    ]
+    assert calls, "layout.frame() must call chat_widget.mount(user)"

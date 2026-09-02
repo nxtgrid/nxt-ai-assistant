@@ -241,6 +241,17 @@ def frame(user: dict[str, Any], current_path: str):
     with ui.column().classes("w-full").style("max-width: 1200px; padding: 1rem 1.5rem;") as content:
         yield content
 
+    # After the page body, so the pop-over is a sibling of the content rather
+    # than nested inside it. Mounted here rather than per-route so every admin
+    # page gets it and the page-context chip follows the user around.
+    # Self-gating: chat_widget.mount() returns immediately for anyone who is
+    # not a bot admin. Function-local import keeps `layout` importable without
+    # pulling in `requests` / `grid_app.lib.perms` at module load, matching
+    # how `frame()` already defers `grouped_entities`.
+    from nicegui_app import chat_widget
+
+    chat_widget.mount(user)
+
 
 def access_denied() -> None:
     with ui.column().classes("w-full items-start"):
