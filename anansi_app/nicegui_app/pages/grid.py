@@ -27,6 +27,7 @@ from grid_app.entities.virtual import VIRTUAL, VirtualCol, make_fetch, preload_f
 from grid_app.lib import perms
 from nicegui import run, ui
 
+from nicegui_app.page_context import PageContext, set_page_context
 from nicegui_app.pages import grid_actions
 from shared.grid_design import settings as grid_settings
 from shared.grid_design.ids import new_id
@@ -100,6 +101,69 @@ def _db_configured() -> bool:
 
 
 # ── dispatcher ──────────────────────────────────────────────────────────────────
+# ── chat page context ─────────────────────────────────────────────────────────
+# NB: a design row's `id` is deliberately NOT published as EntityContext's typed
+# `grid_id`. The grid-design tables and the auth DB whose grid ids the bot's
+# org-scoped tools use are different databases; handing over an id from one
+# namespace as if it belonged to the other would point those tools at the wrong
+# record. The grid NAME goes out instead -- the bot resolves it with its own
+# tools.
+_MAX_LISTED_ROWS = 10
+_MAX_SUMMARY_COLUMNS = 8
+
+
+def _scalar(value: Any) -> bool:
+    return isinstance(value, (str, int, float, bool))
+
+
+def build_grid_record_page_context(spec, row: dict[str, Any]) -> PageContext:
+    """One grid-design record, as chat context."""
+    display = str(row.get(spec.label_column) or row.get(spec.pk) or "record")
+    identifiers = {"entity": spec.bare, "record_id": str(row.get(spec.pk) or "")}
+    if spec.bare == "grids" and row.get("name"):
+        identifiers["grid_name"] = str(row["name"])
+
+    lines: list[str] = []
+    for col in spec.list_columns()[:_MAX_SUMMARY_COLUMNS]:
+        value = row.get(col.name)
+        # None and non-primitives (dicts/lists on a joined column) are noise
+        # in a chat summary -- skip rather than render "Stage: None".
+        if value is None or not _scalar(value):
+            continue
+        lines.append(f"{col.name.replace('_', ' ').capitalize()}: {value}")
+
+    return PageContext(
+        kind="grid_record",
+        label=f"{spec.label}: {display}",
+        identifiers=identifiers,
+        summary_lines=lines,
+        detail_hint=(
+            f"This is the {spec.label} record open in the Grid Design app. "
+            "Ask for related records or design figures by name."
+        ),
+    )
+
+
+def build_grid_list_page_context(spec, rows: list[dict[str, Any]]) -> PageContext:
+    """A grid-design table listing, as chat context."""
+    names = [
+        str(r.get(spec.label_column) or r.get(spec.pk) or "—") for r in rows[:_MAX_LISTED_ROWS]
+    ]
+    lines = [f"{len(rows)} {spec.label} rows listed."]
+    if names:
+        lines.append("On screen: " + ", ".join(names))
+        if len(rows) > len(names):
+            lines.append(f"(first {len(names)} of {len(rows)} listed)")
+
+    return PageContext(
+        kind="grid_list",
+        label=f"{spec.label} ({len(rows)})",
+        identifiers={"entity": spec.bare},
+        summary_lines=lines,
+        detail_hint="Ask about any row above by name for its full record.",
+    )
+
+
 async def render(user: dict, bare: str, params: dict[str, str]) -> None:
     email = user.get("email", "")
     spec = get_entity(bare)
@@ -141,6 +205,7 @@ async def _render_list(spec: EntitySpec, email: str) -> None:
             ui.button("➕ New", on_click=lambda: grid_nav(spec.bare, new=1)).props("color=primary")
 
     rows = await run.io_bound(lambda: spec.repo().list(active_only=True))
+    set_page_context(build_grid_list_page_context(spec, rows))
     ui.label(f"{len(rows)} record(s)").classes("text-caption")
     if not rows:
         ui.label("No records found.").classes("text-italic")
@@ -202,6 +267,7 @@ async def _render_list(spec: EntitySpec, email: str) -> None:
 
 # ── detail view ─────────────────────────────────────────────────────────────────
 async def _render_detail(spec: EntitySpec, row: dict, email: str) -> None:
+    set_page_context(build_grid_record_page_context(spec, row))
     can_write = perms.can_edit(spec.bare, email)
     title = row.get(spec.label_column) or row.get("id")
 
