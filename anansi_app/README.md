@@ -166,6 +166,29 @@ STAFF_ORG_ID=2                 # organization_id that grants staff-mode access
 5. **Expand tool calls** to see function details
 6. **Search** using the sidebar search box
 
+## In-app chat
+
+Every admin page carries a pop-over chat panel (bottom-right). It reaches the same
+conversation graph a Telegram personal chat does, over `POST /chat`
+(`nicegui_app/chat_client.py`), and its turns are saved to `chat_db` like any
+Telegram turn.
+
+- **Context.** The page publishes what it is showing via
+  `nicegui_app/page_context.py`; highlighted text is picked up from the browser
+  selection. Both appear as removable chips above the input and ride to the model in
+  the request's `entity_context`. Summary only -- the bot drills in with its own
+  ticket/grid tools.
+- **Sessions.** One per browser tab. A refresh starts a new session, navigating
+  between pages keeps it, closing the tab ends it. They appear in the Chats page only
+  behind the "Include app chats" switch.
+- **Auth.** The logged-in Google email resolves the org from `public.accounts`; a bot
+  admin whose email is absent there falls back to the staff org, logged as a warning.
+  The panel header shows the org the turn actually ran under.
+- **Requires** `API_KEY`, `IDENTITY_ASSERTION_KEY`, and `CHAT_ORCHESTRATOR_URL`.
+- **Not supported:** streaming, media upload, and Telegram-only inline-button
+  callbacks (Mini App links render as external links; decision buttons send their
+  label as an ordinary message).
+
 ## Database Schema
 
 The chat viewer queries the following tables (read-only):
