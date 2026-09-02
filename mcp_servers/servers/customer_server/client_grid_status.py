@@ -55,6 +55,41 @@ def _fresh_inverter_output_kw(voltage: Any) -> Optional[float]:
     return float(output_kw) if output_kw is not None else None
 
 
+def inverter_power_view(voltage: Any) -> dict[str, Optional[float]]:
+    """The inverter output a chat model may see for one grid: total kW plus
+    per-phase kW, or ``None`` for every field when the VRM reading is missing,
+    errored, or over 30 minutes old.
+
+    ``/grids`` and ``/grid`` both resolve their ``inverter_power_kw`` (and, on
+    ``/grid``, ``inverter_l1/l2/l3_power_kw``) through here so the two cannot
+    drift. The gate matters because VRM keeps serving the last o1/o2/o3 power
+    sample after a gateway goes dark -- only the OV1 ``secondsAgo`` behind
+    ``_inverter_voltage_is_stale`` ages out -- so an ungated read reports a
+    frozen figure for a site that has in fact lost comms and is already being
+    shown as ``Unknown``. This is the same freshness rule
+    ``_fresh_inverter_output_kw`` applies on the alert path.
+    """
+    blank: dict[str, Optional[float]] = {
+        "inverter_power_kw": None,
+        "inverter_l1_power_kw": None,
+        "inverter_l2_power_kw": None,
+        "inverter_l3_power_kw": None,
+    }
+    if _inverter_voltage_is_stale(voltage):
+        return blank
+
+    def _w_to_kw(watts: Any) -> Optional[float]:
+        return round(float(watts) / 1000, 3) if watts is not None else None
+
+    total_kw = getattr(voltage, "total_power_kw", None)
+    return {
+        "inverter_power_kw": float(total_kw) if total_kw is not None else None,
+        "inverter_l1_power_kw": _w_to_kw(getattr(voltage, "l1_power_w", None)),
+        "inverter_l2_power_kw": _w_to_kw(getattr(voltage, "l2_power_w", None)),
+        "inverter_l3_power_kw": _w_to_kw(getattr(voltage, "l3_power_w", None)),
+    }
+
+
 def _inverter_voltage_is_stale(voltage: Any) -> bool:
     """Whether a usable VRM voltage reading is missing or over 30 minutes old."""
     if isinstance(voltage, BaseException) or not voltage or getattr(voltage, "error", None):
@@ -566,10 +601,10 @@ class ClientGridStatusMixin:
                 vrm_solar_power_w: float | None = None
                 vrm_grid_consumption_w: float | None = None
                 vrm_is_on = None  # VRM voltage check for ON/OFF determination
-                vrm_power_kw = None  # VRM power for HPS/Isolated determination
-                vrm_l1_power_w: float | None = None
-                vrm_l2_power_w: float | None = None
-                vrm_l3_power_w: float | None = None
+                # Model-visible inverter output: total + per-phase kW, blank
+                # unless the VRM reading is fresh (see ``inverter_power_view``).
+                power_view = inverter_power_view(None)
+                vrm_power_kw: float | None = None  # == power_view["inverter_power_kw"]
                 vrm_platform = None
 
                 # Fetch VRM real-time metrics BEFORE TimescaleDB so latest_state can use them
@@ -588,22 +623,20 @@ class ClientGridStatusMixin:
                                 return_exceptions=True,
                             )
 
-                            # Inverter voltage/power (total + per-phase)
+                            # Inverter voltage/power (total + per-phase). A reading
+                            # over 30 min old (or errored/missing) is treated as no
+                            # reading: ``vrm_is_on`` stays None so status falls to
+                            # Unknown, and ``power_view`` stays blank so the kW
+                            # figure renders as "—" -- the same rule ``/grids`` uses.
                             voltage = vrm_results[0]
-                            if not isinstance(voltage, (Exception, BaseException)):
-                                if not voltage.error:  # type: ignore[union-attr]
-                                    # Check if VRM data is stale (gateway >30 min old)
-                                    vrm_data_ts = voltage.data_timestamp  # type: ignore[union-attr]
-                                    if vrm_data_ts and (
-                                        datetime.utcnow() - vrm_data_ts
-                                    ) > timedelta(minutes=30):
-                                        pass  # Leave vrm_is_on as None → falls to Unknown
-                                    else:
-                                        vrm_is_on = voltage.is_producing  # type: ignore[union-attr]
-                                    vrm_power_kw = voltage.total_power_kw  # type: ignore[union-attr]
-                                    vrm_l1_power_w = voltage.l1_power_w  # type: ignore[union-attr]
-                                    vrm_l2_power_w = voltage.l2_power_w  # type: ignore[union-attr]
-                                    vrm_l3_power_w = voltage.l3_power_w  # type: ignore[union-attr]
+                            if (
+                                not isinstance(voltage, (Exception, BaseException))
+                                and not voltage.error  # type: ignore[union-attr]
+                                and not _inverter_voltage_is_stale(voltage)
+                            ):
+                                vrm_is_on = voltage.is_producing  # type: ignore[union-attr]
+                            power_view = inverter_power_view(voltage)
+                            vrm_power_kw = power_view["inverter_power_kw"]
 
                             # Battery SOC and current
                             battery = vrm_results[1]
@@ -978,16 +1011,8 @@ class ClientGridStatusMixin:
                 # Service status section: current state + yesterday's on hours + downtime
                 result["service_status"] = {
                     **service_fields,
-                    "inverter_power_kw": vrm_power_kw,  # VRM total output power
-                    "inverter_l1_power_kw": (
-                        round(vrm_l1_power_w / 1000, 3) if vrm_l1_power_w is not None else None
-                    ),
-                    "inverter_l2_power_kw": (
-                        round(vrm_l2_power_w / 1000, 3) if vrm_l2_power_w is not None else None
-                    ),
-                    "inverter_l3_power_kw": (
-                        round(vrm_l3_power_w / 1000, 3) if vrm_l3_power_w is not None else None
-                    ),
+                    # total + per-phase kW, all None unless the VRM reading is fresh
+                    **power_view,
                     "updated_at": _format_local_timestamp(ts_created, grid_tz),
                     "is_stale": ts_is_stale,
                     "yesterday_on_hours": yesterday_on.get("on_hours"),
@@ -1451,8 +1476,10 @@ class ClientGridStatusMixin:
                     vrm_is_on = (
                         vrm_voltage.is_producing if vrm_voltage and not vrm_voltage.error else None
                     )
-                    # Get total inverter power (all phases) from VRM
-                    vrm_power_kw = vrm_voltage.total_power_kw if vrm_voltage else None
+                    # Total inverter power (all phases) from VRM -- ``None`` unless
+                    # the reading is fresh, so a silent gateway reads as "—" and
+                    # not a frozen last value while the grid sits under "Unknown".
+                    vrm_power_kw = inverter_power_view(vrm_voltage)["inverter_power_kw"]
 
                     raw_status = classify_grid_status(
                         vrm_is_on=vrm_is_on,

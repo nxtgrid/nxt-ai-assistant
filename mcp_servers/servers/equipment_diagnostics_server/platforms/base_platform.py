@@ -64,8 +64,11 @@ class EquipmentStatus:
 
     grid_name: str
     site_id: str
-    timestamp: datetime
+    timestamp: datetime  # when this status was assembled, not when the gateway last reported
     is_online: bool
+    # Gateway's own last-report time (UTC). ``None`` when it could not be read.
+    # This, not ``timestamp``, is the recency of the live readings below.
+    gateway_last_seen: Optional[datetime] = None
     inverter: Optional[PowerReading] = None
     battery: Optional[BatteryStatus] = None
     grid: Optional[GridStatus] = None
