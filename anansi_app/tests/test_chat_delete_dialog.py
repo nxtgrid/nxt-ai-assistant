@@ -97,3 +97,31 @@ def test_timezone_aware_timestamps_do_not_crash_expiry():
     aware = (datetime.utcnow() - timedelta(hours=49)).isoformat() + "+00:00"
 
     assert chat._is_expired_for_deletion(_msg(created_at=aware), is_group=True) is True
+
+
+# ── app-chat filtering ────────────────────────────────────────────────────────
+def test_app_chat_sessions_are_recognised_by_their_web_prefix():
+    """generate_session_id builds "{source}_dm_{hash}", and the widget sends
+    source="web", so every widget session starts "web_"."""
+    assert chat._is_app_chat_session("web_dm_a1b2c3") is True
+    assert chat._is_app_chat_session("telegram_dm_a1b2c3") is False
+    assert chat._is_app_chat_session("telegram_9f8e7d") is False
+    assert chat._is_app_chat_session("") is False
+
+
+def test_app_chats_are_dropped_unless_asked_for():
+    contexts = [
+        {"chat_id": "telegram_dm_1", "display_name": "A customer"},
+        {"chat_id": "web_dm_2", "display_name": "Anansi App — admin@example.com"},
+    ]
+    kept = chat._filter_app_chats(contexts, include_app_chats=False)
+    assert [c["chat_id"] for c in kept] == ["telegram_dm_1"]
+
+
+def test_app_chats_are_kept_when_asked_for():
+    contexts = [
+        {"chat_id": "telegram_dm_1"},
+        {"chat_id": "web_dm_2"},
+    ]
+    kept = chat._filter_app_chats(contexts, include_app_chats=True)
+    assert len(kept) == 2

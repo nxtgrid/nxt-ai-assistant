@@ -117,6 +117,64 @@ async def resolve_auth(state: ConversationState) -> Dict[str, Any]:
         )
         LOGGER.info(f"Skill builder staff auth: user={user_context.user_id}")
 
+
+    elif metadata.get("admin_app_auth") and metadata.get("_identity_trusted"):
+        # The anansi_app chat widget (anansi_app/nicegui_app/chat_widget.py).
+        # Same trust model as skill_builder_staff_auth above -- an
+        # identity-trusted "api" caller on a bot-admin-only NiceGUI surface --
+        # but resolved EMAIL FIRST rather than forced to staff.
+        #
+        # public.accounts is authoritative when it has the address: a real
+        # staff account already carries organization_id == STAFF_ORG_ID (see
+        # _get_user_permissions_direct), so staff land on the staff org
+        # automatically, and a non-staff viewer added to the OAuth allowlist
+        # later is scoped to their own org rather than silently inheriting
+        # ours. That consistency is the whole reason this branch exists
+        # instead of reusing the one above.
+        #
+        # The generic email branch at the bottom cannot be used directly: a
+        # miss in public.accounts (common -- most bot-admin emails were never
+        # added to the bot's own onboarding DB) returns empty
+        # organization_ids with is_staff=False, so the session runs unscoped
+        # under customer instructions while looking like it worked. Both
+        # outcomes below are explicit instead: a loud staff fallback for a
+        # bot admin, or a refusal.
+        #
+        # Gated on BOTH signals: "admin_app_auth" alone would let any holder
+        # of the single shared API_KEY self-grant, since that key is common
+        # to every "api" auth_method caller. "_identity_trusted" is computed
+        # server-side from IDENTITY_ASSERTION_KEY (app.py's
+        # is_identity_trusted_caller) and merged into metadata AFTER the
+        # caller's own metadata is spread (handler.py's
+        # _handle_webhook_async), so a caller without that key cannot forge it.
+        user_permissions = await auth_service.get_user_permissions(
+            email=user_context.user_email, user_id=user_context.user_id
+        )
+        if user_permissions.organization_ids:
+            LOGGER.info(
+                f"Admin app auth: {user_context.user_email} resolved from accounts -> "
+                f"org={user_permissions.organization_ids[0]}, staff={user_permissions.is_staff}"
+            )
+        elif metadata.get("admin_app_bot_admin"):
+            LOGGER.warning(
+                f"Admin app auth: {user_context.user_email} is not in public.accounts; "
+                f"falling back to staff org {STAFF_ORG_ID}. Add the account to scope "
+                "this session properly and remove the fallback."
+            )
+            user_permissions = UserPermissions(
+                user_id=user_context.user_id or "admin_app",
+                email=user_context.user_email,
+                organization_ids=[str(STAFF_ORG_ID)],
+                is_staff=True,
+            )
+        else:
+            LOGGER.error(
+                f"Admin app auth: {user_context.user_email} is neither in public.accounts "
+                "nor a bot admin -- refusing rather than running an unscoped session."
+            )
+            raise PermissionError(
+                "Your account is not registered for chat. Please contact support."
+            )
     elif is_scheduled_execution and metadata.get("skill_id"):
         # Skill run (Phase 5 of docs/superpowers/plans/2026-08-06-user-designed-skills.md).
         #
