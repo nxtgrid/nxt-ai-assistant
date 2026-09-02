@@ -7,7 +7,7 @@ import asyncio
 import os
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -339,10 +339,15 @@ class VRMPlatform(BasePlatform):
         records: List[Dict[str, Any]] = data.get("records", [])
         return records
 
-    async def is_site_online(self, site_id: str) -> bool:
-        """Check if VRM site is online by checking gateway connection."""
+    async def _gateway_last_connection(self, site_id: str) -> Optional[datetime]:
+        """The Gateway's own ``lastConnection`` time (UTC), or ``None`` when the
+        system-overview lookup fails or carries no Gateway device.
+
+        This is VRM's only honest gateway-liveness signal: diagnostics record
+        timestamps are refreshed server-side even while the gateway is dark, so
+        the last power sample keeps looking current. ``lastConnection`` does not.
+        """
         try:
-            # Use system-overview endpoint to check gateway lastConnection
             url = f"/installations/{site_id}/system-overview"
             data = await self._api_get(url)
 
@@ -351,12 +356,21 @@ class VRMPlatform(BasePlatform):
                 if device.get("name") == "Gateway":
                     last_conn = device.get("lastConnection")
                     if last_conn:
-                        # Check if within 15 minutes
-                        last_conn_dt = datetime.fromtimestamp(last_conn)
-                        return (datetime.now() - last_conn_dt).total_seconds() < 900
-            return False
+                        return datetime.fromtimestamp(last_conn, tz=timezone.utc)
+            return None
         except Exception:
+            return None
+
+    @staticmethod
+    def _gateway_is_recent(last_seen: Optional[datetime]) -> bool:
+        """Whether a gateway last-connection time is within the 15-minute window."""
+        if last_seen is None:
             return False
+        return (datetime.now(timezone.utc) - last_seen).total_seconds() < 900
+
+    async def is_site_online(self, site_id: str) -> bool:
+        """Whether the site's gateway has reported within the last 15 minutes."""
+        return self._gateway_is_recent(await self._gateway_last_connection(site_id))
 
     async def _get_widget_data(
         self, site_id: str, widget: str, instance: Optional[int] = None
@@ -829,11 +843,13 @@ class VRMPlatform(BasePlatform):
         if metrics is None:
             metrics = ["inverter", "battery", "grid", "pv", "alarms"]
 
+        gateway_last_seen = await self._gateway_last_connection(site_id)
         status = EquipmentStatus(
             grid_name="",  # Will be filled by caller
             site_id=site_id,
             timestamp=datetime.utcnow(),
-            is_online=await self.is_site_online(site_id),
+            is_online=self._gateway_is_recent(gateway_last_seen),
+            gateway_last_seen=gateway_last_seen,
         )
 
         if "inverter" in metrics:

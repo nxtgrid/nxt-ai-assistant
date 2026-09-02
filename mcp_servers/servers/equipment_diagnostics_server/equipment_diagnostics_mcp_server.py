@@ -292,44 +292,56 @@ async def _handle_get_equipment_status(
     # Get grid timezone for timestamp formatting
     grid_tz = await _get_grid_timezone(grid_name)
 
-    # Convert to dict for JSON response
-    result = {
+    # The live readings below are only as current as the gateway's last report.
+    # VRM keeps serving the last diagnostics sample after a gateway goes dark, so
+    # when the gateway is not online we null the numeric readings rather than
+    # present a frozen value as current -- the same rule ``/grids`` and ``/grid``
+    # apply to inverter power. ``gateway_last_seen`` is the recency signal;
+    # ``timestamp`` mirrors it (it used to be the tool's own wall clock).
+    fresh = status.is_online
+    last_seen = _format_local_timestamp(status.gateway_last_seen, grid_tz)
+
+    result: Dict[str, Any] = {
         "grid_name": status.grid_name,
         "site_id": status.site_id,
         "timezone": grid_tz,
-        "timestamp": _format_local_timestamp(status.timestamp, grid_tz),
+        "timestamp": last_seen,
+        "gateway_last_seen": last_seen,
         "is_online": status.is_online,
     }
+    if not fresh:
+        result["data_stale"] = True
+        result["stale_reason"] = "gateway_offline"
 
     if status.inverter:
         result["inverter"] = {
-            "l1_power_w": status.inverter.l1_power_w,
-            "l2_power_w": status.inverter.l2_power_w,
-            "l3_power_w": status.inverter.l3_power_w,
-            "total_power_w": status.inverter.total_power_w,
+            "l1_power_w": status.inverter.l1_power_w if fresh else None,
+            "l2_power_w": status.inverter.l2_power_w if fresh else None,
+            "l3_power_w": status.inverter.l3_power_w if fresh else None,
+            "total_power_w": status.inverter.total_power_w if fresh else None,
         }
 
     if status.battery:
         result["battery"] = {
-            "soc_percent": status.battery.soc_percent,
-            "voltage_v": status.battery.voltage_v,
-            "current_a": status.battery.current_a,
-            "power_w": status.battery.power_w,
-            "charging": status.battery.charging,
+            "soc_percent": status.battery.soc_percent if fresh else None,
+            "voltage_v": status.battery.voltage_v if fresh else None,
+            "current_a": status.battery.current_a if fresh else None,
+            "power_w": status.battery.power_w if fresh else None,
+            "charging": status.battery.charging if fresh else None,
         }
 
     if status.grid:
         result["grid"] = {
-            "connected": status.grid.connected,
-            "l1_power_w": status.grid.l1_power_w,
-            "l2_power_w": status.grid.l2_power_w,
-            "l3_power_w": status.grid.l3_power_w,
-            "total_power_w": status.grid.total_power_w,
+            "connected": status.grid.connected if fresh else None,
+            "l1_power_w": status.grid.l1_power_w if fresh else None,
+            "l2_power_w": status.grid.l2_power_w if fresh else None,
+            "l3_power_w": status.grid.l3_power_w if fresh else None,
+            "total_power_w": status.grid.total_power_w if fresh else None,
         }
 
     if status.pv:
         result["pv"] = {
-            "total_power_w": status.pv.total_power_w,
+            "total_power_w": status.pv.total_power_w if fresh else None,
         }
 
     if status.alarms is not None:
