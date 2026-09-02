@@ -2277,6 +2277,18 @@ def _handle_webhook(args: Dict[str, Any]) -> Dict[str, Any]:
             "choices": [asdict(c) for c in envelope.choices],
             "tool_calls": envelope.tool_calls,
             "tokens": envelope.tokens,
+            # Scope the turn actually ran under. resolve_auth mutates this same
+            # user_context object in place, so these reflect resolution, not what
+            # the request asked for -- which is what lets a chat UI show which
+            # organization answered instead of leaving a mis-scoped session
+            # silent. organization_short_name is only populated on the
+            # chat-resolved path (_get_permissions_by_organization_direct); the
+            # email path leaves it None, so fall back to the raw id.
+            "scope": {
+                "is_staff": user_context.is_staff,
+                "organization": user_context.organization_name
+                or (user_context.organization_ids[0] if user_context.organization_ids else None),
+            },
         }
 
     except Exception as e:
@@ -2561,6 +2573,18 @@ async def _handle_webhook_async(args: Dict[str, Any]) -> Dict[str, Any]:
             "choices": [asdict(c) for c in envelope.choices],
             "tool_calls": envelope.tool_calls,
             "tokens": envelope.tokens,
+            # Scope the turn actually ran under. resolve_auth mutates this same
+            # user_context object in place, so these reflect resolution, not what
+            # the request asked for -- which is what lets a chat UI show which
+            # organization answered instead of leaving a mis-scoped session
+            # silent. organization_short_name is only populated on the
+            # chat-resolved path (_get_permissions_by_organization_direct); the
+            # email path leaves it None, so fall back to the raw id.
+            "scope": {
+                "is_staff": user_context.is_staff,
+                "organization": user_context.organization_name
+                or (user_context.organization_ids[0] if user_context.organization_ids else None),
+            },
         }
 
     except Exception as e:
