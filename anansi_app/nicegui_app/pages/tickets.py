@@ -20,6 +20,7 @@ from typing import Any, Optional
 
 from nicegui import run, ui
 
+from nicegui_app.page_context import PageContext, set_page_context
 from nicegui_app.services_access import get_reader
 from shared.config import flag_registry as fr
 
@@ -181,6 +182,79 @@ def _escalation_chat_id() -> str:
     return os.getenv("ESCALATION_TELEGRAM_CHAT_ID", "")
 
 
+# ── chat page context ─────────────────────────────────────────────────────────
+# What the chat widget attaches when the operator asks about this page. Summary
+# only: identifiers plus a handful of lines, and a hint naming how to go deeper.
+# The bot already has ticket tools -- shipping full rows here would spend tokens
+# on data it can fetch on demand.
+_MAX_LISTED_REFS = 10
+
+
+def build_ticket_page_context(detail: dict[str, Any]) -> PageContext:
+    """One ticket, as chat context."""
+    ref = detail.get("ticket_ref") or "—"
+    identifiers: dict[str, str] = {"ticket_ref": str(ref)}
+    if detail.get("grid_name"):
+        identifiers["grid_name"] = str(detail["grid_name"])
+    if detail.get("organization_id") is not None:
+        identifiers["organization_id"] = str(detail["organization_id"])
+
+    lines = [
+        f"Summary: {detail.get('summary') or '—'}",
+        f"Status: {detail.get('status') or '—'}",
+        f"Backend: {detail.get('backend') or '—'}",
+        f"Origin: {_origin_label(detail.get('created_via') or '')}",
+        f"Grid: {detail.get('grid_name') or '—'}",
+        f"Organization: {detail.get('org_hashtag') or detail.get('organization_id') or '—'}",
+        # Masked, not raw: this string is sent to the model and saved to
+        # chat_messages, so it gets the same treatment the page gives it.
+        f"Customer: {_mask_customer(detail)}",
+        f"Opened: {_format_time_ago(detail.get('created_at'))}",
+    ]
+    if detail.get("reason"):
+        lines.append(f"Reason: {detail['reason']}")
+    if detail.get("root_cause_kind"):
+        lines.append(f"Root cause: {detail['root_cause_kind']}")
+    if (detail.get("affected_count") or 0) > 1:
+        lines.append(f"Correlated tickets affected: {detail['affected_count']}")
+
+    return PageContext(
+        kind="ticket",
+        label=f"Ticket {ref}",
+        identifiers=identifiers,
+        summary_lines=lines,
+        detail_hint=(
+            "Use the ticket tools with this ticket_ref for comments, attachments "
+            "and correlation detail."
+        ),
+    )
+
+
+def build_ticket_list_page_context(
+    tickets: list[dict[str, Any]], total: int, status: str
+) -> PageContext:
+    """The visible page of the ticket list, as chat context."""
+    refs = [str(t.get("ticket_ref") or "—") for t in tickets[:_MAX_LISTED_REFS]]
+    lines = [
+        f"Status filter: {status}",
+        f"{total} tickets match; {len(tickets)} shown on this page.",
+    ]
+    if refs:
+        lines.append("Refs on screen: " + ", ".join(refs))
+        if len(tickets) > len(refs):
+            lines.append(f"(first {len(refs)} of {len(tickets)} listed)")
+
+    return PageContext(
+        kind="ticket_list",
+        label=f"Tickets ({total})",
+        summary_lines=lines,
+        detail_hint=(
+            "Ask about any ticket_ref above -- the ticket tools can fetch its "
+            "full detail on demand."
+        ),
+    )
+
+
 async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
     db = get_reader()
 
@@ -272,6 +346,9 @@ async def render(user: dict[str, Any], ref: Optional[str] = None) -> None:
             )
         )
         tickets = result.items
+        set_page_context(
+            build_ticket_list_page_context(tickets, result.total, state["status"])
+        )
         with list_container:
             if not tickets:
                 ui.label("No tickets match the current filters.").classes("text-caption")
@@ -527,6 +604,7 @@ async def _render_single_detail(db, ticket_id: str) -> None:
     if detail is None:
         ui.label("Ticket was not found.").classes("text-negative")
         return
+    set_page_context(build_ticket_page_context(detail))
     ref = detail.get("ticket_ref") or ticket_id
     summary = detail.get("summary") or ref
     with ui.row().classes("items-center gap-3 flex-wrap"):

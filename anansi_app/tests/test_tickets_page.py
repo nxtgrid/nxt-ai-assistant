@@ -238,3 +238,74 @@ def test_operations_nav_lists_tickets_first():
     from nicegui_app import layout
 
     assert layout.OPERATIONS_NAV[0] == ("/tickets", "🎫 Tickets")
+
+
+# ── chat page context ─────────────────────────────────────────────────────────
+def test_ticket_page_context_carries_the_ref_as_an_identifier():
+    page = tickets_page.build_ticket_page_context(
+        {"ticket_ref": "REF-1", "summary": "Meter offline", "status": "open"}
+    )
+    assert page.kind == "ticket"
+    assert page.label == "Ticket REF-1"
+    assert page.identifiers["ticket_ref"] == "REF-1"
+
+
+def test_ticket_page_context_summarises_without_leaking_the_customer():
+    page = tickets_page.build_ticket_page_context(
+        {
+            "ticket_ref": "REF-1",
+            "summary": "Meter offline",
+            "status": "open",
+            "backend": "internal",
+            "customer_email": "someone@example.com",
+            "grid_name": "Alpha",
+        }
+    )
+    summary = page.summary_text()
+    assert "Meter offline" in summary
+    assert "Alpha" in summary
+    # _mask_customer's output, never the raw address.
+    assert "someone@example.com" not in summary
+    assert "s***@example.com" in summary
+
+
+def test_ticket_page_context_points_the_model_at_the_ticket_tools():
+    page = tickets_page.build_ticket_page_context({"ticket_ref": "REF-1"})
+    assert "ticket_ref" in page.detail_hint
+
+
+def test_ticket_list_page_context_lists_refs_not_rows():
+    tickets = [{"ticket_ref": f"REF-{i}", "summary": "x" * 500} for i in range(25)]
+    page = tickets_page.build_ticket_list_page_context(tickets, total=93, status="open")
+    assert page.kind == "ticket_list"
+    assert page.label == "Tickets (93)"
+    summary = page.summary_text()
+    assert "REF-0" in summary
+    # Capped at 10 refs, so the 11th is absent and no row body is included.
+    assert "REF-11" not in summary
+    assert "x" * 500 not in summary
+
+
+def test_ticket_list_page_context_states_the_active_status_filter():
+    page = tickets_page.build_ticket_list_page_context([], total=0, status="closed")
+    assert "closed" in page.summary_text()
+
+
+def test_tickets_page_publishes_context_on_both_views():
+    """Static check: both the list and the single-ticket view must call
+    set_page_context, or the chat widget silently has nothing attached."""
+    source = open(_TICKETS_PATH).read()
+    tree = ast.parse(source)
+    callers = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(
+            isinstance(inner, ast.Call)
+            and isinstance(inner.func, ast.Name)
+            and inner.func.id == "set_page_context"
+            for inner in ast.walk(node)
+        )
+    }
+    assert "_reload" in callers
+    assert "_render_single_detail" in callers
