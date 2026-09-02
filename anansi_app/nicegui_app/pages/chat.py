@@ -82,6 +82,32 @@ def _deletable_messages(messages: list[dict[str, Any]], is_group: bool) -> list[
     return entries
 
 
+def _is_app_chat_session(chat_id: str) -> bool:
+    """Whether this context came from the anansi_app chat widget.
+
+    The widget sends source="web", and generate_session_id builds
+    "{source}_dm_{hash}" for a DM-shaped session, so every one of its sessions
+    starts "web_". get_chat_contexts uses the session_id as the context's
+    chat_id, which is what this receives.
+    """
+    return bool(chat_id) and str(chat_id).startswith("web_")
+
+
+def _filter_app_chats(
+    contexts: list[dict[str, Any]], include_app_chats: bool
+) -> list[dict[str, Any]]:
+    """Hide staff-facing app chats unless the operator asks for them.
+
+    Same policy as the escalation group below: this page is for customer
+    conversations, and the widget's sessions -- one per browser tab -- would
+    otherwise dominate the list. They are still persisted and still auditable;
+    the switch brings them back.
+    """
+    if include_app_chats:
+        return list(contexts)
+    return [c for c in contexts if not _is_app_chat_session(c.get("chat_id", ""))]
+
+
 async def render(user: dict[str, Any]) -> None:
     user_email = user.get("email", "unknown")
     db = get_reader()
@@ -101,7 +127,12 @@ async def render(user: dict[str, Any]) -> None:
         )
         return
 
-    state: dict[str, Any] = {"days_back": 2, "search": "", "selected": None}
+    state: dict[str, Any] = {
+        "days_back": 2,
+        "search": "",
+        "selected": None,
+        "include_app_chats": False,
+    }
 
     with ui.row().classes("w-full no-wrap gap-4"):
         left = ui.column().classes("gap-2").style("flex: 1; min-width: 260px")
@@ -115,6 +146,9 @@ async def render(user: dict[str, Any]) -> None:
         )
         search_input = ui.input("🔍 Search conversations").classes("w-full")
         search_input.on("keydown.enter", lambda: _apply_search(search_input.value))
+        ui.switch("Include app chats", value=False).bind_value(
+            state, "include_app_chats"
+        ).props("dense").on_value_change(lambda: _reload())
         list_container = ui.column().classes("w-full gap-1")
 
     async def _apply_search(term: str) -> None:
@@ -154,6 +188,8 @@ async def render(user: dict[str, Any]) -> None:
                 if str(c.get("chat_id") or "") != escalation_chat_id
                 and str(c.get("group_id") or "") != escalation_chat_id
             ]
+
+        contexts = _filter_app_chats(contexts, state["include_app_chats"])
 
         groups = [c for c in contexts if c["is_group"]]
         dms = [c for c in contexts if not c["is_group"]]
