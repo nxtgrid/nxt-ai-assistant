@@ -227,7 +227,7 @@ def build_asgi_app(
         async with session_manager.run():
             yield
 
-    return Starlette(
+    asgi_app = Starlette(
         routes=[
             Route("/healthz", healthz),
             Route("/.well-known/oauth-protected-resource", protected_resource_metadata_route),
@@ -239,6 +239,22 @@ def build_asgi_app(
         ],
         lifespan=lifespan,
     )
+    # Starlette's Router defaults redirect_slashes=True: POST /mcp (no
+    # trailing slash - exactly what an MCP client requests) 307s to
+    # POST /mcp/ by default. Starlette computes that Location relative to
+    # what IT saw, with no idea the public URL needs the /mcp-gateway
+    # ingress prefix restored - the DO ingress rule strips it before
+    # forwarding (see .do/app.example.yaml's own comment on why), so the
+    # redirect target is a bare, wrong /mcp/ that lands on the ingress
+    # catch-all instead. Most MCP HTTP clients don't follow redirects on
+    # POST at all regardless, so this surfaced as an outright failed
+    # connection, not a slow one - see test_post_to_mcp_without_a_
+    # trailing_slash_is_not_redirected, written directly against a real
+    # production failure (Starlette Router.__init__'s own redirect_slashes
+    # kwarg isn't forwarded by Starlette.__init__, so this has to be set as
+    # a post-construction attribute instead).
+    asgi_app.router.redirect_slashes = False
+    return asgi_app
 
 
 def run_gateway() -> None:  # pragma: no cover — real production wiring, no fakes
