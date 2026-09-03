@@ -16,12 +16,15 @@ connection to make that latent.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Awaitable, Callable, Dict, List, Mapping
 
 from gateway.catalog import list_exposed_tools
 from gateway.server import dispatch_tool_call
 from gateway.session import GatewaySession, resolve_session
 from gateway.tokens import TokenInvalid, verify_token
+
+_LOGGER = logging.getLogger(__name__)
 
 RegistryListTools = Callable[[str], Awaitable[List[Dict[str, Any]]]]
 RegistryCallTool = Callable[[str, str, Dict[str, Any]], Awaitable[Dict[str, Any]]]
@@ -67,8 +70,26 @@ async def _fetch_tools_by_server(
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Fetch fresh, per-request — no caching, so a newly disabled tool or
     server (ActionFlags) takes effect on the very next call.
+
+    A server that fails to list is skipped rather than propagated. It used to
+    propagate, and one bad name took down the ENTIRE listing: "logs" was in
+    the tier allowlist but is not a registered server, so registry_list_tools
+    raised ValueError("Unknown server: logs") and the client got zero tools
+    while still reporting a healthy connection - the worst kind of failure,
+    silent and total. test_tiers.py now pins the allowlist against the real
+    registry so that specific drift is caught in CI, and this makes any
+    future breakage (an import error in one server, say) degrade to "that
+    server's tools are missing" instead of "the gateway is empty". Logged at
+    error level because a skipped server IS a real problem, just not one
+    worth failing every other server over.
     """
-    return {server_name: await registry_list_tools(server_name) for server_name in allowed_servers}
+    tools_by_server: Dict[str, List[Dict[str, Any]]] = {}
+    for server_name in allowed_servers:
+        try:
+            tools_by_server[server_name] = await registry_list_tools(server_name)
+        except Exception:
+            _LOGGER.error("Skipping MCP server %r: listing its tools failed", server_name, exc_info=True)
+    return tools_by_server
 
 
 async def list_tools_for_request(
