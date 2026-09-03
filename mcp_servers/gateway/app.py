@@ -8,14 +8,18 @@ external dependency (auth_service, registry_list_tools, registry_call_tool)
 and drive it over real ASGI via httpx's ASGITransport (see test_app.py) — the
 one thing that stays genuinely untested at the unit level is the module-level
 run_gateway() below, which wires the REAL AuthService, the REAL
-server_registry, and a secret read from the environment.
+server_registry, the REAL Google OAuth client, the REAL grid_app.lib.perms
+whitelist, and a secret read from the environment.
 
-Not in this file, deliberately (see the plan's Deferred section):
-  - The HTTP sign-in route (Google OAuth callback -> mint_token_for_email).
-    An MCP client is handed a token some other way for now; this file only
-    serves the MCP protocol endpoint itself.
-  - DO App Platform ingress. This app is servable by any ASGI host; nothing
-    here assumes a particular deployment target.
+The three /oauth/* routes and the two /.well-known/* discovery documents ARE
+in this file (see gateway/oauth.py and gateway/oauth_metadata.py for their
+actual logic) - this module just mounts them alongside the MCP protocol
+endpoint on the same ASGI app, matching the design doc's "the gateway acts
+as its own authorization server" framing rather than standing up a second
+service.
+
+Still not in this file: DO App Platform ingress. This app is servable by any
+ASGI host; nothing here assumes a particular deployment target.
 """
 
 from __future__ import annotations
@@ -239,9 +243,23 @@ def build_asgi_app(
 
 def run_gateway() -> None:  # pragma: no cover — real production wiring, no fakes
     """Entrypoint for local/dev running. Reads real config from the
-    environment and wires the real AuthService and server_registry — the one
+    environment and wires the real AuthService, server_registry, Google
+    OAuth client, is_authorized whitelist and single-use store — the one
     piece of this module that cannot be exercised by a unit test.
+
+    MCP_GATEWAY_BASE_URL must be this deployment's real public HTTPS origin
+    (e.g. "https://your-app.example.com/mcp-gateway") — it is what gets
+    embedded in the discovery documents and is the value Google's redirect_
+    uri validation checks against, so a wrong value here fails visibly at
+    first sign-in rather than silently.
+
+    is_authorized delegates to grid_app.lib.perms.has_any_access directly
+    (not anansi_app.nicegui_app.auth.is_authorized, its NiceGUI-page
+    wrapper) — see gateway/Dockerfile's own comment on why only
+    anansi_app/grid_app/ is copied into this image, not all of anansi_app/.
     """
+    from gateway.oauth_store_pg import PgSingleUseStore
+    from grid_app.lib import perms
     from server_registry import call_tool as real_call_tool
     from server_registry import list_tools as real_list_tools
 
@@ -254,6 +272,9 @@ def run_gateway() -> None:  # pragma: no cover — real production wiring, no fa
         registry_list_tools=real_list_tools,
         registry_call_tool=real_call_tool,
         allowed_servers=list(ALLOWED_SERVERS),
+        base_url=os.environ["MCP_GATEWAY_BASE_URL"],
+        is_authorized=lambda email: bool(perms.has_any_access(email)),
+        single_use_store=PgSingleUseStore(),
     )
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
 
