@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 import mcp.types as types
 import uvicorn
+from gateway.oauth_metadata import authorization_server_metadata, protected_resource_metadata
 from gateway.tiers import ALLOWED_SERVERS
 from gateway.transport import (
     RegistryCallTool,
@@ -46,6 +47,7 @@ def build_asgi_app(
     registry_list_tools: RegistryListTools,
     registry_call_tool: RegistryCallTool,
     allowed_servers: Optional[List[str]] = None,
+    base_url: str = "http://localhost:8080",
 ) -> Starlette:
     """Build the gateway's ASGI app.
 
@@ -125,6 +127,12 @@ def build_asgi_app(
         """
         return JSONResponse({"status": "ok"})
 
+    async def protected_resource_metadata_route(request):
+        return JSONResponse(protected_resource_metadata(base_url))
+
+    async def authorization_server_metadata_route(request):
+        return JSONResponse(authorization_server_metadata(base_url))
+
     @asynccontextmanager
     async def lifespan(app: Starlette):
         async with session_manager.run():
@@ -133,6 +141,8 @@ def build_asgi_app(
     return Starlette(
         routes=[
             Route("/healthz", healthz),
+            Route("/.well-known/oauth-protected-resource", protected_resource_metadata_route),
+            Route("/.well-known/oauth-authorization-server", authorization_server_metadata_route),
             Mount("/mcp", app=session_manager.handle_request),
         ],
         lifespan=lifespan,
