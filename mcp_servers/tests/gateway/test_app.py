@@ -82,6 +82,39 @@ async def test_app_lifespan_starts_and_stops_cleanly():
 
 
 @pytest.mark.asyncio
+async def test_post_to_mcp_without_a_trailing_slash_is_not_redirected():
+    # Starlette's Mount defaults to redirecting POST /mcp -> POST /mcp/
+    # (a 307, method-preserving in principle). That's still a real break
+    # here: DO's ingress strips /mcp-gateway before forwarding, so the
+    # Location Starlette computes is a bare /mcp/ with no idea the public
+    # URL needs that prefix back - a client that even follows it lands on
+    # a completely different route (the ingress catch-all), and most MCP
+    # HTTP clients don't follow redirects on POST at all, so this showed up
+    # as an outright failed connection, not a slow one. The client's own
+    # configured URL (.../mcp-gateway/mcp, no trailing slash) must work
+    # with zero redirect.
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", follow_redirects=False) as client:
+        async with transport:
+            response = await client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "method": "initialize", "id": 1},
+                headers={"Accept": "application/json, text/event-stream"},
+            )
+
+    assert response.status_code not in (307, 308)
+    assert "location" not in response.headers
+
+
+@pytest.mark.asyncio
 async def test_protected_resource_metadata_is_served():
     app = build_asgi_app(
         secret="test-secret-not-a-real-key",
