@@ -30,12 +30,9 @@ TIER_1: FrozenSet[str] = frozenset(
 
 TIER_2: FrozenSet[str] = frozenset(
     {
-        "codebase",
         "grafana",
-        "logs",
         "reference",
         "solar",
-        "vrm",
     }
 )
 
