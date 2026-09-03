@@ -1,21 +1,21 @@
 """Single-use enforcement, DI'd behind a tiny protocol so no real DB
 connection is ever constructed in a test.
 
-The real store (wired in gateway/app.py's production path only) does this
-with one atomic statement:
+The real store (gateway/oauth_store_chat_db.py, wired in app.py's
+production path only) claims a code with a plain INSERT against
+db/migrations/0032's table in the chat DB, over PostgREST. The PRIMARY KEY
+conflict is the guarantee: it is evaluated inside that single statement, so
+two concurrent redemptions of the same code_id can never both be told they
+claimed it - no transaction or row lock needed. PostgREST surfaces that
+conflict as a 409, which the store maps to "already redeemed".
 
-    INSERT INTO mcp_gateway_oauth_codes (code_id, expires_at)
-    VALUES ($1, $2)
-    ON CONFLICT (code_id) DO NOTHING
-    RETURNING code_id
-
-- a non-empty result means this call won the race and claimed the code; an
-empty result means it was already claimed (by a legitimate first exchange,
-or a replay attempt). This is deliberately an INSERT, not the
-UPDATE-with-redeemed_at-column shape sketched in the migration comment,
-because INSERT ... ON CONFLICT DO NOTHING is atomic under concurrent
-callers without needing a transaction or row lock - two simultaneous
-redemption attempts for the same code_id can never both succeed.
+An earlier version of that store used asyncpg against AUTH_DB_*, copying
+AuthService's connection pattern. That database is read-only AND is not the
+one db/migrations/ targets, so the insert could never have worked; it
+reached production and failed as UndefinedTableError on the last step of an
+otherwise-complete sign-in. Worth remembering that "which database" is a
+real design decision here, not a detail to inherit from whatever module was
+nearest.
 """
 
 from __future__ import annotations

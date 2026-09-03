@@ -412,7 +412,7 @@ def run_gateway() -> None:  # pragma: no cover — real production wiring, no fa
     wrapper) — see gateway/Dockerfile's own comment on why only
     anansi_app/grid_app/ is copied into this image, not all of anansi_app/.
     """
-    from gateway.oauth_store_pg import PgSingleUseStore
+    from gateway.oauth_store_chat_db import ChatDbSingleUseStore
     from grid_app.lib import perms
     from server_registry import call_tool as real_call_tool
     from server_registry import list_tools as real_list_tools
@@ -428,7 +428,7 @@ def run_gateway() -> None:  # pragma: no cover — real production wiring, no fa
         allowed_servers=list(ALLOWED_SERVERS),
         base_url=os.environ["MCP_GATEWAY_BASE_URL"],
         is_authorized=lambda email: bool(perms.has_any_access(email)),
-        single_use_store=PgSingleUseStore(),
+        single_use_store=ChatDbSingleUseStore(),
     )
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
 
