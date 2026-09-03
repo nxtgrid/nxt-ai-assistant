@@ -154,7 +154,15 @@ async def test_post_to_mcp_without_a_trailing_slash_initializes_successfully():
     # just "no redirect" - since that weaker assertion is exactly what let
     # the original Mount-based code pass a "not redirected" check while
     # still being fundamentally broken (a 404 also satisfies "not a
-    # redirect").
+    # redirect"). A valid bearer token is required here too now - see
+    # _McpASGIApp's own docstring on why every /mcp request, including
+    # initialize, is gated on one; _FakeAuth/_exploding_list_tools are
+    # untouched by that gate (verify_token is pure, no DB call) and by
+    # initialize itself (a base SDK lifecycle method, not one of this
+    # gateway's own _list_tools/_call_tool handlers).
+    from gateway.tokens import issue_token
+
+    token = issue_token("user@example.com", "test-secret-not-a-real-key")
     app = build_asgi_app(
         secret="test-secret-not-a-real-key",
         auth_service=_FakeAuth(),
@@ -178,7 +186,10 @@ async def test_post_to_mcp_without_a_trailing_slash_initializes_successfully():
                         "clientInfo": {"name": "test-client", "version": "0"},
                     },
                 },
-                headers={"Accept": "application/json, text/event-stream"},
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Authorization": f"Bearer {token}",
+                },
             )
 
     assert response.status_code == 200
@@ -259,3 +270,105 @@ def test_www_authenticate_header_names_the_resource_metadata_url():
     assert header == (
         'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"'
     )
+
+
+# --- the /mcp route requires a token before the MCP protocol layer runs ------
+#
+# Reproduces a real production gap, found via a live claude mcp add + /mcp
+# connection: it showed "connected" despite sending NO Authorization header
+# at all (confirmed via doctl apps logs mcp-gateway - no /oauth/* request
+# ever fired). _call_tool/_list_tools' own resolve_session_from_headers
+# checks do reject a missing token, but that rejection happens INSIDE the
+# MCP protocol layer - the SDK's Server wraps it into a JSON-RPC-level
+# error, which is still HTTP 200. An OAuth-aware client has no way to read
+# that as "please authenticate" (the spec's discovery handshake is keyed
+# off a real 401 + WWW-Authenticate), so it just used the connection anyway
+# with no token, "connected" but not actually signed in to anything.
+
+
+class _WorkingAuth:
+    """Unlike this module's _FakeAuth (which asserts it's never touched -
+    correct for the healthz/discovery tests above), this one actually
+    resolves a session, for the one test here that needs a valid token's
+    request to succeed all the way through list_tools.
+    """
+
+    async def get_user_permissions(self, email, user_id=None):
+        class _Permissions:
+            organization_ids = ["4"]
+            is_staff = False
+            user_id = "u1"
+            organization_short_name = "testorg"
+
+        return _Permissions()
+
+    async def get_grid_names_for_organization(self, organization_id=None, include_all=False):
+        return []
+
+
+async def _empty_list_tools(server_name):
+    return []
+
+
+@pytest.mark.asyncio
+async def test_post_to_mcp_without_a_token_returns_401_with_www_authenticate():
+    from gateway.app import unauthorized_www_authenticate_header
+
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+        base_url="https://mcp.example.com",
+    )
+
+    async with _running_lifespan(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test", follow_redirects=False) as client:
+            response = await client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "method": "initialize", "id": 1},
+                headers={"Accept": "application/json, text/event-stream"},
+            )
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == unauthorized_www_authenticate_header("https://mcp.example.com")
+
+
+@pytest.mark.asyncio
+async def test_post_to_mcp_with_a_valid_token_still_initializes_successfully():
+    from gateway.tokens import issue_token
+
+    token = issue_token("user@example.com", "test-secret-not-a-real-key")
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_WorkingAuth(),
+        registry_list_tools=_empty_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+    )
+
+    async with _running_lifespan(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test", follow_redirects=False) as client:
+            response = await client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "initialize",
+                    "id": 1,
+                    "params": {
+                        "protocolVersion": "2026-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test-client", "version": "0"},
+                    },
+                },
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+
+    assert response.status_code == 200
+    assert '"serverInfo"' in response.text
