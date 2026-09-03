@@ -38,11 +38,11 @@ def test_deployment_manifests_declare_public_app_url_for_chat_orchestrator():
     assert "# Canonical public URL of the Anansi app" in digitalocean
 
 
-def test_digitalocean_manifests_match_the_two_service_runtime_topology():
+def test_digitalocean_manifests_match_the_three_service_runtime_topology():
     source_manifest = REPO_ROOT / ".do/app.example.yaml"
     image_manifest = REPO_ROOT / ".do/app.image.example.yaml"
 
-    assert _service_names(source_manifest) == {"chat-orchestrator", "anansi-app"}
+    assert _service_names(source_manifest) == {"chat-orchestrator", "anansi-app", "mcp-gateway"}
     assert _service_names(image_manifest) == _service_names(source_manifest)
 
 
