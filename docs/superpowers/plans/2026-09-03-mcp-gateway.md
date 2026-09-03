@@ -26,9 +26,9 @@ that branch's whole changeset — always branch from `origin/main`.
 **Environment.** `mcp_servers` needs its own Python 3.11 venv, separate from
 any venv another project in this repo (chat_orchestrator, etc.) already has —
 reusing one of those can silently drop whole servers when deps are missing.
-Create it at this worktree's root as `.venv`, not some other name: the repo's
+Create it at this worktree's root as exactly `.venv`: the repo's
 `check_test_wiring.py` pre-commit hook only excludes literal `.venv/**` from
-its test-file scan, so anything else (`.venv-mcp`, `venv`, ...) makes every
+its test-file scan, so any other name (`.venv-mcp`, `venv`, ...) makes every
 `test_*.py` inside your installed dependencies' site-packages show up as an
 "untracked test file" and fail the hook:
 
@@ -94,6 +94,13 @@ organization_ids rather than raising when an email is absent from
 public.accounts, so a permissive gateway would forward organization_id=None
 to servers that never filter by org.
 """
+
+import sys
+from pathlib import Path
+
+_MCP_ROOT = Path(__file__).resolve().parents[2]
+if str(_MCP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MCP_ROOT))
 
 import pytest
 
@@ -266,6 +273,13 @@ organization_id handling of their own, so Class A injection enforces nothing
 for them.
 """
 
+import sys
+from pathlib import Path
+
+_MCP_ROOT = Path(__file__).resolve().parents[2]
+if str(_MCP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MCP_ROOT))
+
 from gateway.tiers import TIER_1, TIER_2, TIER_3_DENIED, is_server_allowed
 
 
@@ -400,6 +414,13 @@ git commit -m "feat(gateway): deny-by-default server tier allowlist"
 Mirrors tool_executor.py's spread-then-overwrite ordering, which is what makes
 injection authoritative over anything the caller supplied.
 """
+
+import sys
+from pathlib import Path
+
+_MCP_ROOT = Path(__file__).resolve().parents[2]
+if str(_MCP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MCP_ROOT))
 
 import pytest
 
@@ -702,6 +723,13 @@ they cannot drift.
 ```python
 """Tool visibility, and the same gate enforced at call time."""
 
+import sys
+from pathlib import Path
+
+_MCP_ROOT = Path(__file__).resolve().parents[2]
+if str(_MCP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MCP_ROOT))
+
 import pytest
 
 from gateway.catalog import ToolDenied, assert_tool_callable, is_tool_exposed
@@ -894,6 +922,13 @@ git commit -m "feat(gateway): one gate predicate for tool listing and calling"
 ```python
 """Bearer tokens carrying a Google-verified email."""
 
+import sys
+from pathlib import Path
+
+_MCP_ROOT = Path(__file__).resolve().parents[2]
+if str(_MCP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MCP_ROOT))
+
 import time
 
 import pytest
@@ -1031,6 +1066,13 @@ git commit -m "feat(gateway): bearer tokens asserting a Google-verified email"
 
 ```python
 """End-to-end dispatch: guard applied, then delegate to the registry."""
+
+import sys
+from pathlib import Path
+
+_MCP_ROOT = Path(__file__).resolve().parents[2]
+if str(_MCP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MCP_ROOT))
 
 import pytest
 
@@ -1218,6 +1260,13 @@ redundant — AuthService returns empty organization_ids rather than raising for
 an email with no accounts row.
 """
 
+import sys
+from pathlib import Path
+
+_MCP_ROOT = Path(__file__).resolve().parents[2]
+if str(_MCP_ROOT) not in sys.path:
+    sys.path.insert(0, str(_MCP_ROOT))
+
 import pytest
 
 from gateway.signin import SignInRejected, mint_token_for_email
@@ -1286,11 +1335,19 @@ The OAuth dance itself is anansi_app/nicegui_app/auth.py's, unchanged — same
 GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET and the same /oauth2callback path, so
 the existing Google OAuth client registration keeps working. This module owns
 only what happens once an email is verified.
+
+is_authorized is REQUIRED, not defaulted. grid_app.lib.perms — the shared RBAC
+whitelist this should delegate to — lives under anansi_app/, a sibling project
+tree mcp_servers' own sys.path cannot reach; a lazy cross-project import would
+either fail at runtime or silently depend on how the process happened to be
+launched. The HTTP layer that wires the real OAuth callback to this function
+(a follow-on, not in this plan — see "Deferred") is what imports perms.is_authorized
+and passes it in explicitly.
 """
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from typing import Callable
 
 from gateway.session import SessionDenied, resolve_session
 from gateway.tokens import issue_token
@@ -1304,18 +1361,13 @@ async def mint_token_for_email(
     email: str,
     secret: str,
     auth_service,
-    is_authorized: Optional[Callable[[str], bool]] = None,
+    is_authorized: Callable[[str], bool],
 ) -> str:
     """Issue a bearer token, or raise SignInRejected.
 
     Rejecting here rather than at first tool call means a user finds out at
     sign-in time, instead of seeing an empty tool list with no explanation.
     """
-    if is_authorized is None:
-        from grid_app.lib import perms
-
-        is_authorized = perms.is_authorized
-
     if not is_authorized(email):
         raise SignInRejected(f"{email} is not authorized for this application")
 
@@ -1392,9 +1444,59 @@ git commit -am "chore(gateway): pre-commit fixes"
 
 ## Deferred — not in this plan
 
-- **Context assembly.** `prepare_context.py`'s instructions, troubleshooting,
-  RAG and knowledge modules stay orchestrator-side. Tools will work without the
-  domain steering the Telegram bot gets.
+- **The HTTP sign-in route itself.** Task 8 covers only the pure function
+  `mint_token_for_email`. Wiring an actual endpoint — reusing
+  `anansi_app/nicegui_app/auth.py`'s OAuth callback, importing
+  `grid_app.lib.perms.is_authorized`, and returning the token to the user —
+  is a follow-on. `mint_token_for_email`'s `is_authorized` parameter is the
+  seam that endpoint calls through.
+- **The actual MCP protocol transport.** `dispatch_tool_call` (Task 7) is a
+  pure function taking `registry_call` and `tools_by_server` as parameters —
+  nothing in this plan wires it to a real `mcp.server.Server()` instance over
+  stdio or Streamable HTTP, or extracts a bearer token from a real transport
+  and calls `verify_token`. This plan builds and tests the guard library;
+  standing up a connectable server is separate follow-on work.
+- **DO App Platform ingress for the gateway.** Confirmed by reading the live
+  deployment config, not assumed: `mcp_servers` has **no existing ingress
+  route today**. `.do/app.example.yaml`'s `services:` list has exactly two
+  entries (`chat-orchestrator`, `anansi-app`); `bridge.py`'s FastAPI HTTP
+  surface is dormant in production — `tool_executor.py`'s
+  `DIRECT_REGISTRY_AVAILABLE` check means the direct-Python-import path wins
+  whenever it's available, which it is (mcp_servers ships inside
+  chat-orchestrator's own image). The only other mcp_servers deployment
+  target is `project.yml`'s DO Functions package (`tools-service`,
+  `handler.main`) — a stateless, one-shot invocation model, a poor fit for an
+  MCP protocol server. **This means the gateway would be the first
+  internet-facing route this part of the codebase has ever had**, with the
+  bearer token as the sole gate — no `API_KEY` layer in front of it the way
+  `bridge.py` has.
+
+  When that follow-on work happens:
+  1. New, dedicated `services:` entry (own Dockerfile, own container) — don't
+     fold this into `chat-orchestrator`'s service. That process has no
+     bearer-token auth model today; sharing its deployment lifecycle raises
+     the chance of an ingress mistake bleeding one surface's auth into the
+     other's.
+  2. New, explicit `ingress: rules:` entry with its own path prefix,
+     `preserve_path_prefix: true` (mandatory — DO strips the matched prefix
+     by default; omitting this on just one rule broke every nested route
+     under `/chat` in production once already, per the comment above that
+     rule in `.do/app.example.yaml`), placed anywhere before the catch-all
+     `prefix: /` → `anansi-app` rule (rules evaluate in order; the catch-all
+     is already last).
+  3. Verify the chosen prefix against the *live* deployed spec, not just this
+     template — it can drift from what's actually running. `/chat`,
+     `/mini-app`, `/api/mini-app`, `/webhook` are already taken.
+  4. A dedicated secret (e.g. `MCP_GATEWAY_TOKEN_SECRET`), never reusing
+     `API_KEY` or `IDENTITY_ASSERTION_KEY` — this secret can mint a token for
+     *any* email (see the spec's security-review addendum), so it warrants
+     its own rotation plan independent of every other secret's blast radius.
+  5. Roll out gated: deploy with `is_authorized` wired to a hardcoded
+     deny-all (or a 1-2 account allowlist) first; confirm the ingress rule
+     actually reaches the new service rather than being swallowed by the
+     catch-all (an unauthenticated health-check path is enough to prove
+     routing); confirm tiering and the scope guard against a real staging
+     session; only then open `is_authorized` to the real whitelist.
 - **Tier 3 servers** (`equipment_control`, `payment_processor`, `messaging`) —
   each needs genuine per-server tenant isolation first.
 - **Full remote-MCP OAuth**, replacing pasted bearer tokens. Re-check the
