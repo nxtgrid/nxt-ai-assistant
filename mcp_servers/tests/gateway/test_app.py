@@ -372,3 +372,83 @@ async def test_post_to_mcp_with_a_valid_token_still_initializes_successfully():
 
     assert response.status_code == 200
     assert '"serverInfo"' in response.text
+
+
+# --- discovery must work at the RFC 8414 URL, not just the path-suffix one ---
+#
+# For an issuer WITH a path component (https://host/mcp-gateway), RFC 8414
+# builds the metadata URL by inserting the well-known segment between the
+# authority and the path - /.well-known/oauth-authorization-server/mcp-gateway
+# - NOT by appending it to the path. Only the appended (OIDC-style) form was
+# served, so a client following RFC 8414 got the DO ingress catch-all (a 307
+# to the anansi-app login page) instead of metadata. Confirmed against the
+# live deployment with curl before writing this.
+
+
+@pytest.mark.asyncio
+async def test_authorization_server_metadata_is_served_at_the_rfc8414_url():
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+        base_url="https://mcp.example.com/mcp-gateway",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/.well-known/oauth-authorization-server/mcp-gateway")
+
+    assert response.status_code == 200
+    assert response.json()["issuer"] == "https://mcp.example.com/mcp-gateway"
+
+
+@pytest.mark.asyncio
+async def test_protected_resource_metadata_is_served_at_the_rfc9728_url():
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+        base_url="https://mcp.example.com/mcp-gateway",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/.well-known/oauth-protected-resource/mcp-gateway")
+
+    assert response.status_code == 200
+    assert response.json()["resource"] == "https://mcp.example.com/mcp-gateway/mcp"
+
+
+@pytest.mark.asyncio
+async def test_the_401_body_is_parseable_json():
+    # Claude Code's own connectivity probe parses the response body as JSON
+    # regardless of status, so an empty-bodied 401 died as
+    # "SyntaxError: Failed to parse JSON" before its OAuth challenge handling
+    # ever ran - the connector showed "failed", never "needs authentication".
+    # Confirmed from its debug log against the live deployment, not guessed.
+    # RFC 6750 section 3 defines this body shape for exactly this response.
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+        base_url="https://mcp.example.com",
+    )
+
+    async with _running_lifespan(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "method": "initialize", "id": 1},
+                headers={"Accept": "application/json, text/event-stream"},
+            )
+
+    assert response.status_code == 401
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["error"] == "invalid_token"

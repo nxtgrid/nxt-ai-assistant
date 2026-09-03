@@ -431,6 +431,21 @@ ingress:
       match:
         path:
           prefix: /mcp-gateway
+    # RFC 8414 discovery paths - see app.example.yaml's matching comment for
+    # why these two exist and why they set preserve_path_prefix while the
+    # rule above deliberately doesn't. Keep the two files identical.
+    - component:
+        name: mcp-gateway
+        preserve_path_prefix: true
+      match:
+        path:
+          prefix: /.well-known/oauth-authorization-server/mcp-gateway
+    - component:
+        name: mcp-gateway
+        preserve_path_prefix: true
+      match:
+        path:
+          prefix: /.well-known/oauth-protected-resource/mcp-gateway
     - component:
         name: anansi-app
       match:

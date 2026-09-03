@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, List, Optional
+from urllib.parse import urlparse
 
 import mcp.types as types
 import uvicorn
@@ -45,7 +46,7 @@ from gateway.transport import (
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Route
 
 
@@ -56,13 +57,10 @@ def unauthorized_www_authenticate_header(base_url: str) -> str:
     something a client can act on - without it, a client has a token
     requirement with no way to find out how to satisfy it.
 
-    NOT YET wired onto the MCP Server's own 401 path (TokenInvalid/
-    SessionDenied raised from _call_tool/_list_tools below) - that depends
-    on exactly how StreamableHTTPSessionManager surfaces a raised exception
-    as an HTTP status, unconfirmed against the installed mcp package's
-    source as of this writing. The plain Starlette routes above already set
-    real status codes directly, so this header is usable on any of those
-    today; only the MCP-protocol path still needs that follow-up.
+    Wired onto the /mcp path by _McpASGIApp below, which gates on a valid
+    token BEFORE the MCP protocol layer runs - rather than trying to make an
+    exception raised inside _call_tool/_list_tools surface as an HTTP status
+    through the SDK's own JSON-RPC error wrapping, which it never does.
     """
     return f'Bearer resource_metadata="{base_url}/.well-known/oauth-protected-resource"'
 
@@ -124,7 +122,22 @@ class _McpASGIApp:
                 token = extract_bearer_token(headers)
                 verify_token(token, self._secret)
             except TokenInvalid:
-                response = Response(
+                # A JSON body, not an empty one: Claude Code's own
+                # connectivity probe parses the response body as JSON
+                # regardless of status, so an empty-bodied 401 died there as
+                # "SyntaxError: Failed to parse JSON" before its OAuth
+                # challenge handling ever ran - the connector showed
+                # "failed", never "needs authentication" (confirmed from its
+                # debug log against the live deployment). RFC 6750 section 3
+                # defines this exact body shape for a bearer-token failure,
+                # so this is what the response should always have carried.
+                response = JSONResponse(
+                    {
+                        "error": "invalid_token",
+                        "error_description": "A valid bearer token is required. "
+                        "Authenticate via the authorization server named in "
+                        "the WWW-Authenticate header.",
+                    },
                     status_code=401,
                     headers={"WWW-Authenticate": unauthorized_www_authenticate_header(self._base_url)},
                 )
@@ -285,11 +298,41 @@ def build_asgi_app(
         async with session_manager.run():
             yield
 
+    # RFC 8414 (and RFC 9728, which follows it) builds an issuer's metadata
+    # URL by inserting the well-known segment BETWEEN the authority and the
+    # issuer's path, not by appending it: an issuer of
+    # https://host/mcp-gateway publishes at
+    # https://host/.well-known/oauth-authorization-server/mcp-gateway. Only
+    # the appended (OIDC-style) form was served, so a client following RFC
+    # 8414 got the DO ingress catch-all - a 307 to anansi-app's login page -
+    # instead of metadata (confirmed with curl against the live deployment).
+    # Both forms are served now: the spec has clients try the RFC 8414 one,
+    # and the appended form stays for clients that use OIDC-style discovery.
+    # The suffix comes from base_url so it tracks deployment config rather
+    # than hardcoding /mcp-gateway; an issuer with no path adds nothing, and
+    # the two route lists collapse to the same pair of paths.
+    issuer_path = urlparse(base_url).path.rstrip("/")
+    rfc8414_routes = (
+        [
+            Route(
+                f"/.well-known/oauth-protected-resource{issuer_path}",
+                protected_resource_metadata_route,
+            ),
+            Route(
+                f"/.well-known/oauth-authorization-server{issuer_path}",
+                authorization_server_metadata_route,
+            ),
+        ]
+        if issuer_path
+        else []
+    )
+
     asgi_app = Starlette(
         routes=[
             Route("/healthz", healthz),
             Route("/.well-known/oauth-protected-resource", protected_resource_metadata_route),
             Route("/.well-known/oauth-authorization-server", authorization_server_metadata_route),
+            *rfc8414_routes,
             Route("/oauth/authorize", oauth_authorize_route),
             Route("/oauth/google-callback", oauth_google_callback_route),
             Route("/oauth/token", oauth_token_route, methods=["POST"]),
