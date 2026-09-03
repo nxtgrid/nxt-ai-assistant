@@ -117,3 +117,30 @@ async def test_authorization_server_metadata_is_served():
 
     assert response.status_code == 200
     assert response.json()["token_endpoint"] == "https://mcp.example.com/oauth/token"
+
+
+@pytest.mark.asyncio
+async def test_authorize_route_redirects_towards_google(monkeypatch):
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+        base_url="https://mcp.example.com",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", follow_redirects=False) as client:
+        response = await client.get(
+            "/oauth/authorize",
+            params={
+                "redirect_uri": "http://127.0.0.1:54321/callback",
+                "state": "client-state",
+                "code_challenge": "abc123",
+                "code_challenge_method": "S256",
+            },
+        )
+
+    assert response.status_code in (302, 307)
+    assert "accounts.google.com" in response.headers["location"]

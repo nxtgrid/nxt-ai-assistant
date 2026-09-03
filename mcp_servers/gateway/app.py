@@ -22,10 +22,12 @@ from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import mcp.types as types
 import uvicorn
+from gateway.google_oauth_client import GoogleOAuthClient
+from gateway.oauth import build_authorize_redirect, handle_google_callback, handle_token_request
 from gateway.oauth_metadata import authorization_server_metadata, protected_resource_metadata
 from gateway.tiers import ALLOWED_SERVERS
 from gateway.transport import (
@@ -37,8 +39,18 @@ from gateway.transport import (
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Mount, Route
+
+
+def _deny_all(email: str) -> bool:
+    """Fail-closed default for is_authorized: a gateway deployed without an
+    explicit whitelist function (run_gateway() always supplies the real
+    grid_app.lib.perms.has_any_access — see its own module) rejects every
+    sign-in rather than silently allowing everyone or crashing on a None
+    call.
+    """
+    return False
 
 
 def build_asgi_app(
@@ -48,13 +60,29 @@ def build_asgi_app(
     registry_call_tool: RegistryCallTool,
     allowed_servers: Optional[List[str]] = None,
     base_url: str = "http://localhost:8080",
+    google_oauth_client: Optional[Any] = None,
+    is_authorized: Optional[Callable[[str], bool]] = None,
+    single_use_store: Optional[Any] = None,
 ) -> Starlette:
     """Build the gateway's ASGI app.
 
     A factory so every external dependency is injectable — real production
     wiring lives only in run_gateway() below, never baked in here.
+
+    google_oauth_client defaults to a real GoogleOAuthClient (not a fake)
+    when omitted: build_authorize_url is pure string-building with no
+    network call, so this is safe to default-construct even for a test that
+    never touches the Google leg at all — it's what lets a plain GET to
+    /oauth/authorize redirect somewhere real without every caller needing
+    to inject a fake. is_authorized defaults to _deny_all (fail-closed);
+    single_use_store has no safe default (there is no "fail-closed" store),
+    so /oauth/token raises loudly if run_gateway() didn't wire a real one.
     """
     servers = list(allowed_servers) if allowed_servers is not None else list(ALLOWED_SERVERS)
+    google_oauth_client = google_oauth_client or GoogleOAuthClient(
+        redirect_uri=f"{base_url}/oauth/google-callback"
+    )
+    is_authorized = is_authorized or _deny_all
     server = Server("nxt-mcp-gateway")
 
     @server.list_tools()
@@ -133,6 +161,45 @@ def build_asgi_app(
     async def authorization_server_metadata_route(request):
         return JSONResponse(authorization_server_metadata(base_url))
 
+    async def oauth_authorize_route(request):
+        result = build_authorize_redirect(
+            client_redirect_uri=request.query_params["redirect_uri"],
+            client_state=request.query_params.get("state", ""),
+            code_challenge=request.query_params["code_challenge"],
+            base_url=base_url,
+            secret=secret,
+            google_oauth=google_oauth_client,
+        )
+        return RedirectResponse(result.redirect_url, status_code=302)
+
+    async def oauth_google_callback_route(request):
+        result = await handle_google_callback(
+            state=request.query_params["state"],
+            callback_query=dict(request.query_params),
+            secret=secret,
+            google_oauth=google_oauth_client,
+            is_authorized=is_authorized,
+            auth_service=auth_service,
+        )
+        return RedirectResponse(result.redirect_url, status_code=302)
+
+    async def oauth_token_route(request):
+        form = await request.form()
+        result = await handle_token_request(
+            code=form["code"],
+            code_verifier=form["code_verifier"],
+            secret=secret,
+            single_use_store=single_use_store,
+            auth_service=auth_service,
+        )
+        return JSONResponse(
+            {
+                "access_token": result.access_token,
+                "token_type": result.token_type,
+                "expires_in": result.expires_in,
+            }
+        )
+
     @asynccontextmanager
     async def lifespan(app: Starlette):
         async with session_manager.run():
@@ -143,6 +210,9 @@ def build_asgi_app(
             Route("/healthz", healthz),
             Route("/.well-known/oauth-protected-resource", protected_resource_metadata_route),
             Route("/.well-known/oauth-authorization-server", authorization_server_metadata_route),
+            Route("/oauth/authorize", oauth_authorize_route),
+            Route("/oauth/google-callback", oauth_google_callback_route),
+            Route("/oauth/token", oauth_token_route, methods=["POST"]),
             Mount("/mcp", app=session_manager.handle_request),
         ],
         lifespan=lifespan,
