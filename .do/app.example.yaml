@@ -436,6 +436,27 @@ ingress:
       match:
         path:
           prefix: /mcp-gateway
+    # RFC 8414 builds an issuer's metadata URL by inserting the well-known
+    # segment BETWEEN the authority and the issuer's path, so an issuer of
+    # https://host/mcp-gateway publishes at
+    # https://host/.well-known/oauth-authorization-server/mcp-gateway - a
+    # path that does NOT start with /mcp-gateway and so would otherwise fall
+    # through to the anansi-app catch-all below (a 307 to its login page,
+    # confirmed live). preserve_path_prefix IS set on these two, unlike the
+    # rule above: gateway/app.py registers these routes at their full literal
+    # path, so the container has to see the whole thing.
+    - component:
+        name: mcp-gateway
+        preserve_path_prefix: true
+      match:
+        path:
+          prefix: /.well-known/oauth-authorization-server/mcp-gateway
+    - component:
+        name: mcp-gateway
+        preserve_path_prefix: true
+      match:
+        path:
+          prefix: /.well-known/oauth-protected-resource/mcp-gateway
     - component:
         name: anansi-app
       match:
