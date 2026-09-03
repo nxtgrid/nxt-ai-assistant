@@ -22,7 +22,20 @@ class ScopeViolation(Exception):
 
 
 # Class A — always injected, matching tool_executor.py's injected set.
+#
+# chat_id/topic_id/session_id are here because at least one Tier 1 server
+# (schedule_mcp_server.py's cancel/pause/resume/list_user_schedules) scopes
+# OWNERSHIP by chat_id alone, not by organization_id at all - found during
+# the Class-C audit. Nothing upstream enforces additionalProperties: false,
+# so a caller could otherwise supply their own chat_id/topic_id/session_id
+# directly and it would reach that ownership check untouched, working
+# across organizations since organization_id plays no part in that check.
+# A gateway session has no Telegram identity, so these are always forced to
+# None - not merely overwritten with some other value a caller could still
+# try to brute-force towards, but a value no real Telegram-created row can
+# ever equal.
 ALWAYS_INJECTED = ("organization_id", "user_email", "user_name")
+ALWAYS_INJECTED_NONE = ("chat_id", "topic_id", "session_id")
 
 # Class A — overwritten only when the tool's schema actually uses them, so we
 # do not add stray keys that a server might branch on.
@@ -80,6 +93,9 @@ def apply_scope_guard(arguments: Dict[str, Any], session: GatewaySession) -> Dic
         "user_email": session.email,
         "user_name": session.email,
     }
+
+    for key in ALWAYS_INJECTED_NONE:
+        guarded[key] = None
 
     for key in INJECTED_IF_PRESENT:
         if key in arguments:

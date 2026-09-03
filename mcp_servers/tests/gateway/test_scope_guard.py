@@ -104,3 +104,43 @@ def test_session_with_no_grids_rejects_any_grid_reference():
     )
     with pytest.raises(ScopeViolation):
         apply_scope_guard({"grid_name": "Alpha Site"}, empty)
+
+
+# Class A gap found during the Class-C audit: tool_executor.py injects
+# chat_id/topic_id/session_id alongside organization_id/user_email/user_name
+# (schedule_mcp_server.py's cancel/pause/resume/list_user_schedules handlers
+# scope OWNERSHIP by chat_id, not organization_id at all), but the original
+# scope guard never touched these three keys. Nothing enforces
+# additionalProperties: false before arguments reach apply_scope_guard, so a
+# caller could supply their own chat_id directly - complete exploit chain:
+# list_user_schedules with a guessed/leaked chat_id enumerates another
+# party's (even another ORG's) schedules, cancel_user_schedule with that
+# chat_id + the returned 8-char id prefix then cancels it. Zero
+# organization_id involvement, so Tier 1's "organization_id scoping makes
+# this safe" argument never even applied here.
+
+
+def test_caller_supplied_chat_id_is_overwritten():
+    guarded = apply_scope_guard({"chat_id": "-1009999999999"}, SESSION)
+    assert guarded["chat_id"] != "-1009999999999"
+
+
+def test_caller_supplied_topic_id_is_overwritten():
+    guarded = apply_scope_guard({"topic_id": "12345"}, SESSION)
+    assert guarded["topic_id"] != "12345"
+
+
+def test_caller_supplied_session_id_is_overwritten():
+    guarded = apply_scope_guard({"session_id": "someone-elses-session"}, SESSION)
+    assert guarded["session_id"] != "someone-elses-session"
+
+
+def test_mcp_session_has_no_telegram_identity_so_chat_scoped_tools_find_nothing():
+    # The gateway session has no chat_id/topic_id concept at all, so the
+    # injected value must be one no real Telegram-created row can ever equal
+    # - not merely "different from the caller's guess", which a cleverer
+    # attacker could still brute-force towards.
+    guarded = apply_scope_guard({}, SESSION)
+    assert guarded["chat_id"] is None
+    assert guarded["topic_id"] is None
+    assert guarded["session_id"] is None
