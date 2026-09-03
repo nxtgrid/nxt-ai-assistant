@@ -7,15 +7,26 @@ Starlette app, the lifespan starts and stops cleanly, and an unauthenticated
 health check responds — exactly the property the plan's safe DO-rollout
 sequence depends on being provable before any auth wiring is trusted.
 
-The /mcp endpoint itself is NOT exercised here: driving a real MCP
-Streamable-HTTP session end-to-end needs an actual mcp.client session on the
-other end, which is integration-test territory, not a unit test. What IS
-covered — auth extraction, tool filtering, the scope guard, dispatch — is
-covered directly in test_transport.py and friends without needing ASGI at
-all.
+Most of what happens once a request reaches /mcp — auth extraction, tool
+filtering, the scope guard, dispatch — is covered directly in
+test_transport.py and friends without needing ASGI at all. But whether a
+request reaches /mcp in the first place (the actual routing: does POST /mcp
+match at all, does it redirect, does the app even resolve past the
+lifespan) is exactly the kind of thing that only breaks at the ASGI level,
+and it did once in production (see test_post_to_mcp_without_a_trailing_
+slash_is_not_redirected) — so a full round trip through a real MCP
+initialize IS exercised here, via _running_lifespan below.
+
+httpx's ASGITransport never sends ASGI lifespan events on its own (confirmed
+by reading its handle_async_request source: it only ever builds an
+http-type scope) - StreamableHTTPSessionManager.run()'s task group is never
+initialized without one, so any test that needs a real /mcp round trip has
+to drive lifespan.startup/shutdown by hand. _running_lifespan is that.
 """
 
+import asyncio
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 _MCP_ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +36,40 @@ if str(_MCP_ROOT) not in sys.path:
 import httpx
 import pytest
 from gateway.app import build_asgi_app
+
+
+@asynccontextmanager
+async def _running_lifespan(app):
+    """Manually drives the ASGI lifespan protocol around `app` so a test
+    can make real requests through code paths (like /mcp's session manager)
+    that only work once lifespan.startup has actually completed. See this
+    module's own docstring for why httpx's ASGITransport can't do this on
+    its own.
+    """
+    startup_complete = asyncio.Event()
+    shutdown_requested = asyncio.Event()
+    shutdown_complete = asyncio.Event()
+
+    async def receive():
+        if not startup_complete.is_set():
+            return {"type": "lifespan.startup"}
+        await shutdown_requested.wait()
+        return {"type": "lifespan.shutdown"}
+
+    async def send(message):
+        if message["type"] == "lifespan.startup.complete":
+            startup_complete.set()
+        elif message["type"] == "lifespan.shutdown.complete":
+            shutdown_complete.set()
+
+    task = asyncio.ensure_future(app({"type": "lifespan"}, receive, send))
+    await startup_complete.wait()
+    try:
+        yield
+    finally:
+        shutdown_requested.set()
+        await asyncio.wait_for(shutdown_complete.wait(), timeout=5)
+        await task
 
 
 class _FakeAuth:
@@ -82,17 +127,34 @@ async def test_app_lifespan_starts_and_stops_cleanly():
 
 
 @pytest.mark.asyncio
-async def test_post_to_mcp_without_a_trailing_slash_is_not_redirected():
-    # Starlette's Mount defaults to redirecting POST /mcp -> POST /mcp/
-    # (a 307, method-preserving in principle). That's still a real break
-    # here: DO's ingress strips /mcp-gateway before forwarding, so the
-    # Location Starlette computes is a bare /mcp/ with no idea the public
-    # URL needs that prefix back - a client that even follows it lands on
-    # a completely different route (the ingress catch-all), and most MCP
-    # HTTP clients don't follow redirects on POST at all, so this showed up
-    # as an outright failed connection, not a slow one. The client's own
-    # configured URL (.../mcp-gateway/mcp, no trailing slash) must work
-    # with zero redirect.
+async def test_post_to_mcp_without_a_trailing_slash_initializes_successfully():
+    # Reproduces a real production failure end to end, not just the symptom
+    # that first surfaced. A live claude mcp add + /mcp connection attempt
+    # showed "mcp-gateway (x) failed"; doctl apps logs showed the real
+    # request/response - POST /mcp 307 Temporary Redirect - and curl -D -
+    # confirmed the exact Location: a bare /mcp/, missing the /mcp-gateway
+    # ingress prefix DO's rule strips before forwarding, landing on a
+    # totally different route for anything that followed it (most MCP HTTP
+    # clients don't follow redirects on POST at all regardless, so this
+    # surfaced as an outright failure, not a slow success).
+    #
+    # The redirect came from Mount("/mcp", app=...): Mount.matches()'s own
+    # path_regex requires a "/" after the mount path to match anything at
+    # all, so Starlette's redirect_slashes=True default was the ONLY way
+    # bare POST /mcp (no trailing slash - exactly what an MCP client
+    # requests) ever worked. A first fix attempt disabled redirect_slashes,
+    # which stopped the wrong redirect but then 404'd instead, for the
+    # exact same underlying reason (confirmed against the live app both
+    # times, not assumed either time) - Mount was never the right primitive
+    # for a single-endpoint transport with no sub-paths. The real fix
+    # replaced it with a plain Route (see gateway/app.py's own comment on
+    # why that needs the _McpASGIApp adapter class).
+    #
+    # This test asserts a genuine, complete initialize round trip - not
+    # just "no redirect" - since that weaker assertion is exactly what let
+    # the original Mount-based code pass a "not redirected" check while
+    # still being fundamentally broken (a 404 also satisfies "not a
+    # redirect").
     app = build_asgi_app(
         secret="test-secret-not-a-real-key",
         auth_service=_FakeAuth(),
@@ -101,17 +163,28 @@ async def test_post_to_mcp_without_a_trailing_slash_is_not_redirected():
         allowed_servers=["customer"],
     )
 
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test", follow_redirects=False) as client:
-        async with transport:
+    async with _running_lifespan(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test", follow_redirects=False) as client:
             response = await client.post(
                 "/mcp",
-                json={"jsonrpc": "2.0", "method": "initialize", "id": 1},
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "initialize",
+                    "id": 1,
+                    "params": {
+                        "protocolVersion": "2026-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test-client", "version": "0"},
+                    },
+                },
                 headers={"Accept": "application/json, text/event-stream"},
             )
 
-    assert response.status_code not in (307, 308)
+    assert response.status_code == 200
     assert "location" not in response.headers
+    assert '"serverInfo"' in response.text
+    assert '"nxt-mcp-gateway"' in response.text
 
 
 @pytest.mark.asyncio
