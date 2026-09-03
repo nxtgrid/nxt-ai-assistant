@@ -32,7 +32,13 @@ from urllib.parse import urlparse
 import mcp.types as types
 import uvicorn
 from gateway.google_oauth_client import GoogleOAuthClient
-from gateway.oauth import build_authorize_redirect, handle_google_callback, handle_token_request
+from gateway.oauth import (
+    RedirectUriInvalid,
+    build_authorize_redirect,
+    handle_client_registration,
+    handle_google_callback,
+    handle_token_request,
+)
 from gateway.oauth_metadata import authorization_server_metadata, protected_resource_metadata
 from gateway.tiers import ALLOWED_SERVERS
 from gateway.tokens import TokenInvalid, verify_token
@@ -255,15 +261,30 @@ def build_asgi_app(
         return JSONResponse(authorization_server_metadata(base_url))
 
     async def oauth_authorize_route(request):
-        result = build_authorize_redirect(
-            client_redirect_uri=request.query_params["redirect_uri"],
-            client_state=request.query_params.get("state", ""),
-            code_challenge=request.query_params["code_challenge"],
-            base_url=base_url,
-            secret=secret,
-            google_oauth=google_oauth_client,
-        )
+        try:
+            result = build_authorize_redirect(
+                client_redirect_uri=request.query_params["redirect_uri"],
+                client_state=request.query_params.get("state", ""),
+                code_challenge=request.query_params["code_challenge"],
+                base_url=base_url,
+                secret=secret,
+                google_oauth=google_oauth_client,
+            )
+        except RedirectUriInvalid as exc:
+            # Deliberately rendered here rather than redirected anywhere:
+            # per OAuth 2.1, an invalid redirect_uri is the one error that
+            # must NOT be reported by redirecting to it - that would be the
+            # very hand-off this check exists to prevent.
+            return JSONResponse(
+                {"error": "invalid_request", "error_description": str(exc)},
+                status_code=400,
+            )
         return RedirectResponse(result.redirect_url, status_code=302)
+
+    async def oauth_register_route(request):
+        body = await request.json()
+        result = handle_client_registration(body)
+        return JSONResponse(result.registration, status_code=201)
 
     async def oauth_google_callback_route(request):
         result = await handle_google_callback(
@@ -336,6 +357,7 @@ def build_asgi_app(
             Route("/oauth/authorize", oauth_authorize_route),
             Route("/oauth/google-callback", oauth_google_callback_route),
             Route("/oauth/token", oauth_token_route, methods=["POST"]),
+            Route("/oauth/register", oauth_register_route, methods=["POST"]),
             # A plain Route, not Mount("/mcp", app=session_manager.
             # handle_request) - Streamable HTTP is one endpoint, not a tree
             # of sub-paths, so Mount's prefix-matching semantics were never

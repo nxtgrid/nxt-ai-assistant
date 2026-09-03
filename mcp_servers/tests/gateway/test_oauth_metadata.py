@@ -37,3 +37,11 @@ def test_authorization_server_metadata_declares_no_client_secret_required():
     # no stored secret) will call this.
     metadata = authorization_server_metadata(BASE_URL)
     assert "none" in metadata["token_endpoint_auth_methods_supported"]
+
+
+def test_authorization_server_metadata_advertises_dynamic_registration():
+    # Claude Code's CLI hard-fails without this: "Incompatible auth server:
+    # does not support dynamic client registration" (its own debug log,
+    # after discovery had already succeeded).
+    metadata = authorization_server_metadata(BASE_URL)
+    assert metadata["registration_endpoint"] == "https://mcp.example.com/oauth/register"
