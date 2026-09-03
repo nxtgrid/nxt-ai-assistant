@@ -1450,12 +1450,14 @@ git commit -am "chore(gateway): pre-commit fixes"
   `grid_app.lib.perms.is_authorized`, and returning the token to the user —
   is a follow-on. `mint_token_for_email`'s `is_authorized` parameter is the
   seam that endpoint calls through.
-- **The actual MCP protocol transport.** `dispatch_tool_call` (Task 7) is a
-  pure function taking `registry_call` and `tools_by_server` as parameters —
-  nothing in this plan wires it to a real `mcp.server.Server()` instance over
-  stdio or Streamable HTTP, or extracts a bearer token from a real transport
-  and calls `verify_token`. This plan builds and tests the guard library;
-  standing up a connectable server is separate follow-on work.
+- ~~**The actual MCP protocol transport.**~~ **Built** (post-plan, same
+  branch): `gateway/transport.py` (per-request auth extraction + the two
+  request flows, headers-in/dicts-out, fully unit-tested) and `gateway/app.py`
+  (`build_asgi_app` factory wiring a real `mcp.server.Server` over Streamable
+  HTTP via `StreamableHTTPSessionManager(stateless=True)`, verified over real
+  ASGI with httpx's `ASGITransport`). `run_gateway()`'s production wiring
+  (real `AuthService`, real `server_registry`) is the one piece left
+  unverified by a unit test — everything upstream of it is DI'd and covered.
 - **DO App Platform ingress for the gateway.** Confirmed by reading the live
   deployment config, not assumed: `mcp_servers` has **no existing ingress
   route today**. `.do/app.example.yaml`'s `services:` list has exactly two
