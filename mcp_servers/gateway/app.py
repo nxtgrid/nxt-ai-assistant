@@ -44,7 +44,7 @@ from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, RedirectResponse
-from starlette.routing import Mount, Route
+from starlette.routing import Route
 
 
 def unauthorized_www_authenticate_header(base_url: str) -> str:
@@ -73,6 +73,21 @@ def _deny_all(email: str) -> bool:
     call.
     """
     return False
+
+
+class _McpASGIApp:
+    """Wraps StreamableHTTPSessionManager.handle_request (a raw ASGI3
+    callable, but a BOUND METHOD) so Starlette's Route treats it as a raw
+    ASGI app rather than a request_response(request) handler - see the
+    Route("/mcp", ...) call site's own comment for the full reasoning.
+    Mirrors mcp.server.fastmcp.server's own StreamableHTTPASGIApp exactly.
+    """
+
+    def __init__(self, session_manager: StreamableHTTPSessionManager) -> None:
+        self._session_manager = session_manager
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        await self._session_manager.handle_request(scope, receive, send)
 
 
 def build_asgi_app(
@@ -235,25 +250,40 @@ def build_asgi_app(
             Route("/oauth/authorize", oauth_authorize_route),
             Route("/oauth/google-callback", oauth_google_callback_route),
             Route("/oauth/token", oauth_token_route, methods=["POST"]),
-            Mount("/mcp", app=session_manager.handle_request),
+            # A plain Route, not Mount("/mcp", app=session_manager.
+            # handle_request) - Streamable HTTP is one endpoint, not a tree
+            # of sub-paths, so Mount's prefix-matching semantics were never
+            # the right primitive here. A first attempt used Mount, which
+            # only ever matched bare POST /mcp (no trailing slash - exactly
+            # what an MCP client requests) via Starlette's redirect_slashes
+            # fallback: Mount.matches()'s own path_regex requires a "/" after
+            # the mount path to match at all, so redirect_slashes=True's
+            # 307-to-/mcp/ was the ONLY way bare /mcp ever worked - and that
+            # redirect's Location is computed relative to what Starlette saw
+            # inside the container, with no idea the public URL needs the
+            # /mcp-gateway prefix DO's ingress rule strips before forwarding
+            # (see .do/app.example.yaml's own comment on why), landing on the
+            # ingress catch-all instead. Turning redirect_slashes off headed
+            # off the wrong redirect but then 404'd instead, for the exact
+            # same underlying reason - confirmed against a real production
+            # failure both times (doctl apps logs showing the 307, then curl
+            # showing the 404), not assumed either time.
+            #
+            # session_manager.handle_request is a raw ASGI3 callable but a
+            # BOUND METHOD - Starlette's Route.__init__ special-cases
+            # inspect.ismethod() endpoints as request_response(request)
+            # handlers, the wrong calling convention here. _McpASGIApp exists
+            # only to dodge that check: a class instance's __call__ is
+            # neither isfunction nor ismethod, so Route treats it as a raw
+            # ASGI app instead - exactly the pattern mcp.server.fastmcp.
+            # server's own StreamableHTTPASGIApp uses, reimplemented locally
+            # rather than imported since this gateway deliberately stays on
+            # the low-level Server API throughout, not fastmcp's high-level
+            # one (see mcp_servers/requirements.txt's own comment on why).
+            Route("/mcp", endpoint=_McpASGIApp(session_manager)),
         ],
         lifespan=lifespan,
     )
-    # Starlette's Router defaults redirect_slashes=True: POST /mcp (no
-    # trailing slash - exactly what an MCP client requests) 307s to
-    # POST /mcp/ by default. Starlette computes that Location relative to
-    # what IT saw, with no idea the public URL needs the /mcp-gateway
-    # ingress prefix restored - the DO ingress rule strips it before
-    # forwarding (see .do/app.example.yaml's own comment on why), so the
-    # redirect target is a bare, wrong /mcp/ that lands on the ingress
-    # catch-all instead. Most MCP HTTP clients don't follow redirects on
-    # POST at all regardless, so this surfaced as an outright failed
-    # connection, not a slow one - see test_post_to_mcp_without_a_
-    # trailing_slash_is_not_redirected, written directly against a real
-    # production failure (Starlette Router.__init__'s own redirect_slashes
-    # kwarg isn't forwarded by Starlette.__init__, so this has to be set as
-    # a post-construction attribute instead).
-    asgi_app.router.redirect_slashes = False
     return asgi_app
 
 
