@@ -6,6 +6,53 @@ Built and run in production by [NXT Grid](https://nxtgrid.co), open-sourced for 
 
 The admin app displays the public name Mini-Grids Assistant on the login screen and in UI copy as of PR #115 (2026-08-20); the codebase and repo remain named Anansi.
 
+## The outer boundary
+
+Everything below is one DigitalOcean App Platform app. This section is the map of what crosses its edges — what can call in, what it calls out to, and where state actually lives. Most of the subtle bugs in this repo have come from getting one of these boundaries wrong, so it's worth reading before changing anything that touches routing, auth, or persistence.
+
+### Ingress — what can call in
+
+A single hostname fronts three services, split by path prefix. Rules are evaluated **in order**, and the last one is a catch-all, so a new path that doesn't match an earlier rule silently lands on the admin app (usually appearing as its login page rather than an error).
+
+| Path prefix | Service | Prefix forwarded? | What it's for |
+|---|---|---|---|
+| `/chat` | chat-orchestrator | **preserved** | Telegram webhook + `/chat/notify` external alert passthrough |
+| `/mini-app` | chat-orchestrator | **preserved** | Telegram Mini App UI |
+| `/api/mini-app` | chat-orchestrator | **preserved** | Mini App backend calls |
+| `/webhook` | chat-orchestrator | **preserved** | Inbound Jira webhooks |
+| `/mcp-gateway` | mcp-gateway | **stripped** | MCP endpoint + its OAuth routes (see [MCP gateway](#mcp-gateway) below) |
+| `/.well-known/oauth-*/mcp-gateway` | mcp-gateway | **preserved** | RFC 8414/9728 OAuth discovery |
+| `/` | anansi-app | stripped | NiceGUI admin UI (catch-all) |
+
+**`preserve_path_prefix` is not cosmetic.** DigitalOcean strips the matched prefix before forwarding unless it's set. Whether you want it depends entirely on whether the *service's own routes* include the prefix: chat-orchestrator serves real `/chat/...` routes so it needs the prefix preserved, while the gateway serves bare `/mcp`, `/healthz`, `/oauth/...` so it needs it stripped. Getting this backwards produces a 404 on every request, or a redirect to a URL missing the prefix entirely.
+
+### Data stores — two databases, and they are not interchangeable
+
+| Store | Access | Writeable? | Holds |
+|---|---|---|---|
+| **Auth DB** (`AUTH_DB_*`) | direct Postgres (asyncpg, pooler port) | **read-only** | `public.accounts`, `grids`, `organizations`, `dcus` — the operational/grid records that drive permissions |
+| **Chat DB** (`CHAT_DB_URL` + `CHAT_DB_SERVICE_KEY`, also `CHAT_DB_POSTGRES_URL`) | Supabase / PostgREST | writeable | conversations, RAG chunks, prompts, skills, escalations, and anything this repo migrates |
+| **Timescale** (`TIMESCALE_*`) | direct Postgres | reads | time-series telemetry |
+| **DO Spaces** (`DO_SPACES_*`) | S3 API | writeable | object storage |
+
+Two rules follow from this and are easy to get wrong:
+
+- **`db/migrations/` targets the Chat DB only.** Anything needing a new table must live there, because the Auth DB is read-only to this app — a feature that writes to `AUTH_DB_*` cannot work, no matter how the connection is configured.
+- **Merging a migration does not apply it.** Someone with Chat DB access runs it separately. An unapplied migration usually fails at runtime as `UndefinedTableError`, not at deploy time.
+
+### Egress — what this repo calls out to
+
+Grouped by what they're for; each is gated by its own env vars and most by an `*_ENABLED` flag.
+
+- **LLMs** — Gemini (`GEMINI_*`, `MODEL_THINKING`/`FAST`/`LITE`), OpenRouter as an alternate provider, Langfuse for tracing
+- **Google Workspace** — OAuth sign-in (`AUTH_CLIENT_ID`/`SECRET`), plus Docs/Drive/Sheets via a service account (`GOOGLE_SERVICE_ACCOUNT_JSON`, `*_DOC_ID`) and an Apps Script helper (`ANANSI_HELPER_*`)
+- **Field/grid systems** — VRM (`VRM_TOKEN`, MQTT), ChirpStack, Calin v1/v2, metering and Tiamat APIs
+- **Ops tooling** — Jira (tickets + webhooks), Grafana (dashboards), Loki (logs), GitHub (`GITHUB_TOKEN`, codebase search), Tavily (web search)
+- **Messaging** — Telegram bot API
+- **Payments** — payment processor (`PAYMENT_PROCESSOR_*`)
+
+Each of these is reachable to the assistant as an MCP server under [`mcp_servers/servers/`](mcp_servers/servers/); the gateway's [`tiers.py`](mcp_servers/gateway/tiers.py) decides which are exposed to external MCP clients and which never are.
+
 ## What it does for mini-grid operators
 
 ### Customer support automation for prepaid meters
@@ -910,6 +957,35 @@ doctl apps create-deployment <app-id>
 # Or push to main branch (auto-deploys)
 git push origin main
 ```
+
+### MCP gateway
+
+Exposes the same tools the assistant uses to external MCP clients (Claude Code, Claude desktop, Codex), scoped to whoever signed in. A user connects once:
+
+```bash
+claude mcp add --transport http anansi-mcp https://your-app.example.com/mcp-gateway/mcp
+```
+
+and authenticates with their own Google work account in their own browser. No token is ever pasted anywhere, and no shared API key exists for this route.
+
+**Routes** (all under the `/mcp-gateway` ingress prefix, which is stripped before reaching the service):
+
+| Route | Purpose |
+|---|---|
+| `/mcp` | The MCP endpoint itself (Streamable HTTP). Requires a bearer token; without one it returns `401` + `WWW-Authenticate`, which is what triggers a client's OAuth flow |
+| `/healthz` | Unauthenticated health check |
+| `/.well-known/oauth-protected-resource` | RFC 9728 — points clients at the authorization server |
+| `/.well-known/oauth-authorization-server` | RFC 8414 — advertises the endpoints below |
+| `/oauth/register` | RFC 7591 dynamic client registration (Claude Code requires this and cannot be given a client ID by hand) |
+| `/oauth/authorize` | Starts the Google leg. `redirect_uri` **must be a loopback address** (RFC 8252) |
+| `/oauth/google-callback` | Google's redirect target — the one URI registered in Google Cloud Console |
+| `/oauth/token` | PKCE-verified, single-use code exchange |
+
+**How authorization works.** Two OAuth hops that are easy to conflate: the client ↔ this gateway (dynamic loopback redirect, PKCE, no Google involvement) and this gateway ↔ Google (one stable, pre-registered callback). The issued `client_id` is not a credential and is not persisted — for a public client the real gates are PKCE, loopback-only `redirect_uri` validation, the Google-verified identity, and the same `grid_app.lib.perms` whitelist the admin app uses.
+
+Once connected, every request re-resolves the caller's organization and permissions from the database — nothing is cached for the life of a connection, so revoking someone takes effect on their next call. Tools are filtered per user by [`tiers.py`](mcp_servers/gateway/tiers.py) (equipment control, payments and messaging are never exposed) and every scope-bearing argument is overwritten server-side rather than trusted from the caller.
+
+**Setup notes.** `MCP_GATEWAY_BASE_URL` must be the full public origin including the `/mcp-gateway` prefix — it's embedded in the discovery documents and is what Google validates the redirect against. The gateway reuses the admin app's Google OAuth client via `AUTH_CLIENT_ID`/`AUTH_CLIENT_SECRET` at app level, so its callback URL needs adding as a second Authorized redirect URI on that client. `db/migrations/0032_oauth_code_single_use.sql` must be applied to the Chat DB, or token exchange fails at the last step.
 
 #### Faster deploys: prebuilt images (optional)
 
