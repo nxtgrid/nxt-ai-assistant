@@ -34,16 +34,18 @@ from gateway.google_oauth_client import GoogleOAuthClient
 from gateway.oauth import build_authorize_redirect, handle_google_callback, handle_token_request
 from gateway.oauth_metadata import authorization_server_metadata, protected_resource_metadata
 from gateway.tiers import ALLOWED_SERVERS
+from gateway.tokens import TokenInvalid, verify_token
 from gateway.transport import (
     RegistryCallTool,
     RegistryListTools,
     call_tool_for_request,
+    extract_bearer_token,
     list_tools_for_request,
 )
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 
@@ -81,12 +83,53 @@ class _McpASGIApp:
     ASGI app rather than a request_response(request) handler - see the
     Route("/mcp", ...) call site's own comment for the full reasoning.
     Mirrors mcp.server.fastmcp.server's own StreamableHTTPASGIApp exactly.
+
+    ALSO gates every request on a valid bearer token before the MCP
+    protocol layer ever runs - found necessary against a real production
+    connection: _call_tool/_list_tools' own resolve_session_from_headers
+    checks do reject a missing token, but that rejection happens INSIDE
+    the MCP protocol layer, which the SDK's Server wraps into a JSON-RPC-
+    level error (still HTTP 200) rather than a real HTTP 401. An OAuth-
+    aware client has no way to read that as "please authenticate" - the
+    spec's discovery handshake is keyed off an actual 401 +
+    WWW-Authenticate - so a real Claude Code connection attempt showed
+    "connected" despite sending no Authorization header at all (confirmed
+    via doctl apps logs: no /oauth/* request ever fired). This checks only
+    the token's own signature and expiry (verify_token - pure, no DB call),
+    not full session resolution: a missing/malformed/expired token needs
+    OAuth (401 is correct), but a validly-signed token for a since-revoked
+    org is a DIFFERENT failure (authorized-nothing, not unauthenticated) -
+    re-running the OAuth dance wouldn't fix that, so it's left to surface
+    as the existing MCP-level SessionDenied error inside list_tools/
+    call_tool instead, exactly as it already did before this gate existed.
     """
 
-    def __init__(self, session_manager: StreamableHTTPSessionManager) -> None:
+    def __init__(
+        self,
+        session_manager: StreamableHTTPSessionManager,
+        secret: str,
+        base_url: str,
+    ) -> None:
         self._session_manager = session_manager
+        self._secret = secret
+        self._base_url = base_url
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http":
+            headers = {
+                key.decode("latin-1").lower(): value.decode("latin-1")
+                for key, value in scope.get("headers", [])
+            }
+            try:
+                token = extract_bearer_token(headers)
+                verify_token(token, self._secret)
+            except TokenInvalid:
+                response = Response(
+                    status_code=401,
+                    headers={"WWW-Authenticate": unauthorized_www_authenticate_header(self._base_url)},
+                )
+                await response(scope, receive, send)
+                return
         await self._session_manager.handle_request(scope, receive, send)
 
 
@@ -280,7 +323,7 @@ def build_asgi_app(
             # rather than imported since this gateway deliberately stays on
             # the low-level Server API throughout, not fastmcp's high-level
             # one (see mcp_servers/requirements.txt's own comment on why).
-            Route("/mcp", endpoint=_McpASGIApp(session_manager)),
+            Route("/mcp", endpoint=_McpASGIApp(session_manager, secret, base_url)),
         ],
         lifespan=lifespan,
     )
