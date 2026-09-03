@@ -198,10 +198,12 @@ def default_tool_runner() -> "ToolRunner | None":
     """The in-process registry runner, or None where mcp_servers is absent.
 
     Production runs the MCP servers inside chat-orchestrator (see
-    .do/app.example.yaml -- only chat-orchestrator and anansi-app are
-    deployed, and chat_orchestrator/Dockerfile copies mcp_servers/ in), so
-    this resolves. Returning None elsewhere keeps the untooled path working
-    instead of failing the edit.
+    .do/app.example.yaml -- chat_orchestrator/Dockerfile copies mcp_servers/
+    in for its own in-process use), so this resolves there. The standalone
+    mcp-gateway service (same .do/app.example.yaml) has its own separate
+    Dockerfile and process; it doesn't change this function's own resolution
+    path. Returning None elsewhere keeps the untooled path working instead
+    of failing the edit.
     """
     try:
         from mcp_servers.server_registry import call_tool
