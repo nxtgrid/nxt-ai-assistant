@@ -43,6 +43,24 @@ from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Mount, Route
 
 
+def unauthorized_www_authenticate_header(base_url: str) -> str:
+    """The header a client parses to discover where to authenticate.
+
+    Per the spec's discovery sequence, this is what turns a bare 401 into
+    something a client can act on - without it, a client has a token
+    requirement with no way to find out how to satisfy it.
+
+    NOT YET wired onto the MCP Server's own 401 path (TokenInvalid/
+    SessionDenied raised from _call_tool/_list_tools below) - that depends
+    on exactly how StreamableHTTPSessionManager surfaces a raised exception
+    as an HTTP status, unconfirmed against the installed mcp package's
+    source as of this writing. The plain Starlette routes above already set
+    real status codes directly, so this header is usable on any of those
+    today; only the MCP-protocol path still needs that follow-up.
+    """
+    return f'Bearer resource_metadata="{base_url}/.well-known/oauth-protected-resource"'
+
+
 def _deny_all(email: str) -> bool:
     """Fail-closed default for is_authorized: a gateway deployed without an
     explicit whitelist function (run_gateway() always supplies the real

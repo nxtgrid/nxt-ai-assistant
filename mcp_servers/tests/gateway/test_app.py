@@ -144,3 +144,12 @@ async def test_authorize_route_redirects_towards_google(monkeypatch):
 
     assert response.status_code in (302, 307)
     assert "accounts.google.com" in response.headers["location"]
+
+
+def test_www_authenticate_header_names_the_resource_metadata_url():
+    from gateway.app import unauthorized_www_authenticate_header
+
+    header = unauthorized_www_authenticate_header("https://mcp.example.com")
+    assert header == (
+        'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"'
+    )
