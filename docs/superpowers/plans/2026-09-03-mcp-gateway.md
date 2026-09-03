@@ -23,11 +23,17 @@ git worktree add -b feat/mcp-gateway .worktrees/mcp-gateway origin/main
 Branching from another feature branch's tip inflates the eventual PR diff with
 that branch's whole changeset — always branch from `origin/main`.
 
-**Environment.** `mcp_servers` needs its own Python 3.11 venv; the repo-root
-`.venv` can silently drop whole servers when deps are missing:
+**Environment.** `mcp_servers` needs its own Python 3.11 venv, separate from
+any venv another project in this repo (chat_orchestrator, etc.) already has —
+reusing one of those can silently drop whole servers when deps are missing.
+Create it at this worktree's root as `.venv`, not some other name: the repo's
+`check_test_wiring.py` pre-commit hook only excludes literal `.venv/**` from
+its test-file scan, so anything else (`.venv-mcp`, `venv`, ...) makes every
+`test_*.py` inside your installed dependencies' site-packages show up as an
+"untracked test file" and fail the hook:
 
 ```bash
-python3.11 -m venv .venv-mcp && .venv-mcp/bin/pip install -r mcp_servers/requirements.txt pytest pytest-asyncio
+python3.11 -m venv .venv && .venv/bin/pip install -r mcp_servers/requirements.txt pytest pytest-asyncio
 ```
 
 **Three repo gotchas that will bite you:**
@@ -151,7 +157,7 @@ async def test_unknown_email_is_denied_not_unscoped():
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_session.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_session.py -v
 ```
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'gateway'`
@@ -229,7 +235,7 @@ async def resolve_session(email: str, auth_service) -> GatewaySession:
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_session.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_session.py -v
 ```
 
 Expected: 3 passed
@@ -295,7 +301,7 @@ def test_tiers_do_not_overlap():
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_tiers.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_tiers.py -v
 ```
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'gateway.tiers'`
@@ -365,7 +371,7 @@ def is_server_allowed(server_name: str) -> bool:
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_tiers.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_tiers.py -v
 ```
 
 Expected: 5 passed
@@ -446,7 +452,7 @@ def test_original_arguments_are_not_mutated():
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_scope_guard.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_scope_guard.py -v
 ```
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'gateway.scope_guard'`
@@ -509,7 +515,7 @@ def apply_scope_guard(arguments: Dict[str, Any], session: GatewaySession) -> Dic
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_scope_guard.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_scope_guard.py -v
 ```
 
 Expected: 5 passed
@@ -595,7 +601,7 @@ from gateway.scope_guard import ScopeViolation, apply_scope_guard
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_scope_guard.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_scope_guard.py -v
 ```
 
 Expected: FAIL — grid arguments pass through unvalidated; `ScopeViolation` not raised
@@ -665,7 +671,7 @@ Then insert this block into `apply_scope_guard`, immediately before the
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_scope_guard.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_scope_guard.py -v
 ```
 
 Expected: 12 passed
@@ -774,7 +780,7 @@ def test_disabled_tool_is_not_exposed(monkeypatch):
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_catalog.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_catalog.py -v
 ```
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'gateway.catalog'`
@@ -862,7 +868,7 @@ def list_exposed_tools(
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_catalog.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_catalog.py -v
 ```
 
 Expected: 8 passed
@@ -930,7 +936,7 @@ def test_token_without_email_claim_is_rejected():
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_tokens.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_tokens.py -v
 ```
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'gateway.tokens'`
@@ -1000,7 +1006,7 @@ def verify_token(token: str, secret: str) -> str:
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_tokens.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_tokens.py -v
 ```
 
 Expected: 5 passed
@@ -1113,7 +1119,7 @@ async def test_unknown_tool_is_refused():
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_server.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_server.py -v
 ```
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'gateway.server'`
@@ -1177,7 +1183,7 @@ async def dispatch_tool_call(
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_server.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_server.py -v
 ```
 
 Expected: 4 passed
@@ -1264,7 +1270,7 @@ async def test_whitelisted_user_with_no_organization_is_rejected():
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_signin.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_signin.py -v
 ```
 
 Expected: FAIL — `ModuleNotFoundError: No module named 'gateway.signin'`
@@ -1324,7 +1330,7 @@ async def mint_token_for_email(
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/test_signin.py -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/test_signin.py -v
 ```
 
 Expected: 3 passed
@@ -1344,7 +1350,7 @@ git commit -m "feat(gateway): mint a bearer token from a Google-verified email"
 - [ ] **Step 1: Run the gateway suite**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/gateway/ -v
+.venv/bin/python -m pytest mcp_servers/tests/gateway/ -v
 ```
 
 Expected: 40 passed
@@ -1352,7 +1358,7 @@ Expected: 40 passed
 - [ ] **Step 2: Confirm nothing else regressed**
 
 ```bash
-.venv-mcp/bin/python -m pytest mcp_servers/tests/ -q
+.venv/bin/python -m pytest mcp_servers/tests/ -q
 ```
 
 Expected: no new failures versus `origin/main`
