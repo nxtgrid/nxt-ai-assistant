@@ -28,6 +28,46 @@ ALWAYS_INJECTED = ("organization_id", "user_email", "user_name")
 # do not add stray keys that a server might branch on.
 INJECTED_IF_PRESENT = ("organization", "organization_name")
 
+# Class B — caller supplies, gateway validates against their own grid set.
+GRID_SCALAR_ARGS = ("grid_name", "grid")
+GRID_LIST_ARGS = ("grid_names",)
+
+# Minimum rapidfuzz score to accept a near-miss within the allowed set.
+_FUZZY_CUTOFF = 85
+
+
+def _resolve_grid(value: str, session: GatewaySession) -> str:
+    """Resolve a caller's grid string to a canonical name they may access.
+
+    Fuzzy matching happens HERE, against the allowed set only. AuthService's
+    get_grid_portal_id fuzzy-matches downstream against ALL grids, so a raw
+    caller string must never reach it — a near-miss could otherwise land on
+    another organization's grid.
+    """
+    if not isinstance(value, str):
+        raise ScopeViolation(f"Grid reference must be a string, got {type(value).__name__}")
+
+    allowed = session.grid_names
+    if not allowed:
+        raise ScopeViolation("Session has no accessible grids")
+
+    if value in allowed:
+        return value
+
+    lowered = {name.lower(): name for name in allowed}
+    if value.lower() in lowered:
+        return lowered[value.lower()]
+
+    from rapidfuzz import fuzz, process
+
+    match = process.extractOne(
+        value, list(allowed), scorer=fuzz.WRatio, score_cutoff=_FUZZY_CUTOFF
+    )
+    if match:
+        return match[0]
+
+    raise ScopeViolation(f"Grid not accessible to this user: {value!r}")
+
 
 def apply_scope_guard(arguments: Dict[str, Any], session: GatewaySession) -> Dict[str, Any]:
     """Return a copy of ``arguments`` with caller-controlled scope removed.
@@ -44,5 +84,16 @@ def apply_scope_guard(arguments: Dict[str, Any], session: GatewaySession) -> Dic
     for key in INJECTED_IF_PRESENT:
         if key in arguments:
             guarded[key] = session.organization_short_name
+
+    for key in GRID_SCALAR_ARGS:
+        if key in arguments and arguments[key] is not None:
+            guarded[key] = _resolve_grid(arguments[key], session)
+
+    for key in GRID_LIST_ARGS:
+        if key in arguments and arguments[key] is not None:
+            values = arguments[key]
+            if not isinstance(values, (list, tuple)):
+                raise ScopeViolation(f"{key} must be a list")
+            guarded[key] = [_resolve_grid(v, session) for v in values]
 
     return guarded
