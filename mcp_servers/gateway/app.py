@@ -8,24 +8,31 @@ external dependency (auth_service, registry_list_tools, registry_call_tool)
 and drive it over real ASGI via httpx's ASGITransport (see test_app.py) — the
 one thing that stays genuinely untested at the unit level is the module-level
 run_gateway() below, which wires the REAL AuthService, the REAL
-server_registry, and a secret read from the environment.
+server_registry, the REAL Google OAuth client, the REAL grid_app.lib.perms
+whitelist, and a secret read from the environment.
 
-Not in this file, deliberately (see the plan's Deferred section):
-  - The HTTP sign-in route (Google OAuth callback -> mint_token_for_email).
-    An MCP client is handed a token some other way for now; this file only
-    serves the MCP protocol endpoint itself.
-  - DO App Platform ingress. This app is servable by any ASGI host; nothing
-    here assumes a particular deployment target.
+The three /oauth/* routes and the two /.well-known/* discovery documents ARE
+in this file (see gateway/oauth.py and gateway/oauth_metadata.py for their
+actual logic) - this module just mounts them alongside the MCP protocol
+endpoint on the same ASGI app, matching the design doc's "the gateway acts
+as its own authorization server" framing rather than standing up a second
+service.
+
+Still not in this file: DO App Platform ingress. This app is servable by any
+ASGI host; nothing here assumes a particular deployment target.
 """
 
 from __future__ import annotations
 
 import os
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import mcp.types as types
 import uvicorn
+from gateway.google_oauth_client import GoogleOAuthClient
+from gateway.oauth import build_authorize_redirect, handle_google_callback, handle_token_request
+from gateway.oauth_metadata import authorization_server_metadata, protected_resource_metadata
 from gateway.tiers import ALLOWED_SERVERS
 from gateway.transport import (
     RegistryCallTool,
@@ -36,8 +43,36 @@ from gateway.transport import (
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Mount, Route
+
+
+def unauthorized_www_authenticate_header(base_url: str) -> str:
+    """The header a client parses to discover where to authenticate.
+
+    Per the spec's discovery sequence, this is what turns a bare 401 into
+    something a client can act on - without it, a client has a token
+    requirement with no way to find out how to satisfy it.
+
+    NOT YET wired onto the MCP Server's own 401 path (TokenInvalid/
+    SessionDenied raised from _call_tool/_list_tools below) - that depends
+    on exactly how StreamableHTTPSessionManager surfaces a raised exception
+    as an HTTP status, unconfirmed against the installed mcp package's
+    source as of this writing. The plain Starlette routes above already set
+    real status codes directly, so this header is usable on any of those
+    today; only the MCP-protocol path still needs that follow-up.
+    """
+    return f'Bearer resource_metadata="{base_url}/.well-known/oauth-protected-resource"'
+
+
+def _deny_all(email: str) -> bool:
+    """Fail-closed default for is_authorized: a gateway deployed without an
+    explicit whitelist function (run_gateway() always supplies the real
+    grid_app.lib.perms.has_any_access — see its own module) rejects every
+    sign-in rather than silently allowing everyone or crashing on a None
+    call.
+    """
+    return False
 
 
 def build_asgi_app(
@@ -46,13 +81,30 @@ def build_asgi_app(
     registry_list_tools: RegistryListTools,
     registry_call_tool: RegistryCallTool,
     allowed_servers: Optional[List[str]] = None,
+    base_url: str = "http://localhost:8080",
+    google_oauth_client: Optional[Any] = None,
+    is_authorized: Optional[Callable[[str], bool]] = None,
+    single_use_store: Optional[Any] = None,
 ) -> Starlette:
     """Build the gateway's ASGI app.
 
     A factory so every external dependency is injectable — real production
     wiring lives only in run_gateway() below, never baked in here.
+
+    google_oauth_client defaults to a real GoogleOAuthClient (not a fake)
+    when omitted: build_authorize_url is pure string-building with no
+    network call, so this is safe to default-construct even for a test that
+    never touches the Google leg at all — it's what lets a plain GET to
+    /oauth/authorize redirect somewhere real without every caller needing
+    to inject a fake. is_authorized defaults to _deny_all (fail-closed);
+    single_use_store has no safe default (there is no "fail-closed" store),
+    so /oauth/token raises loudly if run_gateway() didn't wire a real one.
     """
     servers = list(allowed_servers) if allowed_servers is not None else list(ALLOWED_SERVERS)
+    google_oauth_client = google_oauth_client or GoogleOAuthClient(
+        redirect_uri=f"{base_url}/oauth/google-callback"
+    )
+    is_authorized = is_authorized or _deny_all
     server = Server("nxt-mcp-gateway")
 
     @server.list_tools()
@@ -125,6 +177,51 @@ def build_asgi_app(
         """
         return JSONResponse({"status": "ok"})
 
+    async def protected_resource_metadata_route(request):
+        return JSONResponse(protected_resource_metadata(base_url))
+
+    async def authorization_server_metadata_route(request):
+        return JSONResponse(authorization_server_metadata(base_url))
+
+    async def oauth_authorize_route(request):
+        result = build_authorize_redirect(
+            client_redirect_uri=request.query_params["redirect_uri"],
+            client_state=request.query_params.get("state", ""),
+            code_challenge=request.query_params["code_challenge"],
+            base_url=base_url,
+            secret=secret,
+            google_oauth=google_oauth_client,
+        )
+        return RedirectResponse(result.redirect_url, status_code=302)
+
+    async def oauth_google_callback_route(request):
+        result = await handle_google_callback(
+            state=request.query_params["state"],
+            callback_query=dict(request.query_params),
+            secret=secret,
+            google_oauth=google_oauth_client,
+            is_authorized=is_authorized,
+            auth_service=auth_service,
+        )
+        return RedirectResponse(result.redirect_url, status_code=302)
+
+    async def oauth_token_route(request):
+        form = await request.form()
+        result = await handle_token_request(
+            code=form["code"],
+            code_verifier=form["code_verifier"],
+            secret=secret,
+            single_use_store=single_use_store,
+            auth_service=auth_service,
+        )
+        return JSONResponse(
+            {
+                "access_token": result.access_token,
+                "token_type": result.token_type,
+                "expires_in": result.expires_in,
+            }
+        )
+
     @asynccontextmanager
     async def lifespan(app: Starlette):
         async with session_manager.run():
@@ -133,6 +230,11 @@ def build_asgi_app(
     return Starlette(
         routes=[
             Route("/healthz", healthz),
+            Route("/.well-known/oauth-protected-resource", protected_resource_metadata_route),
+            Route("/.well-known/oauth-authorization-server", authorization_server_metadata_route),
+            Route("/oauth/authorize", oauth_authorize_route),
+            Route("/oauth/google-callback", oauth_google_callback_route),
+            Route("/oauth/token", oauth_token_route, methods=["POST"]),
             Mount("/mcp", app=session_manager.handle_request),
         ],
         lifespan=lifespan,
@@ -141,9 +243,23 @@ def build_asgi_app(
 
 def run_gateway() -> None:  # pragma: no cover — real production wiring, no fakes
     """Entrypoint for local/dev running. Reads real config from the
-    environment and wires the real AuthService and server_registry — the one
+    environment and wires the real AuthService, server_registry, Google
+    OAuth client, is_authorized whitelist and single-use store — the one
     piece of this module that cannot be exercised by a unit test.
+
+    MCP_GATEWAY_BASE_URL must be this deployment's real public HTTPS origin
+    (e.g. "https://your-app.example.com/mcp-gateway") — it is what gets
+    embedded in the discovery documents and is the value Google's redirect_
+    uri validation checks against, so a wrong value here fails visibly at
+    first sign-in rather than silently.
+
+    is_authorized delegates to grid_app.lib.perms.has_any_access directly
+    (not anansi_app.nicegui_app.auth.is_authorized, its NiceGUI-page
+    wrapper) — see gateway/Dockerfile's own comment on why only
+    anansi_app/grid_app/ is copied into this image, not all of anansi_app/.
     """
+    from gateway.oauth_store_pg import PgSingleUseStore
+    from grid_app.lib import perms
     from server_registry import call_tool as real_call_tool
     from server_registry import list_tools as real_list_tools
 
@@ -156,6 +272,9 @@ def run_gateway() -> None:  # pragma: no cover — real production wiring, no fa
         registry_list_tools=real_list_tools,
         registry_call_tool=real_call_tool,
         allowed_servers=list(ALLOWED_SERVERS),
+        base_url=os.environ["MCP_GATEWAY_BASE_URL"],
+        is_authorized=lambda email: bool(perms.has_any_access(email)),
+        single_use_store=PgSingleUseStore(),
     )
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
 

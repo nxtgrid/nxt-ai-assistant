@@ -892,12 +892,13 @@ RAG is automatically used by the chat orchestrator when `rag.enabled=true` in se
 
 ### DigitalOcean App Platform
 
-One app, two services (see [`.do/app.example.yaml`](.do/app.example.yaml); the live reference deployment's chat service is named `anansi-bot` — adjust to match your own app spec):
+One app, three services (see [`.do/app.example.yaml`](.do/app.example.yaml); the live reference deployment's chat service is named `anansi-bot` — adjust to match your own app spec):
 
 | Component | Type | Description |
 |-----------|------|-------------|
 | chat-orchestrator | Service | Chat orchestration + MCP tools (consolidated; Gemini default) |
 | anansi-app | Service | NiceGUI admin UI — chat history, grid design, Skills, settings. Also runs the broadcast-scheduler and Grafana-indexer daemons in-process (`anansi_app/start.sh`) — neither is a separate DO Job. |
+| mcp-gateway | Service | Per-user MCP access for external clients (Claude, Codex) via connector-style OAuth — see [`mcp_servers/gateway/`](mcp_servers/gateway/). Optional: the two services above are the complete app on their own. |
 
 ```bash
 # Deploy via doctl (SAFE pattern — never update directly from .do/app.yaml which has placeholders)

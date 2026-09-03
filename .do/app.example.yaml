@@ -397,6 +397,26 @@ ingress:
       match:
         path:
           prefix: /webhook
+    # Per-user MCP access for external clients (Claude, Codex) - see
+    # mcp_servers/gateway/. preserve_path_prefix is DELIBERATELY OMITTED
+    # here, unlike every rule above - the opposite reasoning from the /chat
+    # rule's comment applies. chat-orchestrator's own route table includes
+    # its prefixes (a real /chat/notify handler exists), so DO must forward
+    # the full path unstripped. gateway/app.py's routes are the reverse:
+    # they're all bare (/oauth/authorize, /mcp, /healthz, /.well-known/...),
+    # with no /mcp-gateway prefix baked in anywhere. Setting true here would
+    # forward the unstripped /mcp-gateway/oauth/authorize to a container
+    # whose route table only knows /oauth/authorize - a 404 on every single
+    # request. Omitting it (the default) makes DO strip /mcp-gateway before
+    # forwarding, so the container sees the bare paths it actually serves.
+    # MCP_GATEWAY_BASE_URL below must end in /mcp-gateway to match - that's
+    # what makes the discovery documents advertise the client-facing URL
+    # this rule expects.
+    - component:
+        name: mcp-gateway
+      match:
+        path:
+          prefix: /mcp-gateway
     - component:
         name: anansi-app
       match:
@@ -534,6 +554,57 @@ services:
         value: "admin@example.com"
         scope: RUN_TIME
       # All other env vars inherited from app-level
+
+  # ---------------------------------------------------------------------------
+  # Service 3: MCP Gateway
+  # Per-user MCP access for external clients (Claude, Codex). Dedicated
+  # service and ingress rule - deliberately NOT folded into chat-orchestrator,
+  # which has no bearer-token auth model of its own. AUTH_DB_HOST/PORT/NAME/
+  # USER/PASSWORD (used by gateway/oauth_store_pg.py) are inherited from
+  # app-level, same as anansi-app's SUPABASE_*/CHAT_DB_* above.
+  # ---------------------------------------------------------------------------
+  - name: mcp-gateway
+    github:
+      repo: your-org/anansi
+      branch: main
+      deploy_on_push: true
+    dockerfile_path: mcp_servers/gateway/Dockerfile
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    health_check:
+      http_path: /healthz
+      initial_delay_seconds: 10
+      period_seconds: 30
+    envs:
+      - key: MCP_GATEWAY_TOKEN_SECRET
+        value: "${MCP_GATEWAY_TOKEN_SECRET}"
+        scope: RUN_TIME
+        type: SECRET
+      # This service's own public origin, INCLUDING the /mcp-gateway ingress
+      # prefix below (e.g. "https://your-app.example.com/mcp-gateway") - it
+      # is embedded verbatim into both discovery documents and is the value
+      # Google's redirect_uri check validates against, so getting this wrong
+      # fails visibly (a client can't discover the right endpoints, or
+      # Google rejects the callback) rather than silently.
+      - key: MCP_GATEWAY_BASE_URL
+        value: "https://your-app.example.com/mcp-gateway"
+        scope: RUN_TIME
+      # Distinct secret names from anansi-app's AUTH_CLIENT_ID/SECRET above,
+      # not aliased to them: confirm in Google Cloud Console (see the OAuth
+      # plan's "Before you start") whether this deployment's redirect URI
+      # (MCP_GATEWAY_BASE_URL + /oauth/google-callback) can be added to that
+      # SAME client, or needs a separate one. Either way, set these two DO
+      # secrets to whichever client_id/secret Cloud Console ends up saying -
+      # same values as AUTH_CLIENT_ID/SECRET if it's the same client, new
+      # ones if not. No further YAML change needed once that's decided.
+      - key: GOOGLE_CLIENT_ID
+        value: "${GOOGLE_CLIENT_ID}"
+        scope: RUN_TIME
+      - key: GOOGLE_CLIENT_SECRET
+        value: "${GOOGLE_CLIENT_SECRET}"
+        scope: RUN_TIME
+        type: SECRET
 
 # =============================================================================
 # Jobs (Scheduled/One-time tasks)

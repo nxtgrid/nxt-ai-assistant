@@ -402,6 +402,16 @@ ingress:
       match:
         path:
           prefix: /webhook
+    # preserve_path_prefix DELIBERATELY OMITTED here - see app.example.yaml's
+    # matching rule for the full reasoning (gateway/app.py's own routes are
+    # bare, unlike chat-orchestrator's prefixed ones; true would 404 every
+    # request). Keep these two rules identical per this file's own
+    # maintenance note.
+    - component:
+        name: mcp-gateway
+      match:
+        path:
+          prefix: /mcp-gateway
     - component:
         name: anansi-app
       match:
@@ -545,6 +555,41 @@ services:
         value: "admin@example.com"
         scope: RUN_TIME
       # All other env vars inherited from app-level
+
+  # ---------------------------------------------------------------------------
+  # Service 3: MCP Gateway
+  # Per-user MCP access for external clients (Claude, Codex). Mirrors
+  # app.example.yaml's mcp-gateway service exactly except for the image:
+  # block - see this file's own maintenance note at the top.
+  # ---------------------------------------------------------------------------
+  - name: mcp-gateway
+    image:
+      registry_type: GHCR
+      registry: your-github-org
+      repository: your-repo-name/mcp-gateway
+      tag: latest
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: basic-xxs
+    health_check:
+      http_path: /healthz
+      initial_delay_seconds: 10
+      period_seconds: 30
+    envs:
+      - key: MCP_GATEWAY_TOKEN_SECRET
+        value: "${MCP_GATEWAY_TOKEN_SECRET}"
+        scope: RUN_TIME
+        type: SECRET
+      - key: MCP_GATEWAY_BASE_URL
+        value: "https://your-app.example.com/mcp-gateway"
+        scope: RUN_TIME
+      - key: GOOGLE_CLIENT_ID
+        value: "${GOOGLE_CLIENT_ID}"
+        scope: RUN_TIME
+      - key: GOOGLE_CLIENT_SECRET
+        value: "${GOOGLE_CLIENT_SECRET}"
+        scope: RUN_TIME
+        type: SECRET
 
 # =============================================================================
 # Jobs (Scheduled/One-time tasks)

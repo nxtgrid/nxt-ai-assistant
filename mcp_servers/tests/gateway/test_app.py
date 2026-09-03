@@ -79,3 +79,77 @@ async def test_app_lifespan_starts_and_stops_cleanly():
         async with transport:
             response = await client.get("/healthz")
             assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_protected_resource_metadata_is_served():
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+        base_url="https://mcp.example.com",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/.well-known/oauth-protected-resource")
+
+    assert response.status_code == 200
+    assert response.json()["resource"] == "https://mcp.example.com/mcp"
+
+
+@pytest.mark.asyncio
+async def test_authorization_server_metadata_is_served():
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+        base_url="https://mcp.example.com",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/.well-known/oauth-authorization-server")
+
+    assert response.status_code == 200
+    assert response.json()["token_endpoint"] == "https://mcp.example.com/oauth/token"
+
+
+@pytest.mark.asyncio
+async def test_authorize_route_redirects_towards_google(monkeypatch):
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+        base_url="https://mcp.example.com",
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", follow_redirects=False) as client:
+        response = await client.get(
+            "/oauth/authorize",
+            params={
+                "redirect_uri": "http://127.0.0.1:54321/callback",
+                "state": "client-state",
+                "code_challenge": "abc123",
+                "code_challenge_method": "S256",
+            },
+        )
+
+    assert response.status_code in (302, 307)
+    assert "accounts.google.com" in response.headers["location"]
+
+
+def test_www_authenticate_header_names_the_resource_metadata_url():
+    from gateway.app import unauthorized_www_authenticate_header
+
+    header = unauthorized_www_authenticate_header("https://mcp.example.com")
+    assert header == (
+        'Bearer resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"'
+    )
