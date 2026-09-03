@@ -31,19 +31,36 @@ _AUTHORIZE_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth"
 _TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
 
 
+def _env_client_id() -> str:
+    return os.environ.get("GOOGLE_CLIENT_ID") or os.environ.get("AUTH_CLIENT_ID", "")
+
+
+def _env_client_secret() -> str:
+    return os.environ.get("GOOGLE_CLIENT_SECRET") or os.environ.get("AUTH_CLIENT_SECRET", "")
+
+
 class GoogleOAuthError(Exception):
     """The Google leg failed: consent was declined, the code exchange was
     rejected, or the returned id_token didn't verify."""
 
 
 class GoogleOAuthClient:
-    """client_id/client_secret default to GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET
-    (empty-string, not required, if unset) so constructing this with no
-    arguments never raises just because the env isn't configured — build_
-    authorize_url still produces a syntactically valid URL either way. This
-    is what lets app.py default-construct one for every build_asgi_app call
-    without every caller (including tests that never exercise the Google
-    leg at all) needing to supply real credentials.
+    """client_id/client_secret default to GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET,
+    falling back to AUTH_CLIENT_ID/AUTH_CLIENT_SECRET — the exact same
+    precedence anansi_app/nicegui_app/auth.py's own client_credentials()
+    already uses for its own (unrelated) OAuth login flow. This lets a
+    deployment reuse anansi-app's existing Web-application OAuth client (it
+    supports more than one redirect URI) for the gateway's callback too,
+    with zero new secret needed, as long as AUTH_CLIENT_ID/AUTH_CLIENT_SECRET
+    are declared at APP level in the DO spec rather than scoped to the
+    anansi-app service alone — only app-level env vars are visible to
+    mcp-gateway's own container. Empty-string (not required) if nothing at
+    all is set, so constructing this with no arguments never raises just
+    because the env isn't configured — build_authorize_url still produces a
+    syntactically valid URL either way. This is what lets app.py
+    default-construct one for every build_asgi_app call without every
+    caller (including tests that never exercise the Google leg at all)
+    needing to supply real credentials.
 
     redirect_uri is fixed at construction, not threaded through per call:
     it is always base_url + "/oauth/google-callback" — a property of this
@@ -65,10 +82,8 @@ class GoogleOAuthClient:
         http_post: Callable[..., Any] = requests.post,
         verify_id_token: Optional[Callable[[str, Optional[str]], Dict[str, Any]]] = None,
     ) -> None:
-        self.client_id = client_id if client_id is not None else os.environ.get("GOOGLE_CLIENT_ID", "")
-        self.client_secret = (
-            client_secret if client_secret is not None else os.environ.get("GOOGLE_CLIENT_SECRET", "")
-        )
+        self.client_id = client_id if client_id is not None else _env_client_id()
+        self.client_secret = client_secret if client_secret is not None else _env_client_secret()
         self._redirect_uri = redirect_uri or ""
         self._http_post = http_post
         self._verify_id_token = verify_id_token or self._real_verify_id_token

@@ -45,6 +45,25 @@ envs:
     scope: RUN_TIME
     type: SECRET
 
+  # Google OAuth client (anansi-app's Web-application-type client - see
+  # anansi_app/nicegui_app/auth.py). App-level, not anansi-app-scoped: the
+  # mcp-gateway service below reuses this exact client for its own callback
+  # (a Web-application client supports more than one redirect URI) via
+  # gateway/google_oauth_client.py's GOOGLE_CLIENT_ID/AUTH_CLIENT_ID
+  # fallback - only an app-level env var is visible to every service, a
+  # service-scoped one is not. Add the gateway's callback URL as a second
+  # Authorized redirect URI on this same client in Google Cloud Console
+  # (MCP_GATEWAY_BASE_URL + /oauth/google-callback, below) rather than
+  # registering a separate client.
+  - key: AUTH_CLIENT_ID
+    value: "${AUTH_CLIENT_ID}"
+    scope: RUN_TIME
+    type: SECRET
+  - key: AUTH_CLIENT_SECRET
+    value: "${AUTH_CLIENT_SECRET}"
+    scope: RUN_TIME
+    type: SECRET
+
   # Logging (can be changed via anansi-app Settings UI)
   - key: LOG_LEVEL
     value: "INFO"
@@ -525,15 +544,10 @@ services:
         value: "${DIGITALOCEAN_API_TOKEN}"
         scope: RUN_AND_BUILD_TIME
         type: SECRET
-      # Google OAuth Configuration
-      - key: AUTH_CLIENT_ID
-        value: "${AUTH_CLIENT_ID}"
-        scope: RUN_TIME
-        type: SECRET
-      - key: AUTH_CLIENT_SECRET
-        value: "${AUTH_CLIENT_SECRET}"
-        scope: RUN_TIME
-        type: SECRET
+      # AUTH_CLIENT_ID/AUTH_CLIENT_SECRET inherited from app-level (see the
+      # top-level envs: block) - promoted there so mcp-gateway's service can
+      # reuse the same client. The rest of this app's own OAuth login config
+      # stays service-scoped, since only anansi-app needs it.
       - key: AUTH_REDIRECT_URI
         value: "https://your-app.example.com/oauth2callback"
         scope: RUN_TIME
@@ -590,20 +604,15 @@ services:
       - key: MCP_GATEWAY_BASE_URL
         value: "https://your-app.example.com/mcp-gateway"
         scope: RUN_TIME
-      # Distinct secret names from anansi-app's AUTH_CLIENT_ID/SECRET above,
-      # not aliased to them: confirm in Google Cloud Console (see the OAuth
-      # plan's "Before you start") whether this deployment's redirect URI
-      # (MCP_GATEWAY_BASE_URL + /oauth/google-callback) can be added to that
-      # SAME client, or needs a separate one. Either way, set these two DO
-      # secrets to whichever client_id/secret Cloud Console ends up saying -
-      # same values as AUTH_CLIENT_ID/SECRET if it's the same client, new
-      # ones if not. No further YAML change needed once that's decided.
-      - key: GOOGLE_CLIENT_ID
-        value: "${GOOGLE_CLIENT_ID}"
-        scope: RUN_TIME
-      - key: GOOGLE_CLIENT_SECRET
-        value: "${GOOGLE_CLIENT_SECRET}"
-        scope: RUN_TIME
+      # No GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET here on purpose: this
+      # service inherits AUTH_CLIENT_ID/AUTH_CLIENT_SECRET from app-level
+      # (see the top-level envs: block's comment) and
+      # gateway/google_oauth_client.py falls back to those exact names when
+      # GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET aren't set - reusing anansi-
+      # app's existing Web-application OAuth client rather than needing a
+      # second one. Set GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET here only if
+      # this deployment genuinely wants the gateway on a DIFFERENT client
+      # than anansi-app's own login.
         type: SECRET
 
 # =============================================================================

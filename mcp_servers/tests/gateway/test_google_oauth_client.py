@@ -39,6 +39,54 @@ def _client(http_post=None, verify_id_token=None, **kwargs):
     )
 
 
+# --- client_id/client_secret resolution --------------------------------------
+#
+# anansi-app's OAuth client is a Web application type, which supports more
+# than one redirect URI on the same client - the gateway's own callback can
+# be registered on it directly rather than needing a second client. But
+# AUTH_CLIENT_ID/AUTH_CLIENT_SECRET are declared on anansi-app's own service
+# in the DO app spec, not at app level, so mcp-gateway's container can't see
+# them under that name automatically - only an app-level env var is shared
+# across services. GOOGLE_CLIENT_ID/AUTH_CLIENT_ID is the same fallback
+# order anansi_app/nicegui_app/auth.py's own client_credentials() already
+# uses, kept identical here rather than inventing a different precedence.
+
+
+def test_client_id_prefers_google_client_id_env(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "from-google-env")
+    monkeypatch.setenv("AUTH_CLIENT_ID", "from-auth-env")
+    client = GoogleOAuthClient()
+    assert client.client_id == "from-google-env"
+
+
+def test_client_id_falls_back_to_auth_client_id_env(monkeypatch):
+    monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.setenv("AUTH_CLIENT_ID", "from-auth-env")
+    client = GoogleOAuthClient()
+    assert client.client_id == "from-auth-env"
+
+
+def test_client_secret_falls_back_to_auth_client_secret_env(monkeypatch):
+    monkeypatch.delenv("GOOGLE_CLIENT_SECRET", raising=False)
+    monkeypatch.setenv("AUTH_CLIENT_SECRET", "from-auth-env")
+    client = GoogleOAuthClient()
+    assert client.client_secret == "from-auth-env"
+
+
+def test_explicit_client_id_wins_over_every_env_var(monkeypatch):
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "from-google-env")
+    monkeypatch.setenv("AUTH_CLIENT_ID", "from-auth-env")
+    client = GoogleOAuthClient(client_id="explicit-value")
+    assert client.client_id == "explicit-value"
+
+
+def test_client_id_defaults_to_empty_string_when_nothing_is_set(monkeypatch):
+    monkeypatch.delenv("GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("AUTH_CLIENT_ID", raising=False)
+    client = GoogleOAuthClient()
+    assert client.client_id == ""
+
+
 # --- build_authorize_url -----------------------------------------------------
 
 
