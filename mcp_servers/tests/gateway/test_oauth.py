@@ -16,8 +16,10 @@ import pytest
 from gateway.oauth import (
     AuthorizeResult,
     GoogleCallbackResult,
+    RedirectUriInvalid,
     TokenResult,
     build_authorize_redirect,
+    handle_client_registration,
     handle_google_callback,
     handle_token_request,
 )
@@ -229,4 +231,154 @@ async def test_token_exchange_rejects_a_replayed_code():
         await handle_token_request(
             code=issued.code, code_verifier=verifier, secret=SECRET,
             single_use_store=store, auth_service=_FakeAuth(),
+        )
+
+
+# --- redirect_uri validation (RFC 8252 loopback) -----------------------------
+#
+# /oauth/authorize took the client's redirect_uri verbatim and faithfully
+# delivered the authorization code there after a successful Google login,
+# with no validation. That is a code-exfiltration hole, not a cosmetic gap:
+# an attacker crafts an authorize URL with their own redirect_uri AND their
+# own code_challenge, gets an already-authorized user to click it, and
+# receives a code they can redeem (PKCE does not help - the attacker chose
+# the challenge, so they hold the verifier). The design spec called for
+# "any loopback address for a public client using PKCE (RFC 8252)"; only
+# the permissive half was implemented.
+
+
+def test_authorize_accepts_a_loopback_ip_redirect_uri():
+    google = _FakeGoogleOAuth()
+    result = build_authorize_redirect(
+        client_redirect_uri="http://127.0.0.1:54321/callback",
+        client_state="s",
+        code_challenge="c",
+        base_url=BASE_URL,
+        secret=SECRET,
+        google_oauth=google,
+    )
+    assert result.redirect_url.startswith("https://accounts.google.com/")
+
+
+def test_authorize_accepts_a_localhost_redirect_uri():
+    google = _FakeGoogleOAuth()
+    result = build_authorize_redirect(
+        client_redirect_uri="http://localhost:1410/oauth/callback",
+        client_state="s",
+        code_challenge="c",
+        base_url=BASE_URL,
+        secret=SECRET,
+        google_oauth=google,
+    )
+    assert result.redirect_url.startswith("https://accounts.google.com/")
+
+
+def test_authorize_accepts_an_ipv6_loopback_redirect_uri():
+    google = _FakeGoogleOAuth()
+    result = build_authorize_redirect(
+        client_redirect_uri="http://[::1]:5000/cb",
+        client_state="s",
+        code_challenge="c",
+        base_url=BASE_URL,
+        secret=SECRET,
+        google_oauth=google,
+    )
+    assert result.redirect_url.startswith("https://accounts.google.com/")
+
+
+def test_authorize_rejects_a_remote_redirect_uri():
+    google = _FakeGoogleOAuth()
+    with pytest.raises(RedirectUriInvalid):
+        build_authorize_redirect(
+            client_redirect_uri="https://evil.example/steal",
+            client_state="s",
+            code_challenge="c",
+            base_url=BASE_URL,
+            secret=SECRET,
+            google_oauth=google,
+        )
+
+
+def test_authorize_rejects_a_host_that_merely_starts_with_the_loopback_ip():
+    # The classic prefix-matching trap: 127.0.0.1.evil.example is a REMOTE
+    # host, so the check has to parse the hostname, not startswith() a string.
+    google = _FakeGoogleOAuth()
+    with pytest.raises(RedirectUriInvalid):
+        build_authorize_redirect(
+            client_redirect_uri="http://127.0.0.1.evil.example/steal",
+            client_state="s",
+            code_challenge="c",
+            base_url=BASE_URL,
+            secret=SECRET,
+            google_oauth=google,
+        )
+
+
+def test_authorize_rejects_a_redirect_uri_with_no_scheme():
+    google = _FakeGoogleOAuth()
+    with pytest.raises(RedirectUriInvalid):
+        build_authorize_redirect(
+            client_redirect_uri="127.0.0.1:8080/cb",
+            client_state="s",
+            code_challenge="c",
+            base_url=BASE_URL,
+            secret=SECRET,
+            google_oauth=google,
+        )
+
+
+# --- RFC 7591 dynamic client registration ------------------------------------
+#
+# Claude Code's CLI refuses to proceed without it: "Incompatible auth server:
+# does not support dynamic client registration" (from its own debug log,
+# after discovery had already succeeded). The original design listed DCR as
+# a non-goal on the reasoning that a fixed client ID is spec-compliant - true
+# for a client that lets you paste one in, which the CLI does not.
+
+
+def test_registration_issues_a_client_id_without_a_secret():
+    result = handle_client_registration({"redirect_uris": ["http://127.0.0.1:54321/callback"]})
+    assert result.registration["client_id"]
+    # Public client: PKCE is the security boundary, so no secret is issued
+    # and none should be expected at the token endpoint.
+    assert "client_secret" not in result.registration
+    assert result.registration["token_endpoint_auth_method"] == "none"
+
+
+def test_registration_echoes_the_requested_redirect_uris():
+    result = handle_client_registration({"redirect_uris": ["http://127.0.0.1:1/cb"]})
+    assert result.registration["redirect_uris"] == ["http://127.0.0.1:1/cb"]
+
+
+def test_registration_issues_a_distinct_client_id_each_time():
+    first = handle_client_registration({"redirect_uris": ["http://127.0.0.1:1/cb"]})
+    second = handle_client_registration({"redirect_uris": ["http://127.0.0.1:1/cb"]})
+    assert first.registration["client_id"] != second.registration["client_id"]
+
+
+@pytest.mark.asyncio
+async def test_google_callback_re_validates_the_redirect_uri():
+    # Defence in depth. The correlation state is HMAC-signed, so a state that
+    # passed /oauth/authorize's check cannot be tampered with in flight - but
+    # re-checking at the callback makes the guarantee unconditional rather
+    # than "as long as every path that signs a state validated first", and it
+    # closes the ~10-minute window (the correlation TTL) in which a state
+    # signed by a BUILD THAT PREDATES the /authorize check could still be
+    # redeemed after this one deploys.
+    google = _FakeGoogleOAuth(email="user@example.com")
+    hostile_state = encode_correlation_state(
+        client_redirect_uri="https://evil.example/steal",
+        client_state="s",
+        code_challenge="c",
+        secret=SECRET,
+    )
+
+    with pytest.raises(RedirectUriInvalid):
+        await handle_google_callback(
+            state=hostile_state,
+            callback_query={},
+            secret=SECRET,
+            google_oauth=google,
+            is_authorized=lambda email: True,
+            auth_service=_FakeAuth(),
         )

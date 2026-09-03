@@ -7,9 +7,10 @@ transport.py already established for the tool-calling path.
 
 from __future__ import annotations
 
+import secrets as _secrets
 from dataclasses import dataclass
-from typing import Any, Callable, Dict
-from urllib.parse import urlencode
+from typing import Any, Callable, Dict, List
+from urllib.parse import urlencode, urlparse
 
 from gateway.oauth_codes import (
     decode_correlation_state,
@@ -23,10 +24,88 @@ from gateway.session import SessionDenied, resolve_session
 from gateway.signin import SignInRejected
 from gateway.tokens import issue_token
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+class RedirectUriInvalid(Exception):
+    """The client's redirect_uri is not an acceptable loopback address."""
+
 
 @dataclass(frozen=True)
 class AuthorizeResult:
     redirect_url: str
+
+
+@dataclass(frozen=True)
+class RegistrationResult:
+    registration: Dict[str, Any]
+
+
+def validate_client_redirect_uri(redirect_uri: str) -> None:
+    """Raise RedirectUriInvalid unless redirect_uri is a loopback address.
+
+    This is the security boundary the design doc actually specified ("any
+    loopback address for a public client using PKCE... the standard
+    native-app pattern, RFC 8252") and that the first implementation
+    omitted. Without it, /oauth/authorize would deliver the authorization
+    code to ANY host the caller named: an attacker crafts an authorize URL
+    carrying their own redirect_uri AND their own code_challenge, gets an
+    already-authorized user to click it, and collects a code they can
+    redeem for that user's token. PKCE cannot help there - the attacker
+    chose the challenge, so they hold the verifier - and the victim sees
+    nothing but a normal, genuine Google login.
+
+    Loopback only, per RFC 8252 section 7.3, which is all any native/CLI
+    client needs (Claude Code included). A future browser-based client
+    wanting a remote https redirect would need its redirect_uris actually
+    registered and checked against the client_id, which is a deliberate
+    change, not something to leave open by default.
+    """
+    parsed = urlparse(redirect_uri)
+    if parsed.scheme not in ("http", "https"):
+        raise RedirectUriInvalid(f"redirect_uri must be http(s), got {parsed.scheme!r}")
+
+    # .hostname (not .netloc) parses the real host out, strips any port, and
+    # unwraps IPv6 brackets - startswith() on the raw string would accept
+    # http://127.0.0.1.evil.example/, a remote host.
+    host = parsed.hostname
+    if host is None or host.lower() not in _LOOPBACK_HOSTS:
+        raise RedirectUriInvalid(f"redirect_uri must be a loopback address, got host {host!r}")
+
+
+def handle_client_registration(request_body: Dict[str, Any]) -> RegistrationResult:
+    """RFC 7591 dynamic client registration.
+
+    Claude Code's CLI refuses to start the flow without this ("Incompatible
+    auth server: does not support dynamic client registration"), so the
+    original design's fixed-client-ID plan - spec-compliant, but assuming a
+    client that lets you paste an ID in - doesn't work for it.
+
+    The issued client_id is deliberately NOT persisted or validated later.
+    For a public client it is an identifier, not a credential: it is not
+    secret, it authenticates nothing, and OAuth 2.1 puts the security for
+    this flow on PKCE plus redirect_uri validation (see
+    validate_client_redirect_uri above) - both of which are enforced per
+    authorization request, independent of who registered. Storing
+    registrations would add a table and an expiry story while changing none
+    of the actual gates: Google-verified identity and the
+    grid_app.lib.perms whitelist still decide whether any token is issued
+    at all. If redirect_uris ever need to be checked against the
+    registration that named them (a browser-client change), that is when
+    this gains storage.
+    """
+    redirect_uris: List[str] = list(request_body.get("redirect_uris") or [])
+    registration: Dict[str, Any] = {
+        "client_id": _secrets.token_urlsafe(24),
+        "redirect_uris": redirect_uris,
+        "token_endpoint_auth_method": "none",
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+    }
+    client_name = request_body.get("client_name")
+    if client_name:
+        registration["client_name"] = client_name
+    return RegistrationResult(registration=registration)
 
 
 @dataclass(frozen=True)
@@ -53,7 +132,14 @@ def build_authorize_redirect(
     """Start the Google leg. The CLIENT's redirect_uri (Claude Code's own
     loopback address) is never sent to Google at all - only encoded into the
     signed correlation state Google faithfully round-trips back to us.
+
+    Validated BEFORE anything is signed or any Google redirect is built: a
+    redirect_uri that reaches the signed correlation state is one the
+    callback will faithfully deliver an authorization code to, so this is
+    the only place it can be stopped.
     """
+    validate_client_redirect_uri(client_redirect_uri)
+
     state = encode_correlation_state(
         client_redirect_uri=client_redirect_uri,
         client_state=client_state,
@@ -84,6 +170,14 @@ async def handle_google_callback(
     authorization CODE, matching the authorization_code grant shape.
     """
     correlation = decode_correlation_state(state, secret)
+
+    # Re-checked even though the state is HMAC-signed and /oauth/authorize
+    # already validated it: this makes the guarantee unconditional rather
+    # than dependent on every path that signs a state having checked first,
+    # and it closes the correlation-TTL window in which a state signed by an
+    # older build could still be redeemed here.
+    validate_client_redirect_uri(correlation.client_redirect_uri)
+
     email = await google_oauth.fetch_verified_email(callback_query)
 
     if not is_authorized(email):

@@ -33,6 +33,13 @@ def authorization_server_metadata(base_url: str) -> Dict[str, Any]:
         "issuer": base_url,
         "authorization_endpoint": f"{base_url}/oauth/authorize",
         "token_endpoint": f"{base_url}/oauth/token",
+        # RFC 7591. Not optional in practice: Claude Code's CLI refuses to
+        # begin the flow against a server that doesn't advertise it
+        # ("Incompatible auth server: does not support dynamic client
+        # registration"), with no way to supply a client ID by hand - so the
+        # original design's fixed-client-ID plan, spec-compliant as it is,
+        # doesn't reach that client at all.
+        "registration_endpoint": f"{base_url}/oauth/register",
         "response_types_supported": ["code"],
         "grant_types_supported": ["authorization_code"],
         "code_challenge_methods_supported": ["S256"],
