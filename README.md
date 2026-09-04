@@ -12,7 +12,7 @@ Everything below is one DigitalOcean App Platform app. This section is the map o
 
 ### Ingress — what can call in
 
-A single hostname fronts three services, split by path prefix. Rules are evaluated **in order**, and the last one is a catch-all, so a new path that doesn't match an earlier rule silently lands on the admin app (usually appearing as its login page rather than an error).
+A single hostname fronts two services, split by path prefix. Rules are evaluated **in order**, and the last one is a catch-all, so a new path that doesn't match an earlier rule silently lands on the admin app (usually appearing as its login page rather than an error).
 
 | Path prefix | Service | Prefix forwarded? | What it's for |
 |---|---|---|---|
@@ -20,11 +20,11 @@ A single hostname fronts three services, split by path prefix. Rules are evaluat
 | `/mini-app` | chat-orchestrator | **preserved** | Telegram Mini App UI |
 | `/api/mini-app` | chat-orchestrator | **preserved** | Mini App backend calls |
 | `/webhook` | chat-orchestrator | **preserved** | Inbound Jira webhooks |
-| `/mcp-gateway` | mcp-gateway | **stripped** | MCP endpoint + its OAuth routes (see [MCP gateway](#mcp-gateway) below) |
-| `/.well-known/oauth-*/mcp-gateway` | mcp-gateway | **preserved** | RFC 8414/9728 OAuth discovery |
+| `/mcp-gateway` | chat-orchestrator | **preserved** | MCP endpoint + its OAuth routes (see [MCP gateway](#mcp-gateway) below) |
+| `/.well-known/oauth-*/mcp-gateway` | chat-orchestrator | **preserved** | RFC 8414/9728 OAuth discovery |
 | `/` | anansi-app | stripped | NiceGUI admin UI (catch-all) |
 
-**`preserve_path_prefix` is not cosmetic.** DigitalOcean strips the matched prefix before forwarding unless it's set. Whether you want it depends entirely on whether the *service's own routes* include the prefix: chat-orchestrator serves real `/chat/...` routes so it needs the prefix preserved, while the gateway serves bare `/mcp`, `/healthz`, `/oauth/...` so it needs it stripped. Getting this backwards produces a 404 on every request, or a redirect to a URL missing the prefix entirely.
+**`preserve_path_prefix` is not cosmetic.** DigitalOcean strips the matched prefix before forwarding unless it's set. Whether you want it depends entirely on whether the *service's own routes* include the prefix: chat-orchestrator serves real `/chat/...` routes, so it needs the prefix preserved. The MCP gateway's own routes are bare (`/mcp`, `/healthz`, `/oauth/...`), but it is *mounted at* `/mcp-gateway` inside chat-orchestrator, and Starlette's `Mount` strips the prefix itself — so ingress has to preserve it for the mount to match at all. Getting this backwards produces a 404 on every request, or a redirect to a URL missing the prefix entirely.
 
 ### Data stores — two databases, and they are not interchangeable
 
@@ -939,13 +939,12 @@ RAG is automatically used by the chat orchestrator when `rag.enabled=true` in se
 
 ### DigitalOcean App Platform
 
-One app, three services (see [`.do/app.example.yaml`](.do/app.example.yaml); the live reference deployment's chat service is named `anansi-bot` — adjust to match your own app spec):
+One app, two services (see [`.do/app.example.yaml`](.do/app.example.yaml); the live reference deployment's chat service is named `anansi-bot` — adjust to match your own app spec):
 
 | Component | Type | Description |
 |-----------|------|-------------|
-| chat-orchestrator | Service | Chat orchestration + MCP tools (consolidated; Gemini default) |
+| chat-orchestrator | Service | Chat orchestration + MCP tools (consolidated; Gemini default). Also hosts the [MCP gateway](#mcp-gateway), mounted at `/mcp-gateway` — not a separate service. |
 | anansi-app | Service | NiceGUI admin UI — chat history, grid design, Skills, settings. Also runs the broadcast-scheduler and Grafana-indexer daemons in-process (`anansi_app/start.sh`) — neither is a separate DO Job. |
-| mcp-gateway | Service | Per-user MCP access for external clients (Claude, Codex) via connector-style OAuth — see [`mcp_servers/gateway/`](mcp_servers/gateway/). Optional: the two services above are the complete app on their own. |
 
 ```bash
 # Deploy via doctl (SAFE pattern — never update directly from .do/app.yaml which has placeholders)
@@ -968,14 +967,20 @@ claude mcp add --transport http anansi-mcp https://your-app.example.com/mcp-gate
 
 and authenticates with their own Google work account in their own browser. No token is ever pasted anywhere, and no shared API key exists for this route.
 
-**Routes** (all under the `/mcp-gateway` ingress prefix, which is stripped before reaching the service):
+**Where it runs.** Inside chat-orchestrator, not as its own service. That image already carries `mcp_servers/` and already calls `server_registry` directly for every tool call, so a separate service duplicated the entire runtime — plus its own copy of the MCP server code, free to drift from the copy actually executing tools — to serve a few hundred requests a day. `orchestrator/api/app.py` mounts it at the path component of `MCP_GATEWAY_BASE_URL`, and starts its session manager from the app's own startup event (a mounted ASGI app never receives the `lifespan` scope, so this is not optional). Both are guarded: if the gateway cannot be built or started, it is skipped with a logged traceback and chat traffic is unaffected.
+
+**Turning it off.** Unset either `MCP_GATEWAY_BASE_URL` or `MCP_GATEWAY_TOKEN_SECRET`. The gateway is then never mounted — no code change, no separate deploy, and nothing else in the service is affected.
+
+**Routes** (all relative to `/mcp-gateway`, which the mount strips before the gateway sees it):
 
 | Route | Purpose |
 |---|---|
 | `/mcp` | The MCP endpoint itself (Streamable HTTP). Requires a bearer token; without one it returns `401` + `WWW-Authenticate`, which is what triggers a client's OAuth flow |
-| `/healthz` | Unauthenticated health check |
+| `/healthz` | Unauthenticated health check — `/mcp-gateway/healthz` publicly, and the fastest way to tell whether the mount succeeded |
 | `/.well-known/oauth-protected-resource` | RFC 9728 — points clients at the authorization server |
 | `/.well-known/oauth-authorization-server` | RFC 8414 — advertises the endpoints below |
+
+RFC 8414 puts an issuer's metadata *above* its own path — an issuer of `https://host/mcp-gateway` publishes at `https://host/.well-known/oauth-authorization-server/mcp-gateway`, which no mount under `/mcp-gateway` could ever serve. Those two paths are registered on chat-orchestrator's root router instead (`well_known_routes()`), which is why they get their own ingress rules.
 | `/oauth/register` | RFC 7591 dynamic client registration (Claude Code requires this and cannot be given a client ID by hand) |
 | `/oauth/authorize` | Starts the Google leg. `redirect_uri` **must be a loopback address** (RFC 8252) |
 | `/oauth/google-callback` | Google's redirect target — the one URI registered in Google Cloud Console |
@@ -985,7 +990,7 @@ and authenticates with their own Google work account in their own browser. No to
 
 Once connected, every request re-resolves the caller's organization and permissions from the database — nothing is cached for the life of a connection, so revoking someone takes effect on their next call. Tools are filtered per user by [`tiers.py`](mcp_servers/gateway/tiers.py) (equipment control, payments and messaging are never exposed) and every scope-bearing argument is overwritten server-side rather than trusted from the caller.
 
-**Setup notes.** `MCP_GATEWAY_BASE_URL` must be the full public origin including the `/mcp-gateway` prefix — it's embedded in the discovery documents and is what Google validates the redirect against. The gateway reuses the admin app's Google OAuth client via `AUTH_CLIENT_ID`/`AUTH_CLIENT_SECRET` at app level, so its callback URL needs adding as a second Authorized redirect URI on that client. `db/migrations/0032_oauth_code_single_use.sql` must be applied to the Chat DB, or token exchange fails at the last step.
+**Setup notes.** `MCP_GATEWAY_BASE_URL` must be the full public origin including the `/mcp-gateway` prefix — it's embedded in the discovery documents, is what Google validates the redirect against, and is what the mount path is derived from. The gateway reuses the admin app's Google OAuth client via `AUTH_CLIENT_ID`/`AUTH_CLIENT_SECRET` at app level, so its callback URL needs adding as a second Authorized redirect URI on that client. `db/migrations/0032_oauth_code_single_use.sql` must be applied to the Chat DB, or token exchange fails at the last step.
 
 #### Faster deploys: prebuilt images (optional)
 

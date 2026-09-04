@@ -43,6 +43,15 @@ COPY shared/ /app/shared/
 COPY rag_pipeline/ /app/rag_pipeline/
 COPY mcp_servers/ /app/mcp_servers/
 
+# grid_app.lib.perms is the MCP gateway's is_authorized whitelist (see
+# gateway/app.py's build_production_app). Only grid_app/ itself, not all of
+# anansi_app/, so NiceGUI and the rest of that app's dependencies stay out of
+# this image -- perms.py imports nothing but os and re. See this repo's own
+# image-copy-sets-cause-silent-import-failures lesson: verify this import
+# still resolves (`python -c "from grid_app.lib import perms"`) after any
+# future change to what's copied here or to perms.py's own imports.
+COPY anansi_app/grid_app/ /app/grid_app/
+
 # Copy built Mini App static files
 COPY --from=mini-app-builder /build/dist/ /app/mini_app/dist/
 

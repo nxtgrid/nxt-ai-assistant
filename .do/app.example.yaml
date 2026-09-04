@@ -46,10 +46,10 @@ envs:
     type: SECRET
 
   # Google OAuth client (anansi-app's Web-application-type client - see
-  # anansi_app/nicegui_app/auth.py). App-level, not anansi-app-scoped: the
-  # mcp-gateway service below reuses this exact client for its own callback
-  # (a Web-application client supports more than one redirect URI) via
-  # gateway/google_oauth_client.py's GOOGLE_CLIENT_ID/AUTH_CLIENT_ID
+  # anansi_app/nicegui_app/auth.py). App-level, not anansi-app-scoped: the MCP
+  # gateway mounted inside chat-orchestrator reuses this exact client for its
+  # own callback (a Web-application client supports more than one redirect
+  # URI) via gateway/google_oauth_client.py's GOOGLE_CLIENT_ID/AUTH_CLIENT_ID
   # fallback - only an app-level env var is visible to every service, a
   # service-scoped one is not. Add the gateway's callback URL as a second
   # Authorized redirect URI on this same client in Google Cloud Console
@@ -417,42 +417,43 @@ ingress:
         path:
           prefix: /webhook
     # Per-user MCP access for external clients (Claude, Codex) - see
-    # mcp_servers/gateway/. preserve_path_prefix is DELIBERATELY OMITTED
-    # here, unlike every rule above - the opposite reasoning from the /chat
-    # rule's comment applies. chat-orchestrator's own route table includes
-    # its prefixes (a real /chat/notify handler exists), so DO must forward
-    # the full path unstripped. gateway/app.py's routes are the reverse:
-    # they're all bare (/oauth/authorize, /mcp, /healthz, /.well-known/...),
-    # with no /mcp-gateway prefix baked in anywhere. Setting true here would
-    # forward the unstripped /mcp-gateway/oauth/authorize to a container
-    # whose route table only knows /oauth/authorize - a 404 on every single
-    # request. Omitting it (the default) makes DO strip /mcp-gateway before
-    # forwarding, so the container sees the bare paths it actually serves.
-    # MCP_GATEWAY_BASE_URL below must end in /mcp-gateway to match - that's
-    # what makes the discovery documents advertise the client-facing URL
-    # this rule expects.
+    # mcp_servers/gateway/. The gateway used to be its own service; it is now
+    # MOUNTED inside chat-orchestrator (orchestrator/api/app.py), whose image
+    # already carries mcp_servers/ and already calls server_registry directly
+    # for every tool call.
+    #
+    # preserve_path_prefix: true, like every other chat-orchestrator rule
+    # above. Note this is the OPPOSITE of what the standalone service needed:
+    # its container served bare routes (/mcp, /oauth/authorize) at its own
+    # root, so DO had to strip /mcp-gateway before forwarding. Mounted, the
+    # prefix has to survive ingress or the mount never matches - Starlette's
+    # Mount strips it again itself, so the gateway's routes stay bare either
+    # way. MCP_GATEWAY_BASE_URL must end in /mcp-gateway to match: it is both
+    # what the discovery documents advertise and what app.py derives the mount
+    # path from.
     - component:
-        name: mcp-gateway
+        name: chat-orchestrator
+        preserve_path_prefix: true
       match:
         path:
           prefix: /mcp-gateway
     # RFC 8414 builds an issuer's metadata URL by inserting the well-known
     # segment BETWEEN the authority and the issuer's path, so an issuer of
     # https://host/mcp-gateway publishes at
-    # https://host/.well-known/oauth-authorization-server/mcp-gateway - a
-    # path that does NOT start with /mcp-gateway and so would otherwise fall
-    # through to the anansi-app catch-all below (a 307 to its login page,
-    # confirmed live). preserve_path_prefix IS set on these two, unlike the
-    # rule above: gateway/app.py registers these routes at their full literal
-    # path, so the container has to see the whole thing.
+    # https://host/.well-known/oauth-authorization-server/mcp-gateway - a path
+    # that does NOT start with /mcp-gateway, so no mount under that prefix can
+    # ever serve it, and without these rules it falls through to the anansi-app
+    # catch-all below (a 307 to its login page, confirmed live).
+    # gateway/app.py's well_known_routes() is registered on
+    # chat-orchestrator's OWN root router for exactly this reason.
     - component:
-        name: mcp-gateway
+        name: chat-orchestrator
         preserve_path_prefix: true
       match:
         path:
           prefix: /.well-known/oauth-authorization-server/mcp-gateway
     - component:
-        name: mcp-gateway
+        name: chat-orchestrator
         preserve_path_prefix: true
       match:
         path:
@@ -525,6 +526,35 @@ services:
         value: "3"
         scope: RUN_TIME
 
+      # MCP gateway (per-user MCP access for external Claude/Codex clients,
+      # mounted at the /mcp-gateway ingress rule above). Service-scoped rather
+      # than app-level: only this service reads them, and their presence is
+      # also the gateway's ON switch - unset either one and
+      # orchestrator/api/app.py logs it and simply doesn't mount the gateway,
+      # with no code change and no effect on chat traffic.
+      - key: MCP_GATEWAY_TOKEN_SECRET
+        value: "${MCP_GATEWAY_TOKEN_SECRET}"
+        scope: RUN_TIME
+        type: SECRET
+      # The gateway's public origin, INCLUDING the /mcp-gateway ingress prefix
+      # (e.g. "https://your-app.example.com/mcp-gateway"). Embedded verbatim
+      # into both discovery documents, checked by Google's redirect_uri
+      # validation, and the value app.py derives its mount path from - so a
+      # wrong value fails visibly at first sign-in rather than silently. NOT a
+      # secret: it is a public URL, published in the discovery documents by
+      # design.
+      - key: MCP_GATEWAY_BASE_URL
+        value: "https://your-app.example.com/mcp-gateway"
+        scope: RUN_TIME
+      # No GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET here on purpose: this service
+      # inherits AUTH_CLIENT_ID/AUTH_CLIENT_SECRET from app-level (see the
+      # top-level envs: block's comment) and gateway/google_oauth_client.py
+      # falls back to those exact names when GOOGLE_CLIENT_ID/
+      # GOOGLE_CLIENT_SECRET aren't set - reusing anansi-app's existing
+      # Web-application OAuth client rather than needing a second one. Set
+      # GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET here only if this deployment
+      # genuinely wants the gateway on a DIFFERENT client than anansi-app's
+      # own login.
       # Mini App Forms (Telegram WebApp popup)
       - key: MINI_APP_BASE_URL
         value: "https://your-app.example.com/mini-app/"
@@ -589,52 +619,6 @@ services:
         value: "admin@example.com"
         scope: RUN_TIME
       # All other env vars inherited from app-level
-
-  # ---------------------------------------------------------------------------
-  # Service 3: MCP Gateway
-  # Per-user MCP access for external clients (Claude, Codex). Dedicated
-  # service and ingress rule - deliberately NOT folded into chat-orchestrator,
-  # which has no bearer-token auth model of its own. AUTH_DB_HOST/PORT/NAME/
-  # USER/PASSWORD (used by gateway/oauth_store_pg.py) are inherited from
-  # app-level, same as anansi-app's SUPABASE_*/CHAT_DB_* above.
-  # ---------------------------------------------------------------------------
-  - name: mcp-gateway
-    github:
-      repo: your-org/anansi
-      branch: main
-      deploy_on_push: true
-    dockerfile_path: mcp_servers/gateway/Dockerfile
-    http_port: 8080
-    instance_count: 1
-    instance_size_slug: basic-xxs
-    health_check:
-      http_path: /healthz
-      initial_delay_seconds: 10
-      period_seconds: 30
-    envs:
-      - key: MCP_GATEWAY_TOKEN_SECRET
-        value: "${MCP_GATEWAY_TOKEN_SECRET}"
-        scope: RUN_TIME
-        type: SECRET
-      # This service's own public origin, INCLUDING the /mcp-gateway ingress
-      # prefix below (e.g. "https://your-app.example.com/mcp-gateway") - it
-      # is embedded verbatim into both discovery documents and is the value
-      # Google's redirect_uri check validates against, so getting this wrong
-      # fails visibly (a client can't discover the right endpoints, or
-      # Google rejects the callback) rather than silently.
-      - key: MCP_GATEWAY_BASE_URL
-        value: "https://your-app.example.com/mcp-gateway"
-        scope: RUN_TIME
-      # No GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET here on purpose: this
-      # service inherits AUTH_CLIENT_ID/AUTH_CLIENT_SECRET from app-level
-      # (see the top-level envs: block's comment) and
-      # gateway/google_oauth_client.py falls back to those exact names when
-      # GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET aren't set - reusing anansi-
-      # app's existing Web-application OAuth client rather than needing a
-      # second one. Set GOOGLE_CLIENT_ID/GOOGLE_CLIENT_SECRET here only if
-      # this deployment genuinely wants the gateway on a DIFFERENT client
-      # than anansi-app's own login.
-        type: SECRET
 
 # =============================================================================
 # Jobs (Scheduled/One-time tasks)

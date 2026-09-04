@@ -12,12 +12,12 @@ import os
 import signal
 import sys
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -195,6 +195,97 @@ if os.getenv("MINI_APP_FORMS_ENABLED", "false").lower() == "true":
         logger.warning("Mini App dist not found at {} — static files not served", mini_app_dist)
 
 
+# --- MCP gateway: per-user MCP access for external clients (Claude, Codex) ---
+# Folded in from what used to be its own DigitalOcean service. It is mounted
+# here rather than deployed separately because this image ALREADY carries
+# everything it needs: mcp_servers/ is copied in and mcp_servers/
+# requirements.txt installed (see this project's Dockerfile), and
+# orchestrator/services/tool_executor.py already calls server_registry
+# directly on every tool call. A second service duplicated all of that — and
+# its own copy of the MCP server code, free to drift from the copy this
+# service actually executes — to serve a few hundred requests a day.
+#
+# The gateway keeps its OWN auth model and does not touch this app's: a
+# separate HMAC secret (MCP_GATEWAY_TOKEN_SECRET), its own bearer-token gate
+# in front of /mcp, and its own Google OAuth routes under the mount prefix.
+# Nothing here is reachable through this service's API-key routes and vice
+# versa — FastAPI(...) declares no app-wide `dependencies`, so a mounted
+# sub-app inherits no authentication from it in either direction.
+_gateway_app: Optional[Any] = None
+_gateway_lifespan: Optional[AsyncExitStack] = None
+
+
+def _mount_mcp_gateway() -> Optional[Any]:
+    """Mount the gateway, or return None and leave this app untouched.
+
+    Deliberately fail-soft, and the reason is asymmetric: this process is the
+    production Telegram bot. A gateway that fails to build must not be able to
+    stop the bot from booting, so every failure path here logs loudly and
+    returns None. The gateway's own absence is visible immediately — its
+    health check at <prefix>/healthz stops answering — and no chat traffic is
+    affected either way.
+
+    Absence of MCP_GATEWAY_BASE_URL / MCP_GATEWAY_TOKEN_SECRET is the
+    supported OFF switch, not an error: unset either one and the gateway is
+    simply not mounted. That is what keeps local dev and CI (where neither is
+    set, and mcp_servers/ may not even be importable) from needing any of it.
+    """
+    base_url = os.getenv("MCP_GATEWAY_BASE_URL", "").strip()
+    if not base_url or not os.getenv("MCP_GATEWAY_TOKEN_SECRET", "").strip():
+        logger.info(
+            "MCP gateway not mounted (MCP_GATEWAY_BASE_URL/MCP_GATEWAY_TOKEN_SECRET unset)"
+        )
+        return None
+
+    try:
+        # Imported from the top-level `gateway` package, not
+        # `mcp_servers.gateway` — the gateway's own modules import each other
+        # by that bare name, and PYTHONPATH=/app:/app/mcp_servers in this
+        # image makes both resolve. Using the bare form here keeps exactly one
+        # copy of each gateway module in the process. (build_production_app
+        # does the OPPOSITE for server_registry, and for the same reason —
+        # see its own comment.)
+        from gateway.app import build_production_app
+
+        gateway_app = build_production_app(base_url=base_url)
+
+        # preserve_path_prefix is set on this route's DO ingress rule, so the
+        # container sees the full public path; Mount strips the prefix again
+        # so the gateway's own routes stay bare (/mcp, /oauth/authorize, ...)
+        # exactly as they are when it runs standalone.
+        mount_path = urlparse(base_url).path.rstrip("/")
+        if not mount_path:
+            logger.error(
+                "MCP gateway not mounted: MCP_GATEWAY_BASE_URL ({}) has no path component "
+                "to mount under",
+                base_url,
+            )
+            return None
+
+        app.mount(mount_path, gateway_app, name="mcp-gateway")
+
+        # RFC 8414/9728 put an issuer's metadata ABOVE its own path
+        # (/.well-known/oauth-authorization-server/mcp-gateway), which no
+        # mount under /mcp-gateway can ever serve — so they are registered on
+        # this app's root router instead. Appended directly rather than via
+        # add_api_route: these are plain Starlette routes with raw
+        # Request->Response endpoints, not FastAPI path operations.
+        from gateway.app import well_known_routes
+
+        app.router.routes.extend(well_known_routes(base_url))
+
+        logger.info("MCP gateway mounted at {} (base_url={})", mount_path, base_url)
+        return gateway_app
+    except Exception:
+        logger.opt(exception=True).error(
+            "MCP gateway failed to mount — continuing without it (chat traffic unaffected)"
+        )
+        return None
+
+
+_gateway_app = _mount_mcp_gateway()
+
+
 async def _handle_sigterm() -> None:
     """SIGTERM handler: cancel active workflow tasks and wait for cleanup.
 
@@ -329,6 +420,26 @@ async def startup_event():
     # Run startup recovery scan: finds packets orphaned by previous deployment crashes
     asyncio.create_task(_run_startup_recovery())
 
+    # A mounted ASGI app never receives the "lifespan" scope — Starlette's
+    # router dispatches it and returns before matching any route — so the
+    # gateway's StreamableHTTPSessionManager task group has to be started
+    # from here. Without it every /mcp request fails on an uninitialised
+    # task group. Guarded for the same reason _mount_mcp_gateway is: a
+    # gateway that will not start must not stop the bot from starting.
+    global _gateway_lifespan
+    if _gateway_app is not None:
+        try:
+            from gateway.app import gateway_lifespan
+
+            stack = AsyncExitStack()
+            await stack.enter_async_context(gateway_lifespan(_gateway_app))
+            _gateway_lifespan = stack
+            logger.info("MCP gateway session manager started")
+        except Exception:
+            logger.opt(exception=True).error(
+                "MCP gateway session manager failed to start — /mcp will not serve"
+            )
+
     # Check if the metrics scheduled service is enabled.
     #
     # Grafana's nightly indexing used to be scheduled here too (a
@@ -445,6 +556,19 @@ async def shutdown_event():
     if scheduler:
         scheduler.shutdown()
         logger.info("Metrics scheduler shut down")
+
+    # Cancels the gateway's session-manager task group. Best-effort: this runs
+    # during SIGTERM alongside the graceful workflow drain, and a failure here
+    # must not keep the process from exiting.
+    global _gateway_lifespan
+    if _gateway_lifespan is not None:
+        try:
+            await _gateway_lifespan.aclose()
+            logger.info("MCP gateway session manager shut down")
+        except Exception:
+            logger.opt(exception=True).warning("MCP gateway shutdown failed (non-fatal)")
+        finally:
+            _gateway_lifespan = None
 
     # Flush pending Langfuse traces
     from shared.utils.langfuse_utils import LANGFUSE_ENABLED
