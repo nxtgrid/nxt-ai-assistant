@@ -81,6 +81,64 @@ def _deny_all(email: str) -> bool:
     return False
 
 
+def well_known_routes(base_url: str) -> List[Route]:
+    """The two discovery documents at their ROOT-level, issuer-suffixed paths.
+
+    RFC 8414 (and RFC 9728, which follows it) builds an issuer's metadata URL
+    by inserting the well-known segment BETWEEN the authority and the issuer's
+    path, not by appending it: an issuer of https://host/mcp-gateway publishes
+    at https://host/.well-known/oauth-authorization-server/mcp-gateway. Only
+    the appended (OIDC-style) form was served once, so a client following RFC
+    8414 got the DO ingress catch-all - a 307 to anansi-app's login page -
+    instead of metadata (confirmed with curl against the live deployment).
+
+    Exposed as its own function, not just inlined into build_asgi_app, because
+    these two paths do NOT start with the issuer path: when the gateway is
+    MOUNTED under that prefix inside another ASGI app (chat_orchestrator's, see
+    orchestrator/api/app.py), the mount can never serve them - a Mount only
+    ever sees requests beneath its own prefix. The host app has to register
+    them at its own root, and this is what it registers.
+
+    An issuer with no path returns nothing: build_asgi_app already serves the
+    bare (unsuffixed) forms, and the two would collapse to the same pair.
+    """
+    issuer_path = urlparse(base_url).path.rstrip("/")
+    if not issuer_path:
+        return []
+
+    async def protected_resource_metadata_route(request):
+        return JSONResponse(protected_resource_metadata(base_url))
+
+    async def authorization_server_metadata_route(request):
+        return JSONResponse(authorization_server_metadata(base_url))
+
+    return [
+        Route(
+            f"/.well-known/oauth-protected-resource{issuer_path}",
+            protected_resource_metadata_route,
+        ),
+        Route(
+            f"/.well-known/oauth-authorization-server{issuer_path}",
+            authorization_server_metadata_route,
+        ),
+    ]
+
+
+def gateway_lifespan(gateway_app: Starlette):
+    """The lifespan that a MOUNTED gateway app will not otherwise get run.
+
+    Starlette's Router.app() dispatches a "lifespan"-type ASGI scope and
+    returns BEFORE it matches any route, so Mount.handle() is never reached
+    for it: a sub-app mounted inside another ASGI app never has its own
+    startup/shutdown run (verified by reading Router.app's source, not
+    assumed). build_asgi_app's lifespan is where
+    StreamableHTTPSessionManager.run() creates the task group that every /mcp
+    request needs, and run() also refuses to be called twice on one instance -
+    so a host app must enter exactly this, exactly once, from its own startup.
+    """
+    return gateway_app.router.lifespan_context(gateway_app)
+
+
 class _McpASGIApp:
     """Wraps StreamableHTTPSessionManager.handle_request (a raw ASGI3
     callable, but a BOUND METHOD) so Starlette's Route treats it as a raw
@@ -319,34 +377,11 @@ def build_asgi_app(
         async with session_manager.run():
             yield
 
-    # RFC 8414 (and RFC 9728, which follows it) builds an issuer's metadata
-    # URL by inserting the well-known segment BETWEEN the authority and the
-    # issuer's path, not by appending it: an issuer of
-    # https://host/mcp-gateway publishes at
-    # https://host/.well-known/oauth-authorization-server/mcp-gateway. Only
-    # the appended (OIDC-style) form was served, so a client following RFC
-    # 8414 got the DO ingress catch-all - a 307 to anansi-app's login page -
-    # instead of metadata (confirmed with curl against the live deployment).
-    # Both forms are served now: the spec has clients try the RFC 8414 one,
-    # and the appended form stays for clients that use OIDC-style discovery.
-    # The suffix comes from base_url so it tracks deployment config rather
-    # than hardcoding /mcp-gateway; an issuer with no path adds nothing, and
-    # the two route lists collapse to the same pair of paths.
-    issuer_path = urlparse(base_url).path.rstrip("/")
-    rfc8414_routes = (
-        [
-            Route(
-                f"/.well-known/oauth-protected-resource{issuer_path}",
-                protected_resource_metadata_route,
-            ),
-            Route(
-                f"/.well-known/oauth-authorization-server{issuer_path}",
-                authorization_server_metadata_route,
-            ),
-        ]
-        if issuer_path
-        else []
-    )
+    # Root-level, issuer-suffixed discovery documents (RFC 8414 / RFC 9728).
+    # Served here so a STANDALONE gateway is complete on its own; when this app
+    # is mounted under the issuer prefix instead, the host app registers the
+    # same routes at its own root (see well_known_routes' own docstring).
+    rfc8414_routes = well_known_routes(base_url)
 
     asgi_app = Starlette(
         routes=[
@@ -395,42 +430,72 @@ def build_asgi_app(
     return asgi_app
 
 
-def run_gateway() -> None:  # pragma: no cover — real production wiring, no fakes
-    """Entrypoint for local/dev running. Reads real config from the
-    environment and wires the real AuthService, server_registry, Google
-    OAuth client, is_authorized whitelist and single-use store — the one
-    piece of this module that cannot be exercised by a unit test.
+def build_production_app(base_url: Optional[str] = None) -> Starlette:  # pragma: no cover
+    """Wire the REAL AuthService, server_registry, Google OAuth client,
+    grid_app.lib.perms whitelist and single-use store — the one piece of this
+    module that cannot be exercised by a unit test.
+
+    Shared by run_gateway() below (standalone uvicorn, for local dev) and by
+    chat_orchestrator's embedded mount (orchestrator/api/app.py), so the two
+    can never drift into wiring different dependencies for the same gateway.
 
     MCP_GATEWAY_BASE_URL must be this deployment's real public HTTPS origin
     (e.g. "https://your-app.example.com/mcp-gateway") — it is what gets
-    embedded in the discovery documents and is the value Google's redirect_
-    uri validation checks against, so a wrong value here fails visibly at
-    first sign-in rather than silently.
+    embedded in the discovery documents and is the value Google's redirect_uri
+    validation checks against, so a wrong value here fails visibly at first
+    sign-in rather than silently. `base_url` overrides it for a caller that
+    already read the env var itself.
 
-    is_authorized delegates to grid_app.lib.perms.has_any_access directly
-    (not anansi_app.nicegui_app.auth.is_authorized, its NiceGUI-page
-    wrapper) — see gateway/Dockerfile's own comment on why only
-    anansi_app/grid_app/ is copied into this image, not all of anansi_app/.
+    is_authorized delegates to grid_app.lib.perms.has_any_access directly (not
+    anansi_app.nicegui_app.auth.is_authorized, its NiceGUI-page wrapper) —
+    perms.py imports nothing but os and re, so it travels into any image that
+    COPYs anansi_app/grid_app/ without dragging NiceGUI along.
     """
     from gateway.oauth_store_chat_db import ChatDbSingleUseStore
     from grid_app.lib import perms
-    from server_registry import call_tool as real_call_tool
-    from server_registry import list_tools as real_list_tools
 
     from shared.auth.auth_service import get_auth_service
 
-    secret = os.environ["MCP_GATEWAY_TOKEN_SECRET"]
-    app = build_asgi_app(
-        secret=secret,
+    # Package-qualified import FIRST, with the bare form only as a fallback.
+    # Both resolve inside chat_orchestrator's image (PYTHONPATH=/app:/app/
+    # mcp_servers), and Python treats them as two entirely unrelated modules —
+    # so importing the bare form here, while orchestrator/services/
+    # tool_executor.py imports the qualified one, would give that single
+    # process TWO copies of server_registry's module-level _server_modules
+    # cache and load every MCP server module twice. The bare form is what a
+    # checkout with only mcp_servers/ on sys.path (this package's own tests,
+    # local `python -m gateway.app`) can resolve, so it stays as a fallback.
+    try:
+        from mcp_servers.server_registry import call_tool as real_call_tool
+        from mcp_servers.server_registry import list_tools as real_list_tools
+    except ImportError:  # pragma: no cover
+        from server_registry import call_tool as real_call_tool
+        from server_registry import list_tools as real_list_tools
+
+    return build_asgi_app(
+        secret=os.environ["MCP_GATEWAY_TOKEN_SECRET"],
         auth_service=get_auth_service(),
         registry_list_tools=real_list_tools,
         registry_call_tool=real_call_tool,
         allowed_servers=list(ALLOWED_SERVERS),
-        base_url=os.environ["MCP_GATEWAY_BASE_URL"],
+        base_url=base_url or os.environ["MCP_GATEWAY_BASE_URL"],
         is_authorized=lambda email: bool(perms.has_any_access(email)),
         single_use_store=ChatDbSingleUseStore(),
     )
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+
+
+def run_gateway() -> None:  # pragma: no cover — real production wiring, no fakes
+    """Standalone entrypoint, for local/dev running only.
+
+    Production no longer runs this: the gateway is mounted into
+    chat_orchestrator's FastAPI app instead of deployed as its own service
+    (see orchestrator/api/app.py and .do/app.example.yaml). Kept because
+    `python -m gateway.app` is still the fastest way to exercise the real
+    wiring against real credentials without booting the whole orchestrator.
+    """
+    uvicorn.run(
+        build_production_app(), host="0.0.0.0", port=int(os.environ.get("PORT", "8080"))
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover
