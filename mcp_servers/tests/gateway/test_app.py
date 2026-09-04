@@ -374,6 +374,83 @@ async def test_post_to_mcp_with_a_valid_token_still_initializes_successfully():
     assert '"serverInfo"' in response.text
 
 
+@pytest.mark.asyncio
+async def test_tools_list_includes_get_operating_context_over_real_asgi():
+    # End to end through the real MCP protocol layer, not just
+    # transport.py's own unit tests: a client listing tools sees the
+    # synthetic gateway tool alongside whatever the registry returned.
+    from gateway.tokens import issue_token
+
+    token = issue_token("user@example.com", "test-secret-not-a-real-key")
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_WorkingAuth(),
+        registry_list_tools=_empty_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+    )
+
+    async with _running_lifespan(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/mcp",
+                json={"jsonrpc": "2.0", "method": "tools/list", "id": 1, "params": {}},
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+
+    assert response.status_code == 200
+    assert "gateway__get_operating_context" in response.text
+    assert "[READ-ONLY]" in response.text
+
+
+@pytest.mark.asyncio
+async def test_calling_get_operating_context_over_real_asgi_returns_real_text():
+    # The other end of the same round trip: actually calling it, not just
+    # seeing it listed, and confirming a bearer-token-authenticated call
+    # gets real content back rather than an error - stateless=True gives
+    # each POST its own transport, so no session-id juggling is needed
+    # between initialize and this call, unlike a stateful server.
+    from gateway.tokens import issue_token
+
+    token = issue_token("user@example.com", "test-secret-not-a-real-key")
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_WorkingAuth(),
+        registry_list_tools=_empty_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+    )
+
+    async with _running_lifespan(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "method": "tools/call",
+                    "id": 1,
+                    "params": {"name": "gateway__get_operating_context", "arguments": {}},
+                },
+                headers={
+                    "Accept": "application/json, text/event-stream",
+                    "Authorization": f"Bearer {token}",
+                },
+            )
+
+    assert response.status_code == 200
+    assert "isError" not in response.text or '"isError":false' in response.text
+    # _empty_list_tools/_exploding_call_tool prove the real registry was
+    # never touched for this call (either would raise/assert if it were),
+    # and the response still carries real text - straight from the actual
+    # PROMPTS singleton's bundled content, not a stub.
+    assert len(response.text) > 500
+
+
 # --- discovery must work at the RFC 8414 URL, not just the path-suffix one ---
 #
 # For an issuer WITH a path component (https://host/mcp-gateway), RFC 8414
