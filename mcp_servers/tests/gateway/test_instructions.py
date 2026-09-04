@@ -148,6 +148,20 @@ def test_the_preamble_names_every_exclusion_category():
         assert category in PREAMBLE, category
 
 
+def test_the_preamble_warns_that_a_name_may_collide_with_a_public_place():
+    """A real production failure, not a hypothetical: a client resolved a
+    genuine Anansi site name (a private mini-grid) against an UNRELATED
+    public record for a same-named place in the same region and answered
+    confidently from that instead — no hedge, no check against Anansi's own
+    tools, which had the correct answer one call away. General-knowledge and
+    web-search confidence are not evidence a name isn't one of ours; this
+    pins the standing instruction that a name-shaped answer must still be
+    verified against this system before being treated as authoritative."""
+    assert "public" in PREAMBLE
+    assert "not sufficient confirmation" in PREAMBLE
+    assert "this system's own tools" in PREAMBLE
+
+
 def test_a_render_failure_degrades_to_no_instructions():
     """Instructions are advisory; the tool surface is not. A broken prompt must
     never take down initialize."""
