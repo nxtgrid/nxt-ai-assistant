@@ -39,6 +39,19 @@ def test_definition_is_marked_read_only_like_every_other_tool_here():
     assert DEFINITION["description"].startswith("[READ-ONLY]")
 
 
+def test_definition_warns_against_trusting_a_public_match_for_a_site_name():
+    """A real production failure, not a hypothetical: a client resolved a
+    genuine Anansi site name against an unrelated public record for a
+    same-named place and answered from that with no hedge, despite having
+    a working lookup tool one call away. This is the pre-decision half of
+    the fix (the model reads this BEFORE choosing whether to call the
+    tool at all) — see instructions.py's PREAMBLE for the other half,
+    read only once a client has already surfaced or fetched content."""
+    description = DEFINITION["description"]
+    assert "public record" in description
+    assert "NOT sufficient confirmation" in description
+
+
 def test_is_operating_context_tool_matches_only_the_exact_name():
     assert is_operating_context_tool("gateway__get_operating_context") is True
     assert is_operating_context_tool("customer__get_operating_context") is False

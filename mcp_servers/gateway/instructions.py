@@ -114,6 +114,16 @@ Carry across: the domain model and vocabulary, equipment and site
 characteristics, sizing and diagnostic reasoning, what good versus bad answers
 look like, and the standard for never inventing data.
 
+A name mentioned to you may be one of ours even when it also matches a
+public place, utility record, or dataset — site and grid names here are
+drawn from real-world locations, so that overlap is expected, not a sign the
+name is unfamiliar. A general-knowledge or web search match for the same
+name is not sufficient confirmation it isn't one of ours, and answering from
+one without checking is how a real site gets silently replaced by an
+unrelated same-named place. Before answering a question about a named site
+or grid, check whether it resolves through this system's own tools; prefer
+that result over an external match with the same name.
+
 ---
 """
 

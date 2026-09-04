@@ -42,11 +42,16 @@ DEFINITION: Dict[str, Any] = {
         "[READ-ONLY] Load Anansi's operating context: the domain vocabulary, "
         "site/grid/meter/ticket conventions, diagnostic reasoning, and "
         "curated knowledge for the organization you're signed in as. Call "
-        "this once, early in a session, before answering a domain question "
-        "or before treating a name mentioned in a message as unfamiliar — it "
-        "very likely refers to a specific, known site. If your MCP client "
-        "already showed you connection-time server instructions, you "
-        "already have this content and do not need to call it again."
+        "this once, early in a session, and before answering any question "
+        "about a named site, grid, or community. Site names here are drawn "
+        "from real-world locations, so a name can also match an unrelated "
+        "public record — a utility report, a government dataset, general "
+        "knowledge. A match found that way is NOT sufficient confirmation "
+        "the name isn't one of ours: check here (or a grid/site lookup "
+        "tool) first, and prefer that result over an external match for the "
+        "same name. If your MCP client already showed you connection-time "
+        "server instructions, you already have this content and do not "
+        "need to call it again."
     ),
     "inputSchema": {"type": "object", "properties": {}},
 }
