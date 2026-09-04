@@ -20,6 +20,8 @@ import logging
 from typing import Any, Awaitable, Callable, Dict, List, Mapping
 
 from gateway.catalog import list_exposed_tools
+from gateway.context_tool import DEFINITION as OPERATING_CONTEXT_TOOL_DEFINITION
+from gateway.context_tool import is_operating_context_tool, operating_context_tool_result
 from gateway.server import dispatch_tool_call
 from gateway.session import GatewaySession, resolve_session
 from gateway.tokens import TokenInvalid, verify_token
@@ -99,10 +101,18 @@ async def list_tools_for_request(
     registry_list_tools: RegistryListTools,
     allowed_servers: List[str],
 ) -> List[Dict[str, Any]]:
-    """Full list_tools flow for one incoming request."""
+    """Full list_tools flow for one incoming request.
+
+    Every authenticated session sees get_operating_context appended, staff
+    and customer alike -- it is not gated by is_tool_exposed/tiers.py because
+    it is not backed by a real server: there is no per-server enable flag or
+    action-flag to check, and every session has SOME operating context
+    (staff.system or customer.system) to hand back. See context_tool.py's
+    own module docstring for why this exists at all.
+    """
     session = await resolve_session_from_headers(headers, secret, auth_service)
     tools_by_server = await _fetch_tools_by_server(registry_list_tools, allowed_servers)
-    return list_exposed_tools(tools_by_server, session)
+    return list_exposed_tools(tools_by_server, session) + [OPERATING_CONTEXT_TOOL_DEFINITION]
 
 
 async def call_tool_for_request(
@@ -115,8 +125,20 @@ async def call_tool_for_request(
     namespaced_name: str,
     arguments: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Full call_tool flow for one incoming request."""
+    """Full call_tool flow for one incoming request.
+
+    get_operating_context is intercepted before any of the real-registry
+    machinery runs: no _fetch_tools_by_server call (which would fetch and
+    filter every OTHER server's tools for nothing), no dispatch_tool_call, no
+    scope guard -- none of that concerns a tool with no arguments and no
+    server behind it. Session resolution still happens first, unconditionally,
+    same as every other call: identity is what this tool's whole answer is
+    built from.
+    """
     session = await resolve_session_from_headers(headers, secret, auth_service)
+    if is_operating_context_tool(namespaced_name):
+        return operating_context_tool_result(session)
+
     tools_by_server = await _fetch_tools_by_server(registry_list_tools, allowed_servers)
     return await dispatch_tool_call(
         namespaced_name, arguments, session, tools_by_server, registry_call_tool

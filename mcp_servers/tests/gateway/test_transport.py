@@ -14,6 +14,7 @@ if str(_MCP_ROOT) not in sys.path:
     sys.path.insert(0, str(_MCP_ROOT))
 
 import pytest
+from gateway.context_tool import TOOL_NAME as OPERATING_CONTEXT_TOOL_NAME
 from gateway.tokens import TokenInvalid, issue_token
 from gateway.transport import (
     call_tool_for_request,
@@ -125,6 +126,40 @@ async def test_list_tools_with_invalid_token_raises_before_querying_registry():
         await list_tools_for_request({}, SECRET, _FakeAuth(), exploding_list_tools, ["customer"])
 
 
+@pytest.mark.asyncio
+async def test_list_tools_always_includes_get_operating_context():
+    # Every authenticated session gets this, staff and customer alike - it
+    # is not gated by visible_to_customer/tiers.py the way real tools are,
+    # since it is not backed by a real server at all.
+    token = issue_token("user@example.com", SECRET)
+
+    async def fake_registry_list_tools(server_name):
+        return []
+
+    tools = await list_tools_for_request(
+        _bearer(token), SECRET, _FakeAuth(), fake_registry_list_tools, ["customer"]
+    )
+
+    names = [t["name"] for t in tools]
+    assert OPERATING_CONTEXT_TOOL_NAME in names
+
+
+@pytest.mark.asyncio
+async def test_list_tools_includes_get_operating_context_even_if_every_real_server_fails():
+    # Its whole point is being a fallback path - it must not disappear
+    # exactly when everything else has already gone wrong.
+    token = issue_token("user@example.com", SECRET)
+
+    async def exploding_list_tools(server_name):
+        raise RuntimeError("registry is down")
+
+    tools = await list_tools_for_request(
+        _bearer(token), SECRET, _FakeAuth(), exploding_list_tools, ["customer"]
+    )
+
+    assert [t["name"] for t in tools] == [OPERATING_CONTEXT_TOOL_NAME]
+
+
 # --- call_tool_for_request --------------------------------------------------
 
 
@@ -169,4 +204,56 @@ async def test_call_tool_with_invalid_token_never_reaches_the_registry():
     with pytest.raises(TokenInvalid):
         await call_tool_for_request(
             {}, SECRET, _FakeAuth(), exploding_list_tools, exploding_call_tool, ["customer"], "customer__get_status", {}
+        )
+
+
+@pytest.mark.asyncio
+async def test_call_tool_routes_get_operating_context_around_the_real_registry_entirely():
+    # The load-bearing assertion: calling this tool must not fetch or
+    # dispatch through server_registry at all. Exploding fakes prove that,
+    # rather than merely observing that the call happened to succeed -
+    # a bug that ALSO fetched the real registry (wastefully, or worse,
+    # let a broken server take this call down too) would pass a weaker test.
+    token = issue_token("user@example.com", SECRET)
+
+    async def exploding_list_tools(server_name):
+        raise AssertionError("get_operating_context must never touch the registry")
+
+    async def exploding_call_tool(server_name, tool_name, arguments):
+        raise AssertionError("get_operating_context must never touch the registry")
+
+    result = await call_tool_for_request(
+        _bearer(token),
+        SECRET,
+        _FakeAuth(),
+        exploding_list_tools,
+        exploding_call_tool,
+        ["customer"],
+        "gateway__get_operating_context",
+        {},
+    )
+
+    assert result["success"] is True
+    assert len(result["result"]) == 1
+    assert result["result"][0]["type"] == "text"
+
+
+@pytest.mark.asyncio
+async def test_call_tool_get_operating_context_still_requires_a_valid_token():
+    async def exploding_list_tools(server_name):
+        raise AssertionError("should never be called without a valid token")
+
+    async def exploding_call_tool(server_name, tool_name, arguments):
+        raise AssertionError("should never be called without a valid token")
+
+    with pytest.raises(TokenInvalid):
+        await call_tool_for_request(
+            {},
+            SECRET,
+            _FakeAuth(),
+            exploding_list_tools,
+            exploding_call_tool,
+            ["customer"],
+            "gateway__get_operating_context",
+            {},
         )

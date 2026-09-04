@@ -959,7 +959,7 @@ git push origin main
 
 ### MCP gateway
 
-Exposes the same tools the assistant uses to external MCP clients (Claude Code, Claude desktop, Codex), scoped to whoever signed in. A user connects once:
+Exposes the same tools the assistant uses to external MCP clients (Claude Code, Claude Desktop, claude.ai, ChatGPT, Codex), scoped to whoever signed in — see **Connecting a client** below for the exact steps per client. A user connects once, for example:
 
 ```bash
 claude mcp add --transport http anansi-mcp https://your-app.example.com/mcp-gateway/mcp
@@ -998,7 +998,37 @@ Once connected, every request re-resolves the caller's organization and permissi
 
 **Hosted clients (Claude Desktop, claude.ai, ChatGPT).** A CLI client (Claude Code, Codex) redirects to a loopback address it controls, which needs no configuration. A *hosted* client has no local port to redirect to — its OAuth callback is that provider's own fixed backend URL, which this deployment has to explicitly trust. `MCP_GATEWAY_REDIRECT_ALLOWLIST` is that trust list: comma-separated, exact-string match (never a host or scheme — that would just move the attacker-controlled-redirect_uri hole this whole check exists to close from "any host" to "any path on one host"). It's a normal, editable setting in the anansi-app Settings UI ([`flag_registry.py`](shared/config/flag_registry.py)'s `MCP_GATEWAY_REDIRECT_ALLOWLIST`), defaulting to Claude's own documented callback, `https://claude.ai/api/mcp/auth_callback` (confirmed from `claude.com/docs/connectors/building/authentication#callback-urls`). Add a provider's URL only once confirmed from that provider's own docs, or from the exact `redirect_uri` a real rejected connection attempt shows in this deployment's logs — never guessed.
 
-**Setup notes.** `MCP_GATEWAY_BASE_URL` must be the full public origin including the `/mcp-gateway` prefix — it's embedded in the discovery documents, is what Google validates the redirect against, and is what the mount path is derived from. The gateway reuses the admin app's Google OAuth client via `AUTH_CLIENT_ID`/`AUTH_CLIENT_SECRET` at app level, so its callback URL needs adding as a second Authorized redirect URI on that client. `db/migrations/0032_oauth_code_single_use.sql` must be applied to the Chat DB, or token exchange fails at the last step.
+**Setup notes.** `MCP_GATEWAY_BASE_URL` must be the full public origin including the `/mcp-gateway` prefix — it's embedded in the discovery documents, is what Google validates the redirect against, and is what the mount path is derived from. The gateway reuses the admin app's Google OAuth client via `AUTH_CLIENT_ID`/`AUTH_CLIENT_SECRET` at app level, so its callback URL needs adding as a second Authorized redirect URI on that client. `db/migrations/0032_oauth_code_single_use.sql` must be applied to the Chat DB, or token exchange fails at the last step. None of this needs a `.do/*.yaml` change on its own — the gateway lives inside `chat-orchestrator`'s existing image and ships on the next redeploy of that service, same as any other code change there.
+
+#### Connecting a client
+
+Every setup below points at the same URL, which is specific to *your* deployment, not a fixed value this repo ships:
+
+```
+https://your-app.example.com/mcp-gateway/mcp
+```
+
+(substitute your own `MCP_GATEWAY_BASE_URL`). Every client authenticates with the connecting user's own Google account — nothing to paste, no shared secret, no per-client server-side setup beyond what's already covered above. What differs per client is purely how *that client* discovers a remote MCP server, split along the same CLI-vs-hosted line the OAuth section above already draws.
+
+**Claude Code** (CLI — loopback, no configuration needed on this deployment):
+
+```bash
+claude mcp add --transport http anansi-mcp https://your-app.example.com/mcp-gateway/mcp
+```
+
+Approve the browser sign-in prompt once; the token is then valid until it expires (30 days) or is revoked.
+
+**Claude Desktop / claude.ai** (hosted — native remote-MCP support): **Settings → Connectors → Add custom connector**, paste the same URL, sign in when prompted. This is the one client path this deployment has to explicitly trust in advance: a hosted client's OAuth callback is *that provider's* fixed backend URL, not something the user or this server controls, so it only works if that URL is in `MCP_GATEWAY_REDIRECT_ALLOWLIST` (see above) — which ships with Claude's own documented callback pre-populated, so this works out of the box on a fresh deployment.
+
+**ChatGPT Desktop** (bundled Codex): as of this writing, the desktop app's own MCP surface (**Plugins → MCPs → Add**) and Codex CLI's `mcp` subcommand read and write the same local config — and neither yet has native support for a remote HTTP+OAuth server the way Claude Code/Desktop do (`codex mcp add` only launches a local command; confirmed from its own `--help`, not assumed). The working path today is the community stdio↔HTTP bridge, [`mcp-remote`](https://github.com/punkpeye/mcp-remote) (real, MIT-licensed, no telemetry — read its source before trusting a bridge with production credentials, don't take that on faith either):
+
+```bash
+codex mcp add anansi-mcp -- npx -y mcp-remote https://your-app.example.com/mcp-gateway/mcp
+```
+
+or the same thing through the Plugins → MCPs → Add GUI: command `npx`, arguments `-y`, `mcp-remote`, `https://your-app.example.com/mcp-gateway/mcp`. `mcp-remote` runs its own RFC 8252 loopback OAuth flow (confirmed from its CLI usage — it takes an optional local callback port), so — like Claude Code — this needs **no allowlist entry**: the bridge is the thing this deployment's gateway actually sees, and it presents a loopback redirect like any other native client. If OpenAI ships true native remote-MCP support later (or if ChatGPT's own web **Settings → Connectors**, untested here, already does — that's a materially different, hosted-OAuth path from the desktop app's Plugins/MCPs feature, not yet verified against this gateway), that client's real callback URL would need adding to `MCP_GATEWAY_REDIRECT_ALLOWLIST` first, the same way Claude's was — never guessed; add only a URL confirmed from that provider's own docs, or from the exact `redirect_uri` a real rejected connection shows in this deployment's logs.
+
+A client that connects successfully gets the same `staff.system`/`customer.system` prompt and knowledge modules the Telegram bot uses (see **Domain context** above) via `InitializeResult.instructions`, plus a `get_operating_context` tool carrying identical content for any client whose model doesn't act on that field — confirmed necessary, not speculative: an A/B test against this exact gateway showed one client resolving a site name immediately from `instructions` and another, receiving the identical payload, with no sign of having used it at all.
 
 #### Faster deploys: prebuilt images (optional)
 
@@ -1244,34 +1274,6 @@ from shared.utils.logging import get_logger
 ```
 
 Run `./setup_shared.sh` to make shared code importable.
-
-### Testing with Claude Desktop
-
-Test the orchestrator locally via Claude Desktop:
-
-**1. Configure Claude:**
-
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "anansi": {
-      "command": "/full/path/to/chat_orchestrator/.venv/bin/python",
-      "args": ["/full/path/to/chat_orchestrator/orchestrator_mcp_server.py"],
-      "env": {
-        "CHAT_DB_URL": "...",
-        "CHAT_DB_SERVICE_KEY": "...",
-        "GOOGLE_API_KEY": "..."
-      }
-    }
-  }
-}
-```
-
-**2. Restart Claude Desktop**
-
-The orchestrator appears as available tools in Claude.
 
 ### Project Structure
 
