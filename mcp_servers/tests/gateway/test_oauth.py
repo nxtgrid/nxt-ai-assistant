@@ -22,6 +22,8 @@ from gateway.oauth import (
     handle_client_registration,
     handle_google_callback,
     handle_token_request,
+    parse_redirect_allowlist,
+    validate_client_redirect_uri,
 )
 from gateway.oauth_codes import (
     decode_correlation_state,
@@ -314,6 +316,82 @@ def test_authorize_rejects_a_host_that_merely_starts_with_the_loopback_ip():
         )
 
 
+def test_authorize_accepts_a_hosted_client_redirect_uri_that_is_allow_listed():
+    # The MCP_GATEWAY_REDIRECT_ALLOWLIST case: a HOSTED client (Claude
+    # Desktop, claude.ai) redirects to its OWN fixed backend, not a loopback
+    # address - this is the exact URL confirmed from Anthropic's own docs.
+    google = _FakeGoogleOAuth()
+    result = build_authorize_redirect(
+        client_redirect_uri="https://claude.ai/api/mcp/auth_callback",
+        client_state="s",
+        code_challenge="c",
+        base_url=BASE_URL,
+        secret=SECRET,
+        google_oauth=google,
+        extra_allowed_redirect_uris=frozenset({"https://claude.ai/api/mcp/auth_callback"}),
+    )
+    assert result.redirect_url.startswith("https://accounts.google.com/")
+
+
+def test_authorize_still_rejects_a_remote_redirect_uri_not_on_the_allowlist():
+    # extra_allowed_redirect_uris must not become a general remote-redirect
+    # escape hatch - only its own exact entries pass, everything else still
+    # goes through the loopback check and fails it.
+    google = _FakeGoogleOAuth()
+    with pytest.raises(RedirectUriInvalid):
+        build_authorize_redirect(
+            client_redirect_uri="https://evil.example/steal",
+            client_state="s",
+            code_challenge="c",
+            base_url=BASE_URL,
+            secret=SECRET,
+            google_oauth=google,
+            extra_allowed_redirect_uris=frozenset({"https://claude.ai/api/mcp/auth_callback"}),
+        )
+
+
+def test_the_allowlist_check_is_an_exact_string_match_not_a_host_match():
+    # An attacker on the same allow-listed HOST but a different path must
+    # still be rejected - matching on host (or scheme+host) here would widen
+    # the hole this whole mechanism exists to close, just to "any path on
+    # claude.ai" instead of "any host at all".
+    with pytest.raises(RedirectUriInvalid):
+        validate_client_redirect_uri(
+            "https://claude.ai/some/other/attacker/controlled/path",
+            extra_allowed=frozenset({"https://claude.ai/api/mcp/auth_callback"}),
+        )
+
+
+def test_an_empty_allowlist_behaves_exactly_like_no_allowlist():
+    # Regression guard: the default (frozenset()) must not silently open
+    # anything up - loopback-only behavior is unchanged when unset.
+    with pytest.raises(RedirectUriInvalid):
+        validate_client_redirect_uri("https://evil.example/steal", extra_allowed=frozenset())
+    validate_client_redirect_uri("http://127.0.0.1:9/cb", extra_allowed=frozenset())
+
+
+class TestParseRedirectAllowlist:
+    def test_splits_on_commas_and_strips_whitespace(self):
+        raw = " https://claude.ai/api/mcp/auth_callback ,https://b.example/cb "
+        assert parse_redirect_allowlist(raw) == frozenset(
+            {"https://claude.ai/api/mcp/auth_callback", "https://b.example/cb"}
+        )
+
+    def test_drops_empty_entries(self):
+        assert parse_redirect_allowlist("https://a.example/cb,,  ,") == frozenset(
+            {"https://a.example/cb"}
+        )
+
+    def test_empty_string_yields_an_empty_set(self):
+        assert parse_redirect_allowlist("") == frozenset()
+        assert parse_redirect_allowlist("   ") == frozenset()
+
+    def test_a_single_entry_needs_no_comma(self):
+        assert parse_redirect_allowlist("https://claude.ai/api/mcp/auth_callback") == frozenset(
+            {"https://claude.ai/api/mcp/auth_callback"}
+        )
+
+
 def test_authorize_rejects_a_redirect_uri_with_no_scheme():
     google = _FakeGoogleOAuth()
     with pytest.raises(RedirectUriInvalid):
@@ -382,3 +460,31 @@ async def test_google_callback_re_validates_the_redirect_uri():
             is_authorized=lambda email: True,
             auth_service=_FakeAuth(),
         )
+
+
+@pytest.mark.asyncio
+async def test_google_callback_honours_the_allowlist_on_its_own_re_validation():
+    # The re-check above must apply the SAME extra_allowed_redirect_uris as
+    # /oauth/authorize - if this call site's re-validation didn't also
+    # receive the allowlist, a hosted client's own flow would pass
+    # /oauth/authorize only to be rejected here, breaking every hosted
+    # connection this feature exists to enable.
+    google = _FakeGoogleOAuth(email="user@example.com")
+    correlation_state = encode_correlation_state(
+        client_redirect_uri="https://claude.ai/api/mcp/auth_callback",
+        client_state="opaque-client-value",
+        code_challenge="challenge123",
+        secret=SECRET,
+    )
+
+    result = await handle_google_callback(
+        state=correlation_state,
+        callback_query={},
+        secret=SECRET,
+        google_oauth=google,
+        is_authorized=lambda email: True,
+        auth_service=_FakeAuth(),
+        extra_allowed_redirect_uris=frozenset({"https://claude.ai/api/mcp/auth_callback"}),
+    )
+
+    assert result.redirect_url.startswith("https://claude.ai/api/mcp/auth_callback?")
