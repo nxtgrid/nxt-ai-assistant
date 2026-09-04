@@ -759,6 +759,26 @@ _FLAGS: List[Flag] = [
         label="Individually disabled tools",
         advanced=True,
     ),
+    _s(
+        "MCP_GATEWAY_REDIRECT_ALLOWLIST",
+        "https://claude.ai/api/mcp/auth_callback",
+        "Extra OAuth redirect_uri values the MCP gateway accepts for a HOSTED "
+        "client (Claude Desktop, claude.ai, ChatGPT), on top of the RFC 8252 "
+        "loopback addresses always allowed for CLI clients (Claude Code, "
+        "Codex) -- those need no entry here. Comma-separated, exact string "
+        "match: a looser match (case-folding, host-only, prefix) would let an "
+        "attacker's crafted redirect_uri steal another user's authorization "
+        "code, which is exactly the hole this allowlist exists to avoid "
+        "reopening -- see gateway/oauth.py's validate_client_redirect_uri. "
+        "Add a provider's URL only once confirmed from that provider's own "
+        "docs, or from a real rejected connection attempt in this "
+        "deployment's logs. Default is Claude's documented callback (see "
+        "claude.com/docs/connectors/building/authentication#callback-urls).",
+        group="tools",
+        label="MCP gateway: extra allowed OAuth redirect URLs",
+        advanced=True,
+        restart_required=True,
+    ),
     # --- Knowledge & RAG ---------------------------------------------------------
     _b(
         "rag__enabled",

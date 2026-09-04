@@ -28,7 +28,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, FrozenSet, List, Optional
 from urllib.parse import urlparse
 
 import mcp.types as types
@@ -41,6 +41,7 @@ from gateway.oauth import (
     handle_client_registration,
     handle_google_callback,
     handle_token_request,
+    parse_redirect_allowlist,
 )
 from gateway.oauth_metadata import authorization_server_metadata, protected_resource_metadata
 from gateway.tiers import ALLOWED_SERVERS
@@ -284,11 +285,13 @@ def build_asgi_app(
     google_oauth_client: Optional[Any] = None,
     is_authorized: Optional[Callable[[str], bool]] = None,
     single_use_store: Optional[Any] = None,
+    extra_allowed_redirect_uris: Optional[FrozenSet[str]] = None,
 ) -> Starlette:
     """Build the gateway's ASGI app.
 
     A factory so every external dependency is injectable — real production
-    wiring lives only in run_gateway() below, never baked in here.
+    wiring lives only in build_production_app()/run_gateway() below, never
+    baked in here.
 
     google_oauth_client defaults to a real GoogleOAuthClient (not a fake)
     when omitted: build_authorize_url is pure string-building with no
@@ -298,8 +301,14 @@ def build_asgi_app(
     to inject a fake. is_authorized defaults to _deny_all (fail-closed);
     single_use_store has no safe default (there is no "fail-closed" store),
     so /oauth/token raises loudly if run_gateway() didn't wire a real one.
+    extra_allowed_redirect_uris defaults to empty (loopback-only, today's
+    behavior) — see gateway/oauth.py's validate_client_redirect_uri for what
+    it's for and why it must stay an exact-match set, never a host/prefix.
     """
     servers = list(allowed_servers) if allowed_servers is not None else list(ALLOWED_SERVERS)
+    extra_allowed_redirect_uris = (
+        frozenset(extra_allowed_redirect_uris) if extra_allowed_redirect_uris is not None else frozenset()
+    )
     google_oauth_client = google_oauth_client or GoogleOAuthClient(
         redirect_uri=f"{base_url}/oauth/google-callback"
     )
@@ -391,6 +400,7 @@ def build_asgi_app(
                 base_url=base_url,
                 secret=secret,
                 google_oauth=google_oauth_client,
+                extra_allowed_redirect_uris=extra_allowed_redirect_uris,
             )
         except RedirectUriInvalid as exc:
             # Deliberately rendered here rather than redirected anywhere:
@@ -416,6 +426,7 @@ def build_asgi_app(
             google_oauth=google_oauth_client,
             is_authorized=is_authorized,
             auth_service=auth_service,
+            extra_allowed_redirect_uris=extra_allowed_redirect_uris,
         )
         return RedirectResponse(result.redirect_url, status_code=302)
 
@@ -517,11 +528,18 @@ def build_production_app(base_url: Optional[str] = None) -> Starlette:  # pragma
     anansi_app.nicegui_app.auth.is_authorized, its NiceGUI-page wrapper) —
     perms.py imports nothing but os and re, so it travels into any image that
     COPYs anansi_app/grid_app/ without dragging NiceGUI along.
+
+    extra_allowed_redirect_uris comes from MCP_GATEWAY_REDIRECT_ALLOWLIST,
+    read through shared.config.flag_registry rather than os.environ directly
+    — that keeps the registry (and its editable-in-the-anansi-app-Settings-UI
+    default) the one place this value's default is written, rather than
+    duplicating it here and risking drift.
     """
     from gateway.oauth_store_chat_db import ChatDbSingleUseStore
     from grid_app.lib import perms
 
     from shared.auth.auth_service import get_auth_service
+    from shared.config import flag_registry
 
     # Package-qualified import FIRST, with the bare form only as a fallback.
     # Both resolve inside chat_orchestrator's image (PYTHONPATH=/app:/app/
@@ -548,6 +566,9 @@ def build_production_app(base_url: Optional[str] = None) -> Starlette:  # pragma
         base_url=base_url or os.environ["MCP_GATEWAY_BASE_URL"],
         is_authorized=lambda email: bool(perms.has_any_access(email)),
         single_use_store=ChatDbSingleUseStore(),
+        extra_allowed_redirect_uris=parse_redirect_allowlist(
+            flag_registry.get("MCP_GATEWAY_REDIRECT_ALLOWLIST")
+        ),
     )
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import secrets as _secrets
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, FrozenSet, List
 from urllib.parse import urlencode, urlparse
 
 from gateway.oauth_codes import (
@@ -41,8 +41,22 @@ class RegistrationResult:
     registration: Dict[str, Any]
 
 
-def validate_client_redirect_uri(redirect_uri: str) -> None:
-    """Raise RedirectUriInvalid unless redirect_uri is a loopback address.
+def parse_redirect_allowlist(raw: str) -> FrozenSet[str]:
+    """Parse MCP_GATEWAY_REDIRECT_ALLOWLIST's comma-separated value.
+
+    Each entry is stripped of surrounding whitespace; empty entries (a
+    trailing comma, an unset var) drop out. Deliberately no other
+    normalization - see validate_client_redirect_uri's own docstring for why
+    the comparison against these entries must stay an exact string match.
+    """
+    return frozenset(entry.strip() for entry in raw.split(",") if entry.strip())
+
+
+def validate_client_redirect_uri(
+    redirect_uri: str, *, extra_allowed: FrozenSet[str] = frozenset()
+) -> None:
+    """Raise RedirectUriInvalid unless redirect_uri is a loopback address or
+    an exact match in ``extra_allowed``.
 
     This is the security boundary the design doc actually specified ("any
     loopback address for a public client using PKCE... the standard
@@ -55,12 +69,25 @@ def validate_client_redirect_uri(redirect_uri: str) -> None:
     chose the challenge, so they hold the verifier - and the victim sees
     nothing but a normal, genuine Google login.
 
-    Loopback only, per RFC 8252 section 7.3, which is all any native/CLI
-    client needs (Claude Code included). A future browser-based client
-    wanting a remote https redirect would need its redirect_uris actually
-    registered and checked against the client_id, which is a deliberate
-    change, not something to leave open by default.
+    Loopback only, per RFC 8252 section 7.3, covers any native/CLI client
+    (Claude Code, Codex). A HOSTED client (Claude Desktop, claude.ai,
+    ChatGPT) has no local port to redirect to at all - its OAuth callback is
+    the CLIENT's own fixed backend URL, not something this deployment
+    controls or the end user chooses. extra_allowed is exactly that: a small,
+    operator-maintained set of such URLs (see MCP_GATEWAY_REDIRECT_ALLOWLIST
+    in shared/config/flag_registry.py), each one that specific provider's own
+    documented callback - never a whole host or scheme, which would just move
+    the same attacker-controlled-redirect_uri hole from "any host" to "any
+    path on this one host". The comparison is against the RAW, unparsed
+    string the caller sent: no case-folding, no urlparse, no stripping of the
+    caller's own value (only the allowlist's entries are pre-stripped, since
+    those come from operator-edited env-var text, not from an untrusted
+    request). Normalizing attacker-controlled input before a security
+    comparison is its own bug class - don't add it here.
     """
+    if redirect_uri in extra_allowed:
+        return
+
     parsed = urlparse(redirect_uri)
     if parsed.scheme not in ("http", "https"):
         raise RedirectUriInvalid(f"redirect_uri must be http(s), got {parsed.scheme!r}")
@@ -128,17 +155,19 @@ def build_authorize_redirect(
     base_url: str,
     secret: str,
     google_oauth: Any,
+    extra_allowed_redirect_uris: FrozenSet[str] = frozenset(),
 ) -> AuthorizeResult:
-    """Start the Google leg. The CLIENT's redirect_uri (Claude Code's own
-    loopback address) is never sent to Google at all - only encoded into the
-    signed correlation state Google faithfully round-trips back to us.
+    """Start the Google leg. The CLIENT's redirect_uri (a loopback address,
+    or an exact match in extra_allowed_redirect_uris) is never sent to
+    Google at all - only encoded into the signed correlation state Google
+    faithfully round-trips back to us.
 
     Validated BEFORE anything is signed or any Google redirect is built: a
     redirect_uri that reaches the signed correlation state is one the
     callback will faithfully deliver an authorization code to, so this is
     the only place it can be stopped.
     """
-    validate_client_redirect_uri(client_redirect_uri)
+    validate_client_redirect_uri(client_redirect_uri, extra_allowed=extra_allowed_redirect_uris)
 
     state = encode_correlation_state(
         client_redirect_uri=client_redirect_uri,
@@ -161,6 +190,7 @@ async def handle_google_callback(
     google_oauth: Any,
     is_authorized: Callable[[str], bool],
     auth_service: Any,
+    extra_allowed_redirect_uris: FrozenSet[str] = frozenset(),
 ) -> GoogleCallbackResult:
     """Google's own redirect target. Verifies the correlation state, gets
     the verified email from Google, checks the same two gates signin.py's
@@ -175,8 +205,13 @@ async def handle_google_callback(
     # already validated it: this makes the guarantee unconditional rather
     # than dependent on every path that signs a state having checked first,
     # and it closes the correlation-TTL window in which a state signed by an
-    # older build could still be redeemed here.
-    validate_client_redirect_uri(correlation.client_redirect_uri)
+    # older build could still be redeemed here. Same extra_allowed_redirect_uris
+    # as the /oauth/authorize check - a value allowed to reach the correlation
+    # state must be allowed to be redeemed from it too, or this re-check would
+    # itself become the thing that breaks a hosted client's flow.
+    validate_client_redirect_uri(
+        correlation.client_redirect_uri, extra_allowed=extra_allowed_redirect_uris
+    )
 
     email = await google_oauth.fetch_verified_email(callback_query)
 

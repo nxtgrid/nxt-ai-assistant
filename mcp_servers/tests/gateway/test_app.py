@@ -506,3 +506,65 @@ async def test_authorize_route_rejects_a_remote_redirect_uri_without_redirecting
     assert response.status_code == 400
     assert "location" not in response.headers
     assert response.json()["error"] == "invalid_request"
+
+
+@pytest.mark.asyncio
+async def test_authorize_route_redirects_for_a_hosted_client_on_the_allowlist():
+    # end-to-end through the real ASGI/route wiring: build_asgi_app's
+    # extra_allowed_redirect_uris parameter has to actually reach
+    # oauth_authorize_route's call to build_authorize_redirect, not just
+    # exist on the factory signature.
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+        base_url="https://mcp.example.com",
+        extra_allowed_redirect_uris=frozenset({"https://claude.ai/api/mcp/auth_callback"}),
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", follow_redirects=False) as client:
+        response = await client.get(
+            "/oauth/authorize",
+            params={
+                "redirect_uri": "https://claude.ai/api/mcp/auth_callback",
+                "state": "client-state",
+                "code_challenge": "abc123",
+                "code_challenge_method": "S256",
+            },
+        )
+
+    assert response.status_code in (302, 307)
+    assert "accounts.google.com" in response.headers["location"]
+
+
+@pytest.mark.asyncio
+async def test_authorize_route_still_rejects_an_unlisted_remote_redirect_uri_when_an_allowlist_is_set():
+    # A non-empty allowlist must not become a general remote-redirect escape
+    # hatch for the whole route - only its own exact entries pass.
+    app = build_asgi_app(
+        secret="test-secret-not-a-real-key",
+        auth_service=_FakeAuth(),
+        registry_list_tools=_exploding_list_tools,
+        registry_call_tool=_exploding_call_tool,
+        allowed_servers=["customer"],
+        base_url="https://mcp.example.com",
+        extra_allowed_redirect_uris=frozenset({"https://claude.ai/api/mcp/auth_callback"}),
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test", follow_redirects=False) as client:
+        response = await client.get(
+            "/oauth/authorize",
+            params={
+                "redirect_uri": "https://evil.example/steal",
+                "state": "client-state",
+                "code_challenge": "abc123",
+                "code_challenge_method": "S256",
+            },
+        )
+
+    assert response.status_code == 400
+    assert "location" not in response.headers
