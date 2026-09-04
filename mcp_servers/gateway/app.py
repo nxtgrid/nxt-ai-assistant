@@ -24,14 +24,17 @@ ASGI host; nothing here assumes a particular deployment target.
 
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import urlparse
 
 import mcp.types as types
 import uvicorn
 from gateway.google_oauth_client import GoogleOAuthClient
+from gateway.instructions import build_instructions
 from gateway.oauth import (
     RedirectUriInvalid,
     build_authorize_redirect,
@@ -48,12 +51,15 @@ from gateway.transport import (
     call_tool_for_request,
     extract_bearer_token,
     list_tools_for_request,
+    resolve_session_from_headers,
 )
 from mcp.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse, RedirectResponse
 from starlette.routing import Route
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def unauthorized_www_authenticate_header(base_url: str) -> str:
@@ -139,6 +145,37 @@ def gateway_lifespan(gateway_app: Starlette):
     return gateway_app.router.lifespan_context(gateway_app)
 
 
+_CALLER_INSTRUCTIONS: ContextVar[Optional[str]] = ContextVar(
+    "mcp_caller_instructions", default=None
+)
+
+
+class _ScopedServer(Server):
+    """A Server whose `instructions` are resolved per caller, not per process.
+
+    Server.instructions is a plain constructor attribute, so the obvious
+    approach - mutating it per request - would race between concurrent callers
+    and could hand one user's org-scoped context to another. A ContextVar
+    cannot: it is per-task.
+
+    This works because stateless mode rebuilds the initialization options for
+    every request (StreamableHTTPSessionManager._handle_stateless_request calls
+    self.app.create_initialization_options() inside the per-request task it
+    spawns), and because a task spawned from the session manager's task group
+    inherits the context of whoever called .start() - i.e. the request's task,
+    where _McpASGIApp set the value. That inheritance is the load-bearing
+    assumption here and is pinned by a test
+    (test_instructions_are_scoped_to_the_calling_user), not assumed.
+    """
+
+    def create_initialization_options(self, *args: Any, **kwargs: Any) -> Any:
+        options = super().create_initialization_options(*args, **kwargs)
+        caller_instructions = _CALLER_INSTRUCTIONS.get()
+        if caller_instructions:
+            options.instructions = caller_instructions
+        return options
+
+
 class _McpASGIApp:
     """Wraps StreamableHTTPSessionManager.handle_request (a raw ASGI3
     callable, but a BOUND METHOD) so Starlette's Route treats it as a raw
@@ -171,10 +208,12 @@ class _McpASGIApp:
         session_manager: StreamableHTTPSessionManager,
         secret: str,
         base_url: str,
+        auth_service: Any = None,
     ) -> None:
         self._session_manager = session_manager
         self._secret = secret
         self._base_url = base_url
+        self._auth_service = auth_service
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] == "http":
@@ -207,7 +246,32 @@ class _McpASGIApp:
                 )
                 await response(scope, receive, send)
                 return
+            await self._set_caller_instructions(headers)
         await self._session_manager.handle_request(scope, receive, send)
+
+    async def _set_caller_instructions(self, headers: Dict[str, str]) -> None:
+        """Resolve the caller and stage their instructions for initialize.
+
+        Runs on every request rather than only on `initialize`, because
+        telling them apart would mean consuming and replaying the ASGI body
+        on the one code path that must not break. build_instructions caches
+        per caller (60s) so the steady-state cost is a dict lookup; see its
+        own comment on why that TTL cannot weaken revocation.
+
+        Deliberately never raises: instructions are advisory. A caller whose
+        prompt fails to render still gets a fully working, fully authorised
+        tool surface - which is why this is not folded into the bearer gate
+        above, whose failures MUST be fatal.
+        """
+        if self._auth_service is None:
+            return
+        try:
+            session = await resolve_session_from_headers(
+                headers, self._secret, self._auth_service
+            )
+            _CALLER_INSTRUCTIONS.set(build_instructions(session))
+        except Exception:
+            _LOGGER.debug("No MCP instructions for this caller", exc_info=True)
 
 
 def build_asgi_app(
@@ -240,7 +304,7 @@ def build_asgi_app(
         redirect_uri=f"{base_url}/oauth/google-callback"
     )
     is_authorized = is_authorized or _deny_all
-    server = Server("nxt-mcp-gateway")
+    server = _ScopedServer("nxt-mcp-gateway")
 
     @server.list_tools()
     async def _list_tools() -> List[types.Tool]:
@@ -423,7 +487,10 @@ def build_asgi_app(
             # rather than imported since this gateway deliberately stays on
             # the low-level Server API throughout, not fastmcp's high-level
             # one (see mcp_servers/requirements.txt's own comment on why).
-            Route("/mcp", endpoint=_McpASGIApp(session_manager, secret, base_url)),
+            Route(
+                "/mcp",
+                endpoint=_McpASGIApp(session_manager, secret, base_url, auth_service),
+            ),
         ],
         lifespan=lifespan,
     )
