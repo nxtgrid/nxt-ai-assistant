@@ -90,6 +90,21 @@ def _is_after_hours() -> bool:
     return now.weekday() >= 5 or now.hour >= start_hour
 
 
+def _org_hashtag_from_short_name(organization_short_name: Optional[str]) -> Optional[str]:
+    """Canonical ``escalations.org_hashtag`` value for an org short name.
+
+    Mirrors the ``#<alnum>`` form shown in the escalation Telegram message
+    itself (see ``_escalate_to_telegram``'s message build), so the daily
+    sweep's "older than 24h with no ticket" alert renders the same ``(#Org)``
+    tag staff saw on the original message. Consumers that need the bare short
+    name back do ``.lstrip("#")``.
+    """
+    if not organization_short_name:
+        return None
+    clean_tag = "".join(c for c in organization_short_name if c.isalnum())
+    return f"#{clean_tag}" if clean_tag else None
+
+
 def _adf_to_text(adf: Any, _depth: int = 0, _max_depth: int = 50) -> str:
     """Extract plain text from an Atlassian Document Format node (recursive, depth-limited)."""
     if _depth > _max_depth or not adf or not isinstance(adf, dict):
@@ -247,6 +262,9 @@ class EscalationService:
         topic_id: Optional[int],
         reason: Optional[str] = None,
         ticket_id: Optional[str] = None,
+        customer_username: Optional[str] = None,
+        customer_email: Optional[str] = None,
+        org_hashtag: Optional[str] = None,
     ) -> None:
         """Dual-write: canonical ``escalations`` row + its Telegram delivery
         receipt. There is no cross-table transaction here (two separate
@@ -275,6 +293,12 @@ class EscalationService:
         parent's ticket) -- otherwise track_as_ticket's own attach_ticket()
         call is the only thing that ever sets it, which a follow-up
         escalation never goes through directly.
+
+        ``customer_username`` / ``customer_email`` / ``org_hashtag`` are
+        persisted so the daily sweep's "older than 24h with no ticket" alert
+        (run_escalation_ticket_sweep) can label each entry with a name and
+        org instead of falling back to the bare escalation UUID. ``None`` is
+        written through unchanged when a caller doesn't have the value.
         """
         if not session_id:
             return
@@ -291,7 +315,13 @@ class EscalationService:
 
         try:
             await self._escalations.create(
-                escalation_id, chat_session_uuid, reason=reason, ticket_id=ticket_id
+                escalation_id,
+                chat_session_uuid,
+                reason=reason,
+                ticket_id=ticket_id,
+                customer_username=customer_username,
+                customer_email=customer_email,
+                org_hashtag=org_hashtag,
             )
         except Exception:
             LOGGER.opt(exception=True).warning(
@@ -615,6 +645,9 @@ class EscalationService:
                                 topic_id=followup_topic_id,
                                 reason=reason,
                                 ticket_id=prelinked_ticket_id,
+                                customer_username=customer_username,
+                                customer_email=customer_email,
+                                org_hashtag=_org_hashtag_from_short_name(organization_short_name),
                             )
 
                     return {
@@ -733,6 +766,9 @@ class EscalationService:
                                 message_id=escalation_message_id,
                                 topic_id=escalation_topic_id,
                                 reason=reason,
+                                customer_username=customer_username,
+                                customer_email=customer_email,
+                                org_hashtag=_org_hashtag_from_short_name(organization_short_name),
                             )
                         if saved_mapping_id and media_file_ids:
                             try:
@@ -3290,6 +3326,8 @@ class EscalationService:
                                 message_id=escalation_message_id,
                                 topic_id=escalation_topic_id,
                                 reason="verification_failed",
+                                customer_username=customer_username,
+                                org_hashtag=_org_hashtag_from_short_name(organization_short_name),
                             )
                         LOGGER.info(
                             f"Saved verification failure escalation to database: "

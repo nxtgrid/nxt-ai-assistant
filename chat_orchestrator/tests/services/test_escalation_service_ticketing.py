@@ -962,6 +962,44 @@ async def test_new_escalation_dual_writes_canonical_escalation_and_delivery():
     assert delivery["external_message_id"] == 42
 
 
+async def test_new_escalation_persists_customer_identity_on_the_canonical_row():
+    """The daily sweep's "older than 24h with no ticket" alert labels each
+    entry from the canonical row's customer_username / customer_email /
+    org_hashtag (escalation_service.run_escalation_ticket_sweep). Those must
+    be written at creation time, or every alert entry falls back to the bare
+    escalation UUID with no org tag.
+    """
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=uuid.uuid4())
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 42}}
+
+    svc._send_telegram_message = fake_send
+
+    await svc.escalate_to_support(
+        **_new_escalation_kwargs(
+            reason="could_not_answer",
+            customer_username="Jane Doe",
+            customer_email="jane@example.com",
+            organization_short_name="Acme Energy",
+        )
+    )
+
+    row = raw.tables["escalations"].rows[0]
+    assert row["customer_username"] == "Jane Doe"
+    assert row["customer_email"] == "jane@example.com"
+    # Stored as the "#<alnum>" hashtag shown in the escalation message itself,
+    # so the sweep alert's "(#Org)" tag matches what staff saw.
+    assert row["org_hashtag"] == "#AcmeEnergy"
+
+
 async def test_new_escalation_skips_legacy_write_once_legacy_writes_stopped(monkeypatch):
     monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
     raw = _FakeRaw()
@@ -1105,6 +1143,55 @@ async def test_followup_escalation_dual_writes_canonical_escalation_and_delivery
     assert delivery_rows[0]["external_message_id"] == 200  # fake_reply's message_id
 
 
+async def test_followup_escalation_persists_customer_identity_on_the_canonical_row():
+    """A follow-up escalation gets its own canonical row (so closing the
+    original doesn't lose it) -- it must carry the same customer_username /
+    customer_email / org_hashtag as a first escalation, or it shows up in the
+    sweep alert as a bare UUID.
+    """
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=uuid.uuid4())
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    async def fake_get_info(_sid):
+        return {
+            "is_active": True,
+            "escalation_message_id": 100,
+            "escalation_topic_id": None,
+            "ticket_ref": None,
+            "ticket_backend": None,
+            "jira_ticket_key": None,
+            "organization_id": None,
+        }
+
+    svc.get_escalation_info = fake_get_info
+
+    async def fake_reply(chat_id, reply_to_message_id, text, reply_markup=None, topic_id=None):
+        return {"ok": True, "result": {"message_id": 200}}
+
+    svc._send_telegram_reply = fake_reply
+    svc._tickets = _FakeTickets(status=TicketStatus(summary="s", is_done=False))
+
+    await svc.escalate_to_support(
+        question_summary="follow up q",
+        session_id="telegram_abc",
+        customer_chat_id="123",
+        customer_username="Jane Doe",
+        customer_email="jane@example.com",
+        organization_short_name="Acme Energy",
+    )
+
+    row = raw.tables["escalations"].rows[0]
+    assert row["customer_username"] == "Jane Doe"
+    assert row["customer_email"] == "jane@example.com"
+    assert row["org_hashtag"] == "#AcmeEnergy"
+
+
 async def test_followup_escalation_attaches_ticket_id_when_prelinked_to_existing_ticket():
     """Regression: attach_ticket() only ever fires for the escalation that
     originally filed a ticket. A follow-up pre-linked to that same ticket
@@ -1232,6 +1319,42 @@ async def test_verification_failure_escalation_skips_legacy_write_once_legacy_wr
     assert len(delivery_rows) == 1
     assert delivery_rows[0]["escalation_id"] == escalation_rows[0]["id"]
     assert delivery_rows[0]["external_message_id"] == 77
+
+
+async def test_verification_failure_escalation_persists_identity_on_the_canonical_row():
+    """escalate_verification_failure has no customer_email parameter, but it
+    does take customer_username and organization_short_name -- both must land
+    on the canonical row so this escalation isn't a bare UUID in the sweep
+    alert either.
+    """
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=uuid.uuid4())
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        return {"ok": True, "result": {"message_id": 77}}
+
+    svc._send_telegram_message = fake_send
+
+    await svc.escalate_verification_failure(
+        original_message="what is my balance",
+        failed_response="bad response",
+        verification_feedback="hallucinated a number",
+        session_id="telegram_abc",
+        customer_chat_id="123",
+        customer_username="Jane Doe",
+        organization_short_name="Acme Energy",
+    )
+
+    row = raw.tables["escalations"].rows[0]
+    assert row["customer_username"] == "Jane Doe"
+    assert row["org_hashtag"] == "#AcmeEnergy"
+    assert row["customer_email"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -1672,6 +1795,35 @@ async def test_sweep_old_escalations_alert_links_each_entry_to_its_telegram_mess
 
     text = calls["messages"][-1]["text"]
     assert "[View](https://t.me/c/123456/777)" in text
+
+
+async def test_sweep_old_escalations_alert_labels_entry_with_name_and_org_not_bare_uuid(
+    monkeypatch,
+):
+    """When the canonical row carries the customer's identity (as it does now
+    that _record_canonical_escalation persists it), the alert bullet reads
+    "Name (#org)" -- not the "id:<uuid>" fallback that fires only when
+    username, email and org_hashtag are all absent.
+    """
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    row = _canonical_escalation_row("esc-old", age_hours=30)
+    row["customer_username"] = "Jane Doe"
+    row["org_hashtag"] = "#acme"
+    raw.table("escalations").rows = [row]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-old", "purpose": "escalation", "external_message_id": 777}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    text = calls["messages"][-1]["text"]
+    assert "Jane Doe (#acme)" in text
+    assert "id:esc-old" not in text
 
 
 async def test_sweep_old_escalations_alert_drops_entries_with_no_traceable_message(
