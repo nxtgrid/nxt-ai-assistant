@@ -507,3 +507,55 @@ async def test_close_callback_skips_transition_when_no_ticket(monkeypatch):
         svc._tickets.transition_to_done_calls == []
         for svc in _FakeEscalationService.instances
     )
+
+
+# ---------------------------------------------------------------------------
+# Stale-alert dismiss (ex:mapping_id) -- one-tap close from the daily sweep
+# ---------------------------------------------------------------------------
+
+
+async def test_stale_alert_dismiss_resolves_the_canonical_escalation(
+    monkeypatch, _patch_telegram_transport
+):
+    mapping_id = "00000000-0000-0000-0000-0000000000aa"
+    supa = _FakeSupabase(claim_row=None, escalations_state={mapping_id: {"state": "open"}})
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+
+    result = await ch._handle_stale_alert_dismiss_callback(
+        callback_id="cb1", mapping_id=mapping_id, chat_id="-100999",
+    )
+
+    assert result["statusCode"] == 200
+    resolve_calls = [
+        c for c in supa.canonical_calls
+        if c[0] == "escalations" and c[1].get("state") == "resolved"
+    ]
+    assert len(resolve_calls) == 1
+    assert resolve_calls[0][2] == [("id", mapping_id)]
+    assert "Closed" in _patch_telegram_transport["answer"][-1]["text"]
+
+
+async def test_stale_alert_dismiss_rejects_other_chats(monkeypatch, _patch_telegram_transport):
+    supa = _FakeSupabase(claim_row=None)
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+
+    result = await ch._handle_stale_alert_dismiss_callback(
+        callback_id="cb1",
+        mapping_id="00000000-0000-0000-0000-0000000000bb",
+        chat_id="-100555",
+    )
+
+    assert result["statusCode"] == 403
+    assert supa.canonical_calls == []
+
+
+async def test_stale_alert_dismiss_rejects_bad_uuid(monkeypatch, _patch_telegram_transport):
+    supa = _FakeSupabase(claim_row=None)
+    monkeypatch.setattr(ch, "get_supabase_client", lambda: supa)
+
+    result = await ch._handle_stale_alert_dismiss_callback(
+        callback_id="cb1", mapping_id="not-a-uuid", chat_id="-100999",
+    )
+
+    assert result["statusCode"] == 400
+    assert supa.canonical_calls == []
