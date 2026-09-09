@@ -1357,6 +1357,47 @@ async def test_verification_failure_escalation_persists_identity_on_the_canonica
     assert row["customer_email"] is None
 
 
+async def test_verification_failure_escalation_message_carries_action_buttons():
+    """Regression: escalate_verification_failure sent a button-less message,
+    leaving no admin path to close the escalation. It must now ship the
+    standard Track + Close-silently keyboard (no 'Close & inform customer'),
+    wired to the same id the canonical row is written under."""
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=uuid.uuid4())
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    sent: list = []
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        sent.append({"text": text, "reply_markup": reply_markup})
+        return {"ok": True, "result": {"message_id": 77}}
+
+    svc._send_telegram_message = fake_send
+
+    await svc.escalate_verification_failure(
+        original_message="why is my meter reading zero",
+        failed_response="bad answer",
+        verification_feedback="not grounded",
+        session_id="telegram_abc",
+        customer_chat_id="123",
+        customer_username="Jane Doe",
+        organization_short_name="Acme Energy",
+    )
+
+    markup = sent[-1]["reply_markup"]
+    assert markup is not None
+    datas = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    row_id = raw.tables["escalations"].rows[0]["id"]
+    assert f"es:{row_id}" in datas  # Track
+    assert f"ec:{row_id}" in datas  # Close silently
+    assert all(not d.startswith("en:") for d in datas)  # no Close & inform
+
+
 # ---------------------------------------------------------------------------
 # Follow-up comment path (inside _escalate_to_telegram)
 # ---------------------------------------------------------------------------

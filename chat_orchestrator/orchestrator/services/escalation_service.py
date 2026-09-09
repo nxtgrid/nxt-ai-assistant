@@ -3318,6 +3318,16 @@ class EscalationService:
                     org_name=organization_short_name or "",
                 )
 
+            # Pre-generate the escalation id so the message can carry action
+            # buttons wired to it. Verification-failure escalations were
+            # button-less -- the only way to close one was the DB. No "Close &
+            # inform customer": this is an internal AI-quality flag, not
+            # something to send the customer a resolution note about.
+            verification_id = str(uuid.uuid4())
+            track_keyboard = build_escalation_track_keyboard(
+                verification_id, include_track=True, include_close_notify=False
+            )
+
             # Send to escalation group
             LOGGER.info(
                 f"Sending verification failure escalation to Telegram for session {session_id}"
@@ -3326,6 +3336,7 @@ class EscalationService:
                 chat_id=self._escalation_chat_id,
                 text=message_text,
                 topic_id=escalation_topic_id,
+                reply_markup=track_keyboard,
             )
 
             if result.get("ok"):
@@ -3335,17 +3346,15 @@ class EscalationService:
                 if escalation_message_id and customer_chat_id:
                     supabase_client = self._get_supabase_client()
                     if supabase_client:
-                        saved_verification_id = str(uuid.uuid4())
-                        if saved_verification_id:
-                            await self._record_canonical_escalation(
-                                saved_verification_id,
-                                session_id,
-                                message_id=escalation_message_id,
-                                topic_id=escalation_topic_id,
-                                reason="verification_failed",
-                                customer_username=customer_username,
-                                org_hashtag=_org_hashtag_from_short_name(organization_short_name),
-                            )
+                        await self._record_canonical_escalation(
+                            verification_id,
+                            session_id,
+                            message_id=escalation_message_id,
+                            topic_id=escalation_topic_id,
+                            reason="verification_failed",
+                            customer_username=customer_username,
+                            org_hashtag=_org_hashtag_from_short_name(organization_short_name),
+                        )
                         LOGGER.info(
                             f"Saved verification failure escalation to database: "
                             f"msg_id={escalation_message_id} → session={session_id}, "
