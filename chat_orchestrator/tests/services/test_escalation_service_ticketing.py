@@ -1826,6 +1826,73 @@ async def test_sweep_old_escalations_alert_labels_entry_with_name_and_org_not_ba
     assert "id:esc-old" not in text
 
 
+async def test_sweep_alert_uses_org_as_label_when_name_and_email_absent(monkeypatch):
+    """Org-only row (name + email both null, org_hashtag backfilled): the
+    bullet reads '#Org', not 'id:<uuid> (#Org)'."""
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    row = _canonical_escalation_row("esc-old", age_hours=30)
+    row["customer_username"] = None
+    row["customer_email"] = None
+    row["org_hashtag"] = "#ExampleOrg"
+    raw.table("escalations").rows = [row]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-old", "purpose": "escalation", "external_message_id": 777}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    text = calls["messages"][-1]["text"]
+    assert "• #ExampleOrg — [View](https://t.me/c/123456/777)" in text
+    assert "id:esc-old" not in text
+    assert "(#ExampleOrg)" not in text  # not duplicated as a suffix
+
+
+async def test_sweep_alert_still_shows_bare_id_when_nothing_is_known(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    row = _canonical_escalation_row("esc-blank", age_hours=30)
+    row["customer_username"] = None
+    row["customer_email"] = None
+    row["org_hashtag"] = None
+    raw.table("escalations").rows = [row]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-blank", "purpose": "escalation", "external_message_id": 888}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    assert "id:esc-blank" in calls["messages"][-1]["text"]
+
+
+async def test_sweep_alert_name_and_org_row_is_unchanged(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    row = _canonical_escalation_row("esc-full", age_hours=30)
+    row["customer_username"] = "Jane Doe"
+    row["org_hashtag"] = "#ExampleOrg"
+    raw.table("escalations").rows = [row]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-full", "purpose": "escalation", "external_message_id": 999}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    assert "Jane Doe (#ExampleOrg)" in calls["messages"][-1]["text"]
+
+
 async def test_sweep_old_escalations_alert_drops_entries_with_no_traceable_message(
     monkeypatch,
 ):

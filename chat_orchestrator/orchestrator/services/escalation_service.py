@@ -2394,9 +2394,20 @@ class EscalationService:
                 username = esc.get("customer_username")
                 email = esc.get("customer_email") or ""
                 masked_email = (email[:2] + "***@" + email.split("@", 1)[1]) if "@" in email else ""
-                label = _escape_telegram_markdown(username or masked_email or f"id:{esc['id']}")
                 org_raw = esc.get("org_hashtag") or ""
-                org_part = f" ({_escape_telegram_markdown(org_raw)})" if org_raw else ""
+                # Precedence: a real name -> a masked email -> the org hashtag
+                # (backfilled onto rows created before PR #192) -> and only
+                # then the bare canonical id, when nothing human-meaningful is
+                # known at all.
+                primary = username or masked_email or org_raw or f"id:{esc['id']}"
+                label = _escape_telegram_markdown(primary)
+                # Don't repeat the org as a "(...)" suffix when it's already
+                # standing in as the label.
+                org_part = (
+                    f" ({_escape_telegram_markdown(org_raw)})"
+                    if org_raw and org_raw != primary
+                    else ""
+                )
                 msg_id = esc.get("escalation_message_id")
                 if msg_id and isinstance(msg_id, int) and channel_id:
                     link = f"https://t.me/c/{channel_id}/{msg_id}"
