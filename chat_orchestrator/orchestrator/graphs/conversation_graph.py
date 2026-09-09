@@ -709,8 +709,14 @@ class ConversationGraphBuilder:
                     "reply_markup": self._make_escalation_offer_markup(state),
                 }
 
-        # Execute only verified calls
-        exec_results = await self._execute_tool_calls(calls_to_execute, metadata)
+        # Execute only verified calls. Once an escalation has succeeded this
+        # turn, further escalate_to_support calls are answered without being
+        # re-sent (one escalation per turn, no duplicate follow-ups).
+        exec_results = await self._execute_tool_calls(
+            calls_to_execute,
+            metadata,
+            suppress_repeat_escalation=bool(state.get("escalation_triggered")),
+        )
 
         # Merge results in original order (blocked get error, executed get real result)
         results: List[ToolCallResult] = []
@@ -1440,8 +1446,19 @@ class ConversationGraphBuilder:
         self,
         function_calls: List[FunctionCall],
         metadata: Dict[str, Any],
+        *,
+        suppress_repeat_escalation: bool = False,
     ) -> List[ToolCallResult]:
-        """Execute one or more tool calls, using parallelism when enabled."""
+        """Execute one or more tool calls, using parallelism when enabled.
+
+        ``suppress_repeat_escalation`` is set by the caller once an escalation
+        has already succeeded this turn: further ``escalate_to_support`` calls
+        are then answered with a synthetic "already open" result instead of
+        being sent, so the support topic gets one escalation per turn rather
+        than a fresh follow-up for every retry (2026-09-09 incident: one
+        customer issue produced four escalation messages -- one real, three
+        duplicates from re-calls the model could not see it had already made).
+        """
         if not function_calls:
             return []
 
@@ -1464,8 +1481,35 @@ class ConversationGraphBuilder:
 
         results = []
 
-        # Handle escalation calls via special handler
-        for call in escalation_calls:
+        # Handle escalation calls via special handler. At most one real
+        # escalation per turn: if one already succeeded on an earlier round
+        # (suppress_repeat_escalation) or earlier in this same batch (idx > 0),
+        # answer the call without re-sending. The model does not carry its
+        # in-turn tool history into a regeneration pass, so without this it
+        # re-escalates on every retry and each call posts another follow-up.
+        for idx, call in enumerate(escalation_calls):
+            if suppress_repeat_escalation or idx > 0:
+                LOGGER.info(
+                    "escalate_to_support called again this turn; an escalation is "
+                    "already open for this conversation -- not re-sending"
+                )
+                results.append(
+                    ToolCallResult(
+                        name=call.name,
+                        success=True,
+                        output={
+                            "success": True,
+                            "already_escalated": True,
+                            "user_message": (
+                                "An escalation for this conversation is already open "
+                                "with the support team. Do NOT call escalate_to_support "
+                                "again. Tell the customer their issue is with the team "
+                                "and they will follow up."
+                            ),
+                        },
+                    )
+                )
+                continue
             if self._escalation_handler:
                 try:
                     escalation_result = await self._escalation_handler(call, metadata)
