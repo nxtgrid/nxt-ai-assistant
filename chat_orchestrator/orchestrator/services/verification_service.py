@@ -234,6 +234,19 @@ Only include categories that actually failed. Common categories:
                         f"or referenced available capabilities.)\n\n{tools_summary}\n"
                     )
 
+            parts.append(
+                "HANDOFF RESPONSES: If the response tells the customer their issue "
+                "has been escalated, raised with, or handed to the support/technical "
+                "team, and the tool activity above shows an escalation actually "
+                "succeeded this turn, then \"the team will follow up\" is a COMPLETE "
+                "answer. Do NOT fail it (for completeness, accuracy, or tool "
+                "awareness) for not stating a resolution time, an ETA, a ticket "
+                "number, or next steps that only the support team can give once a "
+                "human has reviewed it -- that information does not exist yet at the "
+                "time of this reply. A second escalate_to_support call in the same "
+                "turn is a retry, not a contradiction.\n"
+            )
+
             parts.append(f"ORIGINAL USER MESSAGE:\n{original_message}\n")
             parts.append(f"RESPONSE TO VERIFY:\n{response_text}\n")
             categories_block = """

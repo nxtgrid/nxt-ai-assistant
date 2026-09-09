@@ -62,7 +62,7 @@ async def test_hallucinated_tool_blocked(builder):
     valid_result = ToolCallResult(name="jira_jira_search_issues", success=True, output={"ok": True})
 
     # Mock _execute_tool_calls to only receive the valid call
-    async def mock_execute(calls, metadata):
+    async def mock_execute(calls, metadata, **_kwargs):
         assert len(calls) == 1
         assert calls[0].name == "jira_jira_search_issues"
         return [valid_result]
@@ -99,7 +99,7 @@ async def test_all_tools_allowed_passes_through(builder):
     result_a = ToolCallResult(name="tool_a", success=True, output={"r": "a"})
     result_b = ToolCallResult(name="tool_b", success=True, output={"r": "b"})
 
-    async def mock_execute(calls, metadata):
+    async def mock_execute(calls, metadata, **_kwargs):
         assert len(calls) == 2
         return [result_a, result_b]
 
@@ -129,7 +129,7 @@ async def test_empty_allowlist_skips_guard(builder):
 
     expected_result = ToolCallResult(name="any_tool", success=True, output={"ok": True})
 
-    async def mock_execute(calls, metadata):
+    async def mock_execute(calls, metadata, **_kwargs):
         assert len(calls) == 1
         return [expected_result]
 
@@ -151,7 +151,7 @@ async def test_missing_allowlist_key_skips_guard(builder):
 
     expected_result = ToolCallResult(name="any_tool", success=True, output={"ok": True})
 
-    async def mock_execute(calls, metadata):
+    async def mock_execute(calls, metadata, **_kwargs):
         assert len(calls) == 1
         return [expected_result]
 
@@ -182,7 +182,7 @@ async def test_result_ordering_preserved(builder):
     good_result_1 = ToolCallResult(name="good_1", success=True, output={"v": 1})
     good_result_2 = ToolCallResult(name="good_2", success=True, output={"v": 2})
 
-    async def mock_execute(exec_calls, metadata):
+    async def mock_execute(exec_calls, metadata, **_kwargs):
         assert len(exec_calls) == 2
         assert exec_calls[0].name == "good_1"
         assert exec_calls[1].name == "good_2"
