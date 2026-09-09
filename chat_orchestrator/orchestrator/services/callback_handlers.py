@@ -26,6 +26,7 @@ from shared.auth import get_auth_service
 from shared.auth.auth_service import STAFF_ORG_ID as _STAFF_ORG_ID
 from shared.utils.logging import get_logger
 from shared.utils.telegram_buttons import (
+    ESCALATION_ALERT_DISMISS_PREFIX,
     ESCALATION_CLOSE_NOTIFY_PREFIX,
     ESCALATION_CLOSE_SILENT_PREFIX,
     ESCALATION_OFFER_PREFIX,
@@ -166,6 +167,17 @@ async def _handle_callback_query(args: Dict[str, Any]) -> Dict[str, Any]:
                 original_text=message.get("text", ""),
                 notify_customer=notify_customer,
                 clicker_telegram_id=user_id,
+            )
+
+        # =================================================================
+        # STALE-ALERT DISMISS (ex:mapping_id) - one-tap close from the daily
+        # "older than 24h with no ticket" sweep alert
+        # =================================================================
+        if callback_type == ESCALATION_ALERT_DISMISS_PREFIX:
+            return await _handle_stale_alert_dismiss_callback(
+                callback_id=callback_id,
+                mapping_id=parsed["mapping_id"],
+                chat_id=chat_id,
             )
 
         # =================================================================
@@ -897,6 +909,44 @@ async def _handle_escalation_track_callback(
         except Exception:
             pass
         return {"success": False, "error": "Internal error", "statusCode": 500}
+
+
+async def _handle_stale_alert_dismiss_callback(
+    callback_id: str,
+    mapping_id: str,
+    chat_id: str,
+) -> Dict[str, Any]:
+    """Handle a one-tap 'Close' from the stale-escalation sweep alert
+    (ex:mapping_id). Fully resolves the canonical escalation row so it drops
+    out of the next daily alert; reversible with EscalationRepository.reopen().
+    Toast-only feedback -- the alert is regenerated fresh each day, so there
+    is nothing to edit in place.
+    """
+    escalation_group_id = os.getenv("ESCALATION_TELEGRAM_CHAT_ID", "")
+    if chat_id != escalation_group_id:
+        await _answer_callback_query(callback_id, "Unauthorized", show_alert=True)
+        return {"success": True, "message": "Unauthorized", "statusCode": 403}
+
+    try:
+        uuid_mod.UUID(mapping_id)
+    except ValueError:
+        await _answer_callback_query(callback_id, "Invalid escalation ID", show_alert=True)
+        return {"success": True, "message": "Invalid mapping_id", "statusCode": 400}
+
+    supabase_client = get_supabase_client()
+    try:
+        await _canonical_escalations(supabase_client).resolve(mapping_id)
+    except Exception:
+        LOGGER.opt(exception=True).warning(
+            "Stale-alert dismiss: could not resolve canonical escalation {}", mapping_id
+        )
+        await _answer_callback_query(
+            callback_id, "Could not close — try again", show_alert=True
+        )
+        return {"success": False, "message": "resolve failed", "statusCode": 500}
+
+    await _answer_callback_query(callback_id, "✓ Closed — gone from tomorrow's alert.")
+    return {"success": True, "message": "dismissed", "statusCode": 200}
 
 
 async def _handle_escalation_close_callback(

@@ -81,6 +81,11 @@ ESCALATION_CLOSE_NOTIFY_PREFIX = "en"
 # Callback data prefix for proactive escalation offer to customer (eo:{session_id})
 ESCALATION_OFFER_PREFIX = "eo"
 
+# Callback data prefix for one-tap dismiss from the stale-escalation sweep
+# alert (ex:{mapping_uuid}) -- fully resolves the escalation, same end state
+# as "Close silently".
+ESCALATION_ALERT_DISMISS_PREFIX = "ex"
+
 # Maximum length for Telegram callback_data (64 bytes)
 MAX_CALLBACK_DATA_LENGTH = 64
 
@@ -215,11 +220,12 @@ def parse_callback_data(callback_data: str) -> Optional[Dict[str, str]]:
             "choice": parts[1],
         }
 
-    # Handle escalation callbacks (es/ec/en:mapping_uuid)
+    # Handle escalation callbacks (es/ec/en/ex:mapping_uuid)
     if callback_type in (
         ESCALATION_TRACK_CALLBACK_PREFIX,
         ESCALATION_CLOSE_SILENT_PREFIX,
         ESCALATION_CLOSE_NOTIFY_PREFIX,
+        ESCALATION_ALERT_DISMISS_PREFIX,
     ):
         return {
             "type": callback_type,
@@ -502,19 +508,28 @@ def build_step_input_keyboard(options: List[str]) -> Optional[Dict[str, Any]]:
 # =============================================================================
 
 
-def build_escalation_track_keyboard(mapping_id: str, include_track: bool = True) -> Dict[str, Any]:
+def build_escalation_track_keyboard(
+    mapping_id: str,
+    include_track: bool = True,
+    include_close_notify: bool = True,
+) -> Dict[str, Any]:
     """Build inline keyboard with escalation action buttons.
 
-    Three actions (when include_track=True):
+    Actions:
     - Track as ticket & close: Creates JIRA ticket, notifies customer, closes escalation
     - Close silently: Closes escalation without any customer notification
     - Close & inform: Closes escalation and sends resolution message to customer
 
-    When include_track=False (after-hours auto-Jira), the Track row is omitted.
+    ``include_track=False`` (after-hours auto-Jira): the Track row is omitted.
+    ``include_close_notify=False`` (verification-failure escalations): the
+    "Close & inform customer" button is omitted -- a verification failure is
+    an internal AI-quality flag, not something to send the customer a
+    resolution note about.
 
     Args:
         mapping_id: Pre-generated UUID for the escalation mapping
         include_track: Include the "Track as ticket" button (default True)
+        include_close_notify: Include "Close & inform customer" (default True)
 
     Returns:
         InlineKeyboardMarkup dict
@@ -529,18 +544,50 @@ def build_escalation_track_keyboard(mapping_id: str, include_track: bool = True)
                 }
             ]
         )
-    rows.append(
-        [
-            {
-                "text": "\U0001f507 Close silently",
-                "callback_data": f"{ESCALATION_CLOSE_SILENT_PREFIX}:{mapping_id}",
-            },
+    close_row = [
+        {
+            "text": "\U0001f507 Close silently",
+            "callback_data": f"{ESCALATION_CLOSE_SILENT_PREFIX}:{mapping_id}",
+        }
+    ]
+    if include_close_notify:
+        close_row.append(
             {
                 "text": "\u2705 Close & inform customer",
                 "callback_data": f"{ESCALATION_CLOSE_NOTIFY_PREFIX}:{mapping_id}",
-            },
-        ]
-    )
+            }
+        )
+    rows.append(close_row)
+    return {"inline_keyboard": rows}
+
+
+def build_stale_alert_keyboard(entries: List[tuple]) -> Optional[Dict[str, Any]]:
+    """Inline keyboard for the daily stale-escalation sweep alert: one
+    "Close" button per listed ``(escalation_id, label)`` entry. Tapping it
+    routes to ``ESCALATION_ALERT_DISMISS_PREFIX`` and fully resolves that
+    escalation.
+
+    Args:
+        entries: ``(escalation_id, label)`` for each linkable alert row
+
+    Returns:
+        InlineKeyboardMarkup dict, or ``None`` when ``entries`` is empty.
+    """
+    if not entries:
+        return None
+    rows = []
+    for esc_id, label in entries:
+        text = f"✅ Close — {label}"
+        if len(text) > 60:
+            text = text[:59] + "…"
+        rows.append(
+            [
+                {
+                    "text": text,
+                    "callback_data": f"{ESCALATION_ALERT_DISMISS_PREFIX}:{esc_id}",
+                }
+            ]
+        )
     return {"inline_keyboard": rows}
 
 
@@ -704,7 +751,9 @@ __all__ = [
     "ESCALATION_TRACK_CALLBACK_PREFIX",
     "ESCALATION_CLOSE_SILENT_PREFIX",
     "ESCALATION_CLOSE_NOTIFY_PREFIX",
+    "ESCALATION_ALERT_DISMISS_PREFIX",
     "build_escalation_track_keyboard",
+    "build_stale_alert_keyboard",
     # Escalation offer (customer-facing button after system error)
     "ESCALATION_OFFER_PREFIX",
     "build_escalation_offer_keyboard",

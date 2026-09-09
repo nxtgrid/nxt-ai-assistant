@@ -1357,6 +1357,47 @@ async def test_verification_failure_escalation_persists_identity_on_the_canonica
     assert row["customer_email"] is None
 
 
+async def test_verification_failure_escalation_message_carries_action_buttons():
+    """Regression: escalate_verification_failure sent a button-less message,
+    leaving no admin path to close the escalation. It must now ship the
+    standard Track + Close-silently keyboard (no 'Close & inform customer'),
+    wired to the same id the canonical row is written under."""
+    raw = _FakeRaw()
+    supa = _FakeSupabase(raw)
+
+    async def fake_get_session(_sid):
+        return SimpleNamespace(id=uuid.uuid4())
+
+    supa.get_session = fake_get_session
+    svc = _make_service(supa)
+
+    sent: list = []
+
+    async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
+        sent.append({"text": text, "reply_markup": reply_markup})
+        return {"ok": True, "result": {"message_id": 77}}
+
+    svc._send_telegram_message = fake_send
+
+    await svc.escalate_verification_failure(
+        original_message="why is my meter reading zero",
+        failed_response="bad answer",
+        verification_feedback="not grounded",
+        session_id="telegram_abc",
+        customer_chat_id="123",
+        customer_username="Jane Doe",
+        organization_short_name="Acme Energy",
+    )
+
+    markup = sent[-1]["reply_markup"]
+    assert markup is not None
+    datas = [b["callback_data"] for row in markup["inline_keyboard"] for b in row]
+    row_id = raw.tables["escalations"].rows[0]["id"]
+    assert f"es:{row_id}" in datas  # Track
+    assert f"ec:{row_id}" in datas  # Close silently
+    assert all(not d.startswith("en:") for d in datas)  # no Close & inform
+
+
 # ---------------------------------------------------------------------------
 # Follow-up comment path (inside _escalate_to_telegram)
 # ---------------------------------------------------------------------------
@@ -1495,7 +1536,7 @@ def _wire_sweep_telegram(svc: EscalationService) -> Dict[str, List[Any]]:
         return {"ok": True, "result": {"message_id": 999}}
 
     async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
-        calls["messages"].append({"chat_id": chat_id, "text": text})
+        calls["messages"].append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return {"ok": True, "result": {"message_id": 1000}}
 
     svc._edit_telegram_message = fake_edit
@@ -1824,6 +1865,121 @@ async def test_sweep_old_escalations_alert_labels_entry_with_name_and_org_not_ba
     text = calls["messages"][-1]["text"]
     assert "Jane Doe (#acme)" in text
     assert "id:esc-old" not in text
+
+
+async def test_sweep_alert_uses_org_as_label_when_name_and_email_absent(monkeypatch):
+    """Org-only row (name + email both null, org_hashtag backfilled): the
+    bullet reads '#Org', not 'id:<uuid> (#Org)'."""
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    row = _canonical_escalation_row("esc-old", age_hours=30)
+    row["customer_username"] = None
+    row["customer_email"] = None
+    row["org_hashtag"] = "#ExampleOrg"
+    raw.table("escalations").rows = [row]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-old", "purpose": "escalation", "external_message_id": 777}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    text = calls["messages"][-1]["text"]
+    assert "• #ExampleOrg — [View](https://t.me/c/123456/777)" in text
+    assert "id:esc-old" not in text
+    assert "(#ExampleOrg)" not in text  # not duplicated as a suffix
+
+
+async def test_sweep_alert_still_shows_bare_id_when_nothing_is_known(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    row = _canonical_escalation_row("esc-blank", age_hours=30)
+    row["customer_username"] = None
+    row["customer_email"] = None
+    row["org_hashtag"] = None
+    raw.table("escalations").rows = [row]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-blank", "purpose": "escalation", "external_message_id": 888}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    assert "id:esc-blank" in calls["messages"][-1]["text"]
+
+
+async def test_sweep_alert_name_and_org_row_is_unchanged(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    row = _canonical_escalation_row("esc-full", age_hours=30)
+    row["customer_username"] = "Jane Doe"
+    row["org_hashtag"] = "#ExampleOrg"
+    raw.table("escalations").rows = [row]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-full", "purpose": "escalation", "external_message_id": 999}
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    assert "Jane Doe (#ExampleOrg)" in calls["messages"][-1]["text"]
+
+
+async def test_sweep_alert_attaches_one_close_button_per_linkable_entry(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    # Oldest first -- list_unfiled orders by created_at ascending, and the
+    # buttons must line up with the bullets in that same order.
+    r1 = _canonical_escalation_row("esc-a", age_hours=40)
+    r1["customer_username"] = "Jane Doe"
+    r1["org_hashtag"] = "#ExampleOrg"
+    r2 = _canonical_escalation_row("esc-b", age_hours=30)
+    r2["customer_username"] = None
+    r2["customer_email"] = None
+    r2["org_hashtag"] = "#OtherOrg"
+    raw.table("escalations").rows = [r1, r2]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-a", "purpose": "escalation", "external_message_id": 111},
+        {"escalation_id": "esc-b", "purpose": "escalation", "external_message_id": 222},
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    msg = calls["messages"][-1]
+    datas = [b["callback_data"] for row in msg["reply_markup"]["inline_keyboard"] for b in row]
+    assert datas == ["ex:esc-a", "ex:esc-b"]
+    # Button order matches bullet order (esc-a's View link, msg 111, comes first).
+    assert msg["text"].index("/111)") < msg["text"].index("/222)")
+
+
+async def test_sweep_alert_has_no_keyboard_when_all_entries_are_unlinkable(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    row = _canonical_escalation_row("esc-orphan", age_hours=30)
+    row["org_hashtag"] = "#ExampleOrg"
+    raw.table("escalations").rows = [row]
+    raw.table("message_deliveries").rows = []  # no delivery receipt -> unlinkable
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    assert calls["messages"][-1]["reply_markup"] is None
 
 
 async def test_sweep_old_escalations_alert_drops_entries_with_no_traceable_message(

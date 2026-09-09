@@ -34,7 +34,10 @@ from orchestrator.services.ticketing.delivery_repository import DeliveryReposito
 from orchestrator.services.ticketing.service import TicketService
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
-from shared.utils.telegram_buttons import build_escalation_track_keyboard
+from shared.utils.telegram_buttons import (
+    build_escalation_track_keyboard,
+    build_stale_alert_keyboard,
+)
 from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
 from shared.utils.telegram_markdown import escape_markdown as _escape_telegram_markdown
 from shared.utils.telegram_send import is_markdown_parse_error as _is_markdown_parse_error
@@ -2381,6 +2384,7 @@ class EscalationService:
             # leave this unresolvable) are counted in a footer instead of shown
             # as dead bullets, so they stay visible without being clickable.
             linkable_lines: List[str] = []
+            linkable_dismiss: List[tuple] = []  # (esc_id, label) for the Close keyboard
             unlinkable_count = 0
             # Each dropped entry keeps its human-searchable name/org plus its
             # raw id in backticks: name/org is what "check chat history"
@@ -2394,13 +2398,25 @@ class EscalationService:
                 username = esc.get("customer_username")
                 email = esc.get("customer_email") or ""
                 masked_email = (email[:2] + "***@" + email.split("@", 1)[1]) if "@" in email else ""
-                label = _escape_telegram_markdown(username or masked_email or f"id:{esc['id']}")
                 org_raw = esc.get("org_hashtag") or ""
-                org_part = f" ({_escape_telegram_markdown(org_raw)})" if org_raw else ""
+                # Precedence: a real name -> a masked email -> the org hashtag
+                # (backfilled onto rows created before PR #192) -> and only
+                # then the bare canonical id, when nothing human-meaningful is
+                # known at all.
+                primary = username or masked_email or org_raw or f"id:{esc['id']}"
+                label = _escape_telegram_markdown(primary)
+                # Don't repeat the org as a "(...)" suffix when it's already
+                # standing in as the label.
+                org_part = (
+                    f" ({_escape_telegram_markdown(org_raw)})"
+                    if org_raw and org_raw != primary
+                    else ""
+                )
                 msg_id = esc.get("escalation_message_id")
                 if msg_id and isinstance(msg_id, int) and channel_id:
                     link = f"https://t.me/c/{channel_id}/{msg_id}"
                     linkable_lines.append(f"• {label}{org_part} — [View]({link})")
+                    linkable_dismiss.append((esc["id"], primary))
                 else:
                     unlinkable_count += 1
                     unlinkable_breadcrumbs.append(f"{label}{org_part} — `{esc['id']}`")
@@ -2438,6 +2454,7 @@ class EscalationService:
             await self._send_telegram_message(
                 chat_id=self._escalation_chat_id,
                 text="\n".join(lines),
+                reply_markup=build_stale_alert_keyboard(linkable_dismiss),
             )
 
         # Reconcile tracked escalations whose Jira ticket was closed outside the webhook
@@ -3301,6 +3318,16 @@ class EscalationService:
                     org_name=organization_short_name or "",
                 )
 
+            # Pre-generate the escalation id so the message can carry action
+            # buttons wired to it. Verification-failure escalations were
+            # button-less -- the only way to close one was the DB. No "Close &
+            # inform customer": this is an internal AI-quality flag, not
+            # something to send the customer a resolution note about.
+            verification_id = str(uuid.uuid4())
+            track_keyboard = build_escalation_track_keyboard(
+                verification_id, include_track=True, include_close_notify=False
+            )
+
             # Send to escalation group
             LOGGER.info(
                 f"Sending verification failure escalation to Telegram for session {session_id}"
@@ -3309,6 +3336,7 @@ class EscalationService:
                 chat_id=self._escalation_chat_id,
                 text=message_text,
                 topic_id=escalation_topic_id,
+                reply_markup=track_keyboard,
             )
 
             if result.get("ok"):
@@ -3318,17 +3346,15 @@ class EscalationService:
                 if escalation_message_id and customer_chat_id:
                     supabase_client = self._get_supabase_client()
                     if supabase_client:
-                        saved_verification_id = str(uuid.uuid4())
-                        if saved_verification_id:
-                            await self._record_canonical_escalation(
-                                saved_verification_id,
-                                session_id,
-                                message_id=escalation_message_id,
-                                topic_id=escalation_topic_id,
-                                reason="verification_failed",
-                                customer_username=customer_username,
-                                org_hashtag=_org_hashtag_from_short_name(organization_short_name),
-                            )
+                        await self._record_canonical_escalation(
+                            verification_id,
+                            session_id,
+                            message_id=escalation_message_id,
+                            topic_id=escalation_topic_id,
+                            reason="verification_failed",
+                            customer_username=customer_username,
+                            org_hashtag=_org_hashtag_from_short_name(organization_short_name),
+                        )
                         LOGGER.info(
                             f"Saved verification failure escalation to database: "
                             f"msg_id={escalation_message_id} → session={session_id}, "
