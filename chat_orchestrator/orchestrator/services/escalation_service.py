@@ -34,7 +34,10 @@ from orchestrator.services.ticketing.delivery_repository import DeliveryReposito
 from orchestrator.services.ticketing.service import TicketService
 from shared.config import flag_registry as fr
 from shared.utils.logging import get_logger
-from shared.utils.telegram_buttons import build_escalation_track_keyboard
+from shared.utils.telegram_buttons import (
+    build_escalation_track_keyboard,
+    build_stale_alert_keyboard,
+)
 from shared.utils.telegram_markdown import convert_github_to_telegram_markdown
 from shared.utils.telegram_markdown import escape_markdown as _escape_telegram_markdown
 from shared.utils.telegram_send import is_markdown_parse_error as _is_markdown_parse_error
@@ -2381,6 +2384,7 @@ class EscalationService:
             # leave this unresolvable) are counted in a footer instead of shown
             # as dead bullets, so they stay visible without being clickable.
             linkable_lines: List[str] = []
+            linkable_dismiss: List[tuple] = []  # (esc_id, label) for the Close keyboard
             unlinkable_count = 0
             # Each dropped entry keeps its human-searchable name/org plus its
             # raw id in backticks: name/org is what "check chat history"
@@ -2412,6 +2416,7 @@ class EscalationService:
                 if msg_id and isinstance(msg_id, int) and channel_id:
                     link = f"https://t.me/c/{channel_id}/{msg_id}"
                     linkable_lines.append(f"• {label}{org_part} — [View]({link})")
+                    linkable_dismiss.append((esc["id"], primary))
                 else:
                     unlinkable_count += 1
                     unlinkable_breadcrumbs.append(f"{label}{org_part} — `{esc['id']}`")
@@ -2449,6 +2454,7 @@ class EscalationService:
             await self._send_telegram_message(
                 chat_id=self._escalation_chat_id,
                 text="\n".join(lines),
+                reply_markup=build_stale_alert_keyboard(linkable_dismiss),
             )
 
         # Reconcile tracked escalations whose Jira ticket was closed outside the webhook

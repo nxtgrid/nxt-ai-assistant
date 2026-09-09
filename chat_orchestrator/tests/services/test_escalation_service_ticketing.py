@@ -1495,7 +1495,7 @@ def _wire_sweep_telegram(svc: EscalationService) -> Dict[str, List[Any]]:
         return {"ok": True, "result": {"message_id": 999}}
 
     async def fake_send(chat_id, text, parse_mode="Markdown", topic_id=None, reply_markup=None):
-        calls["messages"].append({"chat_id": chat_id, "text": text})
+        calls["messages"].append({"chat_id": chat_id, "text": text, "reply_markup": reply_markup})
         return {"ok": True, "result": {"message_id": 1000}}
 
     svc._edit_telegram_message = fake_edit
@@ -1891,6 +1891,54 @@ async def test_sweep_alert_name_and_org_row_is_unchanged(monkeypatch):
     await svc.run_escalation_ticket_sweep()
 
     assert "Jane Doe (#ExampleOrg)" in calls["messages"][-1]["text"]
+
+
+async def test_sweep_alert_attaches_one_close_button_per_linkable_entry(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    # Oldest first -- list_unfiled orders by created_at ascending, and the
+    # buttons must line up with the bullets in that same order.
+    r1 = _canonical_escalation_row("esc-a", age_hours=40)
+    r1["customer_username"] = "Jane Doe"
+    r1["org_hashtag"] = "#ExampleOrg"
+    r2 = _canonical_escalation_row("esc-b", age_hours=30)
+    r2["customer_username"] = None
+    r2["customer_email"] = None
+    r2["org_hashtag"] = "#OtherOrg"
+    raw.table("escalations").rows = [r1, r2]
+    raw.table("message_deliveries").rows = [
+        {"escalation_id": "esc-a", "purpose": "escalation", "external_message_id": 111},
+        {"escalation_id": "esc-b", "purpose": "escalation", "external_message_id": 222},
+    ]
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    msg = calls["messages"][-1]
+    datas = [b["callback_data"] for row in msg["reply_markup"]["inline_keyboard"] for b in row]
+    assert datas == ["ex:esc-a", "ex:esc-b"]
+    # Button order matches bullet order (esc-a's View link, msg 111, comes first).
+    assert msg["text"].index("/111)") < msg["text"].index("/222)")
+
+
+async def test_sweep_alert_has_no_keyboard_when_all_entries_are_unlinkable(monkeypatch):
+    monkeypatch.setenv("STOP_LEGACY_ESCALATION_WRITES", "true")
+    raw = _FakeRaw()
+    row = _canonical_escalation_row("esc-orphan", age_hours=30)
+    row["org_hashtag"] = "#ExampleOrg"
+    raw.table("escalations").rows = [row]
+    raw.table("message_deliveries").rows = []  # no delivery receipt -> unlinkable
+    supa = _FakeSupabase(raw)
+    _wire_canonical_session(supa)
+    svc = _make_service(supa)
+    calls = _wire_sweep_telegram(svc)
+
+    await svc.run_escalation_ticket_sweep()
+
+    assert calls["messages"][-1]["reply_markup"] is None
 
 
 async def test_sweep_old_escalations_alert_drops_entries_with_no_traceable_message(
