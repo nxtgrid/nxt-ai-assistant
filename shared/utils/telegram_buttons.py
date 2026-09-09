@@ -81,6 +81,11 @@ ESCALATION_CLOSE_NOTIFY_PREFIX = "en"
 # Callback data prefix for proactive escalation offer to customer (eo:{session_id})
 ESCALATION_OFFER_PREFIX = "eo"
 
+# Callback data prefix for one-tap dismiss from the stale-escalation sweep
+# alert (ex:{mapping_uuid}) -- fully resolves the escalation, same end state
+# as "Close silently".
+ESCALATION_ALERT_DISMISS_PREFIX = "ex"
+
 # Maximum length for Telegram callback_data (64 bytes)
 MAX_CALLBACK_DATA_LENGTH = 64
 
@@ -215,11 +220,12 @@ def parse_callback_data(callback_data: str) -> Optional[Dict[str, str]]:
             "choice": parts[1],
         }
 
-    # Handle escalation callbacks (es/ec/en:mapping_uuid)
+    # Handle escalation callbacks (es/ec/en/ex:mapping_uuid)
     if callback_type in (
         ESCALATION_TRACK_CALLBACK_PREFIX,
         ESCALATION_CLOSE_SILENT_PREFIX,
         ESCALATION_CLOSE_NOTIFY_PREFIX,
+        ESCALATION_ALERT_DISMISS_PREFIX,
     ):
         return {
             "type": callback_type,
@@ -555,6 +561,36 @@ def build_escalation_track_keyboard(
     return {"inline_keyboard": rows}
 
 
+def build_stale_alert_keyboard(entries: List[tuple]) -> Optional[Dict[str, Any]]:
+    """Inline keyboard for the daily stale-escalation sweep alert: one
+    "Close" button per listed ``(escalation_id, label)`` entry. Tapping it
+    routes to ``ESCALATION_ALERT_DISMISS_PREFIX`` and fully resolves that
+    escalation.
+
+    Args:
+        entries: ``(escalation_id, label)`` for each linkable alert row
+
+    Returns:
+        InlineKeyboardMarkup dict, or ``None`` when ``entries`` is empty.
+    """
+    if not entries:
+        return None
+    rows = []
+    for esc_id, label in entries:
+        text = f"✅ Close — {label}"
+        if len(text) > 60:
+            text = text[:59] + "…"
+        rows.append(
+            [
+                {
+                    "text": text,
+                    "callback_data": f"{ESCALATION_ALERT_DISMISS_PREFIX}:{esc_id}",
+                }
+            ]
+        )
+    return {"inline_keyboard": rows}
+
+
 def build_escalation_offer_keyboard(session_id: str) -> Dict[str, Any]:
     """Build a single-button keyboard offering escalation to customer after a system error.
 
@@ -715,7 +751,9 @@ __all__ = [
     "ESCALATION_TRACK_CALLBACK_PREFIX",
     "ESCALATION_CLOSE_SILENT_PREFIX",
     "ESCALATION_CLOSE_NOTIFY_PREFIX",
+    "ESCALATION_ALERT_DISMISS_PREFIX",
     "build_escalation_track_keyboard",
+    "build_stale_alert_keyboard",
     # Escalation offer (customer-facing button after system error)
     "ESCALATION_OFFER_PREFIX",
     "build_escalation_offer_keyboard",
