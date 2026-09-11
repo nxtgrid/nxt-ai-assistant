@@ -161,6 +161,79 @@ def test_postprocess_does_not_extract_staff_groups_for_customer_mode():
     assert "Staff Groups" in result
 
 
+def test_postprocess_finds_staff_groups_nested_under_a_parent_heading():
+    """Regression test: a real ops doc naturally has '# <Doc Title>' as the
+    one top-level heading with 'Staff Groups' as one of several '##'
+    subsections underneath it, rather than 'Staff Groups' itself being a
+    bare top-level '#' block. _extract_block only recognizes a block whose
+    OWN heading matches the key -- a '##'-level "Staff Groups" never
+    becomes its own block (the splitter only cuts on '\\n\\n# ', not
+    '\\n\\n## '), so it silently stayed bundled inside its parent's block
+    and the registry stayed empty with no error at all: not even a "Loaded
+    0 staff group(s)" log line, since the section was never located to log
+    a count for in the first place."""
+    context = (
+        "# Internal Operations Context\n\n"
+        "## Staff Groups\n\n"
+        "Here are the specialized groups for staff that you can accept messages from:\n\n"
+        "| Group Name | Telegram Group ID | Purpose |\n"
+        "| --- | --- | --- |\n"
+        "| Ops Team | -1001 | alerts, escalations |\n"
+        "| Logbook Team | -1002 | site changes |\n\n"
+        "# Other Info\n\nsome other context"
+    )
+    ip._postprocess_context(context, extract_staff_groups=True)
+    assert ip.get_staff_group("-1001") == {"name": "Ops Team", "purposes": ["alerts", "escalations"]}
+    assert ip.get_staff_group("-1002") == {"name": "Logbook Team", "purposes": ["site changes"]}
+
+
+def test_postprocess_parses_a_markdown_table_of_staff_groups():
+    """Regression test: _parse_staff_groups only ever understood the
+    '## Name / - chat_id: / - purpose:' bullet format documented in its own
+    docstring. A 3-column table (as opposed to a 2-column one, which
+    gdrive_doc_fetcher.py's _convert_table_to_markdown treats as
+    "key-value" and converts to '### Name' sections instead) survives doc
+    export as a standard pipe-delimited markdown table -- a perfectly
+    reasonable way for a human to author this content, and one the parser
+    must handle rather than requiring the doc be reformatted around it."""
+    context = (
+        "# Staff Groups\n\n"
+        "Here are the specialized groups for staff that you can accept messages from:\n\n"
+        "| Group Name | Telegram Group ID | Purpose |\n"
+        "| --- | --- | --- |\n"
+        "| Ops Team | -1001 | alerts, escalations |\n\n"
+        "# Other Info\n\nsome other context"
+    )
+    result = ip._postprocess_context(context, extract_staff_groups=True)
+    assert "Staff Groups" not in result
+    assert "Other Info" in result
+    assert ip.get_staff_group("-1001") == {"name": "Ops Team", "purposes": ["alerts", "escalations"]}
+
+
+def test_postprocess_table_column_order_does_not_matter():
+    context = (
+        "# Staff Groups\n\n"
+        "| Purpose | Telegram Group ID | Group Name |\n"
+        "| --- | --- | --- |\n"
+        "| alerts | -1003 | Reordered Team |\n"
+    )
+    ip._postprocess_context(context, extract_staff_groups=True)
+    assert ip.get_staff_group("-1003") == {"name": "Reordered Team", "purposes": ["alerts"]}
+
+
+def test_postprocess_table_and_bullet_groups_can_coexist():
+    context = (
+        "# Staff Groups\n\n"
+        "## Bullet Team\n- chat_id: -1004\n- purpose: legacy\n\n"
+        "| Group Name | Telegram Group ID | Purpose |\n"
+        "| --- | --- | --- |\n"
+        "| Table Team | -1005 | new |\n"
+    )
+    ip._postprocess_context(context, extract_staff_groups=True)
+    assert ip.get_staff_group("-1004") == {"name": "Bullet Team", "purposes": ["legacy"]}
+    assert ip.get_staff_group("-1005") == {"name": "Table Team", "purposes": ["new"]}
+
+
 def test_postprocess_moves_examples_section_to_the_end():
     context = "# Examples\n\nsome examples\n\n# FAQ\n\nsome faq content"
     result = ip._postprocess_context(context, extract_staff_groups=False)
