@@ -210,6 +210,10 @@ async def test_json_block_leak_recovers_summary_from_json_arguments(fake_escalat
         pytest.param('{"tool": "escalate_to_support", "args": {"reason": "x"}}', id="json-tool-key"),
         pytest.param('{"name": "expert_run_steps", "arguments": {}}', id="json-name-key"),
         pytest.param("functionCall: escalate_to_support", id="function-call-marker"),
+        pytest.param(
+            "prose before it. [Call Tool: escalate_to_support] prose after it",
+            id="bare-bracket-mid-sentence-no-args",
+        ),
     ],
 )
 def test_detect_raw_tool_call_leak_covers_every_leak_shape(leaked):
@@ -355,3 +359,73 @@ async def test_escalation_question_is_never_the_customer_error_message(
     assert "ran into an issue" not in summary
     # Falls back to what the customer actually asked.
     assert summary == _make_state()["user_input"]
+
+
+# ---------------------------------------------------------------------------
+# Bare bracket-wrapped leak, no arguments at all (2026-09-11 incident)
+#
+# Every leak shape above still has an opening '(' right after the tool name,
+# which is what both detection paths key on: the marker-based check anchored
+# only at a true line start, and the per-tool-name check required '(' or '{'
+# immediately after the name. Production hit a leak with neither: the model
+# wrote "[Call Tool: escalate_to_support]" -- bracket-wrapped like
+# BRACKET_WRAPPED_LEAK above, but with no call syntax after the name at all,
+# and embedded mid-sentence after prose rather than at a line start. Both
+# guards missed it and the raw marker reached the customer untouched.
+# ---------------------------------------------------------------------------
+
+BARE_BRACKET_LEAK = (
+    "I do not have the ability to directly close issues like TICKET-42. "
+    "I have escalated this request to the support team to review the "
+    "status of the units and close the ticket if appropriate. "
+    "[Call Tool: escalate_to_support] #ExampleAction"
+)
+
+
+def test_detect_raw_tool_call_leak_catches_bare_bracket_form_with_no_args():
+    assert safety_check_module._detect_raw_tool_call_leak(BARE_BRACKET_LEAK) is True
+
+
+def test_find_leaked_tool_name_identifies_the_named_tool_with_no_args():
+    # Must not just coincidentally default to "escalate_to_support" -- prove
+    # it reads the actual name out of the bare marker by leaking a different
+    # tool.
+    other_tool_leak = "Sure, one moment. [Call Tool: fetch_training_image] thanks."
+    assert (
+        safety_check_module._find_leaked_tool_name(
+            other_tool_leak, known_tool_names={"escalate_to_support", "fetch_training_image"}
+        )
+        == "fetch_training_image"
+    )
+
+
+@pytest.mark.asyncio
+async def test_bare_bracket_leak_is_never_sent_to_customer(fake_escalation_service):
+    state = _make_state(final_response=BARE_BRACKET_LEAK)
+
+    result = await safety_check(state)
+
+    assert "Call Tool" not in result["final_response"]
+    assert "escalate_to_support" not in result["final_response"]
+    assert result["safety_escalation_needed"] is True
+    fake_escalation_service.escalate_to_support.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bare_bracket_leak_escalation_context_says_leak_not_generic_claim(
+    fake_escalation_service,
+):
+    # There are no kwargs to recover (no arguments were ever written), so the
+    # escalation's question falls back to the customer's own message. The
+    # internal context must say a raw call leaked -- the more specific and
+    # accurate of safety_check.py's two templates for this -- not the generic
+    # "model claimed escalation without tool call" one used when nothing
+    # structural was detected at all.
+    state = _make_state(final_response=BARE_BRACKET_LEAK)
+
+    await safety_check(state)
+
+    _, kwargs = fake_escalation_service.escalate_to_support.await_args
+    assert kwargs["question_summary"] == _make_state()["user_input"]
+    assert "raw tool-call text leaked" in kwargs["conversation_context"]
+    assert "claimed escalation without tool call" not in kwargs["conversation_context"]
