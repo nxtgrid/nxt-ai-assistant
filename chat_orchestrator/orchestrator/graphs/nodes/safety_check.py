@@ -280,12 +280,28 @@ def _strip_impersonation(response_text: str) -> str:
 # 2026-08-24 incident leaked a tool the guard did know about, in a syntax it did
 # not, so anchoring on any single syntax just moves the blind spot.
 _TOOL_CALL_MARKERS = (
-    # "Call Tool: x", "Tool Call: x", "functionCall: x", "tool_call = x"
-    r"(?:^|\n)\s*(?:call\s+tool|tool\s+call|tool_call|function\s*call|invoke\s+tool)\s*[:=]",
+    # "Call Tool: x", "Tool Call: x", "functionCall: x", "tool_call = x" -- at
+    # a line start, or immediately inside a bracket/paren wrapper. The
+    # bracket/paren alternative exists because the 2026-09-11 incident wrote
+    # "...if appropriate. [Call Tool: escalate_to_support] #Action" mid-
+    # sentence, not at a line start -- and with no arguments at all, so
+    # nothing else below caught it either.
+    r"(?:^|\n|[\[(])\s*(?:call\s+tool|tool\s+call|tool_call|function\s*call|invoke\s+tool)\s*[:=]",
     # Gemini's python-style tool harness leaking through verbatim
     r"\bdefault_api\s*\.",
     # Fenced tool blocks (```tool_code, ```tool_call, ```function_call)
     r"```\s*(?:tool_code|tool_call|tool_use|function_call)",
+)
+
+# Captures the name right after a "Call Tool:"-style marker, for when that
+# name isn't followed by '(' or '{' at all (the marker above still detects
+# the leak; this is what makes _find_leaked_tool_name name it correctly
+# instead of coincidentally defaulting to escalate_to_support regardless of
+# which tool actually leaked).
+_MARKER_WITH_NAME = re.compile(
+    r"(?:call\s+tool|tool\s+call|tool_call|function\s*call|invoke\s+tool)\s*[:=]\s*"
+    r"[\[\"'`]*\s*([A-Za-z_][A-Za-z0-9_]*)",
+    re.IGNORECASE,
 )
 
 # Fallback tool names for when the turn's declared payload is unavailable.
@@ -362,12 +378,24 @@ def _detect_raw_tool_call_leak(response_text: str, known_tool_names=None) -> boo
 
 def _find_leaked_tool_name(response_text: str, known_tool_names=None) -> str:
     """Return which tool the leaked call names, defaulting to escalate_to_support."""
-    for name in known_tool_names or _CORE_TOOL_NAMES:
+    names = known_tool_names or _CORE_TOOL_NAMES
+    for name in names:
         escaped = re.escape(name)
         if re.search(rf"\b{escaped}\s*[(\{{]", response_text) or re.search(
             rf'"(?:{_TOOL_NAME_JSON_KEYS})"\s*:\s*"{escaped}"', response_text
         ):
             return name
+
+    # Bare "Call Tool: name" with no '(' or '{' at all (no arguments were
+    # ever written) -- the loop above can't match it, since it only looks
+    # right after the name itself. Read the name straight out of the marker
+    # instead of falling through to the hardcoded default below, which
+    # would silently be wrong for any leaked tool other than
+    # escalate_to_support.
+    marker_match = _MARKER_WITH_NAME.search(response_text)
+    if marker_match and marker_match.group(1) in names:
+        return marker_match.group(1)
+
     return "escalate_to_support"
 
 
