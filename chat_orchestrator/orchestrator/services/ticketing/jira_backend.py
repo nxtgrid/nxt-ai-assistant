@@ -423,6 +423,9 @@ class JiraTicketBackend:
     async def transition_to_done(self, ref: str) -> bool:
         return await self._transition_jira_to_done(ref)
 
+    async def reopen(self, ref: str) -> bool:
+        return await self._transition_jira_from_done(ref)
+
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         return await self._search_jira_for_escalation(mapping_id)
 
@@ -877,6 +880,89 @@ class JiraTicketBackend:
 
         except Exception:
             LOGGER.opt(exception=True).warning("Error transitioning Jira {} to Done", issue_key)
+            return False
+
+    async def _transition_jira_from_done(self, issue_key: str) -> bool:
+        """Reopen a Jira issue that's currently Done, to whatever active
+        status its workflow's own reopen transition leads to.
+
+        Mirror image of ``_transition_jira_to_done``: fetches the issue's
+        currently available transitions and picks the first one whose
+        target status is *not* Done (statusCategory key other than "done").
+        Same no-hardcoded-transition-id approach, so it keeps working
+        regardless of how a given project's workflow names its reopen step
+        ("Reopen", "To Do", "Reopen Issue", ...).
+
+        Returns False (never raises) when no such transition exists --
+        some workflows make "Done" a terminal status with nothing to
+        transition to, which is a legitimate "can't", not a bug to retry.
+        The caller (``TicketService.reopen_ticket``) treats that the same
+        way ``transition_to_done``'s caller treats a failed close: leave the
+        canonical row alone rather than claim a reopen that didn't happen.
+        """
+        transitions_url = f"{self._jira_base_url}/rest/api/3/issue/{issue_key}/transitions"
+        try:
+            session = _get_jira_session()
+            headers = self._jira_auth_headers()
+
+            async with session.get(
+                transitions_url,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    LOGGER.warning(
+                        "Could not fetch transitions for {}: HTTP {} -- {}",
+                        issue_key,
+                        resp.status,
+                        body,
+                    )
+                    return False
+                data = await resp.json()
+
+            transition_id = None
+            for t in data.get("transitions", []):
+                to_status = t.get("to", {})
+                category_key = to_status.get("statusCategory", {}).get("key", "")
+                status_name = to_status.get("name", "")
+                if category_key and category_key != "done" and status_name not in (
+                    "Done",
+                    "Closed",
+                ):
+                    transition_id = t["id"]
+                    break
+
+            if not transition_id:
+                LOGGER.warning(
+                    "No reopen transition available for {} -- workflow may make "
+                    "Done terminal, or it's already open",
+                    issue_key,
+                )
+                return False
+
+            async with session.post(
+                transitions_url,
+                json={"transition": {"id": transition_id}},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status not in (200, 204):
+                    body = await resp.text()
+                    LOGGER.warning(
+                        "Jira reopen transition failed for {}: HTTP {} -- {}",
+                        issue_key,
+                        resp.status,
+                        body,
+                    )
+                    return False
+                LOGGER.info(
+                    "Reopened Jira {} (transition {})", issue_key, transition_id
+                )
+                return True
+
+        except Exception:
+            LOGGER.opt(exception=True).warning("Error reopening Jira {}", issue_key)
             return False
 
     async def _fetch_jira_issue_fields(self, issue_key: str) -> Optional[Dict[str, Any]]:

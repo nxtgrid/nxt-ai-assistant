@@ -44,6 +44,8 @@ class _FakeBackend:
         self.create_calls: List[TicketCreateRequest] = []
         self.transition_to_done_calls: List[str] = []
         self.transition_returns: bool = True
+        self.reopen_calls: List[str] = []
+        self.reopen_returns: bool = True
         self.status_by_ref: Dict[str, Optional[TicketStatus]] = {}
         self.get_status_calls: List[str] = []
         self.get_status_error: Optional[Exception] = None
@@ -57,6 +59,10 @@ class _FakeBackend:
     async def transition_to_done(self, ref: str) -> bool:
         self.transition_to_done_calls.append(ref)
         return self.transition_returns
+
+    async def reopen(self, ref: str) -> bool:
+        self.reopen_calls.append(ref)
+        return self.reopen_returns
 
     async def get_status(self, ref: str) -> Optional[TicketStatus]:
         self.get_status_calls.append(ref)
@@ -716,6 +722,86 @@ class TestTransitionToDone:
 
         assert closed is True
         assert events == []
+
+
+class TestReopenTicket:
+    """Mirrors TestTransitionToDone's shape: jira_backend.reopen() only
+    calls the Jira transitions API and has no repository reference of its
+    own, so TicketService must persist the canonical row itself for Jira --
+    the internal backend already does that via the shared repository and
+    must not be double-written."""
+
+    @pytest.mark.asyncio
+    async def test_persists_canonical_open_status_when_backend_is_jira(self):
+        jira = _FakeBackend("jira")
+        internal = _FakeBackend("internal")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira", status="done",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, internal=internal, ticket_repository=repository)
+
+        reopened = await service.reopen_ticket("OPS-99")
+
+        assert reopened is True
+        assert jira.reopen_calls == ["OPS-99"]
+        assert repository.reopen_by_ref_calls == [("OPS-99", "open")]
+
+    @pytest.mark.asyncio
+    async def test_does_not_double_write_when_backend_is_internal(self):
+        jira = _FakeBackend("jira")
+        internal = _FakeBackend("internal")
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["TKT-1"] = TicketRecord(
+            id="ticket-1", ticket_ref="TKT-1", backend="internal", status="done",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, internal=internal, ticket_repository=repository)
+
+        reopened = await service.reopen_ticket("TKT-1")
+
+        assert reopened is True
+        assert internal.reopen_calls == ["TKT-1"]
+        # Internal backend already persists via the shared repository itself --
+        # TicketService must not also call it.
+        assert repository.reopen_by_ref_calls == []
+
+    @pytest.mark.asyncio
+    async def test_reports_failure_when_jira_has_no_reopen_transition(self):
+        """Some workflows make Done terminal -- a legitimate "can't", and
+        the canonical row must not be touched on a failed live reopen, same
+        rationale as transition_to_done's actively-initiated branch."""
+        jira = _FakeBackend("jira")
+        jira.reopen_returns = False
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["OPS-99"] = TicketRecord(
+            id="ticket-1", ticket_ref="OPS-99", backend="jira", status="done",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, jira=jira, ticket_repository=repository)
+
+        reopened = await service.reopen_ticket("OPS-99")
+
+        assert reopened is False
+        assert repository.reopen_by_ref_calls == []
+
+    @pytest.mark.asyncio
+    async def test_reports_success_on_a_redundant_reopen(self):
+        """Already open -- this call isn't what reopened it, but the ticket
+        is genuinely not-done, so it's reported as success, not failure."""
+        internal = _FakeBackend("internal")
+        internal.reopen_returns = False  # nothing to flip
+        repository = _FakeTicketRepository()
+        repository.records_by_ref["TKT-1"] = TicketRecord(
+            id="ticket-1", ticket_ref="TKT-1", backend="internal", status="open",
+            summary="x", created_via="notification", provisioning_state="active",
+        )
+        service = _make_service(None, internal=internal, ticket_repository=repository)
+
+        reopened = await service.reopen_ticket("TKT-1")
+
+        assert reopened is True
 
 
 class TestMarkInProgressFromWebhook:

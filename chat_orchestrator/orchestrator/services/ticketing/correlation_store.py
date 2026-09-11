@@ -400,6 +400,84 @@ class CorrelationStore:
             )
         return merged
 
+    async def recently_closed_candidates_for_grid(
+        self, grid_name: str, since_iso: str, limit: int = 15
+    ) -> List[Dict[str, Any]]:
+        """Correlation rows for tickets on a grid closed within the reopen
+        window, most-recent-first.
+
+        Feeds only ``AlertCorrelator``'s exact-signature reopen rung -- never
+        the LLM path -- so a chronic fault whose ticket just closed can
+        continue that ticket's history on its next re-fire instead of always
+        minting a fresh ref with the occurrence count back at zero. Same
+        two-query shape as ``open_candidates_for_grid`` (see its docstring
+        for the "why not a join" rationale); the difference is
+        ``status='done'`` and ``since_iso`` bounding closure recency
+        (``tickets.updated_at``, which the repository's close path stamps)
+        rather than correlation-row activity.
+        """
+        client = self._client()
+        if client is None:
+            return []
+        try:
+            ticket_response = (
+                client.table("tickets")
+                .select("id, ticket_ref, backend, summary, description, status, updated_at")
+                .eq("grid_name", grid_name)
+                .eq("status", "done")
+                .eq("provisioning_state", "active")
+                .gte("updated_at", since_iso)
+                .order("updated_at", desc=True)
+                .limit(limit * 2)
+                .execute()
+            )
+        except Exception as e:
+            _record_failure("recently_closed_candidates_for_grid.tickets", e)
+            return []
+        ticket_rows = getattr(ticket_response, "data", None) or []
+        by_id = {row["id"]: row for row in ticket_rows if row.get("id")}
+        if not by_id:
+            return []
+
+        try:
+            correlation_response = (
+                client.table("ticket_correlations")
+                .select("*")
+                .in_("ticket_id", list(by_id.keys()))
+                .execute()
+            )
+        except Exception as e:
+            _record_failure("recently_closed_candidates_for_grid.correlations", e)
+            return []
+        correlation_rows = getattr(correlation_response, "data", None) or []
+        correlation_by_ticket_id = {
+            row["ticket_id"]: row for row in correlation_rows if row.get("ticket_id")
+        }
+
+        merged: List[Dict[str, Any]] = []
+        # Iterate `ticket_rows` (already most-recently-closed-first from the
+        # query above), not the correlations query -- unlike
+        # open_candidates_for_grid, there's no shared "last alert" timestamp
+        # to sort the correlations side by here; a closed ticket's own
+        # `updated_at` (when it closed) is the recency signal this method
+        # promises, and that lives only on `tickets`.
+        for ticket in ticket_rows:
+            correlation = correlation_by_ticket_id.get(ticket.get("id"))
+            if correlation is None:
+                continue
+            merged.append(
+                {
+                    **correlation,
+                    "ticket_ref": ticket.get("ticket_ref"),
+                    "ticket_backend": ticket.get("backend"),
+                    "summary_current": ticket.get("summary"),
+                    "description": ticket.get("description") or "",
+                    "status": ticket.get("status"),
+                    "grid_name": grid_name,
+                }
+            )
+        return merged[:limit]
+
     async def upsert_correlation(
         self,
         *,

@@ -177,6 +177,14 @@ class FakeCanonicalTicketRepository:
         ticket["resolved_at"] = "2026-01-01T00:01:00Z"
         return True
 
+    async def reopen_by_ref(self, ref: str, *, to_status: str = "open") -> bool:
+        ticket = self._ticket(ref)
+        if ticket is None or ticket["status"] != "done":
+            return False
+        ticket["status"] = to_status
+        ticket["resolved_at"] = None
+        return True
+
     async def find_ref_for_escalation(self, mapping_id: str) -> Optional[str]:
         if self.raise_on_find:
             raise self.raise_on_find
@@ -487,6 +495,39 @@ class TestTransitionToDone:
         backend = InternalTicketBackend(get_client=lambda: None)
         # Should not raise.
         await backend.transition_to_done("TKT-000001")
+
+
+class TestReopen:
+    @pytest.mark.asyncio
+    async def test_reopens_a_done_ticket(self):
+        backend, fake = _make_backend()
+        _seed_ticket(fake)
+        await backend.transition_to_done("TKT-000001")
+
+        reopened = await backend.reopen("TKT-000001")
+
+        assert reopened is True
+        assert fake.canonical_tickets.tickets[0]["status"] == "open"
+        assert fake.canonical_tickets.tickets[0]["resolved_at"] is None
+
+        status = await backend.get_status("TKT-000001")
+        assert status is not None
+        assert status.is_done is False
+
+    @pytest.mark.asyncio
+    async def test_redundant_reopen_of_an_already_open_ticket_reports_false(self):
+        backend, fake = _make_backend()
+        _seed_ticket(fake)  # already "open"
+
+        reopened = await backend.reopen("TKT-000001")
+
+        assert reopened is False
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_client(self):
+        backend = InternalTicketBackend(get_client=lambda: None)
+        # Should not raise.
+        await backend.reopen("TKT-000001")
 
 
 class TestFindByEscalation:

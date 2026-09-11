@@ -315,7 +315,27 @@ async def apply_amendment(
     ticket, not that the ticket itself is unknown -- that row is seeded from
     this alert and the normal flow continues, rather than being special-cased
     into an unconditional escalation the way it used to be.
+
+    Reopens the target first if it's currently closed -- not only for the
+    correlator's own signature-reopen rung (``decided_by="signature_reopen"``),
+    but generically for any amend/duplicate that happens to land on a
+    ticket closed moments earlier by something else, since deciding and
+    executing are two separate steps with a real gap between them. A failed
+    reopen (no workflow transition available, or the live call errored) does
+    not block the rest of this function -- the amend/comment/description
+    update below still applies; only the Jira status badge may stay "Done"
+    even though the content changed underneath it.
     """
+    status = await ticket_service.get_status(ticket_ref)
+    if status is not None and status.is_done:
+        reopened = await ticket_service.reopen_ticket(ticket_ref)
+        if not reopened:
+            LOGGER.warning(
+                "apply_amendment: {!r} is closed and could not be reopened -- "
+                "proceeding with the amend anyway",
+                ticket_ref,
+            )
+
     if (
         decision.decided_by == "replay"
         and alert.severity.strip().casefold() == "urgent"

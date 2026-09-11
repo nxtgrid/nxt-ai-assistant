@@ -975,6 +975,85 @@ class TestTransitionToDone:
         assert flipped is False
 
 
+class TestReopen:
+    @pytest.mark.asyncio
+    async def test_finds_and_executes_a_non_done_transition(self, fake_session):
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/issue/OPS-42/transitions",
+            _FakeResponse(
+                200,
+                {
+                    "transitions": [
+                        {"id": "31", "to": {"name": "Done", "statusCategory": {"key": "done"}}},
+                        {"id": "21", "to": {"name": "To Do", "statusCategory": {"key": "new"}}},
+                    ]
+                },
+            ),
+        )
+        fake_session.queue(
+            "POST", "/rest/api/3/issue/OPS-42/transitions", _FakeResponse(204, text_data="")
+        )
+        backend = _make_backend()
+
+        reopened = await backend.reopen("OPS-42")
+
+        assert reopened is True
+        method, url, kwargs = fake_session.calls[-1]
+        assert method == "POST"
+        assert kwargs["json"] == {"transition": {"id": "21"}}
+
+    @pytest.mark.asyncio
+    async def test_picks_an_indeterminate_transition_too(self, fake_session):
+        """Not just "new" -- an "in progress"-shaped reopen (statusCategory
+        "indeterminate") is just as much a legitimate not-done target."""
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/issue/OPS-42/transitions",
+            _FakeResponse(
+                200,
+                {
+                    "transitions": [
+                        {
+                            "id": "41",
+                            "to": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}},
+                        },
+                    ]
+                },
+            ),
+        )
+        fake_session.queue(
+            "POST", "/rest/api/3/issue/OPS-42/transitions", _FakeResponse(204, text_data="")
+        )
+        backend = _make_backend()
+
+        reopened = await backend.reopen("OPS-42")
+
+        assert reopened is True
+        _method, _url, kwargs = fake_session.calls[-1]
+        assert kwargs["json"] == {"transition": {"id": "41"}}
+
+    @pytest.mark.asyncio
+    async def test_noop_when_no_reopen_transition_available(self, fake_session):
+        """Some workflows make Done terminal -- only a Done-category
+        transition (or none at all) is offered."""
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/issue/OPS-42/transitions",
+            _FakeResponse(
+                200,
+                {"transitions": [{"id": "31", "to": {"name": "Done", "statusCategory": {"key": "done"}}}]},
+            ),
+        )
+        backend = _make_backend()
+
+        # Should not raise, and should not attempt a POST (queue would raise
+        # AssertionError on an unqueued POST if one were attempted).
+        reopened = await backend.reopen("OPS-42")
+
+        assert reopened is False
+
+
 class TestFindByEscalation:
     @pytest.mark.asyncio
     async def test_finds_ticket_by_label(self, fake_session):
