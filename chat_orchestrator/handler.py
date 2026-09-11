@@ -804,6 +804,18 @@ def _normalize_telegram_webhook(args: Dict[str, Any]) -> Dict[str, Any]:
             },
         }
 
+        # Carry forward the staff-group auth bypass set by the STAFF GROUP
+        # pre-check above (in async_main, before this function runs). The
+        # "metadata" dict was just built fresh from telegram_msg/chat above
+        # and would otherwise silently drop it -- resolve_auth.py only ever
+        # sees this normalized dict, never the pre-normalization `args`.
+        _incoming_metadata = args.get("metadata") or {}
+        if _incoming_metadata.get("staff_group_auth"):
+            normalized["metadata"]["staff_group_auth"] = True
+            normalized["metadata"]["staff_group_organization_id"] = _incoming_metadata.get(
+                "staff_group_organization_id"
+            )
+
         # Store reply-to metadata for context jump in init_services
         if reply_to_message:
             reply_from = reply_to_message.get("from", {})
@@ -1930,7 +1942,14 @@ async def async_main(args: Dict[str, Any]) -> Dict[str, Any]:
                     auth_svc = get_auth_service()
                     user_org_id = await auth_svc.get_org_id_for_telegram_user(user_tg_id)
 
-                    if not user_org_id or user_org_id != _STAFF_ORG_ID:
+                    # get_org_id_for_telegram_user always returns a str (or
+                    # None) -- see auth_service.py's
+                    # _get_organization_from_telegram_id, which explicitly
+                    # does `return str(org_id)` -- while _STAFF_ORG_ID is an
+                    # int. Comparing them directly ("2" != 2) is always True
+                    # in Python regardless of value, so this check could
+                    # never pass for any user; coerce both sides to str.
+                    if not user_org_id or user_org_id != str(_STAFF_ORG_ID):
                         LOGGER.info(
                             f"Non-staff user {user_tg_id} in staff group "
                             f"{staff_group['name']}, ignoring"

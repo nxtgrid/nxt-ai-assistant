@@ -48,15 +48,88 @@ def get_staff_groups() -> Dict[str, Dict[str, Any]]:
     return _staff_groups
 
 
+_TABLE_ROW = re.compile(r"^\|(.+)\|[ \t]*$")
+_TABLE_SEPARATOR_CELL = re.compile(r"^:?-{2,}:?$")
+
+
+def _parse_staff_groups_table(section_content: str) -> Dict[str, Dict[str, Any]]:
+    """Parse a standard markdown table of staff groups into a chat_id-keyed
+    dict. Column order doesn't matter and header wording is matched
+    loosely (substring, case-insensitive) rather than exactly, since this
+    reads whatever a human titled the columns in the doc:
+        | Group Name | Telegram Group ID | Purpose |
+        | --- | --- | --- |
+        | NXT Engineers | -100... | tag1, tag2 |
+    """
+    rows: list[list[str]] = []
+    for line in section_content.split("\n"):
+        match = _TABLE_ROW.match(line.strip())
+        if not match:
+            continue
+        cells = [c.strip() for c in match.group(1).split("|")]
+        if all(_TABLE_SEPARATOR_CELL.match(c) for c in cells):
+            continue  # the '| --- | --- |' separator row
+        rows.append(cells)
+
+    if len(rows) < 2:
+        return {}
+
+    header = [c.lower() for c in rows[0]]
+
+    def _column(*keywords: str, exclude: frozenset = frozenset()) -> Optional[int]:
+        for i, cell in enumerate(header):
+            if i in exclude:
+                continue
+            if any(kw in cell for kw in keywords):
+                return i
+        return None
+
+    # "chat"/"telegram" first, and excluded from the other lookups below --
+    # a header like "Telegram Group ID" also contains "group", which would
+    # otherwise collide with the name column's own "group" keyword.
+    id_col = _column("chat", "telegram")
+    if id_col is None:
+        return {}
+    name_col = _column("name", "group", exclude=frozenset({id_col}))
+    if name_col is None:
+        name_col = next((i for i in range(len(header)) if i != id_col), id_col)
+    purpose_col = _column("purpose", exclude=frozenset({id_col}))
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    for row in rows[1:]:
+        if id_col >= len(row):
+            continue
+        chat_id = row[id_col].strip()
+        if not chat_id.lstrip("-").isdigit():
+            continue
+        name = row[name_col].strip() if name_col < len(row) else chat_id
+        purposes: list[str] = []
+        if purpose_col is not None and purpose_col < len(row):
+            purposes = [t.strip() for t in row[purpose_col].split(",") if t.strip()]
+        groups[chat_id] = {"name": name, "purposes": purposes}
+
+    return groups
+
+
 def _parse_staff_groups(section_content: str) -> Dict[str, Dict[str, Any]]:
     """Parse the # Staff Groups section into a chat_id-keyed dict.
 
-    Expected format per group:
+    Accepts two formats, and a section may mix both:
+
+    A bullet subsection per group:
         ## Group Name
         - chat_id: -100...
         - purpose: tag1, tag2
+
+    Or a standard markdown table (see _parse_staff_groups_table) -- the
+    natural shape a 3+ column table survives Google Doc export as; a
+    2-column table instead becomes '### Name' bullet sections (see
+    gdrive_doc_fetcher.py's _convert_table_to_markdown "key-value" case),
+    which the bullet format above already reads once given a '##' key line.
     """
     groups: Dict[str, Dict[str, Any]] = {}
+    groups.update(_parse_staff_groups_table(section_content))
+
     current_name: Optional[str] = None
     current_data: Dict[str, Any] = {}
 
@@ -140,6 +213,45 @@ def _extract_block(blocks: list[str], key: str) -> tuple[Optional[str], list[str
     return found, remaining
 
 
+_ANY_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*$", re.MULTILINE)
+
+
+def _find_section_body_by_title(context_text: str, key: str) -> Optional[str]:
+    """Fallback for when a section isn't its own top-level '# ' block.
+
+    _extract_block only matches a block whose *own* heading is a bare '# '
+    (H1) -- a real doc author very reasonably nests a section like
+    'Staff Groups' as a '##' (or deeper) subsection under one overall
+    document title, and gdrive_doc_fetcher.py's Google Doc -> markdown
+    conversion preserves whatever heading level was actually used
+    (HEADING_1 -> '#', HEADING_2 -> '##', etc. -- see its
+    _fetch_document_content). A '##'-or-deeper heading never starts its own
+    top-level block (the splitter only cuts before '\\n\\n# '), so it stays
+    bundled inside its parent's block and _extract_block reports it as
+    simply absent -- with no error, since nothing was technically wrong.
+
+    Finds a heading matching `key` (case-insensitively, at any level 1-6)
+    anywhere in the raw text and returns everything up to the next heading
+    of that same level or shallower (or the end of the text), independent
+    of the '# '-only block splitter above. Returns None if no such heading
+    exists at all.
+    """
+    headings = list(_ANY_HEADING.finditer(context_text))
+    for i, match in enumerate(headings):
+        level = len(match.group(1))
+        title_key = match.group(2).strip().lower().replace(" ", "_")
+        if title_key != key:
+            continue
+        start = match.end()
+        end = len(context_text)
+        for later in headings[i + 1 :]:
+            if len(later.group(1)) <= level:
+                end = later.start()
+                break
+        return context_text[start:end].strip()
+    return None
+
+
 def _truncate_examples_block(block: str) -> str:
     """Cap an examples-style block's body at MAX_EXAMPLES_WORDS words."""
     match = re.match(r"^(#\s+.+?)\n\n(.*)\Z", block, re.DOTALL)
@@ -165,13 +277,40 @@ def _postprocess_context(
     blocks = _split_context_blocks(context_text)
 
     if extract_staff_groups:
-        groups_block, blocks = _extract_block(blocks, "staff_groups")
+        groups_block, remaining_blocks = _extract_block(blocks, "staff_groups")
         if groups_block:
+            # Clean case: "Staff Groups" is its own top-level '# ' block --
+            # strip it from what the LLM sees, same as before.
             body_match = re.match(r"^#\s+.+?\n\n(.*)\Z", groups_block, re.DOTALL)
             body = body_match.group(1) if body_match else ""
-            global _staff_groups
-            _staff_groups = _parse_staff_groups(body)
-            LOGGER.info(f"Loaded {len(_staff_groups)} staff group(s) from doc")
+            blocks = remaining_blocks
+        else:
+            # Fallback: the section exists but isn't a bare top-level '# '
+            # block (e.g. nested as '##' under a parent heading -- see
+            # _find_section_body_by_title). Left in place for the LLM
+            # rather than risking a mismatched strip of unrelated sibling
+            # content; the point of this fallback is loading the registry,
+            # not scrubbing the prompt.
+            body = _find_section_body_by_title(context_text, "staff_groups")
+
+        global _staff_groups
+        if body:
+            parsed = _parse_staff_groups(body)
+            if parsed:
+                _staff_groups = parsed
+                LOGGER.info(f"Loaded {len(_staff_groups)} staff group(s) from doc")
+            else:
+                LOGGER.warning(
+                    "Found a 'Staff Groups' section in the staff instructions doc, "
+                    "but parsed 0 groups from it -- check its format (a '## Name' "
+                    "bullet subsection per group, or a markdown table with a "
+                    "'chat_id'/'telegram ...' column)"
+                )
+        else:
+            LOGGER.warning(
+                "No 'Staff Groups' section found in the staff instructions doc "
+                "-- the staff-group auth bypass has nothing to match against"
+            )
 
     examples_block = None
     for key in _EXAMPLES_SECTION_KEYS:

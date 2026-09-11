@@ -54,7 +54,27 @@ async def resolve_auth(state: ConversationState) -> Dict[str, Any]:
     # Determine auth method
     is_scheduled_execution = metadata.get("scheduled_execution", False)
 
-    if user_context.source == "telegram" and user_context.chat_id and not is_scheduled_execution:
+    if metadata.get("staff_group_auth"):
+        # Staff group auth bypass — user already verified as staff in
+        # handler.py. MUST be checked before the generic Telegram
+        # chat-based branch below: a staff-group message is also a plain
+        # Telegram chat message with a chat_id, so it always satisfies that
+        # branch's own condition too. That branch resolves the organization
+        # from the *chat's* mapping (by design, the grid a shared O&M group
+        # discusses, not the sender) — correct for a genuine customer O&M
+        # group, but never what a staff-group bypass is for. Checking this
+        # branch second would make it unreachable for the one transport
+        # (Telegram) it exists to serve.
+        staff_org_id = str(metadata.get("staff_group_organization_id", STAFF_ORG_ID))
+        user_permissions = UserPermissions(
+            user_id=user_context.user_id or "staff_group",
+            email=user_context.user_email,
+            organization_ids=[staff_org_id],
+            is_staff=True,
+        )
+        LOGGER.info(f"Staff group auth: org={staff_org_id}, user={user_context.user_id}")
+
+    elif user_context.source == "telegram" and user_context.chat_id and not is_scheduled_execution:
         # Chat-based authentication - resolve org from chat_id
         lookup_chat_id = metadata.get("original_chat_id", user_context.chat_id)
 
@@ -76,17 +96,6 @@ async def resolve_auth(state: ConversationState) -> Dict[str, Any]:
                 error_msg += f", Topic ID: {user_context.topic_id}"
             error_msg += "\n\nPlease contact support to register this chat."
             raise PermissionError(error_msg)
-
-    elif metadata.get("staff_group_auth"):
-        # Staff group auth bypass — user already verified as staff in handler.py
-        staff_org_id = str(metadata.get("staff_group_organization_id", STAFF_ORG_ID))
-        user_permissions = UserPermissions(
-            user_id=user_context.user_id or "staff_group",
-            email=user_context.user_email,
-            organization_ids=[staff_org_id],
-            is_staff=True,
-        )
-        LOGGER.info(f"Staff group auth: org={staff_org_id}, user={user_context.user_id}")
 
     elif metadata.get("skill_builder_staff_auth") and metadata.get("_identity_trusted"):
         # The skill builder (anansi_app/nicegui_app/pages/skill_builder.py)
