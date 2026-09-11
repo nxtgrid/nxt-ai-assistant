@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional
 import pytest
 
 from orchestrator.services.ticketing.alert_facts import AlertFacts
+from orchestrator.services.ticketing.backend import TicketStatus
 from orchestrator.services.ticketing.correlation_render import (
     MARKER_END,
     MARKER_START,
@@ -484,9 +485,21 @@ class _FakeStore:
 
 
 class _FakeTicketService:
-    def __init__(self) -> None:
+    def __init__(self, *, is_done: bool = False, reopen_result: bool = True) -> None:
         self.update_calls: List[Dict[str, Any]] = []
         self.comment_calls: List[Dict[str, Any]] = []
+        self.reopen_calls: List[str] = []
+        self._is_done = is_done
+        self._reopen_result = reopen_result
+
+    async def get_status(self, ref) -> Optional[TicketStatus]:
+        return TicketStatus(summary="s", is_done=self._is_done)
+
+    async def reopen_ticket(self, ref) -> bool:
+        self.reopen_calls.append(ref)
+        if self._reopen_result:
+            self._is_done = False
+        return self._reopen_result
 
     async def update_ticket(self, ref, summary=None, description=None, priority_id=None) -> bool:
         self.update_calls.append(
@@ -955,6 +968,81 @@ class TestApplyAmendmentReportsNovelty:
         assert result.component_added is False
         assert result.affected_keys_count == 0
         assert store.merge_calls == []
+
+
+class TestApplyAmendmentReopensAClosedTarget:
+    """apply_amendment checks the target's live status and reopens it first
+    when closed -- the execution-side half of the correlator's
+    signature_reopen rung (see TestSignatureReopen in test_correlator.py),
+    but generic to any amend/duplicate that lands on a closed ticket."""
+
+    @pytest.mark.asyncio
+    async def test_reopens_a_closed_ticket_before_amending(self):
+        correlation = _correlation()
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService(is_done=True, reopen_result=True)
+        alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !")
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            ticket_id="ticket-1",
+            alert=alert,
+            decision=_amend_decision(),
+            raw_text="raw text",
+            grid_name="Kudi",
+        )
+
+        assert ticket_service.reopen_calls == ["TKT-1"]
+        # The amend itself still goes ahead, exactly as if it had been open.
+        assert result is not None
+        assert len(ticket_service.update_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_open_ticket_is_never_reopened(self):
+        correlation = _correlation()
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService(is_done=False)
+        alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !")
+
+        await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            ticket_id="ticket-1",
+            alert=alert,
+            decision=_amend_decision(),
+            raw_text="raw text",
+            grid_name="Kudi",
+        )
+
+        assert ticket_service.reopen_calls == []
+
+    @pytest.mark.asyncio
+    async def test_a_failed_reopen_does_not_block_the_amend(self):
+        """No workflow transition available, or the live call errored --
+        the amend/comment/description update must still go through; only
+        the backend's own status badge may stay stale."""
+        correlation = _correlation()
+        store = _FakeStore(correlation=correlation)
+        ticket_service = _FakeTicketService(is_done=True, reopen_result=False)
+        alert = AlertFacts(subject="! Warning: MPPT A7 in Kudi !")
+
+        result = await apply_amendment(
+            store=store,
+            ticket_service=ticket_service,
+            ticket_ref="TKT-1",
+            ticket_id="ticket-1",
+            alert=alert,
+            decision=_amend_decision(),
+            raw_text="raw text",
+            grid_name="Kudi",
+        )
+
+        assert ticket_service.reopen_calls == ["TKT-1"]
+        assert result is not None
+        assert len(ticket_service.update_calls) == 1
 
 
 class TestApplyAmendmentDuplicate:

@@ -42,6 +42,16 @@ class CorrelationPolicy:
     open_candidate_window_hours: int = 168
     maximum_candidate_count: int = 15
     candidate_status_concurrency: int = 5
+    # How long after closing a ticket stays eligible to be reopened by an
+    # exact-signature re-fire (see AlertCorrelator._assemble_recently_closed_
+    # candidates), rather than the recurrence filing a brand-new ticket with
+    # its occurrence history starting back at zero. Deliberately generous --
+    # a chronic fault has been observed recurring anywhere from under 4h to
+    # 3 days after its ticket closed -- but still bounded, and only ever
+    # consulted for a byte-identical signature match (never the LLM path),
+    # so a genuinely-resolved issue from further back can't be silently
+    # reanimated by an unrelated coincidence.
+    reopen_window_hours: int = 72
 
 
 DEFAULT_CORRELATION_POLICY = CorrelationPolicy()

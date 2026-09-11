@@ -177,6 +177,18 @@ class TicketBackend(Protocol):
         """
         ...
 
+    async def reopen(self, ref: str) -> bool:
+        """Reopen a done ticket back to an active status.
+
+        Returns True only when *this* call is what reopened it (mirrors
+        ``transition_to_done``'s exactly-once-announce contract). Returns
+        False, never raises, when there's nothing to reopen it to -- for
+        Jira specifically, a workflow can make "Done" terminal with no
+        outgoing transition, which is a legitimate "can't" rather than a
+        failure to retry.
+        """
+        ...
+
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         """Find a ticket ref already filed for this escalation mapping (dedup guard)."""
         ...

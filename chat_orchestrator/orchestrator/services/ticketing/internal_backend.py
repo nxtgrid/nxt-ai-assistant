@@ -134,6 +134,16 @@ class InternalTicketBackend:
             LOGGER.warning("Failed to transition internal ticket {} to done: {}", ref, e)
             return False
 
+    async def reopen(self, ref: str) -> bool:
+        """Reopen an internal ticket. No external system to sync -- the
+        canonical repository write is authoritative on its own, same as
+        ``transition_to_done`` above."""
+        try:
+            return await self._tickets.reopen_by_ref(ref, to_status="open")
+        except Exception as e:
+            LOGGER.warning("Failed to reopen internal ticket {}: {}", ref, e)
+            return False
+
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         try:
             return await self._tickets.find_ref_for_escalation(mapping_id)

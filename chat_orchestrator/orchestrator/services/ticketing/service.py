@@ -403,6 +403,54 @@ class TicketService:
             status = None
         return bool(status and status.is_done)
 
+    async def reopen_ticket(self, ref: str) -> bool:
+        """Reopen a done ticket back to open. Returns True only if this call
+        is what reopened it -- False, never raises, if it couldn't (already
+        open, or no reopen transition exists on this ticket's workflow).
+
+        Used by alert correlation (``correlation_render.apply_amendment``)
+        when an incoming alert's exact signature matches a ticket that
+        closed within the reopen window: the same underlying fault
+        recurring should continue that ticket's history rather than mint a
+        new ref starting back at occurrence 1. Mirrors ``transition_to_done``'s
+        shape -- for Jira, the live workflow transition runs first and is
+        authoritative for whether a reopen is even available; the canonical
+        write is what this call's return value is actually based on either
+        way, since ``jira_backend`` has no repository reference of its own
+        to persist against. No Telegram notification here, deliberately: the
+        amend/duplicate flow that triggered this already sends its own
+        message, and a second "reopened" card would be exactly the kind of
+        inconsistent message shape the alerting design explicitly rules out.
+        """
+        backend = await self._backend_for_ref(ref)
+
+        if backend is self._jira:
+            if not await backend.reopen(ref):
+                try:
+                    status = await self._tickets.get_status_by_ref(ref)
+                except Exception:
+                    status = None
+                return bool(status and not status.is_done)
+            try:
+                newly_reopened = await self._tickets.reopen_by_ref(ref, to_status="open")
+            except Exception:
+                newly_reopened = False
+                LOGGER.opt(exception=True).warning(
+                    "reopen_ticket: failed to persist canonical status for jira ticket {}",
+                    ref,
+                )
+        else:
+            newly_reopened = bool(await backend.reopen(ref))
+
+        if newly_reopened:
+            return True
+
+        try:
+            status = await self._tickets.get_status_by_ref(ref)
+        except Exception:
+            status = None
+        return bool(status and not status.is_done)
+
     async def mark_in_progress_from_webhook(
         self,
         ref: str,

@@ -350,6 +350,94 @@ class TestOpenCandidatesForGrid:
         assert await store.open_candidates_for_grid("Kudi", since_iso="2026-01-01") == []
 
 
+class TestRecentlyClosedCandidatesForGrid:
+    """Feeds only AlertCorrelator's exact-signature reopen rung -- same
+    two-query shape as open_candidates_for_grid, but status='done' and
+    recency bound on tickets.updated_at (closure time) rather than
+    ticket_correlations.last_alert_at."""
+
+    @pytest.mark.asyncio
+    async def test_returns_recently_closed_tickets_for_grid_ordered_desc(self):
+        store, fake = _make_store()
+        fake.tables["tickets"] = [
+            {"id": "t-1", "ticket_ref": "TKT-1", "backend": "internal", "grid_name": "Kudi",
+             "status": "done", "provisioning_state": "active", "summary": "s1", "description": "d1",
+             "updated_at": "2026-01-01T00:00:00Z"},
+            {"id": "t-2", "ticket_ref": "TKT-2", "backend": "internal", "grid_name": "Kudi",
+             "status": "done", "provisioning_state": "active", "summary": "s2", "description": "d2",
+             "updated_at": "2026-01-02T00:00:00Z"},
+            {"id": "t-3", "ticket_ref": "TKT-3", "backend": "internal", "grid_name": "Other",
+             "status": "done", "provisioning_state": "active", "summary": "s3",
+             "updated_at": "2026-01-03T00:00:00Z"},
+            {"id": "t-4", "ticket_ref": "TKT-4", "backend": "internal", "grid_name": "Kudi",
+             "status": "open", "provisioning_state": "active", "summary": "s4",
+             "updated_at": "2026-01-04T00:00:00Z"},
+        ]
+        fake.tables["ticket_correlations"] = [
+            {"ticket_id": "t-1", "signatures": ["sig-1"]},
+            {"ticket_id": "t-2", "signatures": ["sig-2"]},
+            {"ticket_id": "t-3", "signatures": ["sig-3"]},
+        ]
+
+        results = await store.recently_closed_candidates_for_grid(
+            "Kudi", since_iso="2025-01-01T00:00:00Z"
+        )
+
+        assert [r["ticket_id"] for r in results] == ["t-2", "t-1"]
+        assert results[0]["ticket_ref"] == "TKT-2"
+        assert results[0]["status"] == "done"
+        assert results[0]["summary_current"] == "s2"
+
+    @pytest.mark.asyncio
+    async def test_excludes_open_tickets_and_tickets_outside_the_window(self):
+        store, fake = _make_store()
+        fake.tables["tickets"] = [
+            {"id": "t-1", "ticket_ref": "TKT-1", "backend": "internal", "grid_name": "Kudi",
+             "status": "done", "provisioning_state": "active", "summary": "s1",
+             "updated_at": "2020-01-01T00:00:00Z"},  # closed long before the window
+            {"id": "t-2", "ticket_ref": "TKT-2", "backend": "internal", "grid_name": "Kudi",
+             "status": "open", "provisioning_state": "active", "summary": "s2",
+             "updated_at": "2026-01-02T00:00:00Z"},  # still open -- not a reopen candidate
+        ]
+        fake.tables["ticket_correlations"] = [
+            {"ticket_id": "t-1", "signatures": ["sig-1"]},
+            {"ticket_id": "t-2", "signatures": ["sig-2"]},
+        ]
+
+        results = await store.recently_closed_candidates_for_grid(
+            "Kudi", since_iso="2026-01-01T00:00:00Z"
+        )
+
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_empty_when_no_matching_tickets(self):
+        store, fake = _make_store()
+
+        assert await store.recently_closed_candidates_for_grid("Kudi", since_iso="2026-01-01") == []
+
+    @pytest.mark.asyncio
+    async def test_empty_on_tickets_error(self):
+        fake = FakeRawClient()
+        fake.raise_on_execute["tickets"] = RuntimeError("db down")
+        store, _ = _make_store(fake)
+
+        assert await store.recently_closed_candidates_for_grid("Kudi", since_iso="2026-01-01") == []
+
+    @pytest.mark.asyncio
+    async def test_empty_on_correlations_error(self):
+        fake = FakeRawClient()
+        fake.tables["tickets"] = [
+            {"id": "t-1", "ticket_ref": "TKT-1", "backend": "internal", "grid_name": "Kudi",
+             "status": "done", "provisioning_state": "active", "summary": "s1",
+             "updated_at": "2026-01-01T00:00:00Z"}
+        ]
+        fake.raise_on_execute["ticket_correlations"] = RuntimeError("db down")
+        store, _ = _make_store(fake)
+
+        assert await store.recently_closed_candidates_for_grid("Kudi", since_iso="2026-01-01") == []
+
+
 class TestUpsertCorrelation:
     @pytest.mark.asyncio
     async def test_creates_new_row(self):

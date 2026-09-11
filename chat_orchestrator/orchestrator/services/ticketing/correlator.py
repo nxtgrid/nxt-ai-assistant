@@ -941,6 +941,7 @@ class AlertCorrelator:
             if lookback_hours is not None
             else policy.open_candidate_window_hours
         )
+        self._reopen_window_hours = policy.reopen_window_hours
         self._max_candidates = (
             max_candidates
             if max_candidates is not None
@@ -1042,6 +1043,40 @@ class AlertCorrelator:
             LOGGER.opt(exception=True).warning("Candidate assembly failed for grid {!r}", grid_name)
             candidates = []
 
+        if candidates:
+            deterministic_decision = find_deterministic_decision(candidates, alert)
+            if deterministic_decision is not None:
+                return await self._finalize(grid_name, alert, dedup_key, deterministic_decision)
+
+        # No open candidate matched (or there were none at all). Before
+        # giving up to "new"/the LLM, check whether this exact signature was
+        # carried by a ticket that closed within the reopen window -- a
+        # chronic fault re-firing right after its ticket closed should
+        # continue that ticket's history rather than start a new one at
+        # occurrence 1. Deliberately reuses the same signature-only rungs as
+        # the open-candidate path (never the LLM): an exact signature match
+        # is the one signal unambiguous enough to reopen a ticket a human or
+        # the resolve-webhook explicitly closed, without a chance of a vague
+        # textual "sounds similar" judgment reanimating something that
+        # actually is done.
+        if alert.signature:
+            try:
+                recently_closed = await self._assemble_recently_closed_candidates(grid_name)
+            except Exception:
+                LOGGER.opt(exception=True).warning(
+                    "Recently-closed candidate assembly failed for grid {!r}", grid_name
+                )
+                recently_closed = []
+            if recently_closed:
+                reopen_decision = find_deterministic_decision(
+                    recently_closed,
+                    alert,
+                    decided_by="signature_reopen",
+                    reason_suffix=" (target ticket had closed; reopening)",
+                )
+                if reopen_decision is not None:
+                    return await self._finalize(grid_name, alert, dedup_key, reopen_decision)
+
         if not candidates:
             return await self._finalize(
                 grid_name,
@@ -1049,10 +1084,6 @@ class AlertCorrelator:
                 dedup_key,
                 _fallback_decision("no open candidates for grid", [], decided_by="no_candidates"),
             )
-
-        deterministic_decision = find_deterministic_decision(candidates, alert)
-        if deterministic_decision is not None:
-            return await self._finalize(grid_name, alert, dedup_key, deterministic_decision)
 
         candidate_refs = [c.ref for c in candidates]
         try:
@@ -1280,6 +1311,51 @@ class AlertCorrelator:
 
         confirmed.sort(key=lambda c: c.age_hours if c.age_hours is not None else 0.0)
         return confirmed[: self._max_candidates]
+
+    async def _assemble_recently_closed_candidates(
+        self, grid_name: str
+    ) -> List[CandidateSummary]:
+        """Correlation-tracked tickets on this grid closed within the reopen
+        window, as ``CandidateSummary`` objects -- feeds only the
+        exact-signature reopen rung in ``decide()``.
+
+        Unlike ``_assemble_candidates``, this never adopts an
+        externally-discovered ticket (a closed ticket with no correlation
+        history has no ``signatures`` to match against anyway) and never
+        reaches the LLM, so there's no live-status re-check here -- the
+        store's own ``status='done'`` filter is enough; ``apply_amendment``
+        re-confirms live status right before it ever mutates anything.
+        """
+        since_iso = (
+            datetime.now(timezone.utc) - timedelta(hours=self._reopen_window_hours)
+        ).isoformat()
+        rows = await self._store.recently_closed_candidates_for_grid(
+            grid_name, since_iso, limit=self._max_candidates
+        )
+        now = datetime.now(timezone.utc)
+        candidates: List[CandidateSummary] = []
+        for row in rows:
+            ref = row.get("ticket_ref")
+            ticket_id = row.get("ticket_id")
+            if not ref or not ticket_id:
+                continue
+            candidates.append(
+                CandidateSummary(
+                    ref=ref,
+                    ticket_id=ticket_id,
+                    backend=row.get("ticket_backend") or "",
+                    summary=row.get("summary_current") or row.get("summary_base") or "",
+                    description=row.get("description") or "",
+                    age_hours=_age_hours(row.get("created_at"), now),
+                    root_cause_kind=row.get("root_cause_kind"),
+                    affected_keys=row.get("affected_keys") or [],
+                    occurrence_count=row.get("occurrence_count") or 1,
+                    status=row.get("status") or "",
+                    signatures=row.get("signatures") or [],
+                    severity=row.get("severity") or "",
+                )
+            )
+        return candidates
 
     async def _confirm_candidate_status(
         self, candidate: CandidateSummary, semaphore: asyncio.Semaphore

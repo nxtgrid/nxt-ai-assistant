@@ -512,6 +512,13 @@ class _FakeStore:
             if row["grid_name"] == grid_name and row.get("status", "open") == "open"
         ][:limit]
 
+    async def recently_closed_candidates_for_grid(self, grid_name, since_iso, limit=15):
+        return [
+            row
+            for row in self.correlations
+            if row["grid_name"] == grid_name and row.get("status") == "done"
+        ][:limit]
+
     async def record_event(self, **kwargs):
         if kwargs.get("dedup_key"):
             self.events[kwargs["dedup_key"]] = {
@@ -1179,6 +1186,131 @@ class TestNoCandidates:
         assert decision.decision == "new"
         assert decision.decided_by == "no_candidates"
         assert gateway.calls == []
+
+
+class TestSignatureReopen:
+    """A closed ticket carrying the alert's exact signature is offered back
+    as a candidate for the deterministic rungs only -- never the LLM -- so a
+    chronic fault re-firing right after its ticket closed continues that
+    ticket's history instead of always minting a fresh ref at occurrence 1.
+    """
+
+    @pytest.mark.asyncio
+    async def test_exact_signature_match_on_a_recently_closed_ticket_reopens_it(
+        self, monkeypatch
+    ):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert()
+        correlator, store, _ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_id": "tid-TKT-1",
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "done",
+                "signatures": [alert.signature],
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "duplicate"
+        assert decision.ticket_ref == "TKT-1"
+        assert decision.ticket_id == "tid-TKT-1"
+        assert decision.decided_by == "signature_reopen"
+        assert gateway.calls == []  # deterministic rung -- never reaches the LLM
+
+    @pytest.mark.asyncio
+    async def test_new_component_on_a_recently_closed_ticket_is_an_amend(self, monkeypatch):
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert(
+            subject="! Warning: MPPT A7 in Kudi seems to perform lower !"
+        )
+        correlator, store, _ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_id": "tid-TKT-1",
+                "ticket_ref": "TKT-1",
+                "grid_name": "Kudi",
+                "status": "done",
+                "signatures": [alert.signature],
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "amend"
+        assert decision.ticket_ref == "TKT-1"
+        assert decision.decided_by == "signature_reopen"
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_closed_ticket_with_a_different_signature_is_not_offered(self, monkeypatch):
+        """A closed ticket for an unrelated fault must not intercept an
+        alert that doesn't match it -- this still falls through to
+        no_candidates/new exactly as if the closed row weren't there."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert()
+        correlator, store, _ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_id": "tid-TKT-9",
+                "ticket_ref": "TKT-9",
+                "grid_name": "Kudi",
+                "status": "done",
+                "signatures": ["some-other-signature"],
+                "affected_keys": [],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.decision == "new"
+        assert decision.decided_by == "no_candidates"
+        assert gateway.calls == []
+
+    @pytest.mark.asyncio
+    async def test_an_open_candidate_match_takes_priority_over_a_closed_one(self, monkeypatch):
+        """When an open candidate already matches deterministically, the
+        recently-closed lookup never even needs to run -- exercised here by
+        having both an exact-match open ticket and an exact-match closed
+        ticket present, and asserting the open one wins."""
+        monkeypatch.setenv("ALERT_CORRELATION_ENABLED", "true")
+        alert = _mppt_alert()
+        correlator, store, ts, gateway = _make_correlator()
+        store.correlations.append(
+            {
+                "ticket_id": "tid-open",
+                "ticket_ref": "TKT-OPEN",
+                "grid_name": "Kudi",
+                "status": "open",
+                "signatures": [alert.signature],
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        store.correlations.append(
+            {
+                "ticket_id": "tid-closed",
+                "ticket_ref": "TKT-CLOSED",
+                "grid_name": "Kudi",
+                "status": "done",
+                "signatures": [alert.signature],
+                "affected_keys": [{"kind": "mppt", "key": "A3", "label": "MPPT A3"}],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        ts.statuses["TKT-OPEN"] = TicketStatus(summary="s", is_done=False)
+
+        decision = await correlator.decide("Kudi", alert)
+
+        assert decision.ticket_ref == "TKT-OPEN"
+        assert decision.decided_by == "signature"
 
 
 class TestSignatureDuplicate:
