@@ -163,18 +163,26 @@ async def _compose_tab(svc, vsvc, email: str) -> None:
     # Image upload.
     img_status = ui.label().classes("text-caption")
 
-    def _on_upload(e) -> None:
+    async def _on_upload(e) -> None:
         if len(state["images"]) >= MAX_IMAGES:
             ui.notify("Maximum 10 images (Telegram limit).", type="negative")
             return
-        content = e.content.read()
+        # NiceGUI >=2.x's UploadEventArguments carries the upload as a nested
+        # `file: FileUpload` (name/content_type/async read()) rather than the
+        # content/name/type attributes directly on `e` -- see broadcast_dialog
+        # image-attachment regression test for the version this broke on.
+        content = await e.file.read()
         if len(content) > MAX_IMAGE_BYTES:
-            ui.notify(f"{e.name} exceeds Telegram's 10 MB limit.", type="negative")
+            ui.notify(f"{e.file.name} exceeds Telegram's 10 MB limit.", type="negative")
             return
         from services.broadcast_service import ImageData
 
         state["images"].append(
-            ImageData(filename=e.name, content_type=e.type or "image/jpeg", data=content)
+            ImageData(
+                filename=e.file.name,
+                content_type=e.file.content_type or "image/jpeg",
+                data=content,
+            )
         )
         total_mb = sum(len(i.data) for i in state["images"]) / (1024 * 1024)
         img_status.set_text(f"{len(state['images'])} image(s), {total_mb:.1f} MB")
