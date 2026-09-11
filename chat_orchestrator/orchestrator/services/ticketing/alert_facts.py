@@ -64,8 +64,19 @@ _SOLAR_CHARGER_PATTERN = re.compile(
 )
 # Mirrors n8n's Build Alert Actions1 regexes exactly (see the plan's
 # "Current architecture (n8n side)" section) -- a 16-hex id is a base
-# station, a 9-digit id is a DCU.
-_DCU_PATTERN = re.compile(r"dcu\s+(\d{9}|[a-fA-F0-9]{16})", re.IGNORECASE)
+# station, a 9-digit id is a DCU. n8n's own alert body always repeats the
+# id after the literal word "dcu" (searched via the `text` param above),
+# even when the subject itself says "Base Station <id>" -- but at least
+# one live alert source sends a subject-only notification (empty details)
+# phrased as "Base Station <id>" with no "dcu" mention anywhere, so that
+# alternative must be matched directly rather than assumed redundant.
+# Confirmed in prod: two distinct base station serials on the same grid,
+# both subject-only, fell through this pattern entirely (blank component
+# kind/key for both) and were left for the LLM to tell apart from subject
+# text alone -- it merged them onto one ticket.
+_DCU_PATTERN = re.compile(
+    r"(?:dcu|base\s+station)\s+(\d{9}|[a-fA-F0-9]{16})", re.IGNORECASE
+)
 
 # The VRM alert shape is `ALERT - '<grid>': '<fault>' on '<device>'` -- the
 # quoted device clause is exactly the part that must be masked structurally

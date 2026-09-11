@@ -85,6 +85,34 @@ class TestDeriveComponent:
         assert key == "a1b2c3d4e5f60718"
         assert label == "Base Station a1b2c3d4e5f60718"
 
+    def test_base_station_subject_only_no_redundant_dcu_mention(self):
+        """Regression test (prod incident): unlike the case above, at least
+        one live alert source sends no body text at all -- the id only ever
+        appears once, in the subject, phrased "Base Station <id>" with the
+        word "dcu" nowhere in either field. Two distinct devices with this
+        exact shape (different id, no component key derivable) were merged
+        onto one ticket by LLM judgment alone before this fix, since
+        derive_component returned ("", "", "") for both and there was no
+        structured way to tell them apart.
+        """
+        subject = "! Warning: Base Station a1b2c3d4e5f60001 in Kudi could have a problem, causing Meter Issues !"
+        kind, key, label = derive_component(subject, "")
+        assert kind == "base_station"
+        assert key == "a1b2c3d4e5f60001"
+        assert label == "Base Station a1b2c3d4e5f60001"
+
+    def test_base_station_subject_only_different_devices_get_different_keys(self):
+        first = derive_component(
+            "! Warning: Base Station a1b2c3d4e5f60001 in Kudi could have a problem, causing Meter Issues !",
+            "",
+        )
+        second = derive_component(
+            "! Warning: Base Station a1b2c3d4e5f60002 in Kudi could have a problem, causing Meter Issues !",
+            "",
+        )
+        assert first[0] == second[0] == "base_station"
+        assert first[1] != second[1]
+
     def test_no_match_returns_blank(self):
         subject = "! Urgent: Inverter Fault reported in Kudi, could be causing Grid outage !"
         kind, key, label = derive_component(subject, "")
@@ -299,6 +327,30 @@ class TestDeriveSignature:
             component_key="A7",
         )
         assert sig_a3 == sig_a7
+
+    def test_same_grid_different_base_station_device_same_signature(self):
+        """The same property this class opens with, for the alert shape that
+        used to skip masking entirely (see TestDeriveComponent's
+        test_base_station_subject_only_* above): two distinct base station
+        serials on one grid must hash to the same signature -- same fault
+        shape, different affected device -- so they meet in the
+        deterministic amend rung instead of two unrelated-looking signatures
+        being left for the LLM to (mis)judge as the same issue by subject
+        text alone.
+        """
+        sig_first = derive_signature(
+            grid_name="Kudi",
+            component_kind="base_station",
+            subject="! Warning: Base Station a1b2c3d4e5f60001 in Kudi could have a problem, causing Meter Issues !",
+            component_key="a1b2c3d4e5f60001",
+        )
+        sig_second = derive_signature(
+            grid_name="Kudi",
+            component_kind="base_station",
+            subject="! Warning: Base Station a1b2c3d4e5f60002 in Kudi could have a problem, causing Meter Issues !",
+            component_key="a1b2c3d4e5f60002",
+        )
+        assert sig_first == sig_second
 
     def test_different_grid_different_signature(self):
         sig_kudi = derive_signature(
