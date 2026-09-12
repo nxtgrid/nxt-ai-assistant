@@ -677,6 +677,7 @@ def _build_judgment_prompt(context: AlertJudgmentContext, alert: AlertFacts) -> 
         "context_availability": context.availability_payload(),
         "deterministic_findings": [finding.model_dump(mode="json") for finding in context.deterministic_findings],
         "open_tickets": [ticket.model_dump(mode="json") for ticket in context.open_tickets],
+        "grid_operational_facts": context.grid_operational_facts,
         "live_telemetry": context.telemetry.model_dump(mode="json"),
         "prior_delivered_alerts": [alert.model_dump(mode="json") for alert in context.prior_alerts],
         "om_topic_messages": [message.model_dump(mode="json") for message in context.om_messages],

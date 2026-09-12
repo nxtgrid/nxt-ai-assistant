@@ -78,6 +78,14 @@ class AlertTelemetry(_ContextModel):
     l3_voltage_v: float | None = None
     observed_at: str | None = None
     fresh: bool = False
+    # Pre-fault evidence from get_recent_production_errors_and_power (VRM's
+    # real alarm-log/diagnostics endpoints), named to match what
+    # ticketing.correlation.prompt already instructs the model to look for --
+    # see _alias_raw_alarm_fields for why these names differ from what the
+    # raw telemetry provider returns them as.
+    active_ve_bus_errors: list[dict[str, Any]] = Field(default_factory=list)
+    recent_ve_bus_errors_30min: list[dict[str, Any]] = Field(default_factory=list)
+    power_trend_past_30min: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class AlertJudgmentContext(_ContextModel):
@@ -86,6 +94,15 @@ class AlertJudgmentContext(_ContextModel):
     telemetry: AlertTelemetry = Field(default_factory=AlertTelemetry)
     prior_alerts: list[PriorAlertMessage] = Field(default_factory=list)
     om_messages: list[OMChatMessage] = Field(default_factory=list)
+    # is_hps_on / is_hps_on_updated_at / DCU status roll-up
+    # (auth_service.get_grid_operational_facts, via
+    # correlation_rules.get_grid_operational_context) -- what the prompt's
+    # "Root Cause Rules" section reads to decide whether a new alert is a
+    # child of an existing grid-off/isolated state. Left as a raw dict
+    # (matching how the legacy prompt path already treats it) rather than a
+    # narrow sub-model: a stricter schema is exactly what silently dropped
+    # the alarm fields above once already.
+    grid_operational_facts: dict[str, Any] = Field(default_factory=dict)
     availability: dict[str, ContextSourceResult] = Field(default_factory=dict)
 
     def has_degradation(self) -> bool:
@@ -107,6 +124,34 @@ def _count(value: Any) -> int:
     if isinstance(value, Sequence) and not isinstance(value, str):
         return len(value)
     return int(value is not None)
+
+
+def _alias_raw_alarm_fields(value: Any) -> Any:
+    """``get_live_telemetry`` (mcp_servers/customer_server/client_grid_status.py)
+    returns pre-fault alarm/power-trend evidence under its own raw key names
+    -- ``active_alarms``, ``recent_alarms_30min``, ``power_history_30min``.
+    ``AlertTelemetry`` (and the judgment prompt's own instructions, and
+    ``UrgentAlertContext.llm_facts()``, the sibling view of this same
+    telemetry used for ticket-description context) use
+    ``active_ve_bus_errors``/``recent_ve_bus_errors_30min``/
+    ``power_trend_past_30min`` instead. Rename here rather than requiring the
+    raw provider to change shape or the prompt to change vocabulary -- this
+    stays the one place that has to know both names, so a mismatch is loud
+    (a missing key) rather than a silent drop.
+
+    A value that isn't a mapping, or one that already carries the aliased
+    names (e.g. a test fixture), passes through unchanged."""
+    if not isinstance(value, Mapping):
+        return value
+    aliased = dict(value)
+    for raw_key, aliased_key in (
+        ("active_alarms", "active_ve_bus_errors"),
+        ("recent_alarms_30min", "recent_ve_bus_errors_30min"),
+        ("power_history_30min", "power_trend_past_30min"),
+    ):
+        if aliased_key not in aliased and raw_key in aliased:
+            aliased[aliased_key] = aliased[raw_key]
+    return aliased
 
 
 async def _capture(
@@ -137,6 +182,7 @@ class AlertJudgmentContextAssembler:
         telemetry_provider: Provider,
         prior_alerts_provider: Provider,
         om_messages_provider: Provider,
+        grid_operational_facts_provider: Provider,
         delivery_failures_provider: Callable[[], int] = delivery_history_failures_last_hour,
         timeout_seconds: float = 3.0,
     ) -> None:
@@ -146,6 +192,7 @@ class AlertJudgmentContextAssembler:
             "telemetry": telemetry_provider,
             "prior_alerts": prior_alerts_provider,
             "om_messages": om_messages_provider,
+            "grid_operational_facts": grid_operational_facts_provider,
         }
         self._delivery_failures_provider = delivery_failures_provider
         self._timeout_seconds = timeout_seconds
@@ -173,6 +220,9 @@ class AlertJudgmentContextAssembler:
         om_messages = self._convert_messages(
             values["om_messages"], OMChatMessage, _OM_MESSAGE_LIMIT, availability, "om_messages"
         )
+        grid_operational_facts = self._convert_grid_operational_facts(
+            values["grid_operational_facts"], availability
+        )
         if self._delivery_failures_provider() > 0:
             availability["prior_alerts"] = ContextSourceResult(
                 status=ContextStatus.FAILED,
@@ -185,6 +235,7 @@ class AlertJudgmentContextAssembler:
             telemetry=telemetry,
             prior_alerts=prior_alerts,
             om_messages=om_messages,
+            grid_operational_facts=grid_operational_facts,
             availability=availability,
         )
 
@@ -223,7 +274,7 @@ class AlertJudgmentContextAssembler:
         if availability["telemetry"].status is not ContextStatus.AVAILABLE:
             return AlertTelemetry()
         try:
-            telemetry = AlertTelemetry.model_validate(value)
+            telemetry = AlertTelemetry.model_validate(_alias_raw_alarm_fields(value))
         except ValidationError as exc:
             self._mark_invalid(availability, "telemetry", exc)
             return AlertTelemetry()
@@ -253,3 +304,24 @@ class AlertJudgmentContextAssembler:
         except (TypeError, ValidationError) as exc:
             self._mark_invalid(availability, name, exc)
             return []
+
+    def _convert_grid_operational_facts(
+        self, value: Any, availability: dict[str, ContextSourceResult]
+    ) -> dict[str, Any]:
+        """``get_grid_operational_facts`` returns ``{}`` by design (grid not
+        found, or any lookup failure -- see its own docstring), which
+        ``_capture`` already reports as EMPTY, not FAILED -- an intentional
+        "no extra context", not degradation. Kept as a raw dict rather than a
+        typed sub-model for the same reason as the alarm fields above."""
+        if availability["grid_operational_facts"].status not in (
+            ContextStatus.AVAILABLE,
+            ContextStatus.EMPTY,
+        ):
+            return {}
+        if isinstance(value, Mapping):
+            return dict(value)
+        if value is not None:
+            self._mark_invalid(
+                availability, "grid_operational_facts", TypeError(f"expected a mapping, got {type(value).__name__}")
+            )
+        return {}
