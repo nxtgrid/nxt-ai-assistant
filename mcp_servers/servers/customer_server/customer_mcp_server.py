@@ -495,10 +495,22 @@ async def _tool_get_recent_production_errors_and_power(
                 text="Error: grid_name is required",
             )
         ]
+    # organization_id is injected by orchestrator, not passed by LLM. Required
+    # (not defaulted to None/staff) so a customer session can never fall through
+    # to the unscoped lookup this tool's own client method also allows.
+    organization_id = arguments.get("organization_id")
+    if not organization_id:
+        return [
+            types.TextContent(
+                type="text",
+                text="Error: organization_id is required (should be injected by orchestrator)",
+            )
+        ]
     minutes = int(arguments.get("minutes") or 30)
     result = await customer_client.get_recent_production_errors_and_power(
         grid_name=grid_name,
         minutes=minutes,
+        organization_id=int(organization_id),
     )
     return list(compose_json_response(result))
 
