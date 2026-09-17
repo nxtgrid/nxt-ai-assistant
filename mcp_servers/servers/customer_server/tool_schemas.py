@@ -101,7 +101,11 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'meter_information',
                  'about per-phase consumption or load and no historical breakdown exists, offer '
                  'this live power reading as the closest available answer instead of escalating '
                  "— but say plainly it's an instantaneous snapshot, not accumulated "
-                 'energy/consumption. You MUST provide the grid_name parameter.',
+                 'energy/consumption. If service_status.is_stale is true or service is '
+                 '"Unknown", the numbers in this response are not a current reading — call '
+                 'get_recent_production_errors_and_power before telling the customer anything '
+                 'about current power/battery state; an active alarm there is often the real '
+                 'explanation. You MUST provide the grid_name parameter.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid (required)'}},
@@ -121,7 +125,14 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'meter_information',
                  'errors/warnings), and recent_alarms (errors that fired within the window). Use '
                  'this to build alert-correlation context — e.g. was one phase already dropping '
                  'before an inverter tripped, or was a VE.Bus alarm active leading up to a grid '
-                 'outage — rather than only the instantaneous reading at alert time.',
+                 'outage — rather than only the instantaneous reading at alert time. Also call '
+                 'this when a customer reports a grid is off/misbehaving, or '
+                 'customer_get_grid_status came back stale/Unknown — an active_alarms entry is '
+                 'often the real explanation. Translate any alarm into plain language for the '
+                 'customer (what it means, not the raw VE.Bus code) rather than inventing a '
+                 "cause if it's unclear; if there is no alarm and the contradiction is still "
+                 'unexplained, escalate per the Uncertainty and Edge Cases policy instead of '
+                 'guessing.',
   'inputSchema': {'type': 'object',
                   'properties': {'grid_name': {'type': 'string',
                                                'description': 'Name of the grid (required)'},
@@ -129,7 +140,7 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'meter_information',
                                             'description': 'How many minutes of history to look '
                                                            'back (default 30)'}},
                   'required': ['grid_name']},
-  'visible_to_customer': False},
+  'visible_to_customer': True},
  {'name': 'customer_get_last_gtr_summary',
   'description': '[READ-ONLY] Get the last Grid Technical Report (GTR) summary for a specific '
                  'grid. Returns KPI values, commentary, and pending issues from the most recent '

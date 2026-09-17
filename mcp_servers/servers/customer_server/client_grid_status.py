@@ -101,6 +101,48 @@ def _inverter_voltage_is_stale(voltage: Any) -> bool:
     return now - data_timestamp > timedelta(minutes=30)
 
 
+def live_metrics_view(
+    *, voltage: Any, battery: Any, pv: Any, grid_status_vrm: Any
+) -> dict[str, Optional[float]]:
+    """Battery SOC/current, solar power, and grid-consumption power a chat
+    model may see for one grid -- all ``None`` when the site's gateway
+    reading is missing, errored, or stale.
+
+    Unlike the inverter reading, none of ``BatteryStatus``/``PowerReading``/
+    ``GridStatus`` carries a gateway report time of its own (see
+    ``_current_battery_voltage_v``), so there is nothing on these readings
+    themselves to age out. All four readings come from the same site's
+    gateway in the same ``get_grid_status`` request, so a stale/missing/
+    errored ``voltage`` reading is used as the shared proxy -- the same rule
+    ``inverter_power_view`` already applies to inverter output. Without this,
+    VRM keeps serving the last SOC/power sample it ever saw for a gateway
+    that has gone dark, which is exactly what let a bot tell a customer their
+    grid was "currently powered, battery at 75%" off a reading many hours
+    stale (see ``customer.system.prompt``'s "Stale or Unknown Live Data").
+    """
+    blank: dict[str, Optional[float]] = {
+        "battery_soc_pct": None,
+        "battery_current_a": None,
+        "solar_power_w": None,
+        "grid_consumption_w": None,
+    }
+    if _inverter_voltage_is_stale(voltage):
+        return blank
+
+    def _reading(obj: Any, attr: str) -> Optional[float]:
+        if isinstance(obj, BaseException) or not obj:
+            return None
+        value = getattr(obj, attr, None)
+        return float(value) if value is not None else None
+
+    return {
+        "battery_soc_pct": _reading(battery, "soc_percent"),
+        "battery_current_a": _reading(battery, "current_a"),
+        "solar_power_w": _reading(pv, "total_power_w"),
+        "grid_consumption_w": _reading(grid_status_vrm, "total_power_w"),
+    }
+
+
 def _unavailable_live_telemetry(
     management: str = "unknown", unavailable_reason: str = "telemetry_unavailable"
 ) -> dict[str, Any]:
@@ -638,21 +680,23 @@ class ClientGridStatusMixin:
                             power_view = inverter_power_view(voltage)
                             vrm_power_kw = power_view["inverter_power_kw"]
 
-                            # Battery SOC and current
+                            # Battery SOC/current, solar power, and grid
+                            # consumption -- all blanked together with the
+                            # inverter reading above when the gateway is dark
+                            # (see ``live_metrics_view``).
                             battery = vrm_results[1]
-                            if not isinstance(battery, (Exception, BaseException)):
-                                vrm_battery_soc = battery.soc_percent  # type: ignore[union-attr]
-                                vrm_battery_current = battery.current_a  # type: ignore[union-attr]
-
-                            # PV/Solar power
                             pv = vrm_results[2]
-                            if not isinstance(pv, (Exception, BaseException)):
-                                vrm_solar_power_w = pv.total_power_w  # type: ignore[union-attr]
-
-                            # Grid consumption (inverter output to customers)
                             grid_status_vrm = vrm_results[3]
-                            if not isinstance(grid_status_vrm, (Exception, BaseException)):
-                                vrm_grid_consumption_w = grid_status_vrm.total_power_w  # type: ignore[union-attr]
+                            metrics_view = live_metrics_view(
+                                voltage=voltage,
+                                battery=battery,
+                                pv=pv,
+                                grid_status_vrm=grid_status_vrm,
+                            )
+                            vrm_battery_soc = metrics_view["battery_soc_pct"]
+                            vrm_battery_current = metrics_view["battery_current_a"]
+                            vrm_solar_power_w = metrics_view["solar_power_w"]
+                            vrm_grid_consumption_w = metrics_view["grid_consumption_w"]
 
                         except Exception as vrm_rt_err:
                             logger.warning(f"VRM real-time fetch failed: {vrm_rt_err}")
@@ -1743,16 +1787,25 @@ class ClientGridStatusMixin:
             return {"error": f"Failed to get all grids status: {str(e)}"}
 
     async def get_recent_production_errors_and_power(
-        self, grid_name: str, minutes: int = 30
+        self, grid_name: str, minutes: int = 30, organization_id: Optional[int] = None
     ) -> Dict[str, Any]:
         """Get recent power data (per phase) and active/recent alarms for alert context.
 
         Fetches the past N minutes of inverter power data per phase and recent VE.Bus
-        errors/alarms, useful for LLM judgment context when correlating alerts.
+        errors/alarms, useful for LLM judgment context when correlating alerts, and for
+        a customer conversation to check for an active fault behind a stale/Unknown grid
+        status (see ``customer.system.prompt``'s "Stale or Unknown Live Data").
 
         Args:
             grid_name: Grid name
             minutes: How many minutes back to fetch (default 30)
+            organization_id: Caller's organization. ``None`` (the internal
+                alert-judgment caller, ``get_live_telemetry``) and
+                ``STAFF_ORG_ID`` both see any grid, matching ``get_grid_status``;
+                any other value scopes the lookup to that organization's own
+                grids, same as the customer-facing tools -- this tool has no
+                other access control, so a customer session must never reach
+                the unscoped branch.
 
         Returns:
             Dict with:
@@ -1764,10 +1817,18 @@ class ClientGridStatusMixin:
             auth_service = get_auth_service()
             pool = await auth_service._get_db_pool()
             async with pool.acquire() as conn:
-                grid_row = await conn.fetchrow(
-                    "SELECT id, generation_external_site_id FROM grids WHERE LOWER(name) = LOWER($1) AND deleted_at IS NULL LIMIT 1",
-                    grid_name,
-                )
+                if organization_id is not None and organization_id != STAFF_ORG_ID:
+                    grid_row = await conn.fetchrow(
+                        "SELECT id, generation_external_site_id FROM grids "
+                        "WHERE LOWER(name) = LOWER($1) AND organization_id = $2 AND deleted_at IS NULL LIMIT 1",
+                        grid_name,
+                        organization_id,
+                    )
+                else:
+                    grid_row = await conn.fetchrow(
+                        "SELECT id, generation_external_site_id FROM grids WHERE LOWER(name) = LOWER($1) AND deleted_at IS NULL LIMIT 1",
+                        grid_name,
+                    )
             if not grid_row or not grid_row.get("generation_external_site_id"):
                 return {
                     "power_history": [],
