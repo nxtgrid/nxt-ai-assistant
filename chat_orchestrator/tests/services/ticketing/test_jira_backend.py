@@ -1519,3 +1519,68 @@ class TestAddAttachments:
         results = await backend.add_attachments("OPS-1", [_attachment()])
 
         assert results == []
+
+
+class TestFindOpenTicketByLabel:
+    """Dedup search for the notify-pipeline watchdog (notify_watchdog.py) --
+    unlike find_by_escalation's per-mapping-id label, this label is reused
+    across time by a recurring check, so the search must exclude resolved
+    tickets or a long-closed prior one would be mistaken for "still open"."""
+
+    @pytest.mark.asyncio
+    async def test_returns_the_issue_key_when_an_open_ticket_is_found(
+        self, fake_session: FakeJiraSession
+    ) -> None:
+        backend = _make_backend()
+        fake_session.queue(
+            "GET",
+            "/rest/api/3/search/jql",
+            _FakeResponse(200, {"issues": [{"key": "OPS-9001"}]}),
+        )
+
+        result = await backend.find_open_ticket_by_label("notify-pipeline-watchdog")
+
+        assert result == "OPS-9001"
+
+    @pytest.mark.asyncio
+    async def test_jql_excludes_resolved_tickets_and_scopes_by_label(
+        self, fake_session: FakeJiraSession
+    ) -> None:
+        backend = _make_backend(project_key="OPS")
+        fake_session.queue(
+            "GET", "/rest/api/3/search/jql", _FakeResponse(200, {"issues": []})
+        )
+
+        await backend.find_open_ticket_by_label("notify-pipeline-watchdog")
+
+        _method, _url, kwargs = fake_session.calls[0]
+        jql = kwargs["params"]["jql"]
+        assert 'project = "OPS"' in jql
+        assert 'labels = "notify-pipeline-watchdog"' in jql
+        assert "statusCategory != Done" in jql
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_nothing_open_matches(
+        self, fake_session: FakeJiraSession
+    ) -> None:
+        backend = _make_backend()
+        fake_session.queue(
+            "GET", "/rest/api/3/search/jql", _FakeResponse(200, {"issues": []})
+        )
+
+        assert await backend.find_open_ticket_by_label("notify-pipeline-watchdog") is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_without_credentials(self) -> None:
+        backend = JiraTicketBackend(
+            base_url="", email="bot@example.com", api_token="tok", project_key="OPS"
+        )
+
+        assert await backend.find_open_ticket_by_label("notify-pipeline-watchdog") is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_on_error_status(self, fake_session: FakeJiraSession) -> None:
+        backend = _make_backend()
+        fake_session.queue("GET", "/rest/api/3/search/jql", _FakeResponse(500, {}))
+
+        assert await backend.find_open_ticket_by_label("notify-pipeline-watchdog") is None

@@ -548,6 +548,82 @@ async def startup_event():
 
         logger.info("Escalation Jira sweep scheduled (daily 08:00 UTC)")
 
+    # -------------------------------------------------------------------------
+    # Notify-pipeline watchdog — checks four times a day whether /notify has
+    # delivered an alert for ANY grid within NOTIFY_WATCHDOG_HOURS (default
+    # 24); files a ticket + Telegram alert if not. Exists because n8n's
+    # upstream polling job once went silent fleet-wide for 5 days and
+    # nothing in this repo could have caught it -- correlator.judge() and
+    # everything downstream of it only ever run once an alert actually
+    # arrives. See notify_watchdog.py.
+    #
+    # A CronTrigger at fixed wall-clock hours, not an IntervalTrigger, on
+    # purpose: this deployment redeploys multiple times a day, and an
+    # interval timer resets on every restart, so it could go long stretches
+    # never reaching its own interval. Cron hours fire regardless of when the
+    # process last restarted. Staggered off the 02:00/03:00 LLM-heavy
+    # batches and the 08:00 escalation sweep.
+    #
+    # Registered unconditionally so it fires even when METRICS_ENABLED is
+    # false, matching the escalation sweep. NOTIFY_WATCHDOG_ENABLED=false is
+    # the deliberate off switch for a deployment that never wires up
+    # /notify at all -- though silence_detected() also treats a table that
+    # has never had a single row as "not applicable", not silence, so an
+    # unconfigured deployment that forgets to flip this is still unlikely to
+    # false-fire.
+    # -------------------------------------------------------------------------
+    from orchestrator.services.ticketing.notify_watchdog import (
+        run_notify_watchdog,
+    )
+    from orchestrator.services.ticketing.notify_watchdog import (
+        watchdog_enabled as notify_watchdog_enabled,
+    )
+
+    if notify_watchdog_enabled():
+
+        async def _run_notify_watchdog():
+            from orchestrator.services.supabase_client import get_supabase_client
+            from orchestrator.services.ticketing.notify_alert_delivery_repository import (
+                NotifyAlertDeliveryRepository,
+            )
+            from orchestrator.services.ticketing.service import TicketService
+            from shared.utils.telegram_send import send_telegram_message_raw
+
+            bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+            escalation_chat_id = os.getenv("ESCALATION_TELEGRAM_CHAT_ID", "")
+
+            async def _send(chat_id: str, text: str):
+                return await send_telegram_message_raw(bot_token, chat_id, text)
+
+            try:
+                result = await run_notify_watchdog(
+                    delivery_repo=NotifyAlertDeliveryRepository(get_client=_raw_supabase_client),
+                    ticket_service=TicketService(get_supabase_client=get_supabase_client),
+                    send_telegram=_send,
+                    escalation_chat_id=escalation_chat_id,
+                )
+                logger.info("Notify watchdog check complete: {}", result)
+            except Exception:
+                logger.exception("Notify watchdog job failed")
+
+        if scheduler is None:
+            scheduler = AsyncIOScheduler()
+
+        scheduler.add_job(
+            _run_notify_watchdog,
+            trigger=CronTrigger(hour="1,7,13,19", minute=15, timezone="UTC"),
+            id="notify_pipeline_watchdog",
+            name="Notify Pipeline Watchdog",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+
+        if not scheduler.running:
+            scheduler.start()
+
+        logger.info("Notify pipeline watchdog scheduled (4x daily, 01:15/07:15/13:15/19:15 UTC)")
+
 
 @app.on_event("shutdown")
 async def shutdown_event():
