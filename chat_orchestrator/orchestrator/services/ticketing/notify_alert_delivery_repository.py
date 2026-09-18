@@ -133,6 +133,39 @@ class NotifyAlertDeliveryRepository:
             _record_failure("record_success", exc)
             return None
 
+    async def most_recent_delivery_at(self) -> str | None:
+        """The newest ``sent_at`` across every grid, or ``None`` if the table
+        has never had a row (or the query itself failed).
+
+        Used by the notify-pipeline watchdog (``notify_watchdog.py``) to
+        detect the upstream trigger (n8n's ``/notify`` webhook) going silent
+        fleet-wide -- unlike ``recent_for_grid``, this is deliberately not
+        scoped to one grid. ``None`` collapses "genuinely empty" and "could
+        not check" into the same answer on purpose, the same way
+        ``latest_downtime_sent_at`` does: neither should ever conclude
+        silence on its own, only a timestamp that has actually gone stale
+        should. Returns the raw string, like ``latest_downtime_sent_at`` --
+        callers parse it (see that method's own note, and
+        ``notify_watchdog.py``'s ``_parse_sent_at``).
+        """
+        client = self._raw_client()
+        if client is None:
+            _record_failure("most_recent_delivery_at", RuntimeError("database client unavailable"))
+            return None
+        try:
+            response = (
+                client.table("notify_alert_deliveries")
+                .select("sent_at")
+                .order("sent_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = getattr(response, "data", None) or []
+            return str(rows[0]["sent_at"]) if rows else None
+        except Exception as exc:
+            _record_failure("most_recent_delivery_at", exc)
+            return None
+
     async def recent_for_grid(
         self, grid_name: str, since: str, limit: int = 20
     ) -> list[PriorAlertMessage]:

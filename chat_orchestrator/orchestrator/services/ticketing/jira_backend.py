@@ -429,6 +429,9 @@ class JiraTicketBackend:
     async def find_by_escalation(self, mapping_id: str) -> Optional[str]:
         return await self._search_jira_for_escalation(mapping_id)
 
+    async def find_open_ticket_by_label(self, label: str) -> Optional[str]:
+        return await self._search_jira_for_open_label(label)
+
     async def update_ticket(
         self,
         ref: str,
@@ -1029,4 +1032,38 @@ class JiraTicketBackend:
             return str(issues[0]["key"]) if issues else None
         except Exception:
             LOGGER.opt(exception=True).debug("Error searching Jira for escalation {}", mapping_id)
+            return None
+
+    async def _search_jira_for_open_label(self, label: str) -> Optional[str]:
+        """Most recent *open* ticket carrying ``label``, or ``None``.
+
+        Unlike ``_search_jira_for_escalation`` (whose label embeds a unique
+        mapping id, so it is never reused across tickets and an old resolved
+        one can never be a false match), this is for a label a recurring
+        system check reuses across time -- ``statusCategory != Done`` is what
+        keeps a long-since-resolved prior ticket from being mistaken for
+        "already tracked" once the underlying condition recurs later.
+        """
+        if not self._jira_base_url or not self._jira_project_key:
+            return None
+        jql = (
+            f'project = "{self._jira_project_key}" AND labels = "{label}" '
+            "AND statusCategory != Done ORDER BY created DESC"
+        )
+        url = f"{self._jira_base_url}/rest/api/3/search/jql"
+        try:
+            session = _get_jira_session()
+            async with session.get(
+                url,
+                params={"jql": jql, "fields": "summary,status", "maxResults": "1"},
+                headers=self._jira_auth_headers(),
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+            issues = data.get("issues", [])
+            return str(issues[0]["key"]) if issues else None
+        except Exception:
+            LOGGER.opt(exception=True).debug("Error searching Jira for open label {}", label)
             return None

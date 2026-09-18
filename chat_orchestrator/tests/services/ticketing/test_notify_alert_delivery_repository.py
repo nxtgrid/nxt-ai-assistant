@@ -346,3 +346,35 @@ async def test_latest_downtime_sent_at_fails_open_on_a_ledger_outage() -> None:
 
     assert await repo.latest_downtime_sent_at("Acme Grid") is None
     assert delivery_history_failures_last_hour() > 0
+
+
+@pytest.mark.asyncio
+async def test_most_recent_delivery_at_spans_every_grid_not_just_one() -> None:
+    """Unlike latest_downtime_sent_at, this is deliberately fleet-wide -- the
+    notify-pipeline watchdog cares whether *anything* arrived, not one grid."""
+    repo, client = _repo()
+    client.tables["notify_alert_deliveries"] = [
+        {"grid_name": "Acme Grid", "sent_at": "2026-09-12T01:48:54+00:00", "downtime": True},
+        {"grid_name": "Other Grid", "sent_at": "2026-09-13T06:48:57+00:00", "downtime": True},
+        {"grid_name": "Acme Grid", "sent_at": "2026-09-09T19:49:10+00:00", "downtime": True},
+    ]
+
+    assert await repo.most_recent_delivery_at() == "2026-09-13T06:48:57+00:00"
+
+
+@pytest.mark.asyncio
+async def test_most_recent_delivery_at_is_none_on_an_empty_table() -> None:
+    repo, _client = _repo()
+
+    assert await repo.most_recent_delivery_at() is None
+
+
+@pytest.mark.asyncio
+async def test_most_recent_delivery_at_fails_open_on_a_ledger_outage() -> None:
+    """Same fail-open shape as latest_downtime_sent_at: an unreadable ledger
+    must never be mistaken for a confirmed-silent pipeline."""
+    repo, client = _repo()
+    client.fail_tables["notify_alert_deliveries"] = RuntimeError("ledger down")
+
+    assert await repo.most_recent_delivery_at() is None
+    assert delivery_history_failures_last_hour() > 0
