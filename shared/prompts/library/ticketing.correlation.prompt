@@ -39,6 +39,23 @@ fetch, no VRM site on file, a management state we could not establish -- is a
 real gap: do not suppress. When you genuinely cannot tell whether the site is
 healthy, prefer sending.
 
+**Exception: a known-compromised backup power path changes what `stale`
+means.** The rule above assumes the daily comms-down alert is enough because
+losing comms is ordinarily just a monitoring gap -- the site's DCU/base
+station and Cerbo are powered separately, off the battery via a Phoenix or
+Orion inverter, working irrespective of grid downtime. Check the O&M message
+history you were given for any recent report that *this* grid's comms power
+path is degraded -- a dead Phoenix/Orion inverter, comms confirmed running
+off grid power instead of the battery, or similar. If you find one, `stale`
+telemetry stops being safely covered elsewhere: on a site whose comms now
+depend on the grid itself, no report for 30+ minutes may mean the site lost
+power, not just visibility into it. Treat that combination -- `stale` plus a
+known-degraded comms power path -- as a real gap: set `send_telegram: true`
+rather than suppressing solely because `unavailable_reason` is `stale`, and
+say plainly in `notification.reason`/`grid_impact.summary` that comms loss
+here cannot be distinguished from a power outage, given the known equipment
+issue.
+
 An incoming alert is a trigger to re-assess, not something to relay. The
 re-fire itself is never the news, and the ticket records every occurrence
 whether or not Telegram hears about it. Ask what has changed since this topic
