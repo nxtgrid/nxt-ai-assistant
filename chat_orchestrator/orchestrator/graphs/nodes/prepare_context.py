@@ -244,6 +244,66 @@ async def _fetch_jit_context(
     return await resolve_jit_context_for(prompt_id, user_context, grid=grid)
 
 
+async def _fetch_grid_context_feeds(
+    user_context: Optional[UserContext],
+    grid: Optional[str],
+) -> str:
+    """Direct-fetched, always-on grid context: recent O&M messages (staff
+    only) and episodic distillation (staff and customer), bounded the same
+    way as the notify/alert-judgment flow's own feeds -- see
+    grid_context_feeds.py for why this exists as a direct fetch rather than
+    an on-demand tool or a pinned knowledge module. Fail open: "" on any
+    error or when no grid is in scope, same contract as every _fetch_*
+    helper in this module.
+    """
+    if not grid:
+        return ""
+    from datetime import timedelta
+
+    from orchestrator.services.grid_context_feeds import (
+        fetch_episodic_summary_for_scope,
+        fetch_om_messages_for_grid,
+    )
+
+    is_staff = bool(user_context.is_staff) if user_context else False
+    organization_ids = list(user_context.organization_ids) if user_context else []
+
+    async def _om() -> List[Any]:
+        if not is_staff:
+            return []
+        since = (datetime.now(timezone.utc) - timedelta(hours=168)).isoformat()
+        try:
+            return await fetch_om_messages_for_grid(grid, since=since)
+        except Exception as e:
+            LOGGER.warning(f"O&M message fetch failed for grid {grid!r}: {e}")
+            return []
+
+    async def _episodic() -> Optional[str]:
+        try:
+            return await fetch_episodic_summary_for_scope(
+                grid=grid,
+                organization_id=organization_ids[0] if organization_ids else None,
+                organization_ids=organization_ids,
+                is_staff=is_staff,
+            )
+        except Exception as e:
+            LOGGER.warning(f"Episodic summary fetch failed for grid {grid!r}: {e}")
+            return None
+
+    om_messages, episodic_summary = await asyncio.gather(_om(), _episodic())
+
+    sections: List[str] = []
+    if om_messages:
+        lines = "\n".join(
+            f"- [{message.created_at}] {message.role or 'user'}: {message.content}"
+            for message in om_messages
+        )
+        sections.append(f"## Recent O&M Messages — {grid}\n{lines}")
+    if episodic_summary:
+        sections.append(f"## Prior History Summary — {grid}\n{episodic_summary}")
+    return "\n\n".join(sections)
+
+
 async def _fetch_user_preferences(
     user_context: Optional[Any],
 ) -> List[Dict[str, Any]]:
@@ -316,6 +376,7 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
         (enrichment_context, grid_names),
         user_preferences,
         (jit_context, jit_used),
+        grid_context_feeds,
     ) = await asyncio.gather(
         _fetch_instructions(user_context, entity_ctx, grid=scope_grid),
         _fetch_troubleshooting(),
@@ -324,6 +385,7 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
         _fetch_enrichment(user_context),
         _fetch_user_preferences(user_context),
         _fetch_jit_context(_prompt_id, user_context, grid=scope_grid),
+        _fetch_grid_context_feeds(user_context, scope_grid),
     )
 
     # Assemble system_instructions
@@ -412,6 +474,16 @@ async def prepare_context(state: ConversationState) -> Dict[str, Any]:
             f"Added JIT context: {len(jit_used)} module(s) "
             f"({', '.join(jit_used)}), {len(jit_context)} chars"
         )
+
+    # Append direct-fetched O&M messages / episodic distillation for the
+    # grid in scope (grid_context_feeds.py) -- always-on, unlike the O&M
+    # chat history the customer_get_grid_chat_chronology tool only surfaces
+    # when the model thinks to call it.
+    if grid_context_feeds:
+        context_message = (
+            f"{context_message}\n\n{grid_context_feeds}" if context_message else grid_context_feeds
+        )
+        LOGGER.info(f"Added grid context feeds: {len(grid_context_feeds)} chars")
 
     # Append user preferences (after enrichment, before scheduled constraints)
     if user_preferences:

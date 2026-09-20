@@ -45,6 +45,14 @@ def _om(index: int) -> OMChatMessage:
     )
 
 
+def _long_om(index: int) -> OMChatMessage:
+    return OMChatMessage(
+        created_at="2026-08-21T10:00:00+00:00",
+        content="m" * 1_200,
+        role="user",
+    )
+
+
 def _telemetry(*, management: str = "managed") -> dict[str, object]:
     return {
         "generation_management": management,
@@ -68,6 +76,7 @@ def _assembler(**overrides: object) -> AlertJudgmentContextAssembler:
         "prior_alerts_provider": lambda: _resolved([_prior(index) for index in range(21)]),
         "om_messages_provider": lambda: _resolved([_om(index) for index in range(51)]),
         "grid_operational_facts_provider": lambda: _resolved({}),
+        "episodic_summary_provider": lambda: _resolved(None),
         "delivery_failures_provider": lambda: 0,
     }
     providers.update(overrides)
@@ -88,7 +97,10 @@ async def test_assembler_bounds_and_labels_every_source() -> None:
     assert len(context.prior_alerts) == 20
     assert len(context.om_messages) == 50
     assert len(context.open_tickets[0].description) == 2_000
-    assert len(context.om_messages[0].content) == 500
+    # 600 chars is under the O&M-specific 1000-char cap, so it survives whole
+    # -- see test_om_messages_truncate_at_1000_not_500 for the cap itself.
+    assert len(context.om_messages[0].content) == 600
+    assert context.episodic_summary is None
     assert set(context.availability) == {
         "deterministic_findings",
         "open_tickets",
@@ -96,11 +108,68 @@ async def test_assembler_bounds_and_labels_every_source() -> None:
         "prior_alerts",
         "om_messages",
         "grid_operational_facts",
+        "episodic_summary",
     }
     assert all(
         source.status in (ContextStatus.AVAILABLE, ContextStatus.EMPTY)
         for source in context.availability.values()
     )
+
+
+@pytest.mark.asyncio
+async def test_om_messages_truncate_at_1000_not_500() -> None:
+    """O&M content is free-text human chat (a technician's field report),
+    which gets a higher per-message cap than prior-alert records -- 500
+    chars often cuts a field report off mid-sentence."""
+    context = await _assembler(
+        om_messages_provider=lambda: _resolved([_long_om(0)])
+    ).assemble(grid_name="Acme Grid", chat_id="-1001", topic_id="42", alert={})
+
+    assert len(context.om_messages[0].content) == 1_000
+
+
+@pytest.mark.asyncio
+async def test_prior_alerts_still_truncate_at_500() -> None:
+    """Prior-alert content is bot-rendered, not free-text human chat -- it
+    keeps the original cap; only O&M messages moved to 1000."""
+    context = await _assembler(
+        prior_alerts_provider=lambda: _resolved(
+            [
+                PriorAlertMessage(
+                    external_chat_id="-1001",
+                    external_message_id=1,
+                    sent_at="2026-08-21T10:00:00+00:00",
+                    content="p" * 1_200,
+                )
+            ]
+        )
+    ).assemble(grid_name="Acme Grid", chat_id="-1001", topic_id="42", alert={})
+
+    assert len(context.prior_alerts[0].content) == 500
+
+
+@pytest.mark.asyncio
+async def test_episodic_summary_is_captured_and_truncated_at_1000() -> None:
+    context = await _assembler(
+        episodic_summary_provider=lambda: _resolved("s" * 1_200)
+    ).assemble(grid_name="Acme Grid", chat_id="-1001", topic_id="42", alert={})
+
+    assert len(context.episodic_summary) == 1_000
+    assert context.availability["episodic_summary"].status is ContextStatus.AVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_episodic_summary_none_is_an_empty_state_not_a_failure() -> None:
+    """No distillation yet is normal (grid_context_feeds.py's
+    fetch_episodic_summary_for_scope returns None the same way for 'no
+    access' and 'nothing stored') -- must not count as degradation."""
+    context = await _assembler(
+        episodic_summary_provider=lambda: _resolved(None)
+    ).assemble(grid_name="Acme Grid", chat_id="-1001", topic_id="42", alert={})
+
+    assert context.episodic_summary is None
+    assert context.availability["episodic_summary"].status is ContextStatus.EMPTY
+    assert context.has_degradation() is False
 
 
 @pytest.mark.asyncio

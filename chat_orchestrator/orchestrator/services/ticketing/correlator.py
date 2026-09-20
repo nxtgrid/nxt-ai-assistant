@@ -681,6 +681,7 @@ def _build_judgment_prompt(context: AlertJudgmentContext, alert: AlertFacts) -> 
         "live_telemetry": context.telemetry.model_dump(mode="json"),
         "prior_delivered_alerts": [alert.model_dump(mode="json") for alert in context.prior_alerts],
         "om_topic_messages": [message.model_dump(mode="json") for message in context.om_messages],
+        "episodic_history": context.episodic_summary,
         "incoming_alert": alert.model_dump(mode="json"),
     }
     return "\n\n".join(

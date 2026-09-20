@@ -12,6 +12,11 @@ from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
 _FAILURE_WINDOW_SECONDS = 3600.0
+# Free-text human chat (a technician's field report) truncates worse at a
+# short cap than bot-rendered content does -- see alert_judgment_context.py's
+# _OM_MESSAGE_CONTENT_LIMIT, which mirrors this for its own defensive
+# re-truncation of the same messages.
+_OM_MESSAGE_CONTENT_CHARS = 1000
 _failure_counts: dict[str, int] = defaultdict(int)
 _failure_window_started_at = time.monotonic()
 
@@ -314,7 +319,7 @@ class NotifyAlertDeliveryRepository:
                     OMChatMessage(
                         created_at=str(row.get("created_at") or ""),
                         role=str(row.get("role") or ""),
-                        content=content[:500],
+                        content=content[:_OM_MESSAGE_CONTENT_CHARS],
                         sender_telegram_id=(
                             str(row["sender_telegram_id"])
                             if row.get("sender_telegram_id") is not None

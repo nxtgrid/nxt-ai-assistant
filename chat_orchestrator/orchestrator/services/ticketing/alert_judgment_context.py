@@ -24,6 +24,12 @@ _MESSAGE_LIMIT = 500
 _TICKET_LIMIT = 15
 _PRIOR_ALERT_LIMIT = 20
 _OM_MESSAGE_LIMIT = 50
+# O&M messages get a higher per-message cap than prior-alert records: they're
+# free-text human chat (a technician's field report), where 500 chars often
+# cuts off mid-sentence; prior-alert content is bot-rendered and stays at
+# _MESSAGE_LIMIT.
+_OM_MESSAGE_CONTENT_LIMIT = 1000
+_EPISODIC_SUMMARY_LIMIT = 1000
 
 
 class ContextStatus(str, Enum):
@@ -94,6 +100,12 @@ class AlertJudgmentContext(_ContextModel):
     telemetry: AlertTelemetry = Field(default_factory=AlertTelemetry)
     prior_alerts: list[PriorAlertMessage] = Field(default_factory=list)
     om_messages: list[OMChatMessage] = Field(default_factory=list)
+    # Distilled prior history for this grid (shared.episodic_memory's nightly
+    # batch), the same source shared.prompts.providers_episodic.EpisodicProvider
+    # resolves for knowledge-module-attached prompts -- fetched directly here
+    # instead, since this flow makes one single-shot LLM call with no tool
+    # access to reach it any other way.
+    episodic_summary: str | None = None
     # is_hps_on / is_hps_on_updated_at / DCU status roll-up
     # (auth_service.get_grid_operational_facts, via
     # correlation_rules.get_grid_operational_context) -- what the prompt's
@@ -116,6 +128,11 @@ class AlertJudgmentContext(_ContextModel):
 
 
 Provider = Callable[[], Awaitable[Any]]
+
+
+async def _no_episodic_summary() -> None:
+    """Default when a caller doesn't wire episodic distillation in."""
+    return None
 
 
 def _count(value: Any) -> int:
@@ -183,6 +200,7 @@ class AlertJudgmentContextAssembler:
         prior_alerts_provider: Provider,
         om_messages_provider: Provider,
         grid_operational_facts_provider: Provider,
+        episodic_summary_provider: Provider | None = None,
         delivery_failures_provider: Callable[[], int] = delivery_history_failures_last_hour,
         timeout_seconds: float = 3.0,
     ) -> None:
@@ -193,6 +211,7 @@ class AlertJudgmentContextAssembler:
             "prior_alerts": prior_alerts_provider,
             "om_messages": om_messages_provider,
             "grid_operational_facts": grid_operational_facts_provider,
+            "episodic_summary": episodic_summary_provider or _no_episodic_summary,
         }
         self._delivery_failures_provider = delivery_failures_provider
         self._timeout_seconds = timeout_seconds
@@ -215,14 +234,25 @@ class AlertJudgmentContextAssembler:
         tickets = self._convert_tickets(values["open_tickets"], availability)
         telemetry = self._convert_telemetry(values["telemetry"], availability)
         prior_alerts = self._convert_messages(
-            values["prior_alerts"], PriorAlertMessage, _PRIOR_ALERT_LIMIT, availability, "prior_alerts"
+            values["prior_alerts"],
+            PriorAlertMessage,
+            _PRIOR_ALERT_LIMIT,
+            availability,
+            "prior_alerts",
+            content_limit=_MESSAGE_LIMIT,
         )
         om_messages = self._convert_messages(
-            values["om_messages"], OMChatMessage, _OM_MESSAGE_LIMIT, availability, "om_messages"
+            values["om_messages"],
+            OMChatMessage,
+            _OM_MESSAGE_LIMIT,
+            availability,
+            "om_messages",
+            content_limit=_OM_MESSAGE_CONTENT_LIMIT,
         )
         grid_operational_facts = self._convert_grid_operational_facts(
             values["grid_operational_facts"], availability
         )
+        episodic_summary = self._convert_episodic_summary(values["episodic_summary"], availability)
         if self._delivery_failures_provider() > 0:
             availability["prior_alerts"] = ContextSourceResult(
                 status=ContextStatus.FAILED,
@@ -236,6 +266,7 @@ class AlertJudgmentContextAssembler:
             prior_alerts=prior_alerts,
             om_messages=om_messages,
             grid_operational_facts=grid_operational_facts,
+            episodic_summary=episodic_summary,
             availability=availability,
         )
 
@@ -295,15 +326,31 @@ class AlertJudgmentContextAssembler:
         limit: int,
         availability: dict[str, ContextSourceResult],
         name: str,
+        *,
+        content_limit: int,
     ) -> list[PriorAlertMessage] | list[OMChatMessage]:
         if availability[name].status is not ContextStatus.AVAILABLE:
             return []
         try:
             messages = [model.model_validate(item) for item in value]
-            return [message.model_copy(update={"content": message.content[:_MESSAGE_LIMIT]}) for message in messages][:limit]
+            return [message.model_copy(update={"content": message.content[:content_limit]}) for message in messages][:limit]
         except (TypeError, ValidationError) as exc:
             self._mark_invalid(availability, name, exc)
             return []
+
+    def _convert_episodic_summary(
+        self, value: Any, availability: dict[str, ContextSourceResult]
+    ) -> str | None:
+        if availability["episodic_summary"].status is not ContextStatus.AVAILABLE:
+            return None
+        if not isinstance(value, str):
+            self._mark_invalid(
+                availability,
+                "episodic_summary",
+                TypeError(f"expected a str, got {type(value).__name__}"),
+            )
+            return None
+        return value[:_EPISODIC_SUMMARY_LIMIT]
 
     def _convert_grid_operational_facts(
         self, value: Any, availability: dict[str, ContextSourceResult]
