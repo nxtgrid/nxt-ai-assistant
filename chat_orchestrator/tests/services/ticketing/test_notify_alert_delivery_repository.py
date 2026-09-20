@@ -270,6 +270,35 @@ async def test_recent_om_messages_is_scoped_to_one_active_topic_and_excludes_ale
     assert rows[0].created_at == "2026-08-21T10:00:00+00:00"
 
 
+@pytest.mark.asyncio
+async def test_recent_om_messages_truncates_content_at_1000_chars() -> None:
+    """Free-text human chat (a technician's field report) gets a higher cap
+    than the 500 chars prior-alert records use -- see
+    alert_judgment_context.py's _OM_MESSAGE_CONTENT_LIMIT, which mirrors this
+    for its own defensive re-truncation of the same messages."""
+    repo, client = _repo()
+    long_report = "leak detected in cabin roof, water reached battery terminals. " * 20
+    assert len(long_report) > 1000
+    client.tables["chat_messages"].append(
+        {
+            "group_id": "-1001",
+            "telegram_topic_id": "42",
+            "created_at": "2026-08-21T10:00:00+00:00",
+            "role": "user",
+            "content": long_report,
+            "metadata": {},
+            "archived_at": None,
+        }
+    )
+
+    rows = await repo.recent_om_messages(
+        chat_id="-1001", topic_id="42", since="2026-08-21T00:00:00+00:00"
+    )
+
+    assert len(rows[0].content) == 1000
+    assert rows[0].content == long_report[:1000]
+
+
 # --------------------------------------------------------------------------- #
 # Downtime clock -- the "at most one downtime alert per day" ledger
 # --------------------------------------------------------------------------- #

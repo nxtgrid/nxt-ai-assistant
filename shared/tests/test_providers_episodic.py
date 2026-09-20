@@ -4,7 +4,7 @@ import pytest
 
 from shared.prompts.knowledge import KnowledgeModule
 from shared.prompts.providers import ResolutionContext
-from shared.prompts.providers_episodic import EpisodicProvider
+from shared.prompts.providers_episodic import EpisodicProvider, fetch_episodic_summary
 from shared.prompts.types import RequestScope
 
 
@@ -201,3 +201,32 @@ async def test_preview_of_a_failing_query_is_reported_not_raised():
 
     assert "Could not read stored distillations" in text
     assert "relation does not exist" in text
+
+
+# ── fetch_episodic_summary(): the direct entry point notify/alert-judgment
+# and chat's grid_context_feeds.py use, with no KnowledgeModule and no
+# knowledge-module/JIT machinery in between. Same anchor/access logic as
+# EpisodicProvider.resolve() above, called directly with a client and
+# grid_access instead of through the provider object. ──
+
+
+@pytest.mark.asyncio
+async def test_fetch_episodic_summary_works_without_a_knowledge_module():
+    client = _Client([
+        {"anchor_type": "grid", "anchor_id": "Alpha", "summary": "Recurring inverter faults."},
+    ])
+    ctx = ResolutionContext(scope=RequestScope(grid="Alpha"), is_staff=True)
+
+    text = await fetch_episodic_summary(ctx, client=client, grid_access=_allow)
+
+    assert text == "Recurring inverter faults."
+
+
+@pytest.mark.asyncio
+async def test_fetch_episodic_summary_denies_the_same_way_as_resolve():
+    client = _Client([{"anchor_type": "grid", "anchor_id": "Alpha", "summary": "secret history"}])
+    ctx = ResolutionContext(
+        scope=RequestScope(grid="Alpha"), organization_ids=("9",), is_staff=False
+    )
+
+    assert await fetch_episodic_summary(ctx, client=client, grid_access=_deny) is None

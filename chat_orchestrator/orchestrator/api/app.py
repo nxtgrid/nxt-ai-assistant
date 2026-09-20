@@ -2826,10 +2826,16 @@ async def _resolve_notify_ticket_llm_judgment(
     async def om_provider(): return await history.recent_om_messages(chat_id=target.chat_id, topic_id=target.topic_id, since=since, limit=50)
     async def grid_facts_provider(): return await get_grid_operational_context(target.grid_name)
 
+    async def episodic_provider():
+        from orchestrator.services.grid_context_feeds import fetch_episodic_summary_for_scope
+
+        return await fetch_episodic_summary_for_scope(grid=target.grid_name, is_staff=True)
+
     context = await AlertJudgmentContextAssembler(
         deterministic_findings_provider=findings_provider, open_tickets_provider=tickets_provider,
         telemetry_provider=telemetry_provider, prior_alerts_provider=prior_provider,
         om_messages_provider=om_provider, grid_operational_facts_provider=grid_facts_provider,
+        episodic_summary_provider=episodic_provider,
     ).assemble(grid_name=target.grid_name, chat_id=target.chat_id, topic_id=target.topic_id, alert=alert)
     judgment = await correlator.judge(target.grid_name, alert, context)
     _usage = judgment.usage

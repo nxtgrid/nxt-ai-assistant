@@ -5,9 +5,9 @@ by anansi_app/scripts/episodic_scheduler.py -- distilling at render time would
 put an LLM call on the critical path of every request that uses this module.
 
 Two things gate this beyond the batch: scope must name a grid or an
-organization (prepare_context.py does not currently pass a grid, so in practice
-only the organization anchor matches), and the module must be attached to a
-prompt -- ensure_singleton_modules creates it attached to none.
+organization (prepare_context.py resolves and passes a grid since PR #142 --
+shared/grid_scope.py -- so either anchor can match), and the module must be
+attached to a prompt -- ensure_singleton_modules creates it attached to none.
 
 Grid is preferred over organization when the scope names both: it is the more
 specific anchor, matching how site-scoped knowledge modules already beat
@@ -23,6 +23,79 @@ from shared.prompts.providers import ResolutionContext
 from shared.utils.logging import get_logger
 
 LOGGER = get_logger(__name__)
+
+
+async def resolve_episodic_anchor(
+    ctx: ResolutionContext,
+    grid_access: Callable[[str, ResolutionContext], Awaitable[bool]],
+) -> Optional[tuple[str, str]]:
+    """(anchor_type, anchor_id) this scope resolves to, or None with no anchor/access.
+
+    Split out from ``EpisodicProvider.resolve`` so a caller with no
+    ``KnowledgeModule`` to hand it -- the notify/alert-judgment flow's
+    single-shot prompt, and chat's direct-injected context -- can reuse the
+    same grid-beats-organization preference and access gate without going
+    through the knowledge-module machinery at all.
+    """
+    if ctx.scope.grid:
+        if not await grid_access(ctx.scope.grid, ctx):
+            LOGGER.info(f"Episodic history for grid '{ctx.scope.grid}' withheld: no access")
+            return None
+        return "grid", ctx.scope.grid
+    if ctx.scope.organization_id:
+        if not (ctx.is_staff or ctx.scope.organization_id in ctx.organization_ids):
+            return None
+        return "organization", ctx.scope.organization_id
+    return None
+
+
+async def fetch_distillation_summary(
+    client: Any, *, anchor_type: str, anchor_id: str
+) -> Optional[str]:
+    """The raw stored distillation summary for one anchor, or None. No access
+    check -- callers gate that themselves (see ``resolve_episodic_anchor``)."""
+    if client is None:
+        return None
+    try:
+        result = (
+            client.table("episodic_distillations")
+            .select("anchor_name, summary")
+            .eq("anchor_type", anchor_type)
+            .eq("anchor_id", anchor_id)
+            .limit(1)
+            .execute()
+        )
+    except Exception as e:
+        LOGGER.warning(f"Episodic distillation lookup failed: {e}")
+        return None
+
+    rows = result.data or []
+    if not rows:
+        return None
+    summary = (rows[0].get("summary") or "").strip()
+    return summary or None
+
+
+async def fetch_episodic_summary(
+    ctx: ResolutionContext,
+    *,
+    client: Any = None,
+    grid_access: Optional[Callable[[str, ResolutionContext], Awaitable[bool]]] = None,
+) -> Optional[str]:
+    """Anchor-resolve and fetch in one call, for a caller with no
+    ``KnowledgeModule`` to hand a full ``EpisodicProvider.resolve()`` --
+    the notify/alert-judgment flow and chat's direct-injected context (see
+    ``chat_orchestrator/orchestrator/services/grid_context_feeds.py``) both
+    want this same distillation outside the knowledge-module system, since
+    neither goes through prompt-pinning/JIT resolution at all."""
+    client = client if client is not None else _default_client()
+    if client is None:
+        return None
+    anchor = await resolve_episodic_anchor(ctx, grid_access or _default_grid_access)
+    if anchor is None:
+        return None
+    anchor_type, anchor_id = anchor
+    return await fetch_distillation_summary(client, anchor_type=anchor_type, anchor_id=anchor_id)
 
 
 class EpisodicProvider:
@@ -43,37 +116,7 @@ class EpisodicProvider:
     ) -> Optional[str]:
         if self._client is None:
             return None
-
-        if ctx.scope.grid:
-            anchor_type, anchor_id = "grid", ctx.scope.grid
-            if not await self._grid_access(ctx.scope.grid, ctx):
-                LOGGER.info(f"Episodic history for grid '{ctx.scope.grid}' withheld: no access")
-                return None
-        elif ctx.scope.organization_id:
-            anchor_type, anchor_id = "organization", ctx.scope.organization_id
-            if not (ctx.is_staff or anchor_id in ctx.organization_ids):
-                return None
-        else:
-            return None
-
-        try:
-            result = (
-                self._client.table("episodic_distillations")
-                .select("anchor_name, summary")
-                .eq("anchor_type", anchor_type)
-                .eq("anchor_id", anchor_id)
-                .limit(1)
-                .execute()
-            )
-        except Exception as e:
-            LOGGER.warning(f"Episodic distillation lookup failed: {e}")
-            return None
-
-        rows = result.data or []
-        if not rows:
-            return None
-        summary = (rows[0].get("summary") or "").strip()
-        return summary or None
+        return await fetch_episodic_summary(ctx, client=self._client, grid_access=self._grid_access)
 
     async def preview(self, ctx: ResolutionContext) -> Optional[str]:
         """What the admin Context page shows for this module.
@@ -190,4 +233,9 @@ def _default_client() -> Any:
         return None
 
 
-__all__ = ["EpisodicProvider"]
+__all__ = [
+    "EpisodicProvider",
+    "fetch_distillation_summary",
+    "fetch_episodic_summary",
+    "resolve_episodic_anchor",
+]
