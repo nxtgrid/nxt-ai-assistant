@@ -137,6 +137,17 @@ earlier ticket** -- never synthesize a new root-cause ticket for a
 genuinely no open candidate represents the root cause, decide **new**
 instead.
 
+- **Soft-failures when grid is still powered**: most warnings such as battery
+  equalization or MPPT production being low do not cause grid failure, as
+  indicated by grid voltage being non-zero or grid status not being Off.
+  Non-failures should be kept as separate, non-critical tickets from grid
+  failure tickets.
+- **Comms failures**: if the site power plant's comms are down, it could be
+  a simple comms issue (no cell/satellite connectivity, a modem unplugged or
+  with a loose connection, a monthly plan not renewed), or it could be an
+  urgent battery failure, since comms are powered by auxiliary supply from
+  the storage. A comms failure usually means we get no data to determine the
+  real failure cause, and usually needs a technician to check manually.
 - **Battery/BMS communication loss -> inverter protective shutdown -> grid
   outage.** A battery or BMS communication-loss alert, followed within
   ~30 minutes by an inverter-off / restart-failed / grid-outage alert on the
