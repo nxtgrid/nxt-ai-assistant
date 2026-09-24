@@ -56,7 +56,7 @@ class TestGroupIsInert:
         assert page.group_is_inert("bot_control", _pending()) is False
 
     def test_a_group_is_not_inert_when_only_one_flag_depends_on_an_unrelated_toggle(self):
-        """"conversation" hosts 15 flags; only ACTIVE_THREAD_WINDOW_MINUTES
+        """ "conversation" hosts 15 flags; only ACTIVE_THREAD_WINDOW_MINUTES
         depends_on THREAD_DISENTANGLEMENT_ENABLED, a toggle that belongs to a
         different feature entirely (the other two dependent flags in this
         group -- VERIFICATION_DOC_ID and LOOP_DETECTION_THRESHOLD -- each
@@ -117,8 +117,23 @@ def test_page_contains_no_hardcoded_flag_names():
         "OPENROUTER_PROVIDER_ORDER",
         "OPENROUTER_ALLOW_FALLBACKS",
         "OPENROUTER_REQUIRE_PARAMETERS",
+        "OPENROUTER_API_KEY",  # Jev readiness note uses secret-presence metadata.
+        "JEV_DECISIONS_ENABLED",  # Jev readiness note follows pending switch state.
     }
-    leaked = sorted(
-        name for name in fr.FLAGS if name not in permitted and f'"{name}"' in source
-    )
+    leaked = sorted(name for name in fr.FLAGS if name not in permitted and f'"{name}"' in source)
     assert leaked == [], f"page still hardcodes {leaked}; move it to the registry"
+
+
+def test_jev_readiness_note_tracks_pending_switch_and_key_presence(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPEN_ROUTER_BEARER_TOKEN", raising=False)
+    assert page._jev_readiness_note({"JEV_DECISIONS_ENABLED": False}, {}) is None
+    assert (
+        page._jev_readiness_note({"JEV_DECISIONS_ENABLED": True}, {"OPENROUTER_API_KEY": True})
+        is None
+    )
+    note = page._jev_readiness_note({"JEV_DECISIONS_ENABLED": True}, {"OPENROUTER_API_KEY": False})
+    assert "existing LLM path" in note
+    assert "generation provider" in note
+    monkeypatch.setenv("OPEN_ROUTER_BEARER_TOKEN", "example-key")
+    assert page._jev_readiness_note({"JEV_DECISIONS_ENABLED": True}, {}) is None

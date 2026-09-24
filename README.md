@@ -345,6 +345,20 @@ OPENROUTER_APP_TITLE=Anansi
 
 Keep `LLM_PROVIDER=gemini` for normal deployments until you intentionally test OpenRouter-backed generation paths. For OpenRouter BYOK/BYOL with Google Vertex, set `OPENROUTER_PROVIDER_ORDER=google-vertex` and `OPENROUTER_ALLOW_FALLBACKS=false` so requests do not fall back to other OpenRouter endpoints. The settings page discovers provider routes from the selected OpenRouter model using the normal OpenRouter access key. Gemini-specific orchestrator code remains available as the default backup path.
 
+### Optional Jev decisions through OpenRouter
+
+The **AI Models & Providers** settings page has a separate **Use Jev for decisions** switch and **Jev decision model** dropdown. The switch is off by default. It applies to customer-response verification (when `VERIFICATION_ENABLED` is on), issue-type classification, ticket-comment significance, multi-active-thread assignment (when `THREAD_DISENTANGLEMENT_ENABLED` is on), and conversation context filtering (when `CONTEXT_FILTER_ENABLED` is on). Gemini can remain the generation provider while these decisions use an OpenRouter key.
+
+```bash
+JEV_DECISIONS_ENABLED=false
+JEV_DECISIONS_MODEL=~typesafe/jev-latest
+OPENROUTER_API_KEY=your-openrouter-api-key
+```
+
+Jev uses OpenRouter's `POST /api/alpha/decisions`, separate from chat completions. The configured model must be in the Jev family. On missing credit, a transport error, an invalid answer, or an uncertain decision, the existing LLM call remains the fallback. The response verifier uses Jev only to fast-pass clear messages; possible failures still go to the existing judge for written repair feedback. Long inputs and tool activity with no source evidence also use the existing judge. The technical-response sanitizer still uses a generative model. The OpenRouter provider-order controls above are for chat completions and are not sent to Decisions.
+
+Before enabling the switch in production, fund the OpenRouter account and smoke-test one Choice, one Noul, and one batched request with the selected model. Compare the five adapters on labeled examples in the supported customer languages and calibrate their thresholds. The implementation's offline tests check the documented wire shape and fallback behavior, but no funded live Jev call has been run for this integration. Set `JEV_DECISIONS_ENABLED=false` to return every path to its previous behavior.
+
 ### Operator-specific database columns
 
 The `shared/auth` code references a column named `is_generation_managed_by_nxt_grid` in the `grids` table (via the `MANAGED_GENERATION_COLUMN` env var, defaulting to that name). This is an operator-specific column from the reference deployment. If your schema uses a different name (or doesn't have this concept), set `MANAGED_GENERATION_COLUMN` or update the default in `shared/auth/auth_service.py`.

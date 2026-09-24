@@ -47,10 +47,16 @@ class ContextFilterService:
         model: Optional[str] = None,
         gateway: Optional[GenerationGateway] = None,
     ) -> None:
-        self._api_key = api_key or os.getenv("GOOGLE_API_KEY", "")
+        provider = os.getenv("LLM_PROVIDER", "gemini").strip().lower()
+        provider_key = (
+            os.getenv("OPENROUTER_API_KEY", "")
+            if provider in {"openrouter", "open-router"}
+            else os.getenv("GOOGLE_API_KEY", "")
+        )
+        self._api_key = api_key or provider_key
         self._model = model or resolve_model(PROMPTS.spec("context_filter.relevance").model)
         self._gateway = gateway or get_default_generation_gateway(
-            api_key=self._api_key,
+            api_key=api_key,
             default_model=self._model,
         )
 
@@ -77,10 +83,6 @@ class ContextFilterService:
 
         all_indices = list(range(len(candidate_messages)))
 
-        if not self._api_key:
-            LOGGER.debug("Context filter: no API key, returning all messages")
-            return ContextFilterResult(relevant_indices=all_indices, confidence=0.0)
-
         # Format candidate messages for the prompt
         formatted = []
         for i, msg in enumerate(candidate_messages):
@@ -92,6 +94,35 @@ class ContextFilterService:
             formatted.append(f"{i}: {msg.role} - {content}")
 
         formatted_candidates = "\n".join(formatted)
+
+        from shared.llm.jev_policy import CONTEXT_DROP_MAX, is_jev_enabled, jev_model
+        from shared.llm.openrouter_decisions import OpenRouterDecisionClient
+
+        if is_jev_enabled():
+            try:
+                questions = {
+                    f"candidate_{i}": {
+                        "type": "noul",
+                        "instructions": f"Is candidate message {i} relevant to understanding or answering the incoming message?",
+                        "criteria": {"true": "Useful context for this reply", "false": "Unrelated to this reply"},
+                    }
+                    for i in range(len(candidate_messages))
+                }
+                async with OpenRouterDecisionClient() as client:
+                    response = await client.decide(
+                        model=jev_model(),
+                        state={"incoming_message": incoming_message[:500], "candidates": formatted_candidates},
+                        questions=questions,
+                    )
+                kept = [i for i in all_indices if response.noul(f"candidate_{i}") > CONTEXT_DROP_MAX]
+                if kept:
+                    return self._enforce_tool_pairs(ContextFilterResult(relevant_indices=kept, confidence=1.0), candidate_messages)
+            except Exception as exc:
+                LOGGER.warning("Jev context filtering unavailable; using legacy model: {}", type(exc).__name__)
+
+        if not self._api_key:
+            LOGGER.debug("Context filter: no API key, returning all messages")
+            return ContextFilterResult(relevant_indices=all_indices, confidence=0.0)
 
         prompt = PROMPTS.text(
             "context_filter.relevance",

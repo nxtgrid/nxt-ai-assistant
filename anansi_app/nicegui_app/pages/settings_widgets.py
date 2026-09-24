@@ -73,6 +73,11 @@ def secret_placeholder(is_set: bool) -> str:
 
 def validate(flag: Flag, value: Any) -> Optional[str]:
     """Return an error message for ``value``, or None when it is acceptable."""
+    if flag.name == "JEV_DECISIONS_MODEL":
+        from shared.llm.jev_policy import valid_jev_model
+
+        if not valid_jev_model(str(value or "")):
+            return "Jev decision model: choose a TypeSafe Jev model"
     if flag.choices and str(value) not in flag.choices:
         return f"{flag.display_label}: must be one of {', '.join(flag.choices)}"
     if flag.type is FlagType.JSON:

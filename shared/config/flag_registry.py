@@ -129,9 +129,9 @@ class Flag:
         maximum: Inclusive upper bound for INT/FLOAT flags (UI + save validation).
         set_via: For read-only flags, a short hint about where an operator sets
             this value (e.g. "Set in the DigitalOcean console.").
-        model_picker: When set to ``"gemini"``, the settings UI renders this
-            flag as a select populated from the live Gemini model list
-            (fetched via the Google API) instead of free text. Unlike
+        model_picker: When set to ``"gemini"`` or ``"jev"``, the settings UI
+            renders this flag as a select populated from the matching model
+            list instead of free text. Unlike
             :attr:`choices`, the option list isn't known statically. Distinct
             from the provider-aware "role model" fields (``MODEL_THINKING``,
             ``MODEL_FAST``, ``MODEL_LITE``, ``FALLBACK_MODEL``), which switch
@@ -351,6 +351,21 @@ _FLAGS: List[Flag] = [
         "Model for lightweight/high-volume tasks (classification, verification, routing).",
         group="models",
         label="Lite-tier model",
+    ),
+    _b(
+        "JEV_DECISIONS_ENABLED",
+        False,
+        "Use OpenRouter Jev for selected classification and verification decisions. Requires an OpenRouter key and funded credit; existing models handle uncertain or failed decisions.",
+        group="models",
+        label="Use Jev for decisions",
+    ),
+    _s(
+        "JEV_DECISIONS_MODEL",
+        "~typesafe/jev-latest",
+        "OpenRouter Decisions model, independent of the generation provider. The latest alias may change version.",
+        group="models",
+        label="Jev decision model",
+        model_picker="jev",
     ),
     _s(
         "FALLBACK_MODEL",
