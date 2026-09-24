@@ -155,6 +155,27 @@ async def classify_significance(
 
     if is_probably_noise(comment_body):
         return False
+    from shared.llm.jev_policy import NOUL_FALSE_MAX, NOUL_TRUE_MIN, is_jev_enabled, jev_model
+    from shared.llm.openrouter_decisions import OpenRouterDecisionClient
+
+    if is_jev_enabled():
+        try:
+            async with OpenRouterDecisionClient() as client:
+                response = await client.decide(
+                    model=jev_model(), state={"comment": comment_body.strip()},
+                    questions={"significant": {
+                        "type": "noul",
+                        "instructions": "Does this comment contain an operationally significant diagnosis, root cause, escalation, customer impact, blocker, schedule change, or resolution that warrants notifying the operations group?",
+                        "criteria": {"true": "Substantive operational change or information the team needs now", "false": "Acknowledgement, status ping, or administrative chatter without material change"},
+                    }},
+                )
+            probability = response.noul("significant")
+            if probability >= NOUL_TRUE_MIN:
+                return True
+            if probability <= NOUL_FALSE_MAX:
+                return False
+        except Exception as exc:
+            LOGGER.warning("Jev significance unavailable; using legacy model: {}", type(exc).__name__)
     try:
         result = await gateway.generate(
             [

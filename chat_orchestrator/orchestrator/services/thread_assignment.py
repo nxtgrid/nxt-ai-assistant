@@ -130,6 +130,30 @@ async def classify_issue_type(user_input: str) -> str:
     Not tied to a specific library prompt (the prompt text below is hand-built,
     not from thread_assignment.classify) -- resolves the lite tier directly.
     """
+    from shared.llm.jev_policy import CHOICE_CONFIDENCE_MIN, is_jev_enabled, jev_model
+    from shared.llm.openrouter_decisions import OpenRouterDecisionClient
+
+    if is_jev_enabled():
+        try:
+            criteria = {
+                "token": "Payment token generation, token not received, top-up failures",
+                "hps": "HPS power limits, load shedding, high-power service requests",
+                "meter": "Meter errors, tamper alerts, replacement, meter hardware",
+                "transaction": "Payments, wallet credit, transaction history, refunds",
+                "commissioning": "New connections, commissioning failures, meter activation",
+                "other": "Any message outside these categories",
+            }
+            async with OpenRouterDecisionClient() as client:
+                response = await client.decide(
+                    model=jev_model(), state={"message": user_input[:500]},
+                    questions={"issue_type": {"type": "choice", "instructions": "Which single support issue category best fits this message?", "criteria": criteria}},
+                )
+            answer = response.choice("issue_type", set(ISSUE_TYPES))
+            if answer.confidence >= CHOICE_CONFIDENCE_MIN:
+                return answer.choice
+        except Exception as exc:
+            LOGGER.warning("Jev issue classification unavailable; using legacy model: {}", type(exc).__name__)
+
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     prompt = (
         f"TODAY'S DATE AND TIME: {now_str}\n\n"
@@ -266,8 +290,6 @@ class ThreadAssignmentService:
         history: List[ConversationMessage],
     ) -> ThreadAssignment:
         """Use Gemini Flash Lite for binary classification."""
-        model = resolve_model(PROMPTS.spec("thread_assignment.classify").model)
-
         # Build thread summaries (last 3 messages per thread)
         thread_summaries = []
         for tid in active_threads:
@@ -284,6 +306,32 @@ class ThreadAssignmentService:
             thread_summaries.append(f"Thread {tid}:\n" + "\n".join(summary_lines))
 
         threads_text = "\n\n".join(thread_summaries)
+
+        from shared.llm.jev_policy import CHOICE_CONFIDENCE_MIN, is_jev_enabled, jev_model
+        from shared.llm.openrouter_decisions import OpenRouterDecisionClient
+
+        if is_jev_enabled():
+            try:
+                criteria = {
+                    tid: f"Continue this conversation: {summary[:600]}"
+                    for tid, summary in zip(active_threads, thread_summaries)
+                }
+                criteria["NEW"] = "This message starts a different issue from every active thread"
+                async with OpenRouterDecisionClient() as client:
+                    response = await client.decide(
+                        model=jev_model(),
+                        state={"incoming_message": user_input[:1000], "active_threads": threads_text[:5000]},
+                        questions={"thread": {"type": "choice", "instructions": "Which active conversation should receive this message, or is it a new issue?", "criteria": criteria}},
+                    )
+                answer = response.choice("thread", set(criteria))
+                if answer.confidence >= CHOICE_CONFIDENCE_MIN:
+                    if answer.choice == "NEW":
+                        return ThreadAssignment(thread_id=_new_thread_id(), is_new=True, method="jev_new", confidence=answer.confidence)
+                    return ThreadAssignment(thread_id=answer.choice, method="jev", confidence=answer.confidence)
+            except Exception as exc:
+                LOGGER.warning("Jev thread assignment unavailable; using legacy model: {}", type(exc).__name__)
+
+        model = resolve_model(PROMPTS.spec("thread_assignment.classify").model)
 
         prompt = PROMPTS.text(
             "thread_assignment.classify",

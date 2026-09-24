@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from nicegui_app.pages import settings as settings_page
 from services.settings_service import SettingsService
 
+from shared.config import flag_registry
+
 
 class FakeResponse:
     def __init__(self, payload):
@@ -15,6 +17,33 @@ class FakeResponse:
 
     def json(self):
         return self._payload
+
+
+def test_jev_settings_are_off_by_default_and_independent_of_chat_provider():
+    assert flag_registry.FLAGS["JEV_DECISIONS_ENABLED"].default is False
+    assert flag_registry.FLAGS["JEV_DECISIONS_MODEL"].default == "~typesafe/jev-latest"
+    pending = {"LLM_PROVIDER": "gemini", "JEV_DECISIONS_MODEL": "~typesafe/jev-latest"}
+    settings_page._apply_llm_provider_change(pending, "openrouter")
+    assert pending["JEV_DECISIONS_MODEL"] == "~typesafe/jev-latest"
+
+
+def test_jev_model_options_are_available_with_gemini_generation(monkeypatch):
+    monkeypatch.setattr(SettingsService, "get_jev_models", lambda self: ["~typesafe/jev-latest", "typesafe/jev-1.13"])
+    svc = SimpleNamespace(
+        get_gemini_models=lambda: ["gemini-flash-latest"],
+        get_openrouter_models=lambda: [],
+        get_openrouter_provider_routes=lambda model: {},
+        get_llm_provider_options=lambda: {"gemini": "Gemini"},
+        get_jev_models=lambda: SettingsService().get_jev_models(),
+    )
+    options = settings_page._model_select_options(svc, {"LLM_PROVIDER": "gemini", "MODEL_FAST": "gemini-flash-latest"})
+    assert options["JEV_DECISIONS_MODEL"] == ["~typesafe/jev-latest", "typesafe/jev-1.13"]
+
+
+def test_settings_service_rejects_non_jev_decision_model():
+    ok, error = SettingsService().update_settings({"JEV_DECISIONS_MODEL": "google/gemini-2.5-flash"})
+    assert ok is False
+    assert "Jev" in error
 
 
 def test_gemini_models_are_fetched_and_normalized(monkeypatch):

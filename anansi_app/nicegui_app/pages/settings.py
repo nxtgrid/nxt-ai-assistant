@@ -21,6 +21,7 @@ saves would thrash it. If any changed flag is restart-scoped the button becomes
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any
 
@@ -120,6 +121,12 @@ def _model_select_options(svc, current: dict[str, Any]) -> dict[str, Any]:
     for flag in registry.FLAGS.values():
         if flag.model_picker == "gemini":
             options[flag.name] = gemini_models
+        elif flag.model_picker == "jev":
+            options[flag.name] = (
+                svc.get_jev_models()
+                if hasattr(svc, "get_jev_models")
+                else ["~typesafe/jev-latest", "typesafe/jev-1.13"]
+            )
     return options
 
 
@@ -178,6 +185,11 @@ def _model_section_plan(names: list[str], pending: dict[str, Any]) -> ModelSecti
     primary_order = [
         "LLM_PROVIDER",
         *_ROLE_MODEL_KEYS,
+        *(
+            flag.name
+            for flag in registry.FLAGS.values()
+            if flag.group == "models" and flag.name.startswith("JEV_")
+        ),
         "OPENROUTER_PROVIDER_ORDER",
         "OPENROUTER_ALLOW_FALLBACKS",
         "OPENROUTER_REQUIRE_PARAMETERS",
@@ -206,15 +218,9 @@ def _options_with_current(options: Any, value: Any) -> Any:
 def _role_model_options(model_options: dict[str, Any], pending: dict[str, Any]) -> list[str]:
     if _selected_provider(pending) == "openrouter":
         return list(
-            model_options.get("__OPENROUTER_MODELS")
-            or model_options.get("MODEL_FAST")
-            or []
+            model_options.get("__OPENROUTER_MODELS") or model_options.get("MODEL_FAST") or []
         )
-    return list(
-        model_options.get("__GEMINI_MODELS")
-        or model_options.get("MODEL_FAST")
-        or []
-    )
+    return list(model_options.get("__GEMINI_MODELS") or model_options.get("MODEL_FAST") or [])
 
 
 def _route_fallbacks_for_model(model: Any) -> dict[str, str]:
@@ -394,12 +400,17 @@ async def render(log_levels: list[str] | None = None) -> None:
         models_container.clear()
         with models_container:
             names = [
-                f.name
-                for f in visible_flags("models", pending, state["advanced"], state["query"])
+                f.name for f in visible_flags("models", pending, state["advanced"], state["query"])
             ]
             _render_models_section(
-                names, pending, log_levels, model_options, _on_change,
-                secret_state, provenance, set(_changed()),
+                names,
+                pending,
+                log_levels,
+                model_options,
+                _on_change,
+                secret_state,
+                provenance,
+                set(_changed()),
             )
 
     def _on_change(name: str, value: Any) -> None:
@@ -433,8 +444,14 @@ async def render(log_levels: list[str] | None = None) -> None:
             models_container = ui.column().classes("w-full")
             with models_container:
                 _render_models_section(
-                    [f.name for f in names], pending, log_levels, model_options, _on_change,
-                    secret_state, provenance, set(_changed()),
+                    [f.name for f in names],
+                    pending,
+                    log_levels,
+                    model_options,
+                    _on_change,
+                    secret_state,
+                    provenance,
+                    set(_changed()),
                 )
         else:
             # Two-column grid: most flags are short (toggle/number/one-line
@@ -443,8 +460,14 @@ async def render(log_levels: list[str] | None = None) -> None:
             with ui.grid(columns=2).classes("w-full gap-x-6 gap-y-0"):
                 for flag in names:
                     _render_flag(
-                        flag.name, pending, log_levels, model_options, _on_change,
-                        secret_state, provenance, set(_changed()),
+                        flag.name,
+                        pending,
+                        log_levels,
+                        model_options,
+                        _on_change,
+                        secret_state,
+                        provenance,
+                        set(_changed()),
                     )
 
     state = {"query": "", "advanced": False}
@@ -474,9 +497,7 @@ async def render(log_levels: list[str] | None = None) -> None:
                     "dense-toggle switch-toggle-side"
                 )
                 with section:
-                    ui.label(group.description).classes("text-caption").style(
-                        "color: #64748b"
-                    )
+                    ui.label(group.description).classes("text-caption").style("color: #64748b")
                     if inert:
                         ui.label(
                             "Disabled — turn the corresponding server on in "
@@ -493,8 +514,10 @@ async def render(log_levels: list[str] | None = None) -> None:
     readiness_container = ui.column().classes("w-full")
     _rebuild_readiness()
 
-    with ui.row().classes("items-center gap-3 w-full q-mb-sm").style(
-        "position: sticky; top: 0; z-index: 10; background: #f0f2f6; padding: 0.5rem 0"
+    with (
+        ui.row()
+        .classes("items-center gap-3 w-full q-mb-sm")
+        .style("position: sticky; top: 0; z-index: 10; background: #f0f2f6; padding: 0.5rem 0")
     ):
 
         def _on_search(event) -> None:
@@ -555,6 +578,11 @@ def _render_models_section(
 ) -> None:
     plan = _model_section_plan(names, pending)
 
+    jev_note = _jev_readiness_note(pending, secret_state)
+    if jev_note:
+        with ui.card().classes("w-full q-mb-md").style("grid-column: 1 / -1"):
+            ui.label(jev_note).classes("text-caption").style("color: #a16207")
+
     provider_routes = model_options.get("OPENROUTER_PROVIDER_ORDER") or {}
     selected_model = pending.get("MODEL_FAST") or ""
     if plan.show_openrouter_routes and not provider_routes:
@@ -585,14 +613,43 @@ def _render_models_section(
     with ui.grid(columns=2).classes("w-full gap-x-6 gap-y-0"):
         for key in plan.primary_keys:
             _render_flag(
-                key, pending, log_levels, section_model_options, on_change,
-                secret_state, provenance, changed_names,
+                key,
+                pending,
+                log_levels,
+                section_model_options,
+                on_change,
+                secret_state,
+                provenance,
+                changed_names,
             )
         for name in plan.remaining_keys:
             _render_flag(
-                name, pending, log_levels, section_model_options, on_change,
-                secret_state, provenance, changed_names,
+                name,
+                pending,
+                log_levels,
+                section_model_options,
+                on_change,
+                secret_state,
+                provenance,
+                changed_names,
             )
+
+
+def _jev_readiness_note(
+    pending: dict[str, Any], secret_state: dict[str, bool] | None
+) -> str | None:
+    has_key = bool(
+        (secret_state or {}).get("OPENROUTER_API_KEY")
+        or os.getenv("OPENROUTER_API_KEY", "").strip()
+        or os.getenv("OPEN_ROUTER_BEARER_TOKEN", "").strip()
+    )
+    if pending.get("JEV_DECISIONS_ENABLED") and not has_key:
+        return (
+            "Jev is enabled but the OpenRouter API key is not configured. "
+            "Decisions will use the existing LLM path until a key is set. "
+            "The generation provider and its routing settings do not control Jev Decisions."
+        )
+    return None
 
 
 def _render_grafana_section(
@@ -629,8 +686,14 @@ def _render_grafana_section(
     ):
         if _take(key):
             _render_flag(
-                key, pending, log_levels, model_options, on_change,
-                secret_state, provenance, changed_names,
+                key,
+                pending,
+                log_levels,
+                model_options,
+                on_change,
+                secret_state,
+                provenance,
+                changed_names,
             )
 
     # Machine-managed blobs are surfaced via the pickers below — hide the raw,
@@ -653,8 +716,14 @@ def _render_grafana_section(
             for key in ("GRAFANA_ENABLED_DASHBOARDS", "GRAFANA_ENABLED_PANELS"):
                 if _take(key):
                     _render_flag(
-                        key, pending, log_levels, model_options, on_change,
-                        secret_state, provenance, changed_names,
+                        key,
+                        pending,
+                        log_levels,
+                        model_options,
+                        on_change,
+                        secret_state,
+                        provenance,
+                        changed_names,
                     )
         else:
             _take("GRAFANA_ENABLED_DASHBOARDS")
@@ -804,8 +873,14 @@ def _render_grafana_section(
     # configured/not-configured status.
     for name in remaining:
         _render_flag(
-            name, pending, log_levels, model_options, on_change,
-            secret_state, provenance, changed_names,
+            name,
+            pending,
+            log_levels,
+            model_options,
+            on_change,
+            secret_state,
+            provenance,
+            changed_names,
         )
 
 
@@ -896,9 +971,9 @@ def _render_flag(
             opts = log_levels or list(flag.choices)
             ui.select(opts, value=value, label=label, on_change=handler).classes("w-full")
         elif mode is RenderMode.SELECT:
-            ui.select(
-                list(flag.choices), value=value, label=label, on_change=handler
-            ).classes("w-full")
+            ui.select(list(flag.choices), value=value, label=label, on_change=handler).classes(
+                "w-full"
+            )
         elif mode is RenderMode.NUMBER:
             number_args: dict[str, Any] = {}
             if flag.minimum is not None:

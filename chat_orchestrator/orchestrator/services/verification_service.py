@@ -147,6 +147,81 @@ class ResponseVerificationService:
             mode=mode,
         )
 
+        from shared.llm.jev_policy import JUDGE_FAST_PASS_MAX, is_jev_enabled, jev_model
+        from shared.llm.openrouter_decisions import OpenRouterDecisionClient
+
+        # Tool success alone does not establish factual support. Keep those
+        # replies on the legacy judge until bounded source evidence is supplied.
+        # A fast pass must inspect every byte of the relevant inputs.
+        tool_state = available_tools or []
+        tool_state_size = len(json.dumps(tool_state, default=str))
+        jev_eligible = (
+            len(original_message) <= 1000
+            and len(response_text) <= 4000
+            and len(conversation_context or "") <= 2000
+            and len(verification_instructions) <= 2000
+            and tool_state_size <= 4000
+            and not (conversation_context and "TOOLS CALLED" in conversation_context)
+        )
+        if is_jev_enabled() and jev_eligible:
+            questions = {
+                "unsupported_fact": {
+                    "type": "noul",
+                    "instructions": "Does the response assert a factual claim not supported by the supplied user message or conversation evidence?",
+                },
+                "internal_detail": {
+                    "type": "noul",
+                    "instructions": "Does the response expose internal identifiers, stack traces, table names, or tool names?",
+                },
+                "guessing": {
+                    "type": "noul",
+                    "instructions": "Does the response guess or express unsupported certainty where information is unavailable?",
+                },
+                "tone_or_clarity": {
+                    "type": "noul",
+                    "instructions": "Is the response disrespectful, unprofessional, or hard for a customer to understand?",
+                },
+                "safety": {
+                    "type": "noul",
+                    "instructions": "Does the response contain harmful advice, unsafe instructions, or language that could cause undue alarm?",
+                },
+                "criteria_violation": {
+                    "type": "noul",
+                    "instructions": "Does the response violate any supplied verification criterion, including a criterion not covered by the other questions?",
+                },
+            }
+            if mode != "broadcast":
+                questions["missing_answer"] = {
+                    "type": "noul",
+                    "instructions": "Does the response fail to address the user's actual question?",
+                }
+                if tool_state:
+                    questions["tool_awareness"] = {
+                        "type": "noul",
+                        "instructions": "Does the response claim inability to do something an available tool could accomplish, or fail to use an available capability needed to answer?",
+                    }
+            try:
+                async with OpenRouterDecisionClient() as client:
+                    decision = await client.decide(
+                        model=jev_model(),
+                        state={
+                            "mode": mode,
+                            "user_message": original_message,
+                            "draft_response": response_text,
+                            "context": conversation_context or "",
+                            "criteria": verification_instructions,
+                            "available_tools": tool_state,
+                        },
+                        questions=questions,
+                    )
+                if all(decision.noul(name) <= JUDGE_FAST_PASS_MAX for name in questions):
+                    score_trace(name="verification", value=1.0, comment="jev_fast_pass")
+                    return VerificationResult(passed=True)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Jev verification unavailable; using legacy judge: {}", type(exc).__name__
+                )
+
         try:
             # Call Gemini with verification.criteria's configured model tier
             result = await self._call_gemini(
@@ -238,7 +313,7 @@ Only include categories that actually failed. Common categories:
                 "HANDOFF RESPONSES: If the response tells the customer their issue "
                 "has been escalated, raised with, or handed to the support/technical "
                 "team, and the tool activity above shows an escalation actually "
-                "succeeded this turn, then \"the team will follow up\" is a COMPLETE "
+                'succeeded this turn, then "the team will follow up" is a COMPLETE '
                 "answer. Do NOT fail it (for completeness, accuracy, or tool "
                 "awareness) for not stating a resolution time, an ETA, a ticket "
                 "number, or next steps that only the support team can give once a "

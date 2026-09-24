@@ -110,6 +110,11 @@ class SettingsService:
         Read-only (non-editable) and oversized values are filtered out by the
         backend. Returns ``(success, error_message)``.
         """
+        if "JEV_DECISIONS_MODEL" in settings:
+            from shared.llm.jev_policy import valid_jev_model
+
+            if not valid_jev_model(str(settings["JEV_DECISIONS_MODEL"] or "")):
+                return False, "Jev decision model must be a TypeSafe Jev model"
         success, error = self.backend.update(settings, restart=restart_bot)
         return success, error
 
@@ -205,6 +210,13 @@ class SettingsService:
             return sorted(dict.fromkeys(models)) or list(OPENROUTER_MODEL_FALLBACKS)
         except Exception:
             return list(OPENROUTER_MODEL_FALLBACKS)
+
+    def get_jev_models(self) -> List[str]:
+        """Jev Decisions models, including the documented moving alias."""
+        from shared.llm.jev_policy import JEV_LATEST, JEV_PINNED, valid_jev_model
+
+        discovered = [model for model in self.get_openrouter_models() if valid_jev_model(model)]
+        return list(dict.fromkeys([JEV_LATEST, JEV_PINNED, *discovered]))
 
     def get_openrouter_provider_routes(self, model: str) -> Dict[str, str]:
         """Fetch provider endpoint slugs available for an OpenRouter model."""
