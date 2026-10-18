@@ -179,14 +179,9 @@ class FullConversationGraphBuilder:
         builder.add_edge(START, "init_services")
         builder.add_edge("init_services", "resolve_auth")
         builder.add_edge("resolve_auth", "check_escalation")
-        builder.add_conditional_edges(
-            "check_escalation",
-            self._route_after_escalation_check,
-            {
-                "respond": "respond",  # Early exit for escalated sessions
-                "prepare_media": "prepare_media",
-            },
-        )
+        # Escalated sessions continue too: check_escalation forwards the message to
+        # the open escalation thread and the bot still answers it.
+        builder.add_edge("check_escalation", "prepare_media")
         builder.add_edge("prepare_media", "prepare_tools")
 
         # Early save: persist user message before any processing
@@ -258,23 +253,6 @@ class FullConversationGraphBuilder:
         builder.add_edge("save_history", END)
 
         return builder.compile()
-
-    def _route_after_escalation_check(
-        self, state: ConversationState
-    ) -> Literal["respond", "prepare_media"]:
-        """Route after escalation check.
-
-        If session is escalated and message was forwarded, go to respond.
-        Otherwise continue with normal flow.
-        """
-        is_escalated = state.get("is_escalated_session", False)
-        forward_result = state.get("escalation_forward_result")
-
-        if is_escalated and forward_result:
-            LOGGER.info("Session is escalated, skipping to respond")
-            return "respond"
-
-        return "prepare_media"
 
     def _route_after_expert_check(
         self, state: ConversationState
@@ -508,11 +486,6 @@ class FullConversationGraphBuilder:
         """Finalize the response."""
         final_text = state.get("final_response", "")
 
-        # If this is an escalation forward, use that message
-        escalation_forward_result = state.get("escalation_forward_result")
-        if escalation_forward_result:
-            final_text = escalation_forward_result
-
         # Add final message to history if we have history_messages
         history_messages = list(state.get("history_messages", []))
         gemini_history = list(state.get("gemini_history", []))
@@ -528,7 +501,7 @@ class FullConversationGraphBuilder:
             if user_input:
                 history_messages.append(ConversationMessage(role="user", content=user_input))
 
-        if final_text and not escalation_forward_result:
+        if final_text:
             from orchestrator.models.schemas import ConversationMessage
 
             token_metadata = {
@@ -627,6 +600,7 @@ async def invoke_full_graph(
         "verification_enabled": False,
         "verification_passed": None,
         "is_escalated_session": False,
+        "escalation_followup_forwarded": False,
         "safety_escalation_needed": False,
         # Initialize counters
         "current_round": 0,

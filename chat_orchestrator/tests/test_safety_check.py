@@ -11,6 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from orchestrator.models.schemas import UserContext
+from shared.utils.error_messages import ErrorCategory, get_user_message
+
 # orchestrator.graphs.nodes.__init__ re-exports the `safety_check` function under
 # the same name as this submodule, shadowing it on the package — import via
 # importlib to get the actual module (for its private helpers) rather than the
@@ -429,3 +432,170 @@ async def test_bare_bracket_leak_escalation_context_says_leak_not_generic_claim(
     assert kwargs["question_summary"] == _make_state()["user_input"]
     assert "raw tool-call text leaked" in kwargs["conversation_context"]
     assert "claimed escalation without tool call" not in kwargs["conversation_context"]
+
+
+# ---------------------------------------------------------------------------
+# Unnecessary backup escalations (2026-10-18 audit)
+#
+# An audit of two months of production escalations found about a quarter were
+# false or duplicate, most of them from this node's backup path rather than the
+# model choosing to escalate:
+#   - _escalate_node's own verification-failure reply ("...I've notified our
+#     support team...") was re-detected as an unbacked claim, so a verification
+#     failure filed a second escalation one second later;
+#   - ticket titles often quote old bot text ("I have escalated this..."), so
+#     listing open tickets read as the bot claiming an escalation;
+#   - offers ("Would you like me to escalate this...?") and conditions ("let me
+#     know once the form is filled so I can escalate this") were read as
+#     claims, escalating before the user had even answered;
+#   - staff chats got backup escalations posted into their own support group.
+# ---------------------------------------------------------------------------
+
+VERIFICATION_FAILED_REPLY = get_user_message(ErrorCategory.ESCALATION, "verification_failed")
+
+
+def _user(*, is_staff: bool) -> UserContext:
+    return UserContext(user_id="1001", user_email="person@example.com", is_staff=is_staff)
+
+
+@pytest.mark.asyncio
+async def test_verification_failure_reply_does_not_file_a_second_escalation(
+    fake_escalation_service,
+):
+    # _escalate_node already filed the escalation and set escalation_triggered;
+    # its canned reply must not be re-detected as an unbacked claim.
+    state = _make_state(final_response=VERIFICATION_FAILED_REPLY, escalation_triggered=True)
+
+    result = await safety_check(state)
+
+    assert result["safety_escalation_needed"] is False
+    fake_escalation_service.escalate_to_support.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_message_already_forwarded_to_open_escalation_needs_no_backup(
+    fake_escalation_service,
+):
+    # check_escalation posted this turn's message into the session's open
+    # escalation thread, so a reply saying it was passed on is true.
+    state = _make_state(
+        final_response="I've passed your message to the support team handling your request.",
+        is_escalated_session=True,
+        escalation_followup_forwarded=True,
+    )
+
+    result = await safety_check(state)
+
+    assert result["safety_escalation_needed"] is False
+    fake_escalation_service.escalate_to_support.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_staff_reply_claiming_escalation_does_not_escalate(fake_escalation_service):
+    # Staff are the support team: a backup would only post into their own group.
+    state = _make_state(
+        final_response="I have escalated this to the engineering team for review.",
+        user_context=_user(is_staff=True),
+    )
+
+    result = await safety_check(state)
+
+    assert result["safety_escalation_needed"] is False
+    fake_escalation_service.escalate_to_support.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_staff_raw_tool_call_leak_is_still_replaced(fake_escalation_service):
+    # Skipping the staff backup escalation must not skip the leak guard.
+    state = _make_state(final_response=LEAKED_TEXT, user_context=_user(is_staff=True))
+
+    result = await safety_check(state)
+
+    assert "escalate_to_support(" not in result["final_response"]
+    fake_escalation_service.escalate_to_support.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_customer_reply_claiming_escalation_still_gets_a_backup(fake_escalation_service):
+    """The fixes must not switch the net off for the case it exists for."""
+    state = _make_state(
+        final_response="I have escalated this to the engineering team for review.",
+        user_context=_user(is_staff=False),
+    )
+
+    result = await safety_check(state)
+
+    assert result["safety_escalation_needed"] is True
+    fake_escalation_service.escalate_to_support.assert_awaited_once()
+
+
+TICKET_LISTING = """Here are the open and in-progress tickets, grouped by assignee:
+
+**Assignee A**
+* **TICKET-101**: ! Urgent: Grid outage at Example Grid ! (To Do, Highest)
+* **TICKET-102:** [In reply to the bot: "I've escalated this to our support team to verify the …
+
+**Unassigned**
+* **TICKET-103**: I am very sorry that this is still ongoing. I have escalated this directly to the senior technical t…
+
+| Key | Summary | Status |
+| TICKET-104 | I have escalated this to our support team | To Do |
+"""
+
+
+def test_ticket_listing_quoting_old_bot_text_is_not_a_claim():
+    assert safety_check_module._detect_escalation_claim(TICKET_LISTING) is False
+
+
+@pytest.mark.asyncio
+async def test_customer_ticket_listing_does_not_escalate(fake_escalation_service):
+    state = _make_state(final_response=TICKET_LISTING, user_context=_user(is_staff=False))
+
+    result = await safety_check(state)
+
+    assert result["safety_escalation_needed"] is False
+    fake_escalation_service.escalate_to_support.assert_not_awaited()
+
+
+def test_quoted_text_is_not_a_claim():
+    text = 'The customer wrote "I have escalated this already", but the meter is fine.'
+
+    assert safety_check_module._detect_escalation_claim(text) is False
+
+
+@pytest.mark.parametrize(
+    "offer",
+    [
+        "Would you like me to escalate this to the engineering team for a physical inspection?",
+        "Please let me know once you have completed the form so I can escalate this for review.",
+        "If these checks do not resolve the issue, please let me know, and I will escalate "
+        "this to our technical team for further investigation.",
+        "Please provide the session ID from the bank receipt so I can escalate this for "
+        "verification.",
+        "Once you provide these details, I will escalate this to our support team to verify "
+        "the payment.",
+        "Please advise if you would like me to escalate this for a formal status check.",
+        "Let me know if you would like me to try again later, or if you would like me to "
+        "escalate this to the support team for manual verification.",
+    ],
+)
+def test_offer_or_condition_to_escalate_is_not_a_claim(offer):
+    assert safety_check_module._detect_escalation_claim(offer) is False
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "I have escalated this to the support team for investigation.",
+        "I'm very sorry this is still ongoing. I have escalated this directly to the senior "
+        "technical team.",
+        "I will escalate this to our support team now.",
+        "Let me escalate this for you.",
+        "I've escalated your request to our support team; let me know if you need anything else.",
+        "Your ticket TICKET-7 is still open. I have escalated it to the senior team.",
+        "I have escalated the meter issue to our support team. Would you like me to escalate "
+        "the billing question too?",
+    ],
+)
+def test_genuine_escalation_claims_are_still_detected(claim):
+    assert safety_check_module._detect_escalation_claim(claim) is True

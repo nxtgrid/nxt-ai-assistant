@@ -77,13 +77,22 @@ async def safety_check(state: ConversationState) -> Dict[str, Any]:
         final_response = get_user_message(ErrorCategory.ESCALATION, "failed")
         state_updates["final_response"] = final_response
 
-    # If the session has an active escalation AND this turn was already handled by
-    # auto-forwarding (escalation_forward_result is set), the bot's response is the
-    # confirmation message — skip the false-positive check.
-    # Do NOT skip when forward_result is None: that means forwarding failed and the
-    # LLM processed the turn normally, so we still need to catch fabricated claims.
-    if state.get("is_escalated_session") and state.get("escalation_forward_result"):
-        LOGGER.debug("Session has active escalation and forward succeeded, skipping safety check")
+    # Support already has this turn in front of them, so a backup escalation would
+    # only duplicate it:
+    # - escalation_triggered: escalate_to_support succeeded, or _escalate_node filed
+    #   a verification-failure escalation -- whose own canned reply ("...I've
+    #   notified our support team...") would otherwise be re-detected below as an
+    #   unbacked claim and filed a second time.
+    # - escalation_followup_forwarded: check_escalation posted this message into the
+    #   session's open escalation thread, so "I've passed this on" is true.
+    if state.get("escalation_triggered") or state.get("escalation_followup_forwarded"):
+        LOGGER.debug("Support already has this turn, skipping backup escalation")
+        return {**state_updates, "safety_escalation_needed": False}
+
+    # Staff are the support team: a backup escalation from a staff chat only posts
+    # into their own support group.
+    if user_context is not None and user_context.is_staff:
+        LOGGER.debug("Staff user, skipping backup escalation")
         return {**state_updates, "safety_escalation_needed": False}
 
     # Check if escalate_to_support was actually called this turn
@@ -517,40 +526,83 @@ def _extract_kwargs_from_tool_call_text(response_text: str, tool_name: str) -> D
     return {}
 
 
+# A Jira-style key followed by a title separator opens a ticket-listing entry
+# ("* **ABC-12**: <title>", "| ABC-12 | <title> |"). Ticket titles routinely quote
+# earlier bot replies ("I have escalated this..."), so the rest of that line is
+# data the bot is reporting, not something it claims to have done.
+_TICKET_LISTING_ENTRY = re.compile(
+    r"\b[A-Z][A-Z0-9]+-\d+\b[*_\])]*\s*(?::|\||\u2014|\u2013|\s-\s).*$", re.MULTILINE
+)
+# Quoted material -- a ticket title, the customer's words, an earlier message --
+# is not the bot's own claim either. Truncated titles ("I've escalated this to...)
+# never close their quote, so an unclosed quote runs to the end of its line.
+_QUOTED_SPAN = re.compile(r'"[^"\n]*(?:"|$)|\u201c[^\u201d\n]*(?:\u201d|$)', re.MULTILINE)
+_BLOCKQUOTE_LINE = re.compile(r"^[ \t]*>.*$", re.MULTILINE)
+
+# The bot saying an escalation already happened. These count even when the same
+# sentence carries a condition ("I've escalated it; let me know if anything changes").
+_COMPLETED_ESCALATION_PATTERNS = (
+    r"i('ve| have) escalated",
+    # Completed handoff to staff without using "escalate". Past tense / present
+    # perfect only: "I can forward" or "I will forward once..." are not claims.
+    r"i('ve| have) (forwarded|passed|reported|notified|alerted)",
+    r"(has|have) been (forwarded|passed|reported|sent) to (the )?(staff|team|support)",
+    r"notified (the )?(staff|team|support)",
+)
+# The bot announcing an escalation as part of this reply. A claim only when the
+# sentence doesn't make it an offer or a condition -- see below.
+_ANNOUNCED_ESCALATION_PATTERNS = (
+    r"i will (now )?escalate",
+    r"escalating (this|your) (request|issue|matter)",
+    r"i('m| am) escalating",
+    r"let me escalate",
+    r"escalate this (to|for)",
+)
+# Offers and conditions: "Would you like me to escalate this...?", "let me know
+# once the form is filled so I can escalate this", "If the meter still trips, I
+# will escalate this". Nothing has been escalated or promised yet; reading these
+# as claims escalated before the user had even answered.
+_OFFER_OR_CONDITION_PATTERNS = (
+    r"\?$",
+    r"\bwould you like\b",
+    r"\bdo you want\b",
+    r"\b(should|shall) i\b",
+    r"\bif you('d| would)? like\b",
+    r"\bif you want\b",
+    r"\blet me know\b",
+    r"\bplease advise\b",
+    r"\bso (that )?i can\b",
+    r"\bonce (you|i|we|the|it)\b",
+    r"(^|[,;:]\s*)if\b",
+)
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def _strip_quoted_material(response_text: str) -> str:
+    """Drop text the bot is quoting (ticket titles, quotes) rather than saying itself."""
+    text = _TICKET_LISTING_ENTRY.sub("", response_text)
+    text = _BLOCKQUOTE_LINE.sub("", text)
+    return _QUOTED_SPAN.sub("", text)
+
+
 def _detect_escalation_claim(response_text: str) -> bool:
     """Detect if the response claims to escalate without actually calling the tool.
 
-    Returns True if the response contains affirmative escalation language
-    (e.g., "I will escalate", "I have escalated") but NOT negations
-    (e.g., "cannot escalate", "won't escalate").
+    Returns True if the bot says in its own words that it has escalated ("I have
+    escalated", "I've notified the team") or is escalating as part of this reply
+    ("I will escalate this to..."), but NOT negations ("cannot escalate"),
+    preparatory language ("before I can escalate"), offers or conditions
+    ("Would you like me to escalate this?"), or quoted text such as ticket titles.
     """
-    import re
-
     if not response_text:
         return False
 
     # Models emit typographic apostrophes (U+2019) routinely, which silently
     # defeated every "i've"/"i'm"/"can't" pattern below and disabled the backup
     # escalation for any claim phrased with one. Normalise before matching.
-    text_lower = response_text.lower()
+    text_lower = _strip_quoted_material(response_text).lower()
     for curly in ("\u2019", "\u2018", "\u02bc", "\u2032", "`"):
         text_lower = text_lower.replace(curly, "'")
-
-    # Patterns indicating the bot claims to escalate
-    escalation_patterns = [
-        r"i will (now )?escalate",
-        r"i('ve| have) escalated",
-        r"escalating (this|your) (request|issue|matter)",
-        r"i('m| am) escalating",
-        r"let me escalate",
-        r"escalate this (to|for)",
-        # Patterns implying completed handoff to staff without using "escalate"
-        # Use past tense / present-perfect to avoid false positives on future intent
-        # e.g., "I have forwarded" but NOT "I can forward" or "I will forward once..."
-        r"i('ve| have) (forwarded|passed|reported|notified|alerted)",
-        r"(has|have) been (forwarded|passed|reported|sent) to (the )?(staff|team|support)",
-        r"notified (the )?(staff|team|support)",
-    ]
 
     # Negation patterns that indicate NOT escalating
     negation_patterns = [
@@ -577,16 +629,22 @@ def _detect_escalation_claim(response_text: str) -> bool:
         r"i (can|will) (then )?(forward|pass|send|report) .{0,40}(staff|team|support)",
     ]
 
-    # Check for escalation claim
-    claimed_escalation = any(re.search(p, text_lower) for p in escalation_patterns)
+    if any(re.search(p, text_lower) for p in negation_patterns):
+        return False
 
-    # Check for negation
-    is_negation = any(re.search(p, text_lower) for p in negation_patterns)
+    # Preparatory language (gathering info before escalating)
+    if any(re.search(p, text_lower) for p in preparatory_patterns):
+        return False
 
-    # Check for preparatory language (gathering info before escalating)
-    is_preparatory = any(re.search(p, text_lower) for p in preparatory_patterns)
-
-    return claimed_escalation and not is_negation and not is_preparatory
+    for sentence in _SENTENCE_BREAK.split(text_lower):
+        sentence = sentence.strip()
+        if any(re.search(p, sentence) for p in _COMPLETED_ESCALATION_PATTERNS):
+            return True
+        if any(re.search(p, sentence) for p in _ANNOUNCED_ESCALATION_PATTERNS) and not any(
+            re.search(p, sentence) for p in _OFFER_OR_CONDITION_PATTERNS
+        ):
+            return True
+    return False
 
 
 def _extract_escalation_summary(response_text: str) -> str:

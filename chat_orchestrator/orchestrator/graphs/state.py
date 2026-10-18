@@ -157,7 +157,8 @@ class ConversationState(TypedDict, total=False):
     # Phase 3: Authentication state
     user_permissions: Optional[Dict[str, Any]]
     is_escalated_session: bool
-    escalation_forward_result: Optional[str]
+    # This turn's message was posted into the session's open escalation thread
+    escalation_followup_forwarded: bool
 
     # Phase 3: Context preparation
     available_tools: Optional[List[Dict[str, Any]]]
