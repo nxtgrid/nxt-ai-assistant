@@ -1,7 +1,8 @@
 """Check escalation status node for LangGraph.
 
-This node checks if a session has an active escalation and auto-forwards
-customer messages to the support group instead of processing via LLM.
+This node checks if a session has an active escalation and, if so, forwards the
+customer's message into that escalation's support thread. The bot still answers
+the message as usual.
 """
 
 import os
@@ -13,22 +14,25 @@ from orchestrator.graphs.state import ConversationState
 
 
 async def check_escalation(state: ConversationState) -> Dict[str, Any]:
-    """Check if session has active escalation and handle auto-forward.
+    """Forward a message from a session with an active escalation to its thread.
 
     This node:
-    1. Checks if the user is a customer (not staff)
-    2. Checks if the session has an active escalation
-    3. If escalated, forwards the customer message to support group
-    4. Returns early with confirmation message
+    1. Checks if the session has an active escalation
+    2. If so, forwards the message (including any media) into the escalation's
+       support thread, so staff see the follow-up
+    3. Lets the turn continue either way -- the bot answers the message too
 
-    The graph should route to END if is_escalated_session is True
-    and escalation_forward_result is set.
+    Forwarding used to replace the bot's reply ("Your message has been
+    forwarded...") until a human closed the escalation, which could take days:
+    one escalation stopped the bot answering that chat entirely, simple questions
+    included.
 
     Args:
         state: Current conversation state
 
     Returns:
-        State updates with escalation status and forward result
+        State updates: is_escalated_session, and escalation_followup_forwarded
+        (whether this message actually reached the escalation thread)
     """
     user_context = state.get("user_context")
     session_id = state.get("session_id")
@@ -54,10 +58,10 @@ async def check_escalation(state: ConversationState) -> Dict[str, Any]:
         LOGGER.debug(f"Session {session_id} has no active escalation")
         return {
             "is_escalated_session": False,
-            "escalation_forward_result": None,
+            "escalation_followup_forwarded": False,
         }
 
-    LOGGER.info(f"Session {session_id} has active escalation, auto-forwarding message")
+    LOGGER.info(f"Session {session_id} has active escalation, forwarding message to its thread")
 
     # Forward customer message (including any media) to escalation group
     metadata = state.get("metadata", {})
@@ -68,20 +72,11 @@ async def check_escalation(state: ConversationState) -> Dict[str, Any]:
         media_metadata=metadata,
     )
 
-    if forward_result.get("success"):
-        confirmation_message = forward_result.get(
-            "message", "Your message has been forwarded to the support team."
-        )
-        return {
-            "is_escalated_session": True,
-            "escalation_forward_result": confirmation_message,
-            "final_response": confirmation_message,  # Set final response for early exit
-            "should_continue": False,  # Signal to stop processing
-        }
-    else:
-        # Forwarding failed - continue with normal LLM processing
+    forwarded = bool(forward_result.get("success"))
+    if not forwarded:
         LOGGER.error(f"Failed to forward customer message: {forward_result.get('error')}")
-        return {
-            "is_escalated_session": True,
-            "escalation_forward_result": None,
-        }
+
+    return {
+        "is_escalated_session": True,
+        "escalation_followup_forwarded": forwarded,
+    }

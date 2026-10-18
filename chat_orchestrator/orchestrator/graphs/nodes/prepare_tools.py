@@ -12,19 +12,24 @@ from orchestrator.config.settings import get_settings
 from orchestrator.graphs.state import ConversationState
 from orchestrator.services.user_permissions import get_permissions_service
 
-# Escalation tool definition - available to all users
+# Escalation tool definition - offered to customers only (see prepare_tools)
 ESCALATION_TOOL_DEF = {
     "name": "escalate_to_support",
     "description": (
-        "IMMEDIATELY escalate requests to the Support Team. "
-        "REQUIRED for:\n"
+        "Escalate a request to the Support Team when it needs an action only staff "
+        "can perform. REQUIRED for:\n"
         "- Meter unassignment requests\n"
         "- Manual wallet credits (ONLY after transaction verified via check_transaction_status)\n"
         "- Transaction verification (when payment status tool unavailable/failed)\n"
         "- HPS power limit increase reviews (after form filled)\n"
         "- Meter replacements\n"
         "- Manual commissioning retries\n"
-        "- Any action beyond available read-only tools\n\n"
+        "- Any other change to the customer's service or account that your tools cannot make\n"
+        "- The user explicitly asks for a human\n\n"
+        "Do NOT escalate a question asking for information, data or a report your tools "
+        "cannot provide (e.g. performance figures, battery or usage history, statistics): "
+        "answer with what your tools do show and say plainly that the rest isn't "
+        "available to you.\n\n"
         "CRITICAL for financial issues: NEVER recommend wallet credits without first "
         "successfully verifying the transaction. If verification fails, escalate for "
         "'transaction_verification' instead of 'wallet_credit'.\n\n"
@@ -53,8 +58,12 @@ ESCALATION_TOOL_DEF = {
                 "description": (
                     "Category of escalation reason:\n"
                     "- user_requested: User explicitly asked for human help\n"
-                    "- could_not_answer: Bot couldn't answer the question\n"
-                    "- out_of_scope: Request outside bot capabilities (policy, etc.)\n"
+                    "- could_not_answer: Troubleshooting didn't resolve the customer's "
+                    "problem and staff need to look at it (not for data or reports your "
+                    "tools can't provide)\n"
+                    "- out_of_scope: A request staff must handle that your instructions "
+                    "don't cover, such as a policy decision (not for data or reports your "
+                    "tools can't provide)\n"
                     "- staff_action_required: Needs action bot can't perform "
                     "(meter swap, credits, unassignment, etc.)\n"
                     "- inappropriate_language: Offensive/inappropriate content from user\n"
@@ -469,7 +478,7 @@ async def prepare_tools(state: ConversationState) -> Dict[str, Any]:
 
     This node:
     1. Gets available tools from permissions service
-    2. Adds escalation tool (available to all)
+    2. Adds escalation tool (customers only)
     3. Adds training image tool
     4. Returns provider-neutral function declarations
 
@@ -491,11 +500,12 @@ async def prepare_tools(state: ConversationState) -> Dict[str, Any]:
         available_tools = []
     LOGGER.info(f"User has access to {len(available_tools)} tools")
 
-    # Add escalation tool (available to all users including staff for testing)
-    available_tools.append(ESCALATION_TOOL_DEF)
-    LOGGER.info(
-        f"Added escalation tool (user is_staff={user_context.is_staff if user_context else 'unknown'})"
-    )
+    # Escalation tool: customers only. Staff are the support team, so an escalation
+    # from a staff chat only posts into their own support group.
+    is_staff = user_context.is_staff if user_context else False
+    if not is_staff:
+        available_tools.append(ESCALATION_TOOL_DEF)
+        LOGGER.info("Added escalation tool")
 
     # Add training image tool
     available_tools.append(TRAINING_IMAGE_TOOL_DEF)
@@ -510,7 +520,6 @@ async def prepare_tools(state: ConversationState) -> Dict[str, Any]:
     # Add natural language expert routing tool (staff only)
     # Staff-only gate: all expert workflows are staff_only=True in command_registry,
     # so this tool must only be visible to staff users to prevent bypass.
-    is_staff = user_context.is_staff if user_context else False
     if is_staff:
         available_tools.append(NL_EXPERT_TOOL_DEF)
         LOGGER.info("Added NL expert routing tool (start_expert_workflow)")

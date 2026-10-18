@@ -1155,6 +1155,18 @@ class ConversationGraphBuilder:
             if entity_context_text:
                 context_blocks.append(entity_context_text)
 
+        # check_escalation already sent this message into the session's open
+        # escalation thread; the model still answers it, and shouldn't re-escalate
+        # the same issue.
+        if state.get("escalation_followup_forwarded"):
+            context_blocks.append(
+                "[Open Escalation]\n"
+                "This conversation has an open escalation with the support team, and "
+                "this message has been sent to them as well. Answer it as usual with "
+                "your tools. Only call escalate_to_support for a new request that needs "
+                "staff action."
+            )
+
         # Compose text with context
         user_input = state["user_input"]
         composed_text = "\n\n".join(context_blocks + [user_input]) if context_blocks else user_input
