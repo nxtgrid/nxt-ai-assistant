@@ -918,6 +918,21 @@ class ConversationGraphBuilder:
         """
         from orchestrator.services.escalation_service import EscalationService
 
+        # escalate_to_support already succeeded this turn, so support is handling
+        # this message: a verification-failure escalation on top only duplicates
+        # it. The twice-failed draft still doesn't reach the customer -- they get
+        # the plain escalation confirmation, which is true.
+        if state.get("escalation_triggered"):
+            LOGGER.warning(
+                "Verification failed after a successful escalation this turn; not "
+                f"escalating again. Feedback: {(state.get('verification_feedback') or '')[:200]}"
+            )
+            return {
+                "final_response": get_user_message(ErrorCategory.ESCALATION, "success"),
+                "escalation_triggered": True,
+                "history_messages": self._record_verification_outcome(state, escalated=True),
+            }
+
         LOGGER.info("Escalating verification failure to support team")
 
         user_input = state.get("user_input", "")
@@ -976,23 +991,30 @@ class ConversationGraphBuilder:
             "verification_failed" if escalated else "failed",
         )
 
-        # Add verification metadata to the final message
-        history_messages = list(state.get("history_messages", []))
-        if history_messages:
-            last_message = history_messages[-1]
-            if last_message.role == "model":
-                last_message.metadata["verification_feedback"] = verification_feedback
-                last_message.metadata["verification_categories"] = state.get(
-                    "verification_categories", []
-                )
-                last_message.metadata["escalated"] = escalated
-
         return {
             "final_response": escalation_message,
             "escalation_triggered": escalated,
             "escalation_result": result,
-            "history_messages": history_messages,
+            "history_messages": self._record_verification_outcome(state, escalated=escalated),
         }
+
+    @staticmethod
+    def _record_verification_outcome(
+        state: ConversationState, *, escalated: bool
+    ) -> List[ConversationMessage]:
+        """Add verification metadata to the final model message in the transcript."""
+        history_messages = list(state.get("history_messages", []))
+        if history_messages:
+            last_message = history_messages[-1]
+            if last_message.role == "model":
+                last_message.metadata["verification_feedback"] = state.get(
+                    "verification_feedback", ""
+                )
+                last_message.metadata["verification_categories"] = state.get(
+                    "verification_categories", []
+                )
+                last_message.metadata["escalated"] = escalated
+        return history_messages
 
     async def _escalate_for_blocked_content(
         self,
