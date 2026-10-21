@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import json
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -134,6 +135,21 @@ def resolve_tool_name_aliases(
         else:
             resolved.append(call)
     return resolved if changed else function_calls
+
+
+# How many rounds in a row may consist entirely of calls to tools that were never
+# offered to the model. The first such round is answered with an error naming the
+# closest real tools, so the model can correct itself; the second ends the turn.
+MAX_REJECTED_TOOL_ROUNDS = 2
+
+
+def _unavailable_tool_message(name: str, allowed_names: Set[str]) -> str:
+    """The error a rejected tool call is answered with, naming near matches."""
+    message = f"Tool '{name}' is not available. Use only the tools provided to you."
+    closest = difflib.get_close_matches(name, sorted(allowed_names), n=3, cutoff=0.6)
+    if closest:
+        message += " Closest available tools: " + ", ".join(closest) + "."
+    return message
 
 
 # Bounds on the tool outputs shown to the response judge: room for a full grid
@@ -692,6 +708,7 @@ class ConversationGraphBuilder:
                 "current_round": current_round + 1,
                 "should_continue": False,
                 "pending_tool_calls": [],
+                "rejected_tool_rounds": 0,
             }
 
     async def _execute_tools_node(self, state: ConversationState) -> Dict[str, Any]:
@@ -770,12 +787,7 @@ class ConversationGraphBuilder:
                         ToolCallResult(
                             name=call.name,
                             success=False,
-                            output={
-                                "error": (
-                                    f"Tool '{call.name}' is not available. "
-                                    "Use only the tools provided to you."
-                                )
-                            },
+                            output={"error": _unavailable_tool_message(call.name, allowed_names)},
                             tool_call_id=call.tool_call_id,
                         )
                     )
@@ -785,20 +797,43 @@ class ConversationGraphBuilder:
                     f"tool calls: {[r.name for r in blocked_results]}"
                 )
 
-            # Break out of the loop if all calls were hallucinated — sending errors back to
-            # Gemini just causes it to retry the same nonexistent tools indefinitely, burning
-            # through the LangGraph recursion limit and producing a generic crash error.
+            # Every call named a tool that was not offered. Answer each one like any other
+            # call: the model used to be left holding its own unanswered call and simply
+            # issued it again (19 times in one turn, until the tool budget ran out). The
+            # first such round goes back to the model with the closest real tool names;
+            # a second one in a row means it is not going to correct itself, so end the
+            # turn with the standard error and the escalation offer.
             if not calls_to_execute:
+                rejected_rounds = state.get("rejected_tool_rounds", 0) + 1
                 safe_names = [repr(r.name[:80]) for r in blocked_results]
-                LOGGER.error(
-                    "All tool calls were hallucinated; terminating to avoid recursion limit. "
-                    f"Blocked: {safe_names}"
-                )
-                return {
+                accumulated_results.extend(blocked_results)
+                for result in blocked_results:
+                    tool_message = ConversationMessage(role="tool", tool_result=result)
+                    history_messages.append(tool_message)
+                    llm_messages.append(tool_message)
+                update: Dict[str, Any] = {
                     "llm_messages": llm_messages,
                     "history_messages": history_messages,
                     "accumulated_tool_calls": accumulated_calls,
                     "accumulated_tool_results": accumulated_results,
+                    "pending_tool_calls": [],
+                    "rejected_tool_rounds": rejected_rounds,
+                }
+                if rejected_rounds < MAX_REJECTED_TOOL_ROUNDS:
+                    LOGGER.warning(
+                        f"Every tool call was rejected as unavailable (round {rejected_rounds} "
+                        f"of {MAX_REJECTED_TOOL_ROUNDS}); returning the errors to the model. "
+                        f"Blocked: {safe_names}"
+                    )
+                    return update
+                LOGGER.error(
+                    f"Every tool call was rejected as unavailable {rejected_rounds} rounds in a "
+                    f"row; ending the turn. Blocked: {safe_names}"
+                )
+                return {
+                    **update,
+                    "tool_loop_aborted": True,
+                    "should_continue": False,
                     "error": "Gemini requested unavailable tools",
                     "error_category": ErrorCategory.SYSTEM.value,
                     "final_response": get_user_message(ErrorCategory.SYSTEM, "internal_error"),
@@ -850,6 +885,7 @@ class ConversationGraphBuilder:
             "accumulated_tool_calls": accumulated_calls,
             "accumulated_tool_results": accumulated_results,
             "pending_tool_calls": [],
+            "rejected_tool_rounds": 0,
             "escalation_triggered": escalation_triggered
             or state.get("escalation_triggered", False),
         }
