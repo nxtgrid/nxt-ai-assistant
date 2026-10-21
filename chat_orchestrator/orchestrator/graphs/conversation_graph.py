@@ -19,6 +19,7 @@ import asyncio
 import contextlib
 import difflib
 import json
+import re
 from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -197,6 +198,84 @@ def _tool_outputs_for_judge(calls: List[Any], results: List[Any]) -> Optional[st
     return (
         "TOOL OUTPUTS THIS TURN (what the tools returned; long outputs are cut short):\n"
         + "\n\n".join(blocks)
+    )
+
+
+# Tags the system prompt has the model append to a reply that commits staff to act
+# ("#NXTAction", "#OperatorAction", "#CustomerAction"). A budget-recovery summary
+# has no business carrying one unless an escalation was really filed.
+_ACTION_TAG = re.compile(r"[ \t]*#\w+Action\b")
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+_FACT_LINES_MAX = 30
+
+
+def _drop_unbacked_claims(summary: Optional[str], escalated: bool) -> Optional[str]:
+    """Remove "I have escalated ..." sentences and action tags from a recovery summary.
+
+    The summary call has tools disabled, but the system prompt pushes hard on
+    escalating, so the model sometimes writes the escalation it would have made
+    (2026-10-19). Unless escalate_to_support really succeeded this turn, any such
+    sentence is false, and so is a "#NXTAction" tag. The detector is the safety
+    net's own, so the two can never disagree about what counts as a claim.
+    A summary with nothing to remove is returned untouched, because most recovery
+    summaries report real, tool-backed work. Returns None when nothing is left, so
+    the caller falls back to its no-action line.
+    """
+    if escalated or not summary:
+        return summary
+    # The detector lives with the safety net; imported here to avoid a module cycle.
+    from orchestrator.graphs.nodes.safety_check import _detect_escalation_claim
+
+    split = [_SENTENCE_END.split(line) for line in summary.splitlines()]
+    has_claim = any(_detect_escalation_claim(part) for parts in split for part in parts)
+    if not has_claim and not _ACTION_TAG.search(summary):
+        return summary
+    LOGGER.warning("Removed an unbacked escalation claim or action tag from the execution-limit summary")
+
+    kept: List[str] = []
+    for line, parts in zip(summary.splitlines(), split):
+        text = _ACTION_TAG.sub("", " ".join(p for p in parts if not _detect_escalation_claim(p))).rstrip()
+        if text.strip(" \t*-\u2022"):
+            kept.append(text)
+        elif not line.strip():
+            kept.append("")  # keep paragraph breaks; a bullet marker left alone is dropped
+    cleaned = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    return cleaned or None
+
+
+def _turn_facts_for_synthesis(state: ConversationState) -> str:
+    """What actually happened this turn, built in code, for the summary call to rely on."""
+    calls = list(state.get("accumulated_tool_calls") or [])
+    results = list(state.get("accumulated_tool_results") or [])
+    counts: Dict[str, int] = {}
+    for i, result in enumerate(results):
+        call = calls[i] if i < len(calls) else None
+        name = getattr(call, "name", None) or getattr(result, "name", None) or "unknown tool"
+        if getattr(result, "success", None):
+            line = f"- {name}: succeeded"
+        else:
+            output = getattr(result, "output", None)
+            reason = (
+                getattr(result, "error", None)
+                or (output.get("error") if isinstance(output, dict) else None)
+                or output
+                or "unknown error"
+            )
+            line = f"- {name}: failed ({str(reason)[:120]})"
+        counts[line] = counts.get(line, 0) + 1
+    for call in calls[len(results):]:
+        line = f"- {getattr(call, 'name', None) or 'unknown tool'}: no result"
+        counts[line] = counts.get(line, 0) + 1
+
+    shown = [f"{line} x{n}" if n > 1 else line for line, n in counts.items()]
+    if len(shown) > _FACT_LINES_MAX:
+        extra = len(shown) - _FACT_LINES_MAX
+        shown = shown[:_FACT_LINES_MAX] + [f"- ... and {extra} more not listed"]
+    escalation = "filed this turn" if state.get("escalation_triggered") else "NOT filed this turn"
+    return (
+        "FACTS about this turn (the only things that happened):\n"
+        + ("\n".join(shown) if shown else "- No tools ran.")
+        + f"\nEscalation to staff: {escalation}"
     )
 
 
@@ -1387,6 +1466,7 @@ class ConversationGraphBuilder:
             summary = await self._synthesize_partial_answer(state, partial_response)
         except Exception as synth_err:
             LOGGER.exception(f"Execution-limit synthesis failed: {synth_err}")
+        summary = _drop_unbacked_claims(summary, escalated=bool(state.get("escalation_triggered")))
 
         tool_results = state.get("accumulated_tool_results", [])
         successful_results = sum(bool(result.success) for result in tool_results)
@@ -1422,7 +1502,10 @@ class ConversationGraphBuilder:
             "results and messages, write a concise Telegram-ready bullet summary of "
             "confirmed completed work. Do not claim an action succeeded unless its tool "
             "result confirms success. Include any remaining items or uncertainty in the "
-            "same summary."
+            "same summary. Do not say or imply that anything was escalated, forwarded, "
+            "notified, reported or passed to staff, or that anyone will follow up, unless "
+            "the FACTS below show an escalation was filed this turn. Do not add hashtags."
+            f"\n\n{_turn_facts_for_synthesis(state)}"
         )
         if partial_response:
             synthesis_prompt += f"\n\nPartial draft that was cut off:\n{partial_response}"
