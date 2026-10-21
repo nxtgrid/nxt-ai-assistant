@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from orchestrator.clients.gemini import GeminiClient
@@ -91,6 +92,96 @@ def get_error_for_finish_reason(finish_reason: str) -> Optional[str]:
 
 # Type alias for escalation/training image handlers
 EscalationHandler = Callable[[FunctionCall, Dict[str, Any]], ToolCallResult]
+
+
+def resolve_tool_name_aliases(
+    function_calls: List[FunctionCall], allowed_names: Set[str]
+) -> List[FunctionCall]:
+    """Put the server prefix back on a tool name the model got slightly wrong.
+
+    Tools are offered to the model as ``<server>_<tool>``, and some tool names
+    already begin with the server name: ``customer_get_grid_status`` on the
+    ``customer`` server is offered as ``customer_customer_get_grid_status``.
+    Prompts and tool descriptions quote the shorter name, the model follows
+    them, and the call was rejected as a hallucination -- again and again,
+    because the graph returns to the model after a rejection.
+
+    A name is rewritten only when putting a server prefix back in front of it
+    gives exactly one allowed tool. A server prefix is the first word of at
+    least three allowed names, which keeps single-purpose tools such as
+    ``escalate_to_support`` out of reach: a garbled fragment can never resolve
+    into one. Everything else is left for the hallucination guard.
+    """
+    if not allowed_names:
+        return function_calls
+
+    first_words = Counter(name.split("_", 1)[0] for name in allowed_names if "_" in name)
+    prefixes = sorted(word for word, count in first_words.items() if count >= 3)
+
+    resolved: List[FunctionCall] = []
+    changed = False
+    for call in function_calls:
+        if call.name in allowed_names or "_" not in call.name:
+            resolved.append(call)
+            continue
+        candidates = [
+            f"{prefix}_{call.name}" for prefix in prefixes if f"{prefix}_{call.name}" in allowed_names
+        ]
+        if len(candidates) == 1:
+            LOGGER.info("Resolved tool name '{}' to '{}'", call.name, candidates[0])
+            resolved.append(call.model_copy(update={"name": candidates[0]}))
+            changed = True
+        else:
+            resolved.append(call)
+    return resolved if changed else function_calls
+
+
+# Bounds on the tool outputs shown to the response judge: room for a full grid
+# status result (about 6k characters), but a runaway search result can't swamp
+# the judge's prompt.
+_JUDGE_TOOL_OUTPUT_CHARS = 10_000
+_JUDGE_TOOL_OUTPUT_TOTAL_CHARS = 24_000
+
+
+def _tool_outputs_for_judge(calls: List[Any], results: List[Any]) -> Optional[str]:
+    """What this turn's tools returned, bounded, for the response judge.
+
+    The judge used to be told only which tools ran and that they succeeded, so
+    it could not tell a figure copied from a tool result from one the model made
+    up, and it called correct, grounded answers fabricated (2026-10-20).
+    """
+    blocks: List[str] = []
+    remaining = _JUDGE_TOOL_OUTPUT_TOTAL_CHARS
+    for i, call in enumerate(calls):
+        result = results[i] if i < len(results) else None
+        if result is None:
+            continue
+        name = getattr(call, "name", None) or (call.get("name") if isinstance(call, dict) else "?")
+        if getattr(result, "success", None):
+            output = getattr(result, "output", None)
+            text = (
+                output
+                if isinstance(output, str)
+                else json.dumps(output, default=str, ensure_ascii=False)
+            )
+        else:
+            failure = getattr(result, "error", None) or getattr(result, "output", None)
+            text = f"FAILED: {failure or 'unknown error'}"
+        if remaining <= 0:
+            blocks.append(f"### {name}\n[output omitted: size budget reached]")
+            continue
+        limit = min(_JUDGE_TOOL_OUTPUT_CHARS, remaining)
+        shown = text[:limit]
+        if len(text) > limit:
+            shown += f"\n[truncated: {len(text) - limit} more characters]"
+        remaining -= min(len(text), limit)
+        blocks.append(f"### {name}\n{shown}")
+    if not blocks:
+        return None
+    return (
+        "TOOL OUTPUTS THIS TURN (what the tools returned; long outputs are cut short):\n"
+        + "\n\n".join(blocks)
+    )
 
 
 class ConversationGraphBuilder:
@@ -615,6 +706,12 @@ class ConversationGraphBuilder:
         if not function_calls:
             return {}
 
+        # The model often drops a server prefix that prompts and tool descriptions
+        # leave out. Put it back before anything records or checks the call, so
+        # history, the hallucination guard and execution all see the real name.
+        allowed_names = set(state.get("allowed_tool_names", []))
+        function_calls = resolve_tool_name_aliases(function_calls, allowed_names)
+
         LOGGER.debug(f"Executing {len(function_calls)} tool calls")
 
         # Get current state
@@ -656,7 +753,6 @@ class ConversationGraphBuilder:
         llm_messages.extend(call_messages)
 
         # Hallucination guard: verify each tool was presented to Gemini
-        allowed_names = set(state.get("allowed_tool_names", []))
         calls_to_execute = function_calls  # default: execute all
         blocked_results: List[ToolCallResult] = []
 
@@ -816,6 +912,12 @@ class ConversationGraphBuilder:
                     else:
                         tool_summaries.append(f"- {name}: called")
                 context_parts.append("TOOLS CALLED THIS TURN:\n" + "\n".join(tool_summaries))
+
+            # And what they returned: without the data, the judge cannot tell a
+            # figure copied from a tool result from one the model invented.
+            tool_outputs = _tool_outputs_for_judge(accumulated_calls, accumulated_results)
+            if tool_outputs:
+                context_parts.append(tool_outputs)
 
             # Flag if session has an active escalation from a prior turn
             if state.get("is_escalated_session"):

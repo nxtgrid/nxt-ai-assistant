@@ -38,7 +38,7 @@ Technical details: meter number, issue description, steps already attempted
 
 Priority: urgency based on customer impact
 
-This is for actions that change something for the customer. A question asking for information, data or a report that your tools don’t provide (for example performance figures, battery or usage history, statistics) is not an action: answer with what your tools do show and say plainly that the rest isn’t available to you. Do not escalate it.
+This is for actions that change something for the customer. A question asking for information, data or a report that none of your tools return (for example an average across all grids) is not an action: first look through your tools and their results, then answer with what they show and say plainly that the rest isn’t available to you. Do not escalate it.
 
 **Tool Use Protocol** 
 

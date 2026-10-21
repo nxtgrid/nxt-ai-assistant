@@ -837,7 +837,7 @@
       },
       {
         "name": "customer_get_grid_status",
-        "description": "[READ-ONLY] Get comprehensive status for a single grid including power status (HPS/FS), capacity (kWp/kWh), DCU connectivity, current weather, and real-time per-phase inverter output power (service_status.inverter_l1_power_kw / l2 / l3, in kW). If a customer asks about per-phase consumption or load and no historical breakdown exists, offer this live power reading as the closest available answer instead of escalating — but say plainly it's an instantaneous snapshot, not accumulated energy/consumption. If service_status.is_stale is true or service is \"Unknown\", the numbers in this response are not a current reading — call get_recent_production_errors_and_power before telling the customer anything about current power/battery state; an active alarm there is often the real explanation. You MUST provide the grid_name parameter.",
+        "description": "[READ-ONLY] Get comprehensive status for a single grid including power status (HPS/FS), capacity (kWp/kWh), DCU connectivity, current weather, the FS schedule with FS command delivery rates (fs_detail: delivery %, successful/total for the last FS command, plus per-day delivery for recent days — use it for any question about FS delivery success), and real-time per-phase inverter output power (service_status.inverter_l1_power_kw / l2 / l3, in kW). If a customer asks about per-phase consumption or load and no historical breakdown exists, offer this live power reading as the closest available answer instead of escalating — but say plainly it's an instantaneous snapshot, not accumulated energy/consumption. If service_status.is_stale is true or service is \"Unknown\", the numbers in this response are not a current reading — call get_recent_production_errors_and_power before telling the customer anything about current power/battery state; an active alarm there is often the real explanation. You MUST provide the grid_name parameter.",
         "inputSchema": {
           "type": "object",
           "properties": {
@@ -854,7 +854,7 @@
       },
       {
         "name": "customer_get_all_grids_status",
-        "description": "[READ-ONLY] Status dashboard for every grid the caller can access, including service status icons and weather — the multi-grid overview. For one grid in full detail (power status, capacity, DCU connectivity, per-phase inverter output), use customer_get_grid_status instead.",
+        "description": "[READ-ONLY] Status dashboard for every grid the caller can access, including service status icons, weather and the last-24h FS command delivery % per grid — the multi-grid overview. For one grid in full detail (power status, capacity, DCU connectivity, per-phase inverter output, FS schedule and per-day FS delivery), use customer_get_grid_status instead.",
         "inputSchema": {
           "type": "object",
           "properties": {}

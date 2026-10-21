@@ -322,6 +322,16 @@ Only include categories that actually failed. Common categories:
                 "turn is a retry, not a contradiction.\n"
             )
 
+            if conversation_context and "TOOL OUTPUTS THIS TURN" in conversation_context:
+                parts.append(
+                    "EVIDENCE: Under TOOL OUTPUTS in the conversation context is what the "
+                    "tools called this turn returned (long outputs may be cut short). A "
+                    "figure or fact in the response that appears there is supported, "
+                    "however specific it is. Fail for fabrication only when the response "
+                    "states specifics found neither in those outputs nor in the "
+                    "conversation.\n"
+                )
+
             parts.append(f"ORIGINAL USER MESSAGE:\n{original_message}\n")
             parts.append(f"RESPONSE TO VERIFY:\n{response_text}\n")
             categories_block = """

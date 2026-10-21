@@ -69,3 +69,17 @@ def test_reason_descriptions_do_not_invite_escalating_data_questions():
 
     assert len(lines) == 2
     assert all("not for data" in line for line in lines)
+
+
+def test_description_does_not_prime_the_model_to_deny_data_its_tools_return():
+    # 2026-10-20: "performance figures ... statistics" were listed as examples of
+    # data the tools lack. The model then told a customer it had no delivery-rate
+    # data while the grid status tool returned exactly that.
+    description = ESCALATION_TOOL_DEF["description"].lower()
+
+    assert "performance figures" not in description
+    assert "statistics" not in description
+
+
+def test_description_tells_the_model_to_look_through_its_tools_first():
+    assert "tools and their results" in ESCALATION_TOOL_DEF["description"]

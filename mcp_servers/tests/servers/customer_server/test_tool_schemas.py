@@ -133,3 +133,26 @@ class TestMatchesServerOutput:
         first = asyncio.run(srv.handle_list_tools())
         second = asyncio.run(srv.handle_list_tools())
         assert all(a is not b for a, b in zip(first, second))
+
+
+# ---------------------------------------------------------------------------
+# What the status tools say they return. 2026-10-20: a customer asked for the
+# Full Service delivery rate. Both status tools return it, but the single-grid
+# description never mentioned it, so the model told the customer it had no such
+# data. A tool's description is the only thing the model knows about its output.
+# ---------------------------------------------------------------------------
+
+
+def _description(tool_name: str) -> str:
+    return next(t["description"] for t in TOOL_SCHEMAS if t["name"] == tool_name)
+
+
+def test_single_grid_status_says_it_returns_fs_delivery_rates():
+    description = _description("customer_get_grid_status")
+
+    assert "FS command delivery" in description
+    assert "fs_detail" in description
+
+
+def test_all_grids_status_says_it_returns_each_grids_fs_delivery():
+    assert "FS command delivery" in _description("customer_get_all_grids_status")

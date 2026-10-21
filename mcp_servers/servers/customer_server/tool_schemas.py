@@ -95,7 +95,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'meter_information',
   'visible_to_customer': True},
  {'name': 'customer_get_grid_status',
   'description': '[READ-ONLY] Get comprehensive status for a single grid including power status '
-                 '(HPS/FS), capacity (kWp/kWh), DCU connectivity, current weather, and '
+                 '(HPS/FS), capacity (kWp/kWh), DCU connectivity, current weather, the FS '
+                 'schedule with FS command delivery rates (fs_detail: delivery %, '
+                 'successful/total for the last FS command, plus per-day delivery for recent '
+                 'days — use it for any question about FS delivery success), and '
                  'real-time per-phase inverter output power '
                  '(service_status.inverter_l1_power_kw / l2 / l3, in kW). If a customer asks '
                  'about per-phase consumption or load and no historical breakdown exists, offer '
@@ -113,9 +116,10 @@ TOOL_SCHEMAS: List[Dict[str, Any]] = [{'name': 'meter_information',
   'visible_to_customer': True},
  {'name': 'customer_get_all_grids_status',
   'description': '[READ-ONLY] Status dashboard for every grid the caller can access, including '
-                 'service status icons and weather — the multi-grid overview. For one grid in '
-                 'full detail (power status, capacity, DCU connectivity, per-phase inverter '
-                 'output), use customer_get_grid_status instead.',
+                 'service status icons, weather and the last-24h FS command delivery % per grid '
+                 '— the multi-grid overview. For one grid in full detail (power status, '
+                 'capacity, DCU connectivity, per-phase inverter output, FS schedule and '
+                 'per-day FS delivery), use customer_get_grid_status instead.',
   'inputSchema': {'type': 'object', 'properties': {}},
   'visible_to_customer': True},
  {'name': 'get_recent_production_errors_and_power',
