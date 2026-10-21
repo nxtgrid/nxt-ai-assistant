@@ -79,6 +79,9 @@ class ConversationState(TypedDict, total=False):
 
         # Control flow
         should_continue: Whether to continue the tool loop
+        rejected_tool_rounds: Consecutive rounds where every tool call named a tool
+            that was not offered to the model
+        tool_loop_aborted: Whether repeated rejected tool calls ended the turn
         error: Error message if processing failed
         error_category: Error category for user-facing message
     """
@@ -144,6 +147,10 @@ class ConversationState(TypedDict, total=False):
     finish_reason: Optional[str]  # Gemini finishReason (STOP, SAFETY, RECITATION, etc.)
     execution_limit_reason: Optional[str]
     graceful_limit_recovery: bool
+    # Rejected tool calls: consecutive rounds where every call named a tool that
+    # was not offered, and whether that ended the turn (see _execute_tools_node)
+    rejected_tool_rounds: int
+    tool_loop_aborted: bool
 
     # Phase 3: Services
     # NOTE: Service objects are NOT stored in state (causes checkpointer serialization errors).
@@ -331,6 +338,8 @@ def create_initial_state(
         escalation_result=None,
         # Control flow
         should_continue=True,
+        rejected_tool_rounds=0,
+        tool_loop_aborted=False,
         error=None,
         error_category=None,
     )

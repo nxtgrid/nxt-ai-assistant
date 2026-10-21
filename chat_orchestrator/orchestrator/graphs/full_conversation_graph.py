@@ -232,6 +232,7 @@ class FullConversationGraphBuilder:
             {
                 "call_gemini": "call_gemini",
                 "expert_router": "expert_router",
+                "safety_check": "safety_check",  # Repeated rejected tool calls end the turn
             },
         )
 
@@ -323,16 +324,22 @@ class FullConversationGraphBuilder:
 
     def _route_after_tools(
         self, state: ConversationState
-    ) -> Literal["call_gemini", "expert_router"]:
+    ) -> Literal["call_gemini", "expert_router", "safety_check"]:
         """Route after tool execution.
 
         Normally loops back to call_gemini. If NL expert routing intercepted
         a start_expert_workflow call, reroute to expert_router with the
-        synthetic slash command set as user_input.
+        synthetic slash command set as user_input. If the model keeps calling
+        tools that were never offered to it, the tools node has ended the turn
+        with an error response: go straight to the safety check instead of
+        handing the model another round.
         """
         if state.get("nl_expert_reroute"):
             LOGGER.info("NL expert reroute: sending synthetic command to expert_router")
             return "expert_router"
+        if state.get("tool_loop_aborted"):
+            LOGGER.info("Tool loop aborted after repeated rejected tool calls; ending the turn")
+            return "safety_check"
         return "call_gemini"
 
     def _route_after_gemini(
@@ -615,6 +622,8 @@ async def invoke_full_graph(
         "error": None,
         "execution_limit_reason": None,
         "graceful_limit_recovery": False,
+        "rejected_tool_rounds": 0,
+        "tool_loop_aborted": False,
         "unlocked_tools": [],
         # Phase 4: Expert routing defaults
         "expert_routing_decision": None,
