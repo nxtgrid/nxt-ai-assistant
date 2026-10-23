@@ -406,6 +406,8 @@ class EscalationService:
                 - inappropriate_language: Offensive content from user
                 - negative_feedback: User expressed dissatisfaction
                 - verification_failed: LLM judge rejected response twice
+                - llm_unavailable: LLM provider refused service, so the bot could not
+                  answer (set by the error handler, never chosen by the model)
                 - safety_escalation: Bot claimed escalation without tool call
                 - other: Doesn't fit other categories
             action_type: Specific action needed when reason=staff_action_required:

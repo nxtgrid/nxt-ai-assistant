@@ -11,7 +11,7 @@ import logging
 import re
 from typing import Dict, Optional, Tuple
 
-from shared.utils.error_messages import ErrorCategory, get_user_message
+from shared.utils.error_messages import ErrorCategory, get_user_message, is_llm_billing_block
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +301,15 @@ def categorize_and_sanitize_error(
     logger.error(f"Original error{log_context}: {error}")
 
     # Categorize based on error patterns
+
+    # LLM provider billing block: checked before the rate-limit branch because
+    # the same text has been sent under 429 -- see
+    # shared/utils/error_messages.categorize_error.
+    if is_llm_billing_block(error):
+        return (
+            ErrorCategory.TRANSIENT,
+            get_user_message(ErrorCategory.TRANSIENT, "llm_unavailable"),
+        )
 
     # TRANSIENT errors - user should try again
     if re.search(r"(429|rate.?limit|too many requests)", error_lower):
