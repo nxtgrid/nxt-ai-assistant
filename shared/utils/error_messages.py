@@ -40,6 +40,11 @@ ERROR_MESSAGES = {
         "timeout": "That request took too long. Please try again.",
         "service_unavailable": "I'm temporarily unavailable. Please try again in a minute.",
         "connection_error": "I'm having trouble connecting. Please try again in a moment.",
+        # Shown when nothing was escalated, so it promises no human follow-up.
+        "llm_unavailable": (
+            "I'm having a temporary technical issue and can't answer right now. "
+            "Please try again in a little while."
+        ),
     },
     ErrorCategory.REPHRASE: {
         "empty_response": "I wasn't able to understand that. Could you try rephrasing?",
@@ -70,6 +75,12 @@ ERROR_MESSAGES = {
             "Let me check on that and get back to you. "
             "I've notified our support team who will respond shortly."
         ),
+        # Only for a turn whose escalation actually succeeded; otherwise use
+        # the TRANSIENT "llm_unavailable" message above.
+        "llm_unavailable": (
+            "I'm having a temporary technical issue and can't answer right now. "
+            "I've escalated your message to our support team, and they'll follow up with you."
+        ),
     },
 }
 
@@ -90,6 +101,29 @@ def get_user_message(category: ErrorCategory, subtype: str) -> str:
     return ERROR_MESSAGES.get(category, {}).get(subtype, DEFAULT_MESSAGE)
 
 
+# An LLM provider refusing service over billing, as opposed to throttling it:
+# Gemini answers HTTP 402 once the prepaid balance behind the API key is gone.
+# The gateway re-raises a plain RuntimeError that carries only the message, so
+# this matches on text. Earlier Gemini releases sent the same depleted-balance
+# wording under 429, so the phrase counts on its own, without the status code.
+_LLM_BILLING_BLOCK = re.compile(
+    r"prepay(?:ment)?\s+credits?|payment required|"
+    r"\b402\b.*resource_exhausted|resource_exhausted.*\b402\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def is_llm_billing_block(error: object) -> bool:
+    """True when ``error`` is an LLM provider refusing requests over billing.
+
+    It needs someone to act (top up or repair the billing account), not a wait
+    for a rate-limit window, and it is not the end user's to know about -- so
+    callers show a neutral temporary-issue message and alert ops, instead of
+    treating it like a rate limit.
+    """
+    return bool(_LLM_BILLING_BLOCK.search(str(error)))
+
+
 def categorize_error(error: Exception) -> Tuple[ErrorCategory, str]:
     """Categorize an exception and return appropriate user message.
 
@@ -104,6 +138,17 @@ def categorize_error(error: Exception) -> Tuple[ErrorCategory, str]:
     # Permission errors - show the actual message (already user-friendly)
     if isinstance(error, PermissionError):
         return (ErrorCategory.PERMISSION, str(error))
+
+    # LLM provider refusing service over billing. Checked before the rate-limit
+    # branch because the depleted-balance text has also been sent under 429, and
+    # the "high traffic, try again in a few moments" reply would hide a problem
+    # that needs ops, not patience. The user gets a neutral temporary-issue
+    # message; billing is for the ops alert, not for them.
+    if is_llm_billing_block(error_str):
+        return (
+            ErrorCategory.TRANSIENT,
+            get_user_message(ErrorCategory.TRANSIENT, "llm_unavailable"),
+        )
 
     # Rate limiting - transient, user should try again
     if "429" in error_str or "rate limit" in error_str or "too many requests" in error_str:

@@ -11,6 +11,7 @@ import re
 import time
 from typing import Any, Callable
 
+from shared.llm.billing_alert import report_billing_block
 from shared.llm.model_tiers import resolve_model
 from shared.llm.types import (
     EmbeddingOptions,
@@ -24,6 +25,7 @@ from shared.llm.types import (
     ToolSpec,
     Usage,
 )
+from shared.utils.error_messages import is_llm_billing_block
 from shared.utils.langfuse_utils import update_generation
 from shared.utils.logging import get_logger
 
@@ -56,6 +58,16 @@ def _status_code(exc: Exception) -> int | None:
         return int(status) if status is not None else None
     except (TypeError, ValueError):
         return None
+
+
+def _report_if_billing_block(model: str, exc: Exception) -> None:
+    """Tell ops when the provider refuses service over billing (HTTP 402).
+
+    The text is checked as well as the status: an error that was wrapped on its
+    way here has lost its ``.code`` but still says what it is.
+    """
+    if _status_code(exc) == 402 or is_llm_billing_block(exc):
+        report_billing_block(model)
 
 
 _SDK_KEY_MAP = {
@@ -278,6 +290,7 @@ class GeminiGateway:
                     conversation_state,
                     retry=False,
                 )
+            _report_if_billing_block(model, exc)
             raise RuntimeError(_sanitize_text(exc, self._api_key)) from exc
 
     async def generate_content(
@@ -304,6 +317,7 @@ class GeminiGateway:
                     payload,
                     retry=False,
                 )
+            _report_if_billing_block(model_name, exc)
             raise RuntimeError(_sanitize_text(exc, self._api_key)) from exc
 
     def generate_sync(
@@ -346,6 +360,7 @@ class GeminiGateway:
                     conversation_state,
                     retry=False,
                 )
+            _report_if_billing_block(model, exc)
             raise RuntimeError(_sanitize_text(exc, self._api_key)) from exc
 
     async def embed_texts(

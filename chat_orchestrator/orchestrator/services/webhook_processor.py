@@ -26,7 +26,12 @@ from orchestrator.models.schemas import (
     ToolCallResult,
     UserContext,
 )
-from shared.utils.error_messages import ErrorCategory, categorize_error, get_user_message
+from shared.utils.error_messages import (
+    ErrorCategory,
+    categorize_error,
+    get_user_message,
+    is_llm_billing_block,
+)
 from shared.utils.langfuse_utils import langfuse_observe, update_trace
 from shared.utils.logging import get_logger
 
@@ -69,6 +74,73 @@ async def _persist_execution_limit_fallback(
         )
     except Exception as exc:
         LOGGER.warning(f"Could not persist execution-limit fallback: {exc}")
+
+
+def _organization_id(user_context: UserContext) -> int | None:
+    """The user's primary organization id as an int (see ConversationGraphBuilder)."""
+    organization_ids = getattr(user_context, "organization_ids", None)
+    if not organization_ids:
+        return None
+    try:
+        return int(organization_ids[0])
+    except (TypeError, ValueError):
+        return None
+
+
+async def _escalate_llm_outage(
+    user_input: str,
+    user_context: UserContext,
+    session_id: str | None,
+    metadata: Dict[str, Any] | None,
+) -> str | None:
+    """Escalate a customer message the LLM could not answer.
+
+    Returns the customer-facing text only when an escalation actually exists, so
+    the caller never promises support that nobody is coming from -- the rule
+    ``_escalate_node`` follows. None means "nothing was escalated". Never raises:
+    it runs inside an error handler.
+
+    Skips staff (they are support), turns with no session to attach the
+    escalation to, and turns that are not a real inbound Telegram message --
+    button callbacks and scheduled runs carry no ``telegram_message_id``, and
+    their ``user_input`` is not something a customer wrote.
+    """
+    metadata = metadata or {}
+    if (
+        getattr(user_context, "is_staff", False)
+        or not session_id
+        or not metadata.get("telegram_message_id")
+    ):
+        return None
+
+    try:
+        from orchestrator.services.escalation_service import EscalationService
+
+        service = EscalationService()
+        if not service.is_enabled():
+            return None
+        result = await service.escalate_to_support(
+            question_summary=(
+                "The AI assistant could not answer this message: its language-model "
+                f"service was unavailable. Customer wrote: {user_input[:500]}"
+            ),
+            session_id=session_id,
+            organization_id=_organization_id(user_context),
+            organization_short_name=getattr(user_context, "organization_name", None),
+            customer_chat_id=getattr(user_context, "chat_id", None),
+            customer_topic_id=getattr(user_context, "topic_id", None) or metadata.get("topic_id"),
+            customer_username=getattr(user_context, "username", None),
+            customer_email=getattr(user_context, "user_email", None),
+            reason="llm_unavailable",
+        )
+    except Exception:
+        LOGGER.opt(exception=True).warning("Could not escalate a message the LLM could not answer")
+        return None
+
+    if not (result or {}).get("success"):
+        LOGGER.warning("Escalating a message the LLM could not answer failed: {}", result)
+        return None
+    return get_user_message(ErrorCategory.ESCALATION, "llm_unavailable")
 
 
 @langfuse_observe(name="chat-request")
@@ -181,4 +253,11 @@ async def process_webhook_with_graph(
         LOGGER.exception(f"Error in LangGraph full graph processing: {e}")
         # Fall back to error message
         _, error_message = categorize_error(e)
+        if is_llm_billing_block(e):
+            # categorize_error already gave the neutral temporary-issue text; swap in
+            # the escalated wording only if an escalation really was created.
+            error_message = (
+                await _escalate_llm_outage(user_input, user_context, session_id, metadata)
+                or error_message
+            )
         return error_message, [], None, {}

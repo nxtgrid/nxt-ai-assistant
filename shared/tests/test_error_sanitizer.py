@@ -1,4 +1,4 @@
-from shared.utils.error_messages import ErrorCategory
+from shared.utils.error_messages import ErrorCategory, get_user_message
 from shared.utils.error_sanitizer import categorize_and_sanitize_error
 
 
@@ -25,3 +25,21 @@ def test_malformed_input_is_still_rephrase():
     category, _ = categorize_and_sanitize_error("malformed input received")
 
     assert category == ErrorCategory.REPHRASE
+
+
+def test_llm_billing_block_gets_the_neutral_temporary_message():
+    """Mirrors error_messages.categorize_error: a provider billing block is a
+    temporary issue to the user, never the generic error and never a rate limit."""
+    category, message = categorize_and_sanitize_error(
+        "402 RESOURCE_EXHAUSTED: Your prepayment credits are depleted."
+    )
+
+    assert category == ErrorCategory.TRANSIENT
+    assert message == get_user_message(ErrorCategory.TRANSIENT, "llm_unavailable")
+
+
+def test_ordinary_rate_limit_is_still_the_high_traffic_message():
+    category, message = categorize_and_sanitize_error("429 Too Many Requests")
+
+    assert category == ErrorCategory.TRANSIENT
+    assert message == get_user_message(ErrorCategory.TRANSIENT, "rate_limit")

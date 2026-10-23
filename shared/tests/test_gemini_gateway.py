@@ -61,6 +61,16 @@ class FakeRateLimitError(Exception):
     status_code = 429
 
 
+class FakeServerError(Exception):
+    status_code = 500
+
+
+class FakeBillingBlockError(Exception):
+    """What the SDK raises on Gemini's HTTP 402: a ClientError carries ``.code``."""
+
+    code = 402
+
+
 class ModelDumpResponse:
     def __init__(self, payload):
         self.payload = payload
@@ -595,3 +605,94 @@ async def test_embed_texts_uses_embedding_model_task_type_and_dimensions():
             },
         }
     ]
+
+
+# ── billing block (HTTP 402): an ops alert on top of the normal raise ──────────
+
+
+@pytest.fixture
+def billing_alerts(monkeypatch):
+    """Models the gateway reported as billing-blocked; nothing is sent anywhere."""
+    # A 429 would otherwise retry on the env-configured fallback model, and the
+    # fake client has no second response for it.
+    monkeypatch.delenv("FALLBACK_MODEL", raising=False)
+    reported = []
+    monkeypatch.setattr("shared.llm.gemini.report_billing_block", reported.append)
+    return reported
+
+
+@pytest.mark.asyncio
+async def test_generate_alerts_on_a_402_and_still_raises(billing_alerts):
+    client = FakeClient([FakeBillingBlockError("backend refused")])
+    gateway = GeminiGateway(
+        api_key="test-key", client=client, default_model="primary-model", max_retries=0
+    )
+
+    with pytest.raises(RuntimeError, match="backend refused"):
+        await gateway.generate(
+            [LLMMessage(role="user", text="Hello")], GenerationOptions(max_output_tokens=32)
+        )
+
+    assert billing_alerts == ["primary-model"]
+
+
+@pytest.mark.asyncio
+async def test_generate_content_alerts_on_a_402_and_still_raises(billing_alerts):
+    """The chat path: the orchestrator's GeminiClient calls generate_content."""
+    client = FakeClient([FakeBillingBlockError("backend refused")])
+    gateway = GeminiGateway(api_key="test-key", client=client, max_retries=0)
+
+    with pytest.raises(RuntimeError, match="backend refused"):
+        await gateway.generate_content(
+            {"contents": [{"role": "user", "parts": [{"text": "Hello"}]}]},
+            model="chat-model",
+        )
+
+    assert billing_alerts == ["chat-model"]
+
+
+def test_generate_sync_alerts_on_a_402_and_still_raises(billing_alerts):
+    client = SyncFakeClient([FakeBillingBlockError("backend refused")])
+    gateway = GeminiGateway(api_key="test-key", client=client, max_retries=0)
+
+    with pytest.raises(RuntimeError, match="backend refused"):
+        gateway.generate_sync(
+            [LLMMessage(role="user", text="Hello")],
+            GenerationOptions(model="sync-model", max_output_tokens=32),
+        )
+
+    assert billing_alerts == ["sync-model"]
+
+
+@pytest.mark.asyncio
+async def test_a_billing_error_that_lost_its_status_code_is_still_alerted(billing_alerts):
+    """A wrapped error has no ``.code``; its text still says what it is."""
+    client = FakeClient(
+        [RuntimeError("402 RESOURCE_EXHAUSTED. Your prepayment credits are depleted.")]
+    )
+    gateway = GeminiGateway(
+        api_key="test-key", client=client, default_model="primary-model", max_retries=0
+    )
+
+    with pytest.raises(RuntimeError, match="prepayment credits"):
+        await gateway.generate(
+            [LLMMessage(role="user", text="Hello")], GenerationOptions(max_output_tokens=32)
+        )
+
+    assert billing_alerts == ["primary-model"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error", [FakeServerError("500 backend error"), FakeRateLimitError("rate limited")]
+)
+async def test_ordinary_failures_do_not_alert(billing_alerts, error):
+    client = FakeClient([error])
+    gateway = GeminiGateway(api_key="test-key", client=client, max_retries=0)
+
+    with pytest.raises(RuntimeError):
+        await gateway.generate(
+            [LLMMessage(role="user", text="Hello")], GenerationOptions(max_output_tokens=32)
+        )
+
+    assert billing_alerts == []
